@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tracked",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-15",
+  "observability": { "enabled": true },
+  "kv_namespaces": [
+    {
+      "binding": "CACHE",
+      "id": "8cb267cd79b346baa86d37ec9e1015ef",
+      "preview_id": "c13978cb82b249f6b2b8939f92d1dad9"
+    }
+  ]
+  // Secrets (set via `wrangler secret put`):
+  //   API_TOKEN          bearer token Tasker uses
+  //   YOUTUBE_API_KEY    YouTube Data API v3 key
+}
