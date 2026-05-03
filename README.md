@@ -2,6 +2,8 @@
 
 Resolve the song that's currently playing in a YouTube DJ set.
 
+> **Personal-use only.** This calls 1001tracklists.com on your behalf. Please respect [their ToS](https://www.1001tracklists.com/info/policies/terms.html) — don't run this at high volume, don't redistribute scraped data, and don't use it as a stand-in for a 1001tracklists subscription. KV caching keeps a personal Tasker setup well under any reasonable rate limit.
+
 A Cloudflare Worker that takes a YouTube video title + playback offset, finds the matching video via the YouTube Data API, finds the matching tracklist on 1001tracklists, scrapes the per-track cue times, and returns the song(s) playing at that moment with deep links to Apple Music (and YouTube as a fallback). The companion is a [Tasker setup](docs/tasker-setup.md) that calls this endpoint from your phone while you're listening.
 
 ## API
@@ -20,6 +22,17 @@ Content-Type: application/json
 ```
 
 `transitionWindowSeconds` is optional (default 15). `videoDurationSeconds` is optional but recommended — it disambiguates between multiple uploads of the same DJ set.
+
+If the caller already knows the YouTube URL, send it directly to skip the YouTube Data API roundtrip (saves 100 quota units per call):
+
+```jsonc
+{
+  "videoUrl": "https://www.youtube.com/watch?v=79n8BaQAL2Q",  // or youtu.be/, m.youtube.com, /shorts/, /embed/, or a bare 11-char id
+  "currentSeconds": 4595
+}
+```
+
+`videoTitle` and `videoUrl` are mutually optional but at least one is required (zod-validated). When both are sent, `videoUrl` wins. `videoDurationSeconds` is ignored on the `videoUrl` path (no tie-breaker needed).
 
 The response always returns `200` (errors live in `status` so the Tasker side can branch on a single field):
 

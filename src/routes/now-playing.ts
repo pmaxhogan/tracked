@@ -1,7 +1,7 @@
 import { createRoute, type RouteHandler } from '@hono/zod-openapi'
 import { NowPlayingRequest, NowPlayingResponse, ErrorResponse } from '../schemas'
 import type { Env, ParsedTrack, ResponseTrack, Status } from '../types'
-import { resolveVideo } from '../lib/youtube'
+import { resolveVideo, extractVideoId } from '../lib/youtube'
 import { searchByYouTubeUrl, fetchTracklist, fetchMediaLinks, type MediaLinks } from '../lib/tracklists1001'
 import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
@@ -35,12 +35,21 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     c.json({ status, videoUrl: null, tracklistUrl: null, tracks: [], ...(message ? { message } : {}), ...extras } satisfies Res, 200)
 
   let videoId: string | null = null
-  try {
-    videoId = await resolveYouTube(env, body.videoTitle, body.videoDurationSeconds)
-  } catch (e) {
-    return empty('upstream_error', {}, `youtube: ${(e as Error).message}`)
+  if (body.videoUrl) {
+    // Caller already knows the video — skip the YouTube Data API roundtrip.
+    videoId = extractVideoId(body.videoUrl)
+    if (!videoId) return empty('no_video', {}, 'could not parse a YouTube video id from videoUrl')
+  } else if (body.videoTitle) {
+    try {
+      videoId = await resolveYouTube(env, body.videoTitle, body.videoDurationSeconds)
+    } catch (e) {
+      return empty('upstream_error', {}, `youtube: ${(e as Error).message}`)
+    }
+    if (!videoId) return empty('no_video')
+  } else {
+    // Schema-level refine should have caught this, but belt-and-suspenders.
+    return empty('no_video', {}, 'videoUrl or videoTitle is required')
   }
-  if (!videoId) return empty('no_video')
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`
 
   let tracklistUrl: string | null = null

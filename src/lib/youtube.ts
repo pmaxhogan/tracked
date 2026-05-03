@@ -1,3 +1,34 @@
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
+
+/**
+ * Extract a YouTube video id from any of the common URL shapes the user might
+ * paste: full `youtube.com/watch?v=`, mobile `m.youtube.com`, music subdomain,
+ * shortener `youtu.be/<id>`, embed paths, or a bare 11-char id. Returns null
+ * if nothing parses cleanly.
+ */
+export function extractVideoId(input: string): string | null {
+  const s = input.trim()
+  if (VIDEO_ID_RE.test(s)) return s
+  let url: URL
+  try {
+    url = new URL(s)
+  } catch {
+    return null
+  }
+  const host = url.hostname.replace(/^www\./, '')
+  if (host === 'youtu.be') {
+    const id = url.pathname.slice(1).split('/')[0] ?? ''
+    return VIDEO_ID_RE.test(id) ? id : null
+  }
+  if (host === 'youtube.com' || host === 'm.youtube.com' || host === 'music.youtube.com') {
+    const v = url.searchParams.get('v')
+    if (v && VIDEO_ID_RE.test(v)) return v
+    const m = url.pathname.match(/^\/(?:embed|shorts|live|v)\/([A-Za-z0-9_-]{11})/)
+    if (m) return m[1]!
+  }
+  return null
+}
+
 type SearchResponse = {
   items?: Array<{ id?: { videoId?: string }; snippet?: { title?: string } }>
 }
