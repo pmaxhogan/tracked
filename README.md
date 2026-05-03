@@ -87,26 +87,29 @@ npx wrangler kv namespace create CACHE
 npx wrangler kv namespace create CACHE --preview
 
 # 2. Set secrets
-echo $API_TOKEN       | npx wrangler secret put API_TOKEN
-echo $YOUTUBE_API_KEY | npx wrangler secret put YOUTUBE_API_KEY
+echo $API_TOKEN          | npx wrangler secret put API_TOKEN
+echo $YOUTUBE_API_KEY    | npx wrangler secret put YOUTUBE_API_KEY
+echo $BRIGHTDATA_API_KEY | npx wrangler secret put BRIGHTDATA_API_KEY
 
 # 3. Deploy
 npx wrangler deploy
 ```
 
-## Status
+## Network strategy
 
-**Local dev**: end-to-end verified. The full pipeline (YouTube resolve → 1001tracklists search → tracklist scrape → current-track selection → Apple Music link) works against the Matroda Space Miami set when run from a residential IP.
+1001tracklists treats Cloudflare Workers' egress IPs as bots and serves a captcha interstitial on tracklist *page* GETs (the search endpoint, oddly, comes through fine). To bypass that without having to babysit CAPTCHAs, the tracklist page GET routes through **Bright Data Web Unlocker** when `BRIGHTDATA_API_KEY` is set.
 
-**Production (Cloudflare Workers)**: YouTube resolution and 1001tracklists *search* work fine. The tracklist *page* GET is currently blocked: 1001tracklists serves a captcha interstitial (literally `"We need to validate your are real human!"` with an image challenge) to Cloudflare Workers' egress IPs, instead of the JS hash challenge it serves to residential IPs. The Worker's `chop()` solver handles the latter but not the former.
+| upstream                              | how we fetch it                                          |
+| ------------------------------------- | -------------------------------------------------------- |
+| YouTube Data API                       | direct `fetch()`                                          |
+| iTunes Search API                      | direct `fetch()`                                          |
+| 1001tracklists `/search/result.php`    | direct `fetch()` (works from Worker IPs)                 |
+| 1001tracklists tracklist page          | Bright Data Web Unlocker if key set, else direct (dev)    |
+| 1001tracklists `get_medialink.php` AJAX| direct `fetch()` (no captcha there)                       |
 
-Workarounds, in order of effort:
+When the key is unset (local dev from a residential IP) we fall back to the home-grown JS-challenge solver in `src/lib/fetch.ts`.
 
-1. **Cloudflare Browser Rendering API** — run a headless Chromium inside Workers for the tracklist GET only. Real Chrome usually clears the captcha. Paid Workers feature, but per-page cost is small for personal use. Plug it into `fetchHtml()` in `src/lib/fetch.ts`.
-2. **Local proxy** — run a tiny Node/Bun proxy at home, expose it via `cloudflared tunnel`, and have the Worker route 1001tracklists requests through it. Free.
-3. **Residential proxy service** — point `fetch()` at Smartproxy/Oxylabs/etc. for the 1001 calls. Costs money, no setup.
-
-The search endpoint (`POST /search/result.php`) keeps working from Worker IPs because it's a one-shot call; the tracklist page GET fails because 1001 specifically gates HTML page reads more aggressively.
+**Cost**: at ~$3/1,000 successful requests with Web Unlocker and KV caching tracklist parses for 7 days, ~20–40 lookups/month works out to under $0.50/month. Search and medialink results are cached separately.
 
 ## How it works
 

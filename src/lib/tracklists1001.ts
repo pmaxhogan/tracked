@@ -1,6 +1,7 @@
 import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
 import { fetchHtml, postForm, type ChallengeState } from './fetch'
+import { fetchViaUnlocker } from './unlocker'
 
 const ORIGIN = 'https://www.1001tracklists.com'
 
@@ -49,11 +50,27 @@ export type ScrapedTracklist = {
   tracks: ParsedTrack[]
 }
 
+export type FetchTracklistOpts = {
+  /** When set, route through Bright Data Web Unlocker (handles the captcha gate
+   *  1001tracklists serves to Cloudflare Worker IPs). When absent, fetch directly
+   *  — fine from a residential IP, fails on Workers. */
+  brightdataApiKey?: string
+  state?: ChallengeState
+}
+
 export async function fetchTracklist(
   tracklistUrl: string,
-  state?: ChallengeState,
+  opts: FetchTracklistOpts = {},
 ): Promise<{ result: ScrapedTracklist; state: ChallengeState }> {
-  const { html, state: s2 } = await fetchHtml(tracklistUrl, state)
+  if (opts.brightdataApiKey) {
+    const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey)
+    if (r.status !== 200 || !r.html) {
+      const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
+      throw new Error(`unlocker tracklist fetch failed — ${detail}`)
+    }
+    return { result: parseTracklist(tracklistUrl, r.html), state: opts.state ?? { cookie: '' } }
+  }
+  const { html, state: s2 } = await fetchHtml(tracklistUrl, opts.state)
   return { result: parseTracklist(tracklistUrl, html), state: s2 }
 }
 

@@ -2,6 +2,8 @@ export type Env = {
   CACHE: KVNamespace
   API_TOKEN: string
   YOUTUBE_API_KEY: string
+  /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
+  BRIGHTDATA_API_KEY?: string
 }
 
 export type Status = 'ok' | 'no_video' | 'no_tracklist' | 'unidentified' | 'upstream_error'

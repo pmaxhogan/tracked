@@ -99,8 +99,11 @@ async function resolveTracklist(env: Env, tracklistUrl: string): Promise<ParsedT
   const key = `tl:${slug}`
   const cached = await getJson<ParsedTrack[]>(env.CACHE, key)
   if (cached) return cached
-  const { result } = await fetchTracklist(tracklistUrl)
-  await putJson(env.CACHE, key, result.tracks, TTL.TRACKLIST_PAGE)
+  const { result } = await fetchTracklist(tracklistUrl, { brightdataApiKey: env.BRIGHTDATA_API_KEY })
+  // Avoid caching empty parses — could be a one-off captcha that we want to retry.
+  if (result.tracks.length > 0) {
+    await putJson(env.CACHE, key, result.tracks, TTL.TRACKLIST_PAGE)
+  }
   return result.tracks
 }
 
