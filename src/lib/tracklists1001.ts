@@ -96,6 +96,7 @@ export async function fetchTracklist(
       mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
       ms: Date.now() - start,
     })
+    if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
     return { result, state: opts.state ?? { cookie: '' } }
   }
   const { html, state: s2 } = await fetchHtml(tracklistUrl, opts.state)
@@ -106,7 +107,35 @@ export async function fetchTracklist(
     trackCount: result.tracks.length,
     ms: Date.now() - start,
   })
+  if (result.tracks.length === 0) logEmptyParseDiagnostics(html, tracklistUrl, log)
   return { result, state: s2 }
+}
+
+/**
+ * When a scrape parses 0 tracks, log a fingerprint of the response so we can
+ * tell at a glance whether 1001tl renamed selectors / changed layout (bug),
+ * served a captcha (transient), or returned a real empty page. No raw HTML.
+ */
+function logEmptyParseDiagnostics(html: string, tracklistUrl: string, log?: Logger): void {
+  if (!log) return
+  const sample = (re: RegExp, n = 1) => {
+    const m = html.match(re)
+    return m ? m.slice(0, n) : null
+  }
+  log.warn('1001scrape.empty_diagnostics', {
+    tracklistUrl,
+    htmlBytes: html.length,
+    hasTurnstile: /turnstile|cf-mitigated|sitekey/.test(html),
+    hasUnblockIp: /unblock_ip\.html/.test(html),
+    tlpItemCount: (html.match(/tlpItem/g) ?? []).length,
+    cueValueEntries: (html.match(/cueValuesEntry\.seconds/g) ?? []).length,
+    metaNameCount: (html.match(/itemprop="name"/g) ?? []).length,
+    contentDivCount: (html.match(/id="tlp\d+_content"/g) ?? []).length,
+    hasJsBuffer: /jsbuffer|jsAsyncReady/.test(html),
+    titleHint: sample(/<title>([^<]{1,140})/)?.[0]?.slice(0, 200) ?? null,
+    classListSample: [...new Set((html.match(/class="[a-zA-Z][^"]{0,40}"/g) ?? []).slice(0, 30))].slice(0, 15),
+    bodyTail: html.slice(-400),
+  })
 }
 
 export function parseTracklist(tracklistUrl: string, html: string): ScrapedTracklist {
