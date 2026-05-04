@@ -40,6 +40,11 @@ export const ResponseTrackSchema = z
     startSeconds: z.number().int().nullable(),
     isCurrent: z.boolean(),
     isUnidentified: z.boolean(),
+    idStatus: z.string().nullable().openapi({
+      example: 'ID Remix',
+      description:
+        'Non-null when this row is a partial-ID variant of a known base track ("ID Remix", "ID Edit", "ID Bootleg", "ID Rework"). The artist, title, appleLink, youtubeLink, and trackUrl all describe the BASE track; the actual playing version is not yet identified and may differ.',
+    }),
     appleLink: z.string().nullable(),
     youtubeLink: z.string().nullable(),
     trackUrl: z.string().nullable().openapi({
@@ -54,6 +59,11 @@ export const NowPlayingResponse = z
     status: z.enum(['ok', 'no_video', 'no_tracklist', 'unidentified', 'upstream_error']),
     videoUrl: z.string().nullable(),
     tracklistUrl: z.string().nullable(),
+    /** Apple Music album/playlist URL for the entire DJ set when 1001tracklists has one (parallels videoUrl for YouTube). */
+    setAppleLink: z.string().nullable().openapi({
+      example: 'https://music.apple.com/us/album/max-styler-at-edc-las-vegas-2025-circuit-grounds-stage-dj-mix/1818472775?app=music&at=1000lwkw',
+      description: 'Apple Music album link for the whole DJ set (when 1001tracklists has one). Parallel to videoUrl. null otherwise.',
+    }),
     tracks: z.array(ResponseTrackSchema),
     message: z.string().optional(),
   })

@@ -47,6 +47,7 @@ function track(startSeconds: number | null, opts: Partial<ParsedTrack> = {}): Pa
     trackId: opts.trackId ?? 'abc123',
     trackUrl: opts.trackUrl ?? null,
     isUnidentified: opts.isUnidentified ?? false,
+    idStatus: opts.idStatus ?? null,
     isMashupLinked: opts.isMashupLinked ?? false,
   }
 }

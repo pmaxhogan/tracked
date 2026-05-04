@@ -41,8 +41,9 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
 ```jsonc
 {
   "status": "ok",                    // ok | unidentified | no_video | no_tracklist | upstream_error
-  "videoUrl":     "https://www.youtube.com/watch?v=79n8BaQAL2Q",
-  "tracklistUrl": "https://www.1001tracklists.com/tracklist/l3uw499/...",
+  "videoUrl":      "https://www.youtube.com/watch?v=79n8BaQAL2Q",
+  "tracklistUrl":  "https://www.1001tracklists.com/tracklist/l3uw499/...",
+  "setAppleLink":  null,              // Apple Music album for the WHOLE set, when 1001tl has one
   "tracks": [
     {
       "title": "LEFT TO RIGHT (Aidan Rudd Remix)",
@@ -51,6 +52,7 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
       "startSeconds": 4590,
       "isCurrent": true,
       "isUnidentified": false,
+      "idStatus": null,               // "ID Remix" / "ID Edit" etc. when the base track is known but the playing variant isn't
       "appleLink": "https://music.apple.com/...",
       "youtubeLink": null,
       "trackUrl": "https://www.1001tracklists.com/track/1x9zgrpp/odd-mob-left-to-right-aidan-rudd-remix/index.html"
@@ -59,7 +61,11 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
 }
 ```
 
-Tracks within the ±transition window are returned with `isCurrent: false`. Mashup-linked siblings (1001tracklists `w/`) are grouped together and all share the parent's `isCurrent` flag. `trackUrl` is the canonical 1001tracklists track page (good for opening track details / submitting a fix); `null` when the row is unidentified.
+Tracks within the ±transition window are returned with `isCurrent: false`. Mashup-linked siblings (1001tracklists `w/`) are grouped together and all share the parent's `isCurrent` flag. `trackUrl` is the canonical 1001tracklists track page (good for opening track details / submitting a fix); `null` when there's no meta url on the row.
+
+`setAppleLink` (top-level) is the Apple Music album/playlist URL for the entire DJ set when 1001tracklists has one — parallel to `videoUrl` for the YouTube source. `null` for sets with no Apple Music release.
+
+`idStatus` (per-track) is `null` for fully-identified tracks. When 1001tracklists marks a row as a partial-ID variant of a known base track ("ID Remix", "ID Edit", "ID Bootleg", "ID Rework", etc.), `idStatus` carries that label, `isUnidentified` stays `false`, and `appleLink` / `youtubeLink` / `trackUrl` describe the **base track** — the actual playing variant may sound different. `isUnidentified: true` is reserved for fully-anonymous tracks (e.g. `"Cave Studio - ID"`); those skip link resolution entirely.
 
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 

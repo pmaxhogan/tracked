@@ -102,6 +102,7 @@ export function selectCurrent(
     startSeconds: t.startSeconds,
     isCurrent: currentMembers.has(t),
     isUnidentified: t.isUnidentified,
+    idStatus: t.idStatus,
     appleLink: null,
     youtubeLink: null,
     trackUrl: t.trackUrl,

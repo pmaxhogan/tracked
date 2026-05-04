@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseTracklist, parseMediaLinks } from '../src/lib/tracklists1001'
+import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink } from '../src/lib/tracklists1001'
 import { chop, extractChallenge } from '../src/lib/fetch'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -69,10 +69,23 @@ describe('parseTracklist (Matroda Space Miami)', () => {
     expect(mashup!.artist).toBe('Round Table Knights & Bauchamp')
   })
 
-  it('flags unidentified rows', () => {
+  it('flags fully unidentified rows (title is literal "ID")', () => {
     const ids = parsed.tracks.filter((t) => t.isUnidentified)
     expect(ids.length).toBeGreaterThanOrEqual(1)
     expect(ids[0]!.title).toBe('ID')
+    expect(ids[0]!.idStatus).toBeNull()
+  })
+
+  it('detects "ID Remix" rows: NOT isUnidentified, artist+title from base track, idStatus="ID Remix"', () => {
+    // Row 19 in the fixture: Armand van Helden - I Want Your Soul (ID Remix)
+    const row = parsed.tracks.find((t) => t.idStatus === 'ID Remix')!
+    expect(row).toBeDefined()
+    expect(row.isUnidentified).toBe(false)
+    expect(row.artist).toBe('Armand van Helden')
+    expect(row.title).toBe('I Want Your Soul')
+    expect(row.trackUrl).toBe(
+      'https://www.1001tracklists.com/track/6gbh9j5/armand-van-helden-i-want-your-soul/index.html',
+    )
   })
 
   it('captures the medialink track id (iRow.mediaRow data-trackid)', () => {
@@ -92,11 +105,51 @@ describe('parseTracklist (Matroda Space Miami)', () => {
     expect(id.trackUrl).toBeNull()
   })
 
+  it('setAppleLink is null when the page has no set-level Apple Music album', () => {
+    expect(parsed.setAppleLink).toBeNull()
+  })
+
   it('keeps tracks ordered by ascending start time', () => {
     const cues = parsed.tracks.map((t) => t.startSeconds).filter((x): x is number => x !== null)
     for (let i = 1; i < cues.length; i++) {
       expect(cues[i]!).toBeGreaterThanOrEqual(cues[i - 1]!)
     }
+  })
+})
+
+describe('parseTracklist (Max Styler — has set-level Apple Music album)', () => {
+  const url =
+    'https://www.1001tracklists.com/tracklist/1pmwyfn1/max-styler-circuitgrounds-edc-las-vegas-united-states-2025-05-16.html'
+  const parsed = parseTracklist(url, fx('tracklist-maxstyler.html'))
+
+  it('builds a canonical music.apple.com album URL from the embed iframe', () => {
+    expect(parsed.setAppleLink).toBe(
+      'https://music.apple.com/us/album/max-styler-at-edc-las-vegas-2025-circuit-grounds-stage-dj-mix/1818472775?app=music&at=1000lwkw',
+    )
+  })
+
+  it('still parses tracks alongside', () => {
+    expect(parsed.tracks.length).toBeGreaterThan(0)
+  })
+})
+
+describe('extractSetAppleLink (unit)', () => {
+  it('returns null when no embed URL is present', () => {
+    expect(extractSetAppleLink('<html><body>nothing here</body></html>')).toBeNull()
+  })
+
+  it('rebuilds the canonical URL with country, slug, album id, and query string', () => {
+    const html =
+      '<iframe src="https://embed.music.apple.com/album/some-slug/1234567/us/album/some-slug/1234567?app=music&at=foo"></iframe>'
+    expect(extractSetAppleLink(html)).toBe(
+      'https://music.apple.com/us/album/some-slug/1234567?app=music&at=foo',
+    )
+  })
+
+  it('handles a non-US country code', () => {
+    const html =
+      '<iframe src="https://embed.music.apple.com/album/foo/999/gb/album/foo/999"></iframe>'
+    expect(extractSetAppleLink(html)).toBe('https://music.apple.com/gb/album/foo/999')
   })
 })
 

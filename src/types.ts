@@ -17,9 +17,17 @@ export type ParsedTrack = {
   title: string
   /** Internal 1001tracklists track id, used for the medialink AJAX. null if unextractable. */
   trackId: string | null
-  /** Canonical 1001tracklists track page URL. null when the row is unidentified or has no meta url. */
+  /** Canonical 1001tracklists track page URL. null when the meta url is missing. */
   trackUrl: string | null
+  /** True only when the playing track is fully anonymous (e.g. "Cave Studio - ID"). Remix/edit variants of a known base track surface artist+title+links and use idStatus instead. */
   isUnidentified: boolean
+  /**
+   * Non-null when the row has a 1001tl trackStatus marker indicating a partial-ID
+   * variant of a known base track — typically "ID Remix", "ID Edit", "ID Bootleg",
+   * "ID Rework". Links/trackUrl point to the BASE track in this case; the actual
+   * playing version may differ. null when the row is fully ID'd or fully unidentified.
+   */
+  idStatus: string | null
   /** True if this row is a "w/" sibling of the previous row (mashup-linked position). */
   isMashupLinked: boolean
 }
@@ -31,8 +39,10 @@ export type ResponseTrack = {
   startSeconds: number | null
   isCurrent: boolean
   isUnidentified: boolean
+  /** "ID Remix" / "ID Edit" / etc. — non-null means the links point to the base track but the actual playing version is a not-yet-identified variant. */
+  idStatus: string | null
   appleLink: string | null
   youtubeLink: string | null
-  /** Canonical 1001tracklists track page URL. null when unidentified. */
+  /** Canonical 1001tracklists track page URL. null when no meta url is present. */
   trackUrl: string | null
 }

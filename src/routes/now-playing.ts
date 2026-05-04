@@ -43,6 +43,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       status,
       videoUrl: null,
       tracklistUrl: null,
+      setAppleLink: null,
       tracks: [],
       ...(message ? { message } : {}),
       ...extras,
@@ -95,8 +96,11 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
 
   // Phase 3 — scrape the tracklist
   let parsedTracks: ParsedTrack[]
+  let setAppleLink: string | null = null
   try {
-    parsedTracks = await resolveTracklist(env, tracklistUrl, log)
+    const scraped = await resolveTracklist(env, tracklistUrl, log)
+    parsedTracks = scraped.tracks
+    setAppleLink = scraped.setAppleLink
   } catch (e) {
     log.error('phase.scrape.throw', { tracklistUrl, ...errorFields(e) })
     return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${(e as Error).message}`)
@@ -105,6 +109,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     tracklistUrl,
     trackCount: parsedTracks.length,
     unidentifiedCount: parsedTracks.filter((t) => t.isUnidentified).length,
+    setAppleLink,
   })
 
   // Phase 4 — pick current tracks
@@ -132,7 +137,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   )
 
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
-  const payload = { status, videoUrl, tracklistUrl, tracks: enriched } satisfies Res
+  const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks: enriched } satisfies Res
   log.info('req.end', { status, totalMs: Date.now() - tStart, response: payload })
   return c.json(payload, 200)
 }
@@ -166,23 +171,33 @@ async function resolveTracklistUrl(env: Env, videoId: string, videoUrl: string, 
   return result.tracklistUrl
 }
 
-async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Promise<ParsedTrack[]> {
+type CachedTracklist = { tracks: ParsedTrack[]; setAppleLink: string | null }
+
+async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Promise<CachedTracklist> {
   const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
   const key = `tl:${slug}`
-  const cached = await getJson<ParsedTrack[]>(env.CACHE, key)
+  // Backwards compat: older cache entries were a bare ParsedTrack[]. If we
+  // hit one of those, normalize and ignore the (missing) setAppleLink — it'll
+  // be picked up on the next refresh after TTL expires.
+  const cached = await getJson<CachedTracklist | ParsedTrack[]>(env.CACHE, key)
   if (cached) {
-    log.info('cache.hit', { key, trackCount: cached.length })
+    if (Array.isArray(cached)) {
+      log.info('cache.hit', { key, trackCount: cached.length, schema: 'legacy' })
+      return { tracks: cached, setAppleLink: null }
+    }
+    log.info('cache.hit', { key, trackCount: cached.tracks.length, setAppleLink: cached.setAppleLink })
     return cached
   }
   log.info('cache.miss', { key })
   const { result } = await fetchTracklist(tracklistUrl, { brightdataApiKey: env.BRIGHTDATA_API_KEY, log })
   if (result.tracks.length > 0) {
-    await putJson(env.CACHE, key, result.tracks, TTL.TRACKLIST_PAGE)
-    log.info('cache.put', { key, trackCount: result.tracks.length, ttlSeconds: TTL.TRACKLIST_PAGE })
-  } else {
-    log.warn('cache.skip_empty', { key, reason: 'parsed 0 tracks; likely a transient captcha — not caching' })
+    const value: CachedTracklist = { tracks: result.tracks, setAppleLink: result.setAppleLink }
+    await putJson(env.CACHE, key, value, TTL.TRACKLIST_PAGE)
+    log.info('cache.put', { key, trackCount: result.tracks.length, setAppleLink: result.setAppleLink, ttlSeconds: TTL.TRACKLIST_PAGE })
+    return value
   }
-  return result.tracks
+  log.warn('cache.skip_empty', { key, reason: 'parsed 0 tracks; likely a transient captcha — not caching' })
+  return { tracks: [], setAppleLink: result.setAppleLink }
 }
 
 async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: ResponseTrack, log: Logger): Promise<{ appleLink: string | null; youtubeLink: string | null }> {

@@ -53,6 +53,8 @@ export function parseSearchResult(html: string): SearchResult {
 
 export type ScrapedTracklist = {
   slug: string
+  /** Apple Music album/playlist link for the whole set, when 1001tl embeds one. null otherwise. */
+  setAppleLink: string | null
   tracks: ParsedTrack[]
 }
 
@@ -111,12 +113,29 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     const t = parseRow(row)
     if (t) tracks.push(t)
   }
-  return { slug, tracks }
+
+  return { slug, setAppleLink: extractSetAppleLink(html), tracks }
+}
+
+/**
+ * Some 1001tracklists pages have an Apple Music album for the whole DJ set
+ * embedded near the top of the page (in the media-tabs section, parallel to
+ * the YouTube video). When present, the iframe src is of the form:
+ *   embed.music.apple.com/album/<slug>/<id>/<country>/album/<slug>/<id>?app=music&at=...
+ * — the country code lives in the middle of the path after the first
+ * /album/<slug>/<id> repeats. We rebuild the canonical user-facing URL.
+ */
+export function extractSetAppleLink(html: string): string | null {
+  const m = html.match(
+    /embed\.music\.apple\.com\/album\/[^/"]+\/\d+\/(\w{2})\/album\/([^/"]+)\/(\d+)([^"\s]*)/,
+  )
+  if (!m) return null
+  const [, country, slug, albumId, query] = m
+  return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ''}`
 }
 
 function parseRow(row: HTMLElement): ParsedTrack | null {
   const dataId = row.getAttribute('data-id') ?? null
-  const isided = row.getAttribute('data-isided') === 'true'
   const cls = row.getAttribute('class') ?? ''
   const isMashupLinked = / con(\s|$)/.test(cls)
 
@@ -131,38 +150,49 @@ function parseRow(row: HTMLElement): ParsedTrack | null {
   const fullName = decodeEntities(nameMeta?.getAttribute('content') ?? '')
   const artistRaw = decodeEntities(artistMeta?.getAttribute('content') ?? '')
 
-  if (!fullName && !isided) return null
+  if (!fullName) return null
 
   let title = ''
   let artist = artistRaw
-  if (fullName) {
-    const dash = fullName.indexOf(' - ')
-    if (dash >= 0) {
-      const left = fullName.slice(0, dash).trim()
-      title = fullName.slice(dash + 3).trim()
-      if (!artist) artist = left
-    } else {
-      title = fullName
-    }
+  const dash = fullName.indexOf(' - ')
+  if (dash >= 0) {
+    const left = fullName.slice(0, dash).trim()
+    title = fullName.slice(dash + 3).trim()
+    if (!artist) artist = left
+  } else {
+    title = fullName
   }
 
-  const isUnidentified = !isided || title === 'ID' || /\bID\b/.test(title)
+  // 1001tl marks partial-ID variants ("ID Remix", "ID Edit", etc.) with a
+  // <span class="trackStatus"> next to the title. The base track is known;
+  // only the variant is uncertain. We propagate that signal as idStatus.
+  const trackStatus = row.querySelector('span.trackStatus')
+  const trackStatusText = (trackStatus?.text ?? '').trim()
+  const idStatus = trackStatusText && /\bID\b/.test(trackStatusText)
+    ? trackStatusText.replace(/^\(|\)$/g, '').trim()
+    : null
+
+  // Fully unidentified = the playing track itself has no name (e.g.
+  // "Cave Studio - ID"). Partial variants (idStatus set) are NOT unidentified
+  // — the artist + title describe the base track and are useful.
+  const isUnidentified = idStatus === null && (title === 'ID' || /^ID\b/.test(title) || !artist || artist === 'ID')
 
   const mediaRow = row.querySelector('div.mediaRow')
   const mediaTrackId = mediaRow?.getAttribute('data-trackid') ?? null
 
   const urlMeta = row.querySelector('meta[itemprop="url"]')
   const urlPath = urlMeta?.getAttribute('content') ?? ''
-  const trackUrl = !isUnidentified && urlPath ? new URL(urlPath, ORIGIN).toString() : null
+  const trackUrl = urlPath ? new URL(urlPath, ORIGIN).toString() : null
 
   return {
     startTime: startTime || (Number.isFinite(startSeconds!) ? formatCue(startSeconds!) : ''),
     startSeconds: Number.isFinite(startSeconds!) ? (startSeconds as number) : null,
-    artist: artist || (isUnidentified ? '' : ''),
-    title: title || (isUnidentified ? 'ID' : ''),
+    artist,
+    title: title || 'ID',
     trackId: mediaTrackId ?? dataId,
     trackUrl,
     isUnidentified,
+    idStatus,
     isMashupLinked,
   }
 }
