@@ -36,7 +36,16 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   const body = c.req.valid('json')
   const env = c.env
 
-  log.info('req.start', { method: c.req.method, path: c.req.path, body })
+  // Pull CF request metadata for regional triage. cf is undefined on non-CF
+  // (e.g. Miniflare dev) so guard everything.
+  const cf = (c.req.raw as Request & { cf?: IncomingRequestCfProperties }).cf
+  log.info('req.start', {
+    method: c.req.method,
+    path: c.req.path,
+    body,
+    colo: cf?.colo ?? null,
+    country: cf?.country ?? null,
+  })
 
   const respond = (status: Status, extras: Partial<Res> = {}, message?: string) => {
     const payload = {
@@ -48,7 +57,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       ...(message ? { message } : {}),
       ...extras,
     } satisfies Res
-    log.info('req.end', { status, totalMs: Date.now() - tStart, response: payload })
+    log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
     return c.json(payload, 200)
   }
 
@@ -147,7 +156,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
 
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
   const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks: enriched } satisfies Res
-  log.info('req.end', { status, totalMs: Date.now() - tStart, response: payload })
+  log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
   return c.json(payload, 200)
 }
 
@@ -155,10 +164,13 @@ async function resolveYouTube(env: Env, title: string, dur: number | undefined, 
   const key = `yt:${await sha1Hex(title)}:${dur ?? 'x'}`
   const cached = await getJson<{ videoId: string | null }>(env.CACHE, key)
   if (cached) {
+    log.counters.cacheHits++
     log.info('cache.hit', { key, value: cached })
     return cached.videoId
   }
+  log.counters.cacheMisses++
   log.info('cache.miss', { key })
+  log.counters.youtubeApiCalls++
   const r = await resolveVideo(title, dur, env.YOUTUBE_API_KEY, log)
   const videoId = r?.videoId ?? null
   await putJson(env.CACHE, key, { videoId }, TTL.YT_VIDEO)
@@ -170,9 +182,11 @@ async function resolveTracklistUrl(env: Env, videoId: string, videoUrl: string, 
   const key = `s1001:${videoId}`
   const cached = await getJson<{ tracklistUrl: string | null }>(env.CACHE, key)
   if (cached) {
+    log.counters.cacheHits++
     log.info('cache.hit', { key, value: cached })
     return cached.tracklistUrl
   }
+  log.counters.cacheMisses++
   log.info('cache.miss', { key })
   const { result } = await searchByYouTubeUrl(videoUrl, undefined, log)
   await putJson(env.CACHE, key, { tracklistUrl: result.tracklistUrl }, TTL.TRACKLIST_SEARCH)
@@ -190,6 +204,7 @@ async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Pr
   // be picked up on the next refresh after TTL expires.
   const cached = await getJson<CachedTracklist | ParsedTrack[]>(env.CACHE, key)
   if (cached) {
+    log.counters.cacheHits++
     if (Array.isArray(cached)) {
       log.info('cache.hit', { key, trackCount: cached.length, schema: 'legacy' })
       return { tracks: cached, setAppleLink: null }
@@ -197,6 +212,7 @@ async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Pr
     log.info('cache.hit', { key, trackCount: cached.tracks.length, setAppleLink: cached.setAppleLink })
     return cached
   }
+  log.counters.cacheMisses++
   log.info('cache.miss', { key })
   const { result } = await fetchTracklist(tracklistUrl, { brightdataApiKey: env.BRIGHTDATA_API_KEY, log })
   if (result.tracks.length > 0) {
@@ -238,10 +254,14 @@ async function getMediaLinks(env: Env, trackId: string, log: Logger): Promise<Me
   const key = `ml:${trackId}`
   const cached = await getJson<MediaLinks>(env.CACHE, key)
   if (cached) {
+    log.counters.cacheHits++
     log.info('cache.hit', { key, value: cached })
     return cached
   }
+  log.counters.cacheMisses++
   log.info('cache.miss', { key })
+  // medialink primary path is direct fetch; brightdata is only the timeout
+  // fallback. Counter is bumped on the actual unlocker call (see lib).
   const { result } = await fetchMediaLinks(trackId, { log, brightdataApiKey: env.BRIGHTDATA_API_KEY })
   await putJson(env.CACHE, key, result, TTL.MEDIALINK)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
@@ -252,10 +272,13 @@ async function lookupAppleCached(env: Env, artist: string, title: string, log: L
   const key = `am:${await sha1Hex(`${artist}|${title}`)}`
   const cached = await getJson<{ url: string | null }>(env.CACHE, key)
   if (cached) {
+    log.counters.cacheHits++
     log.info('cache.hit', { key, value: cached })
     return cached.url
   }
+  log.counters.cacheMisses++
   log.info('cache.miss', { key })
+  log.counters.itunesCalls++
   const url = await lookupAppleLink(artist, title, log)
   await putJson(env.CACHE, key, { url }, TTL.APPLE)
   log.info('cache.put', { key, value: { url }, ttlSeconds: TTL.APPLE })

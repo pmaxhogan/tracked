@@ -49,6 +49,7 @@ export async function fetchViaUnlocker(
   retriesLeft = MAX_RETRIES,
 ): Promise<UnlockerResult> {
   const start = Date.now()
+  if (log) log.counters.brightdataCalls++
   log?.info('unlocker.start', { url, zone, retriesLeft })
 
   let res: Response

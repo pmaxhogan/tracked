@@ -11,6 +11,19 @@
 
 export type LogLevel = 'info' | 'warn' | 'error'
 
+/**
+ * Per-request running counters. Mutated as upstream calls happen so the final
+ * `req.end` log can summarize how much work this request did — useful for
+ * answering "what did this single request cost?" without grepping every event.
+ */
+export type RequestCounters = {
+  cacheHits: number
+  cacheMisses: number
+  youtubeApiCalls: number
+  brightdataCalls: number
+  itunesCalls: number
+}
+
 export type Logger = {
   info(event: string, fields?: Record<string, unknown>): void
   warn(event: string, fields?: Record<string, unknown>): void
@@ -18,9 +31,12 @@ export type Logger = {
   /** Wraps an async fn, timing it; logs success/failure with duration. */
   time<T>(event: string, fn: () => Promise<T>, extraOnSuccess?: (v: T) => Record<string, unknown>): Promise<T>
   child(extra: Record<string, unknown>): Logger
+  /** Per-request counters incremented by upstream calls. */
+  counters: RequestCounters
 }
 
-export function makeLogger(base: Record<string, unknown> = {}): Logger {
+export function makeLogger(base: Record<string, unknown> = {}, counters?: RequestCounters): Logger {
+  const c = counters ?? { cacheHits: 0, cacheMisses: 0, youtubeApiCalls: 0, brightdataCalls: 0, itunesCalls: 0 }
   const emit = (level: LogLevel, event: string, fields?: Record<string, unknown>) => {
     const line = { level, event, t: new Date().toISOString(), ...base, ...(fields ?? {}) }
     const out = safeStringify(line)
@@ -43,7 +59,8 @@ export function makeLogger(base: Record<string, unknown> = {}): Logger {
         throw e
       }
     },
-    child: (extra) => makeLogger({ ...base, ...extra }),
+    child: (extra) => makeLogger({ ...base, ...extra }, c),
+    counters: c,
   }
   return log
 }
