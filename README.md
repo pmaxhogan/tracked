@@ -18,12 +18,11 @@ Content-Type: application/json
 {
   "videoTitle": "Matroda @ Club Space Miami, United States 2023-08-05",
   "videoDurationSeconds": 5286,
-  "currentSeconds": 4595,
-  "transitionWindowSeconds": 15
+  "currentSeconds": 4595
 }
 ```
 
-`transitionWindowSeconds` is optional (default 15). `videoDurationSeconds` is optional but recommended — it disambiguates between multiple uploads of the same DJ set.
+`videoDurationSeconds` is optional but recommended — it disambiguates between multiple uploads of the same DJ set.
 
 If the caller already knows the YouTube URL, send it directly to skip the YouTube Data API roundtrip (saves 100 quota units per call):
 
@@ -62,7 +61,21 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
 }
 ```
 
-Tracks within the ±transition window are returned with `isCurrent: false`. Mashup-linked siblings (1001tracklists `w/`) are grouped together and all share the parent's `isCurrent` flag. `trackUrl` is the canonical 1001tracklists track page (good for opening track details / submitting a fix); `null` when there's no meta url on the row.
+The response always carries a small adjacent-context window so the caller doesn't have to scrub the source video to grab a previous song or peek at what's coming up:
+
+- the **previous** group (immediately before current),
+- the **current** group (one or more tracks if it's a mashup),
+- the **next** group (immediately after current).
+
+`isCurrent: true` only on the current group's members. Edge cases:
+- **First track of the tracklist** → no previous; response is `[current, next]`.
+- **Last track of the tracklist** → no next; response is `[previous, current]`.
+- **Single-track tracklist** → just `[current]`.
+- **Playback is before the first cued track** → no current; response is `[firstCuedGroup]` with all `isCurrent: false`, so the client can show "next up at 0:30".
+
+Mashup-linked siblings (1001tracklists `w/`) count as a single group, so a current pair returns both members with `isCurrent: true`, and prev/next can themselves be pairs.
+
+`trackUrl` is the canonical 1001tracklists track page (good for opening track details / submitting a fix); `null` when there's no meta url on the row.
 
 `setAppleLink` (top-level) is the Apple Music album/playlist URL for the entire DJ set when 1001tracklists has one — parallel to `videoUrl` for the YouTube source. `null` for sets with no Apple Music release.
 
@@ -159,7 +172,7 @@ When the key is unset (local dev from a residential IP) we fall back to the home
 2. **1001tracklists search** — POST to `/search/result.php` with the YouTube URL and a media-source filter pinned to YouTube. Result is the canonical tracklist URL or null. Cached 2 hours.
 3. **Anti-bot challenge** — 1001tracklists serves a JS interstitial on first contact: a `var <token>='<value>';` plus a form that POSTs back with `bChk = Java String.hashCode(<value>)`. The Worker re-implements `chop()` (Java's hash) and POSTs through the challenge. From Cloudflare egress IPs the page upgrades to a captcha that the JS solver can't clear — those requests route through Bright Data Web Unlocker instead.
 4. **Tracklist scrape** — `node-html-parser` over the (un-gated) tracklist HTML. Each `div.tlpItem` contributes one row: cue seconds come from a hidden `input[id$="_cue_seconds"]`, title/artist from `meta[itemprop="name|byArtist"]`, mashup-linked status from a `con` class on the row plus a `w/` track number. Cached 2 hours (and never cached when the parse comes back empty — that's almost always a captcha-gated response we want to retry, not a real zero-track tracklist).
-5. **Current-track selection** — group `w/` siblings, find the group with `startSeconds <= now < nextGroupStart`, then optionally include the previous group (if we just transitioned within `transitionWindowSeconds`) and/or the next group (if it's about to start within the same window).
+5. **Current-track selection** — group `w/` siblings, find the group whose `[startSeconds, nextGroupStart)` window contains `currentSeconds`, then always include the previous group (if any) and the next group (if any) so the caller has one-tap context. When `currentSeconds` is before any cued track, return only the first cued group with `isCurrent: false`.
 6. **Per-track Apple/YouTube links** — first try 1001tracklists' first-party AJAX `get_medialink.php?idObject=5&idItem=<n>` and parse the Apple Music embed iframe URL out of the response; fall back to the iTunes Search API for an Apple link if 1001tl has none. No per-track YouTube search (YouTube Data API quota is precious).
 
 ## Files

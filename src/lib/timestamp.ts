@@ -30,35 +30,38 @@ export type SelectionResult = {
 }
 
 /**
- * Pick currently-playing track(s) plus any inside the transition window,
- * grouping w/ siblings. `tracks` must be in document order.
+ * Return the currently-playing group plus the immediately-previous and
+ * immediately-next groups, so the caller has one-tap context without
+ * rewinding/fast-forwarding the source video. Mashup-linked siblings ("w/")
+ * count as one group, so a current pair returns both members and the prev/next
+ * "group" might itself be a pair.
  *
- * `currentSeconds` is the playback offset in the original DJ set.
+ * `tracks` must be in document order (= chronological by cue time).
  *
- * Rules:
- *  - "Current group": tracks whose startSeconds <= currentSeconds < nextStartSeconds,
- *    plus any subsequent rows marked isMashupLinked (w/) that share the same group.
- *  - "Transition window":
- *      • include the previous group if its members started within `windowSeconds` before now
- *      • include the next group if its first member starts within `windowSeconds` after now
- *  - Tracks with null startSeconds (no cue) are skipped for time-based selection but kept
- *    if they are mashup-linked siblings of a selected track.
+ * Edge cases:
+ *  - currentSeconds is before any cued track → no current; we return the
+ *    first cued group as a "next-up" hint (all isCurrent=false).
+ *  - first track in the tracklist → no previous, just [current, next].
+ *  - last track in the tracklist → no next, just [previous, current].
+ *  - single-track tracklist → just [current].
+ *  - empty tracklist → [].
+ *  - tracks without a cue (startSeconds === null) are skipped for current
+ *    selection but stay attached to their parent group via isMashupLinked.
  */
-export function selectCurrent(
-  tracks: ParsedTrack[],
-  currentSeconds: number,
-  windowSeconds: number,
-): SelectionResult {
+export function selectCurrent(tracks: ParsedTrack[], currentSeconds: number): SelectionResult {
   const groups = groupByMashup(tracks)
+  if (groups.length === 0) return { picked: [], anyUnidentified: false }
 
+  // Find the group whose [start, nextStart) range contains currentSeconds.
+  // Returns -1 if currentSeconds is before any cued group (which means the
+  // listener is in an intro / pre-roll / silent section).
   let currentIdx = -1
   for (let i = 0; i < groups.length; i++) {
-    const g = groups[i]!
-    const groupStart = groupStartSeconds(g)
-    if (groupStart === null) continue
+    const start = groupStartSeconds(groups[i]!)
+    if (start === null) continue
     const next = groups[i + 1]
     const nextStart = next ? groupStartSeconds(next) : null
-    if (groupStart <= currentSeconds && (nextStart === null || currentSeconds < nextStart)) {
+    if (start <= currentSeconds && (nextStart === null || currentSeconds < nextStart)) {
       currentIdx = i
       break
     }
@@ -67,32 +70,22 @@ export function selectCurrent(
   const picked: ParsedTrack[] = []
   const currentMembers = new Set<ParsedTrack>()
 
-  if (currentIdx >= 0) {
-    const g = groups[currentIdx]!
-    const currentStart = groupStartSeconds(g)
-    for (const t of g) {
+  if (currentIdx === -1) {
+    // Before the first cued group: offer up the first cued group as next-up.
+    const firstCued = groups.find((g) => groupStartSeconds(g) !== null)
+    if (firstCued) picked.push(...firstCued)
+  } else {
+    const prev = groups[currentIdx - 1]
+    if (prev) picked.push(...prev)
+
+    const cur = groups[currentIdx]!
+    for (const t of cur) {
       picked.push(t)
       currentMembers.add(t)
     }
-    const prev = groups[currentIdx - 1]
-    if (prev && currentStart !== null && currentSeconds - currentStart <= windowSeconds) {
-      picked.unshift(...prev)
-    }
+
     const next = groups[currentIdx + 1]
-    if (next) {
-      const nextStart = groupStartSeconds(next)
-      if (nextStart !== null && nextStart - currentSeconds <= windowSeconds) {
-        picked.push(...next)
-      }
-    }
-  } else {
-    const next = groups.find((g) => {
-      const s = groupStartSeconds(g)
-      return s !== null && s > currentSeconds && s - currentSeconds <= windowSeconds
-    })
-    if (next) {
-      picked.push(...next)
-    }
+    if (next) picked.push(...next)
   }
 
   const response: ResponseTrack[] = picked.map((t) => ({

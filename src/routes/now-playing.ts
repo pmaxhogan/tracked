@@ -33,10 +33,9 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   const tStart = Date.now()
 
   const body = c.req.valid('json')
-  const window = body.transitionWindowSeconds ?? 15
   const env = c.env
 
-  log.info('req.start', { method: c.req.method, path: c.req.path, body, window })
+  log.info('req.start', { method: c.req.method, path: c.req.path, body })
 
   const respond = (status: Status, extras: Partial<Res> = {}, message?: string) => {
     const payload = {
@@ -113,10 +112,9 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   })
 
   // Phase 4 — pick current tracks
-  const sel = selectCurrent(parsedTracks, body.currentSeconds, window)
+  const sel = selectCurrent(parsedTracks, body.currentSeconds)
   log.info('phase.select.done', {
     currentSeconds: body.currentSeconds,
-    window,
     pickedCount: sel.picked.length,
     currentCount: sel.picked.filter((t) => t.isCurrent).length,
     anyUnidentified: sel.anyUnidentified,

@@ -62,42 +62,66 @@ describe('selectCurrent', () => {
     track(900, { title: 'E' }),
   ]
 
-  it('returns the current track when comfortably in the middle', () => {
-    const r = selectCurrent(tracks, 400, 15)
-    expect(r.picked.map((t) => t.title)).toEqual(['C'])
-    expect(r.picked[0]!.isCurrent).toBe(true)
-  })
-
-  it('includes the next track when within transition window', () => {
-    const r = selectCurrent(tracks, 590, 15)
-    expect(r.picked.map((t) => t.title)).toEqual(['C', 'D'])
+  it('returns prev + current + next, with isCurrent only on the current group', () => {
+    const r = selectCurrent(tracks, 400)
+    expect(r.picked.map((t) => t.title)).toEqual(['B', 'C', 'D'])
+    expect(r.picked.find((t) => t.title === 'B')!.isCurrent).toBe(false)
     expect(r.picked.find((t) => t.title === 'C')!.isCurrent).toBe(true)
     expect(r.picked.find((t) => t.title === 'D')!.isCurrent).toBe(false)
   })
 
-  it('includes the previous track when within transition window', () => {
-    const r = selectCurrent(tracks, 310, 15)
-    expect(r.picked.map((t) => t.title)).toEqual(['B', 'C'])
-    expect(r.picked.find((t) => t.title === 'B')!.isCurrent).toBe(false)
-    expect(r.picked.find((t) => t.title === 'C')!.isCurrent).toBe(true)
+  it('boundary timestamps still produce prev + current + next (no transition window flag)', () => {
+    const r1 = selectCurrent(tracks, 300) // exactly at C's start
+    expect(r1.picked.map((t) => t.title)).toEqual(['B', 'C', 'D'])
+    const r2 = selectCurrent(tracks, 599) // 1s before D
+    expect(r2.picked.map((t) => t.title)).toEqual(['B', 'C', 'D'])
   })
 
-  it('handles before-first edge: returns next within window', () => {
-    const r = selectCurrent([track(60, { title: 'X' }), track(200, { title: 'Y' })], 50, 15)
+  it('first track of tracklist: no prev, returns [current, next]', () => {
+    const r = selectCurrent(tracks, 50) // current is A (starts at 0)
+    expect(r.picked.map((t) => t.title)).toEqual(['A', 'B'])
+    expect(r.picked.find((t) => t.title === 'A')!.isCurrent).toBe(true)
+    expect(r.picked.find((t) => t.title === 'B')!.isCurrent).toBe(false)
+  })
+
+  it('last track of tracklist: no next, returns [prev, current]', () => {
+    const r = selectCurrent(tracks, 1000) // past start of E
+    expect(r.picked.map((t) => t.title)).toEqual(['D', 'E'])
+    expect(r.picked.find((t) => t.title === 'D')!.isCurrent).toBe(false)
+    expect(r.picked.find((t) => t.title === 'E')!.isCurrent).toBe(true)
+  })
+
+  it('single-track tracklist returns just the current', () => {
+    const r = selectCurrent([track(50, { title: 'only' })], 100)
+    expect(r.picked.map((t) => t.title)).toEqual(['only'])
+    expect(r.picked[0]!.isCurrent).toBe(true)
+  })
+
+  it('before the first cued group: returns first as next-up, no isCurrent', () => {
+    const r = selectCurrent([track(60, { title: 'X' }), track(200, { title: 'Y' })], 10)
     expect(r.picked.map((t) => t.title)).toEqual(['X'])
     expect(r.picked[0]!.isCurrent).toBe(false)
   })
 
-  it('groups w/ mashup-linked siblings', () => {
+  it('empty tracklist returns empty pick', () => {
+    const r = selectCurrent([], 100)
+    expect(r.picked).toEqual([])
+    expect(r.anyUnidentified).toBe(false)
+  })
+
+  it('groups w/ mashup-linked siblings within prev/current/next', () => {
     const ts: ParsedTrack[] = [
       track(0, { title: 'A' }),
       track(300, { title: 'B' }),
       track(300, { title: 'B-mashup', isMashupLinked: true }),
       track(600, { title: 'C' }),
     ]
-    const r = selectCurrent(ts, 400, 15)
-    expect(r.picked.map((t) => t.title)).toEqual(['B', 'B-mashup'])
-    expect(r.picked.every((t) => t.isCurrent)).toBe(true)
+    const r = selectCurrent(ts, 400) // current = B+B-mashup
+    expect(r.picked.map((t) => t.title)).toEqual(['A', 'B', 'B-mashup', 'C'])
+    expect(r.picked.find((t) => t.title === 'A')!.isCurrent).toBe(false)
+    expect(r.picked.find((t) => t.title === 'B')!.isCurrent).toBe(true)
+    expect(r.picked.find((t) => t.title === 'B-mashup')!.isCurrent).toBe(true)
+    expect(r.picked.find((t) => t.title === 'C')!.isCurrent).toBe(false)
   })
 
   it('flags unidentified current tracks', () => {
@@ -106,17 +130,30 @@ describe('selectCurrent', () => {
       track(300, { title: 'ID', isUnidentified: true }),
       track(600, { title: 'C' }),
     ]
-    const r = selectCurrent(ts, 400, 15)
+    const r = selectCurrent(ts, 400)
     expect(r.anyUnidentified).toBe(true)
   })
 
-  it('skips tracks with null cue', () => {
+  it('does not flag unidentified when the unidentified track is just neighboring context', () => {
+    const ts: ParsedTrack[] = [
+      track(0, { title: 'A' }),
+      track(300, { title: 'B' }),
+      track(600, { title: 'ID', isUnidentified: true }),
+    ]
+    const r = selectCurrent(ts, 400) // current is B, unidentified is next
+    expect(r.anyUnidentified).toBe(false)
+  })
+
+  it('skips null-cue tracks for current selection', () => {
     const ts: ParsedTrack[] = [
       track(null, { title: 'pre' }),
       track(300, { title: 'B' }),
       track(600, { title: 'C' }),
     ]
-    const r = selectCurrent(ts, 400, 15)
-    expect(r.picked.map((t) => t.title)).toEqual(['B'])
+    const r = selectCurrent(ts, 400) // current = B; prev = pre group, next = C
+    // The null-cue 'pre' is its own group with no cue; selectCurrent's range
+    // matcher skips it, so current is B. Previous group is the pre row.
+    expect(r.picked.map((t) => t.title)).toEqual(['pre', 'B', 'C'])
+    expect(r.picked.find((t) => t.title === 'B')!.isCurrent).toBe(true)
   })
 })

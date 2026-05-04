@@ -21,10 +21,6 @@ export const NowPlayingRequest = z
       example: 4590,
       description: 'Current playback offset (seconds from start of the video)',
     }),
-    transitionWindowSeconds: z.number().int().nonnegative().max(120).optional().openapi({
-      example: 15,
-      description: 'How close to a track boundary (seconds) to also return the adjacent track. Default 15.',
-    }),
   })
   .refine((d) => Boolean(d.videoTitle || d.videoUrl), {
     message: 'Either videoTitle or videoUrl is required',
