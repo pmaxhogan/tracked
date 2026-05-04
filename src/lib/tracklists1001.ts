@@ -1,6 +1,6 @@
 import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
-import { fetchHtml, fetchWithTimeout, postForm, type ChallengeState } from './fetch'
+import { fetchHtml, fetchWithTimeout, postForm, isIPBlocked, extractIPBlockedAddress, IPBlockedError, type ChallengeState } from './fetch'
 import { fetchViaUnlocker } from './unlocker'
 import type { Logger } from './log'
 
@@ -81,6 +81,11 @@ export async function fetchTracklist(
       const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
       log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage })
       throw new Error(`unlocker tracklist fetch failed — ${detail}`)
+    }
+    if (isIPBlocked(r.html)) {
+      const clientIp = extractIPBlockedAddress(r.html)
+      log?.error('1001scrape.unlocker_ip_blocked', { tracklistUrl, clientIp, htmlBytes: r.html.length })
+      throw new IPBlockedError(clientIp)
     }
     const result = parseTracklist(tracklistUrl, r.html)
     log?.info('1001scrape.parsed', {
