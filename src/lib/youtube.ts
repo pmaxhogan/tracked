@@ -29,6 +29,7 @@ export function extractVideoId(input: string): string | null {
   return null
 }
 
+import { fetchWithTimeout } from './fetch'
 import type { Logger } from './log'
 
 type SearchResponse = {
@@ -113,7 +114,7 @@ export function parseIso8601Duration(s: string): number | null {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url)
+  const res = await fetchWithTimeout(url, { timeoutMs: 8000 })
   if (!res.ok) throw new Error(`youtube ${res.status}: ${await res.text()}`)
   return (await res.json()) as T
 }

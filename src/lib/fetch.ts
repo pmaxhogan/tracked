@@ -1,6 +1,22 @@
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
+/**
+ * fetch wrapper that aborts after `timeoutMs` so a stuck connection can't
+ * stall the whole Worker invocation. The original use case was a 1001tl
+ * AJAX endpoint that occasionally responds with CF-edge 522s after ~19s,
+ * blocking the entire request — fail fast and let the caller fall back.
+ */
+export async function fetchWithTimeout(input: RequestInfo, init: RequestInit & { timeoutMs: number }): Promise<Response> {
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(new Error(`fetch timed out after ${init.timeoutMs}ms`)), init.timeoutMs)
+  try {
+    return await fetch(input, { ...init, signal: ac.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 const COMMON_HEADERS: Record<string, string> = {
   'User-Agent': UA,
   Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',

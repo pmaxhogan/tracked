@@ -1,6 +1,6 @@
 import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
-import { fetchHtml, postForm, type ChallengeState } from './fetch'
+import { fetchHtml, fetchWithTimeout, postForm, type ChallengeState } from './fetch'
 import { fetchViaUnlocker } from './unlocker'
 import type { Logger } from './log'
 
@@ -268,14 +268,90 @@ type MedialinkResponse = {
   more?: Array<{ source: string; idLink: string; type?: string }>
 }
 
-export async function fetchMediaLinks(mediaItemId: string, state?: ChallengeState, log?: Logger): Promise<{ result: MediaLinks; state: ChallengeState }> {
+export type FetchMediaLinksOpts = {
+  state?: ChallengeState
+  log?: Logger
+  /** When set, the fallback path is enabled: if a direct CF→1001tl fetch
+   *  fails or times out, race a longer direct retry against a BrightData
+   *  call (different IP, no captcha needed for the JSON endpoint — it just
+   *  works from non-CF IPs). */
+  brightdataApiKey?: string
+}
+
+/**
+ * Resolve per-track Apple Music + YouTube links from 1001tl's medialink
+ * AJAX. Strategy:
+ *
+ *   1. **Direct fetch with a 2s timeout.** Most calls succeed in ~150ms.
+ *   2. On timeout/transport failure, race a longer direct retry against a
+ *      BrightData fetch via Promise.any. Whichever returns first wins.
+ *
+ * Background: medialink calls from Cloudflare Worker IPs occasionally hit
+ * CF-edge 522s after ~19s — a single stuck call was blocking the whole
+ * Worker invocation for 20s. Failing fast at 2s + a second-IP retry both
+ * fixes the slow-tail and increases reliability.
+ */
+export async function fetchMediaLinks(mediaItemId: string, state?: ChallengeState, log?: Logger): Promise<{ result: MediaLinks; state: ChallengeState }>
+export async function fetchMediaLinks(mediaItemId: string, opts: FetchMediaLinksOpts): Promise<{ result: MediaLinks; state: ChallengeState }>
+export async function fetchMediaLinks(
+  mediaItemId: string,
+  stateOrOpts?: ChallengeState | FetchMediaLinksOpts,
+  maybeLog?: Logger,
+): Promise<{ result: MediaLinks; state: ChallengeState }> {
+  const opts: FetchMediaLinksOpts = stateOrOpts && 'cookie' in stateOrOpts
+    ? { state: stateOrOpts, log: maybeLog }
+    : (stateOrOpts ?? {})
+  const log = opts.log
   const url = `${ORIGIN}/ajax/get_medialink.php?idObject=5&idItem=${encodeURIComponent(mediaItemId)}`
-  const cookieHeader: Record<string, string> = state?.cookie ? { Cookie: state.cookie } : {}
   log?.info('medialink.start', { mediaItemId })
+
+  // Attempt 1: direct, 2s deadline.
+  try {
+    const result = await fetchMediaLinksDirect(mediaItemId, url, opts.state, 2000, log, 'direct.first')
+    return { result, state: opts.state ?? { cookie: '' } }
+  } catch (e) {
+    log?.warn('medialink.direct_first_failed', {
+      mediaItemId,
+      error: e instanceof Error ? e.message : String(e),
+      willRace: !!opts.brightdataApiKey,
+    })
+  }
+
+  // Attempt 2: race a longer direct retry against BrightData.
+  const racers: Promise<MediaLinks>[] = [
+    fetchMediaLinksDirect(mediaItemId, url, opts.state, 8000, log, 'direct.retry'),
+  ]
+  if (opts.brightdataApiKey) {
+    racers.push(fetchMediaLinksViaUnlocker(mediaItemId, url, opts.brightdataApiKey, log))
+  }
+  try {
+    const result = await Promise.any(racers)
+    return { result, state: opts.state ?? { cookie: '' } }
+  } catch (e) {
+    // Promise.any throws AggregateError when all racers reject.
+    log?.error('medialink.all_failed', {
+      mediaItemId,
+      racerCount: racers.length,
+      errors: e instanceof AggregateError ? e.errors.map((er) => (er instanceof Error ? er.message : String(er))) : [String(e)],
+    })
+    return { result: { appleLink: null, youtubeLink: null }, state: opts.state ?? { cookie: '' } }
+  }
+}
+
+async function fetchMediaLinksDirect(
+  mediaItemId: string,
+  url: string,
+  state: ChallengeState | undefined,
+  timeoutMs: number,
+  log: Logger | undefined,
+  phase: string,
+): Promise<MediaLinks> {
+  const cookieHeader: Record<string, string> = state?.cookie ? { Cookie: state.cookie } : {}
   const start = Date.now()
   let res: Response
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, {
+      timeoutMs,
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -286,20 +362,60 @@ export async function fetchMediaLinks(mediaItemId: string, state?: ChallengeStat
       },
     })
   } catch (e) {
-    log?.error('medialink.transport_throw', { mediaItemId, error: e instanceof Error ? e.message : String(e), ms: Date.now() - start })
-    return { result: { appleLink: null, youtubeLink: null }, state: state ?? { cookie: '' } }
+    log?.warn('medialink.transport_throw', { mediaItemId, phase, error: e instanceof Error ? e.message : String(e), ms: Date.now() - start })
+    throw e
   }
-  const text = await res.text()
+  return parseAndLog(mediaItemId, res, await res.text(), log, phase, start)
+}
+
+async function fetchMediaLinksViaUnlocker(
+  mediaItemId: string,
+  url: string,
+  apiKey: string,
+  log: Logger | undefined,
+): Promise<MediaLinks> {
+  const start = Date.now()
+  const r = await fetchViaUnlocker(url, apiKey, log)
+  if (r.status !== 200 || !r.html) {
+    log?.warn('medialink.unlocker_non_ok', { mediaItemId, status: r.status, errorCode: r.errorCode, ms: Date.now() - start })
+    throw new Error(`unlocker medialink ${r.status}: ${r.errorCode ?? r.errorMessage ?? ''}`)
+  }
+  let json: MedialinkResponse
+  try {
+    json = JSON.parse(r.html)
+  } catch {
+    log?.warn('medialink.unlocker_parse_failed', { mediaItemId, body: r.html.slice(0, 500), ms: Date.now() - start })
+    throw new Error('unlocker medialink JSON parse failed')
+  }
+  const result = parseMediaLinks(json)
+  log?.info('medialink.unlocker_done', {
+    mediaItemId,
+    appleLink: result.appleLink,
+    youtubeLink: result.youtubeLink,
+    ms: Date.now() - start,
+  })
+  return result
+}
+
+function parseAndLog(
+  mediaItemId: string,
+  res: Response,
+  text: string,
+  log: Logger | undefined,
+  phase: string,
+  start: number,
+): MediaLinks {
   let json: MedialinkResponse
   try {
     json = JSON.parse(text)
   } catch {
-    log?.warn('medialink.parse_failed', { mediaItemId, status: res.status, body: text.slice(0, 500), ms: Date.now() - start })
-    return { result: { appleLink: null, youtubeLink: null }, state: state ?? { cookie: '' } }
+    log?.warn('medialink.parse_failed', { mediaItemId, phase, status: res.status, body: text.slice(0, 500), ms: Date.now() - start })
+    throw new Error(`medialink parse_failed (${phase}) status=${res.status}`)
   }
   const result = parseMediaLinks(json)
   log?.info('medialink.done', {
     mediaItemId,
+    phase,
     status: res.status,
     success: json.success,
     sourcesData: (json.data ?? []).map((d) => d.source),
@@ -308,7 +424,7 @@ export async function fetchMediaLinks(mediaItemId: string, state?: ChallengeStat
     youtubeLink: result.youtubeLink,
     ms: Date.now() - start,
   })
-  return { result, state: state ?? { cookie: '' } }
+  return result
 }
 
 export function parseMediaLinks(json: MedialinkResponse): MediaLinks {

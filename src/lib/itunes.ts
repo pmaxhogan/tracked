@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from './fetch'
 import type { Logger } from './log'
 
 type ITunesResponse = {
@@ -25,7 +26,7 @@ export async function lookupAppleLink(artist: string, title: string, log?: Logge
   const start = Date.now()
   let res: Response
   try {
-    res = await fetch(url)
+    res = await fetchWithTimeout(url, { timeoutMs: 5000 })
   } catch (e) {
     log?.error('itunes.transport_throw', { term, error: e instanceof Error ? e.message : String(e), ms: Date.now() - start })
     return null

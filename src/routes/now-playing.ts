@@ -233,7 +233,7 @@ async function getMediaLinks(env: Env, trackId: string, log: Logger): Promise<Me
     return cached
   }
   log.info('cache.miss', { key })
-  const { result } = await fetchMediaLinks(trackId, undefined, log)
+  const { result } = await fetchMediaLinks(trackId, { log, brightdataApiKey: env.BRIGHTDATA_API_KEY })
   await putJson(env.CACHE, key, result, TTL.MEDIALINK)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
   return result
