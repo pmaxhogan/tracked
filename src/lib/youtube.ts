@@ -29,6 +29,8 @@ export function extractVideoId(input: string): string | null {
   return null
 }
 
+import type { Logger } from './log'
+
 type SearchResponse = {
   items?: Array<{ id?: { videoId?: string }; snippet?: { title?: string } }>
 }
@@ -50,16 +52,24 @@ export async function resolveVideo(
   title: string,
   targetDurationSeconds: number | undefined,
   apiKey: string,
+  log?: Logger,
 ): Promise<{ videoId: string; matchTitle: string } | null> {
+  log?.info('yt.search.start', { title, targetDurationSeconds })
   const search = await fetchJson<SearchResponse>(
     `${API}/search?part=snippet&type=video&maxResults=5&q=${encodeURIComponent(title)}&key=${apiKey}`,
   )
   const candidates = (search.items ?? [])
     .map((it) => ({ id: it.id?.videoId, title: it.snippet?.title ?? '' }))
     .filter((x): x is { id: string; title: string } => !!x.id)
+  log?.info('yt.search.result', {
+    title,
+    candidateCount: candidates.length,
+    candidates: candidates.map((c) => ({ id: c.id, title: c.title })),
+  })
   if (candidates.length === 0) return null
 
   if (targetDurationSeconds === undefined) {
+    log?.info('yt.resolve.no_duration_picked_first', { videoId: candidates[0]!.id, title: candidates[0]!.title })
     return { videoId: candidates[0]!.id, matchTitle: candidates[0]!.title }
   }
 
@@ -79,7 +89,15 @@ export async function resolveVideo(
     const delta = Math.abs(d - targetDurationSeconds)
     if (best === null || delta < best.delta) best = { c, delta }
   }
-  if (!best || best.delta > 90) return null
+  log?.info('yt.resolve.duration_match', {
+    targetDurationSeconds,
+    durations: Array.from(durations.entries()).map(([id, d]) => ({ id, d })),
+    best: best ? { id: best.c.id, title: best.c.title, delta: best.delta } : null,
+  })
+  if (!best || best.delta > 90) {
+    log?.warn('yt.resolve.no_match_within_tolerance', { targetDurationSeconds, bestDelta: best?.delta ?? null })
+    return null
+  }
   return { videoId: best.c.id, matchTitle: best.c.title }
 }
 

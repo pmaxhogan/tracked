@@ -80,6 +80,18 @@ describe('parseTracklist (Matroda Space Miami)', () => {
     expect(t.trackId).toBe('909720')
   })
 
+  it('captures trackUrl from meta[itemprop="url"]', () => {
+    const t = parsed.tracks[1]!
+    expect(t.trackUrl).toBe(
+      'https://www.1001tracklists.com/track/1hf79cg5/tobehonest-where-ya-at/index.html',
+    )
+  })
+
+  it('returns null trackUrl for unidentified rows', () => {
+    const id = parsed.tracks.find((t) => t.isUnidentified)!
+    expect(id.trackUrl).toBeNull()
+  })
+
   it('keeps tracks ordered by ascending start time', () => {
     const cues = parsed.tracks.map((t) => t.startSeconds).filter((x): x is number => x !== null)
     for (let i = 1; i < cues.length; i++) {

@@ -17,6 +17,8 @@ export type ParsedTrack = {
   title: string
   /** Internal 1001tracklists track id, used for the medialink AJAX. null if unextractable. */
   trackId: string | null
+  /** Canonical 1001tracklists track page URL. null when the row is unidentified or has no meta url. */
+  trackUrl: string | null
   isUnidentified: boolean
   /** True if this row is a "w/" sibling of the previous row (mashup-linked position). */
   isMashupLinked: boolean
@@ -31,4 +33,6 @@ export type ResponseTrack = {
   isUnidentified: boolean
   appleLink: string | null
   youtubeLink: string | null
+  /** Canonical 1001tracklists track page URL. null when unidentified. */
+  trackUrl: string | null
 }

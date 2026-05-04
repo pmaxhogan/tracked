@@ -45,6 +45,7 @@ function track(startSeconds: number | null, opts: Partial<ParsedTrack> = {}): Pa
     artist: opts.artist ?? 'Artist',
     title: opts.title ?? 'Title',
     trackId: opts.trackId ?? 'abc123',
+    trackUrl: opts.trackUrl ?? null,
     isUnidentified: opts.isUnidentified ?? false,
     isMashupLinked: opts.isMashupLinked ?? false,
   }

@@ -2,6 +2,7 @@ import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
 import { fetchHtml, postForm, type ChallengeState } from './fetch'
 import { fetchViaUnlocker } from './unlocker'
+import type { Logger } from './log'
 
 const ORIGIN = 'https://www.1001tracklists.com'
 
@@ -20,7 +21,10 @@ export type SearchResult = { tracklistUrl: string } | { tracklistUrl: null }
 export async function searchByYouTubeUrl(
   videoUrl: string,
   state?: ChallengeState,
+  log?: Logger,
 ): Promise<{ result: SearchResult; state: ChallengeState }> {
+  log?.info('1001search.start', { videoUrl })
+  const start = Date.now()
   const { html, state: s2 } = await postForm(
     `${ORIGIN}/search/result.php`,
     {
@@ -31,7 +35,9 @@ export async function searchByYouTubeUrl(
     },
     state,
   )
-  return { result: parseSearchResult(html), state: s2 }
+  const result = parseSearchResult(html)
+  log?.info('1001search.done', { videoUrl, htmlBytes: html.length, tracklistUrl: result.tracklistUrl, ms: Date.now() - start })
+  return { result, state: s2 }
 }
 
 export function parseSearchResult(html: string): SearchResult {
@@ -56,22 +62,43 @@ export type FetchTracklistOpts = {
    *  — fine from a residential IP, fails on Workers. */
   brightdataApiKey?: string
   state?: ChallengeState
+  log?: Logger
 }
 
 export async function fetchTracklist(
   tracklistUrl: string,
   opts: FetchTracklistOpts = {},
 ): Promise<{ result: ScrapedTracklist; state: ChallengeState }> {
+  const log = opts.log
+  log?.info('1001scrape.start', { tracklistUrl, viaUnlocker: !!opts.brightdataApiKey })
+  const start = Date.now()
   if (opts.brightdataApiKey) {
-    const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey)
+    const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log)
     if (r.status !== 200 || !r.html) {
       const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
+      log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage })
       throw new Error(`unlocker tracklist fetch failed — ${detail}`)
     }
-    return { result: parseTracklist(tracklistUrl, r.html), state: opts.state ?? { cookie: '' } }
+    const result = parseTracklist(tracklistUrl, r.html)
+    log?.info('1001scrape.parsed', {
+      tracklistUrl,
+      htmlBytes: r.html.length,
+      trackCount: result.tracks.length,
+      unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
+      mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
+      ms: Date.now() - start,
+    })
+    return { result, state: opts.state ?? { cookie: '' } }
   }
   const { html, state: s2 } = await fetchHtml(tracklistUrl, opts.state)
-  return { result: parseTracklist(tracklistUrl, html), state: s2 }
+  const result = parseTracklist(tracklistUrl, html)
+  log?.info('1001scrape.parsed_direct', {
+    tracklistUrl,
+    htmlBytes: html.length,
+    trackCount: result.tracks.length,
+    ms: Date.now() - start,
+  })
+  return { result, state: s2 }
 }
 
 export function parseTracklist(tracklistUrl: string, html: string): ScrapedTracklist {
@@ -124,12 +151,17 @@ function parseRow(row: HTMLElement): ParsedTrack | null {
   const mediaRow = row.querySelector('div.mediaRow')
   const mediaTrackId = mediaRow?.getAttribute('data-trackid') ?? null
 
+  const urlMeta = row.querySelector('meta[itemprop="url"]')
+  const urlPath = urlMeta?.getAttribute('content') ?? ''
+  const trackUrl = !isUnidentified && urlPath ? new URL(urlPath, ORIGIN).toString() : null
+
   return {
     startTime: startTime || (Number.isFinite(startSeconds!) ? formatCue(startSeconds!) : ''),
     startSeconds: Number.isFinite(startSeconds!) ? (startSeconds as number) : null,
     artist: artist || (isUnidentified ? '' : ''),
     title: title || (isUnidentified ? 'ID' : ''),
     trackId: mediaTrackId ?? dataId,
+    trackUrl,
     isUnidentified,
     isMashupLinked,
   }
@@ -167,27 +199,47 @@ type MedialinkResponse = {
   more?: Array<{ source: string; idLink: string; type?: string }>
 }
 
-export async function fetchMediaLinks(mediaItemId: string, state?: ChallengeState): Promise<{ result: MediaLinks; state: ChallengeState }> {
+export async function fetchMediaLinks(mediaItemId: string, state?: ChallengeState, log?: Logger): Promise<{ result: MediaLinks; state: ChallengeState }> {
   const url = `${ORIGIN}/ajax/get_medialink.php?idObject=5&idItem=${encodeURIComponent(mediaItemId)}`
   const cookieHeader: Record<string, string> = state?.cookie ? { Cookie: state.cookie } : {}
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      Accept: 'application/json,text/javascript,*/*;q=0.01',
-      'X-Requested-With': 'XMLHttpRequest',
-      Referer: ORIGIN + '/',
-      ...cookieHeader,
-    },
-  })
+  log?.info('medialink.start', { mediaItemId })
+  const start = Date.now()
+  let res: Response
+  try {
+    res = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'application/json,text/javascript,*/*;q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        Referer: ORIGIN + '/',
+        ...cookieHeader,
+      },
+    })
+  } catch (e) {
+    log?.error('medialink.transport_throw', { mediaItemId, error: e instanceof Error ? e.message : String(e), ms: Date.now() - start })
+    return { result: { appleLink: null, youtubeLink: null }, state: state ?? { cookie: '' } }
+  }
   const text = await res.text()
   let json: MedialinkResponse
   try {
     json = JSON.parse(text)
   } catch {
+    log?.warn('medialink.parse_failed', { mediaItemId, status: res.status, body: text.slice(0, 500), ms: Date.now() - start })
     return { result: { appleLink: null, youtubeLink: null }, state: state ?? { cookie: '' } }
   }
-  return { result: parseMediaLinks(json), state: state ?? { cookie: '' } }
+  const result = parseMediaLinks(json)
+  log?.info('medialink.done', {
+    mediaItemId,
+    status: res.status,
+    success: json.success,
+    sourcesData: (json.data ?? []).map((d) => d.source),
+    sourcesMore: (json.more ?? []).map((m) => m.source),
+    appleLink: result.appleLink,
+    youtubeLink: result.youtubeLink,
+    ms: Date.now() - start,
+  })
+  return { result, state: state ?? { cookie: '' } }
 }
 
 export function parseMediaLinks(json: MedialinkResponse): MediaLinks {

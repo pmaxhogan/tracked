@@ -7,6 +7,8 @@
  * suspended) and 429 (rate limit) bubble up so the caller can flag them.
  */
 
+import type { Logger } from './log'
+
 const API_URL = 'https://api.brightdata.com/request'
 
 const DEFAULT_ZONE = 'prism'
@@ -42,43 +44,56 @@ export type UnlockerResult = {
 export async function fetchViaUnlocker(
   url: string,
   apiKey: string,
+  log?: Logger,
   zone = DEFAULT_ZONE,
   retriesLeft = MAX_RETRIES,
 ): Promise<UnlockerResult> {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ zone, url, format: 'json' }),
-  })
+  const start = Date.now()
+  log?.info('unlocker.start', { url, zone, retriesLeft })
+
+  let res: Response
+  try {
+    res = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ zone, url, format: 'json' }),
+    })
+  } catch (e) {
+    log?.error('unlocker.transport_throw', { url, ms: Date.now() - start, error: e instanceof Error ? e.message : String(e) })
+    throw e
+  }
+
   if (!res.ok) {
-    throw new Error(`unlocker transport ${res.status}: ${await res.text()}`)
+    const text = await res.text()
+    log?.error('unlocker.transport_non_ok', { url, transportStatus: res.status, body: text.slice(0, 1000), ms: Date.now() - start })
+    throw new Error(`unlocker transport ${res.status}: ${text}`)
   }
   const json = (await res.json()) as UnlockerResponse
   const status = json.status_code ?? 0
   const headers = json.headers ?? {}
   const errorCode = headers['x-brd-error-code'] ?? null
   const errorMessage = headers['x-brd-error'] ?? null
+  const htmlBytes = (json.body ?? '').length
+  const ms = Date.now() - start
 
   if (status === 407) {
+    log?.error('unlocker.account_suspended', { url, status, errorCode, errorMessage, ms })
     throw new Error('unlocker account suspended (407) — top up Bright Data balance')
   }
 
   if (status !== 200 && status !== 404) {
     if (errorCode && RETRYABLE_ERROR_CODES.has(errorCode) && retriesLeft > 0) {
-      return fetchViaUnlocker(url, apiKey, zone, retriesLeft - 1)
+      log?.warn('unlocker.retrying', { url, status, errorCode, errorMessage, retriesLeft, ms })
+      return fetchViaUnlocker(url, apiKey, log, zone, retriesLeft - 1)
     }
-    return {
-      status,
-      html: '',
-      redirectedUrl: '',
-      errorCode,
-      errorMessage,
-    }
+    log?.error('unlocker.failed', { url, status, errorCode, errorMessage, htmlBytes, ms })
+    return { status, html: '', redirectedUrl: '', errorCode, errorMessage }
   }
 
+  log?.info('unlocker.ok', { url, status, htmlBytes, redirectedUrl: headers['x-unblocker-redirected-to'] ?? '', ms })
   return {
     status,
     html: json.body ?? '',

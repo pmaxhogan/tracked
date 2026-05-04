@@ -42,6 +42,10 @@ export const ResponseTrackSchema = z
     isUnidentified: z.boolean(),
     appleLink: z.string().nullable(),
     youtubeLink: z.string().nullable(),
+    trackUrl: z.string().nullable().openapi({
+      example: 'https://www.1001tracklists.com/track/1hf79cg5/tobehonest-where-ya-at/index.html',
+      description: 'Canonical 1001tracklists track page (for opening track details, feedback, alt links). null when unidentified.',
+    }),
   })
   .openapi('ResponseTrack')
 

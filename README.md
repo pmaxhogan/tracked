@@ -52,15 +52,33 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
       "isCurrent": true,
       "isUnidentified": false,
       "appleLink": "https://music.apple.com/...",
-      "youtubeLink": null
+      "youtubeLink": null,
+      "trackUrl": "https://www.1001tracklists.com/track/1x9zgrpp/odd-mob-left-to-right-aidan-rudd-remix/index.html"
     }
   ]
 }
 ```
 
-Tracks within the ±transition window are returned with `isCurrent: false`. Mashup-linked siblings (1001tracklists `w/`) are grouped together and all share the parent's `isCurrent` flag.
+Tracks within the ±transition window are returned with `isCurrent: false`. Mashup-linked siblings (1001tracklists `w/`) are grouped together and all share the parent's `isCurrent` flag. `trackUrl` is the canonical 1001tracklists track page (good for opening track details / submitting a fix); `null` when the row is unidentified.
 
-OpenAPI spec: `GET /openapi.json`.
+OpenAPI spec: `GET /openapi.json` (bearer-gated).
+
+## Logs
+
+Worker observability is on (`observability.enabled: true` in `wrangler.jsonc`). Every request emits a stream of structured JSON log lines correlated by `reqId` (the Cloudflare `cf-ray` header). Each phase logs full input/output bodies and timing; every error path logs full error context (name, message, stack, upstream status/error code).
+
+```bash
+# live, all events
+npx wrangler tail tracked --format json
+
+# live, errors only
+npx wrangler tail tracked --format json --status error
+
+# stream to a file for later analysis
+npx wrangler tail tracked --format json > logs/all.jsonl
+```
+
+For historical (past few days), use the Cloudflare dashboard → Workers & Pages → `tracked` → Observability tab → Query Builder.
 
 ## Local dev
 

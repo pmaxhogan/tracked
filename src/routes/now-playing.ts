@@ -7,6 +7,7 @@ import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
 import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
 import { bearerAuth } from '../middleware/auth'
+import { makeLogger, errorFields, type Logger } from '../lib/log'
 
 export const nowPlayingRoute = createRoute({
   method: 'post',
@@ -27,127 +28,212 @@ export const nowPlayingRoute = createRoute({
 type Res = typeof NowPlayingResponse._type
 
 export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings: Env }> = async (c) => {
+  const reqId = c.req.raw.headers.get('cf-ray') ?? `local-${Math.random().toString(36).slice(2, 10)}`
+  const log = makeLogger({ reqId })
+  const tStart = Date.now()
+
   const body = c.req.valid('json')
   const window = body.transitionWindowSeconds ?? 15
   const env = c.env
 
-  const empty = (status: Status, extras: Partial<Res> = {}, message?: string) =>
-    c.json({ status, videoUrl: null, tracklistUrl: null, tracks: [], ...(message ? { message } : {}), ...extras } satisfies Res, 200)
+  log.info('req.start', { method: c.req.method, path: c.req.path, body, window })
 
+  const respond = (status: Status, extras: Partial<Res> = {}, message?: string) => {
+    const payload = {
+      status,
+      videoUrl: null,
+      tracklistUrl: null,
+      tracks: [],
+      ...(message ? { message } : {}),
+      ...extras,
+    } satisfies Res
+    log.info('req.end', { status, totalMs: Date.now() - tStart, response: payload })
+    return c.json(payload, 200)
+  }
+
+  // Phase 1 — resolve videoId
   let videoId: string | null = null
   if (body.videoUrl) {
-    // Caller already knows the video — skip the YouTube Data API roundtrip.
     videoId = extractVideoId(body.videoUrl)
-    if (!videoId) return empty('no_video', {}, 'could not parse a YouTube video id from videoUrl')
-  } else if (body.videoTitle) {
-    try {
-      videoId = await resolveYouTube(env, body.videoTitle, body.videoDurationSeconds)
-    } catch (e) {
-      return empty('upstream_error', {}, `youtube: ${(e as Error).message}`)
+    log.info('phase.video.from_url', { input: body.videoUrl, videoId })
+    if (!videoId) {
+      log.error('phase.video.unparseable_url', { input: body.videoUrl })
+      return respond('no_video', {}, 'could not parse a YouTube video id from videoUrl')
     }
-    if (!videoId) return empty('no_video')
+  } else if (body.videoTitle) {
+    log.info('phase.video.from_title', { videoTitle: body.videoTitle, videoDurationSeconds: body.videoDurationSeconds })
+    try {
+      videoId = await resolveYouTube(env, body.videoTitle, body.videoDurationSeconds, log)
+    } catch (e) {
+      log.error('phase.video.youtube_throw', errorFields(e))
+      return respond('upstream_error', {}, `youtube: ${(e as Error).message}`)
+    }
+    if (!videoId) {
+      log.warn('phase.video.no_match', { videoTitle: body.videoTitle, videoDurationSeconds: body.videoDurationSeconds })
+      return respond('no_video')
+    }
   } else {
-    // Schema-level refine should have caught this, but belt-and-suspenders.
-    return empty('no_video', {}, 'videoUrl or videoTitle is required')
+    log.error('phase.video.no_input')
+    return respond('no_video', {}, 'videoUrl or videoTitle is required')
   }
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`
+  log.info('phase.video.resolved', { videoId, videoUrl })
 
+  // Phase 2 — find a tracklist
   let tracklistUrl: string | null = null
   try {
-    tracklistUrl = await resolveTracklistUrl(env, videoId, videoUrl)
+    tracklistUrl = await resolveTracklistUrl(env, videoId, videoUrl, log)
   } catch (e) {
-    return empty('upstream_error', { videoUrl }, `1001 search: ${(e as Error).message}`)
+    log.error('phase.search.throw', { videoId, videoUrl, ...errorFields(e) })
+    return respond('upstream_error', { videoUrl }, `1001 search: ${(e as Error).message}`)
   }
-  if (!tracklistUrl) return empty('no_tracklist', { videoUrl })
+  if (!tracklistUrl) {
+    log.info('phase.search.no_tracklist', { videoId, videoUrl })
+    return respond('no_tracklist', { videoUrl })
+  }
+  log.info('phase.search.resolved', { tracklistUrl })
 
+  // Phase 3 — scrape the tracklist
   let parsedTracks: ParsedTrack[]
   try {
-    parsedTracks = await resolveTracklist(env, tracklistUrl)
+    parsedTracks = await resolveTracklist(env, tracklistUrl, log)
   } catch (e) {
-    return empty('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${(e as Error).message}`)
+    log.error('phase.scrape.throw', { tracklistUrl, ...errorFields(e) })
+    return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${(e as Error).message}`)
   }
+  log.info('phase.scrape.resolved', {
+    tracklistUrl,
+    trackCount: parsedTracks.length,
+    unidentifiedCount: parsedTracks.filter((t) => t.isUnidentified).length,
+  })
 
+  // Phase 4 — pick current tracks
   const sel = selectCurrent(parsedTracks, body.currentSeconds, window)
+  log.info('phase.select.done', {
+    currentSeconds: body.currentSeconds,
+    window,
+    pickedCount: sel.picked.length,
+    currentCount: sel.picked.filter((t) => t.isCurrent).length,
+    anyUnidentified: sel.anyUnidentified,
+    pickedTitles: sel.picked.map((t) => `${t.startTime} ${t.artist} - ${t.title}${t.isCurrent ? ' *' : ''}`),
+  })
   if (sel.picked.length === 0) {
-    return empty('no_tracklist', { videoUrl, tracklistUrl })
+    log.warn('phase.select.empty', { currentSeconds: body.currentSeconds, totalTracks: parsedTracks.length })
+    return respond('no_tracklist', { videoUrl, tracklistUrl })
   }
 
+  // Phase 5 — enrich with deep links
   const enriched = await Promise.all(
     sel.picked.map(async (t) => {
       const parsed = parsedTracks.find((p) => p.title === t.title && p.startSeconds === t.startSeconds)
-      const links = await resolveLinks(env, parsed, t)
+      const links = await resolveLinks(env, parsed, t, log)
       return { ...t, ...links } satisfies ResponseTrack
     }),
   )
 
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
-  return c.json({ status, videoUrl, tracklistUrl, tracks: enriched } satisfies Res, 200)
+  const payload = { status, videoUrl, tracklistUrl, tracks: enriched } satisfies Res
+  log.info('req.end', { status, totalMs: Date.now() - tStart, response: payload })
+  return c.json(payload, 200)
 }
 
-async function resolveYouTube(env: Env, title: string, dur: number | undefined): Promise<string | null> {
+async function resolveYouTube(env: Env, title: string, dur: number | undefined, log: Logger): Promise<string | null> {
   const key = `yt:${await sha1Hex(title)}:${dur ?? 'x'}`
   const cached = await getJson<{ videoId: string | null }>(env.CACHE, key)
-  if (cached) return cached.videoId
-  const r = await resolveVideo(title, dur, env.YOUTUBE_API_KEY)
+  if (cached) {
+    log.info('cache.hit', { key, value: cached })
+    return cached.videoId
+  }
+  log.info('cache.miss', { key })
+  const r = await resolveVideo(title, dur, env.YOUTUBE_API_KEY, log)
   const videoId = r?.videoId ?? null
   await putJson(env.CACHE, key, { videoId }, TTL.YT_VIDEO)
+  log.info('cache.put', { key, value: { videoId }, ttlSeconds: TTL.YT_VIDEO })
   return videoId
 }
 
-async function resolveTracklistUrl(env: Env, videoId: string, videoUrl: string): Promise<string | null> {
+async function resolveTracklistUrl(env: Env, videoId: string, videoUrl: string, log: Logger): Promise<string | null> {
   const key = `s1001:${videoId}`
   const cached = await getJson<{ tracklistUrl: string | null }>(env.CACHE, key)
-  if (cached) return cached.tracklistUrl
-  const { result } = await searchByYouTubeUrl(videoUrl)
+  if (cached) {
+    log.info('cache.hit', { key, value: cached })
+    return cached.tracklistUrl
+  }
+  log.info('cache.miss', { key })
+  const { result } = await searchByYouTubeUrl(videoUrl, undefined, log)
   await putJson(env.CACHE, key, { tracklistUrl: result.tracklistUrl }, TTL.TRACKLIST_SEARCH)
+  log.info('cache.put', { key, value: result, ttlSeconds: TTL.TRACKLIST_SEARCH })
   return result.tracklistUrl
 }
 
-async function resolveTracklist(env: Env, tracklistUrl: string): Promise<ParsedTrack[]> {
+async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Promise<ParsedTrack[]> {
   const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
   const key = `tl:${slug}`
   const cached = await getJson<ParsedTrack[]>(env.CACHE, key)
-  if (cached) return cached
-  const { result } = await fetchTracklist(tracklistUrl, { brightdataApiKey: env.BRIGHTDATA_API_KEY })
-  // Avoid caching empty parses — could be a one-off captcha that we want to retry.
+  if (cached) {
+    log.info('cache.hit', { key, trackCount: cached.length })
+    return cached
+  }
+  log.info('cache.miss', { key })
+  const { result } = await fetchTracklist(tracklistUrl, { brightdataApiKey: env.BRIGHTDATA_API_KEY, log })
   if (result.tracks.length > 0) {
     await putJson(env.CACHE, key, result.tracks, TTL.TRACKLIST_PAGE)
+    log.info('cache.put', { key, trackCount: result.tracks.length, ttlSeconds: TTL.TRACKLIST_PAGE })
+  } else {
+    log.warn('cache.skip_empty', { key, reason: 'parsed 0 tracks; likely a transient captcha — not caching' })
   }
   return result.tracks
 }
 
-async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: ResponseTrack): Promise<{ appleLink: string | null; youtubeLink: string | null }> {
-  if (t.isUnidentified) return { appleLink: null, youtubeLink: null }
+async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: ResponseTrack, log: Logger): Promise<{ appleLink: string | null; youtubeLink: string | null }> {
+  if (t.isUnidentified) {
+    log.info('links.skip_unidentified', { artist: t.artist, title: t.title })
+    return { appleLink: null, youtubeLink: null }
+  }
 
   let apple: string | null = null
   let youtube: string | null = null
 
   if (parsed?.trackId && /^\d+$/.test(parsed.trackId)) {
-    const ml = await getMediaLinks(env, parsed.trackId)
+    const ml = await getMediaLinks(env, parsed.trackId, log)
     apple = ml.appleLink
     youtube = ml.youtubeLink
+    log.info('links.medialink_result', { trackId: parsed.trackId, artist: t.artist, title: t.title, apple, youtube })
+  } else {
+    log.info('links.no_medialink_id', { artist: t.artist, title: t.title, parsedTrackId: parsed?.trackId ?? null })
   }
 
   if (!apple && t.artist && t.title) {
-    apple = await lookupAppleCached(env, t.artist, t.title)
+    apple = await lookupAppleCached(env, t.artist, t.title, log)
+    log.info('links.itunes_fallback_result', { artist: t.artist, title: t.title, apple })
   }
   return { appleLink: apple, youtubeLink: youtube }
 }
 
-async function getMediaLinks(env: Env, trackId: string): Promise<MediaLinks> {
+async function getMediaLinks(env: Env, trackId: string, log: Logger): Promise<MediaLinks> {
   const key = `ml:${trackId}`
   const cached = await getJson<MediaLinks>(env.CACHE, key)
-  if (cached) return cached
-  const { result } = await fetchMediaLinks(trackId)
+  if (cached) {
+    log.info('cache.hit', { key, value: cached })
+    return cached
+  }
+  log.info('cache.miss', { key })
+  const { result } = await fetchMediaLinks(trackId, undefined, log)
   await putJson(env.CACHE, key, result, TTL.MEDIALINK)
+  log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
   return result
 }
 
-async function lookupAppleCached(env: Env, artist: string, title: string): Promise<string | null> {
+async function lookupAppleCached(env: Env, artist: string, title: string, log: Logger): Promise<string | null> {
   const key = `am:${await sha1Hex(`${artist}|${title}`)}`
   const cached = await getJson<{ url: string | null }>(env.CACHE, key)
-  if (cached) return cached.url
-  const url = await lookupAppleLink(artist, title)
+  if (cached) {
+    log.info('cache.hit', { key, value: cached })
+    return cached.url
+  }
+  log.info('cache.miss', { key })
+  const url = await lookupAppleLink(artist, title, log)
   await putJson(env.CACHE, key, { url }, TTL.APPLE)
+  log.info('cache.put', { key, value: { url }, ttlSeconds: TTL.APPLE })
   return url
 }

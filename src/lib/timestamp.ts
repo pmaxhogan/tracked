@@ -104,6 +104,7 @@ export function selectCurrent(
     isUnidentified: t.isUnidentified,
     appleLink: null,
     youtubeLink: null,
+    trackUrl: t.trackUrl,
   }))
 
   return {
