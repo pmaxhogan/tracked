@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl } from '../src/lib/tracklists1001'
-import { chop, extractChallenge } from '../src/lib/fetch'
+import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress } from '../src/lib/fetch'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
@@ -23,6 +23,32 @@ describe('challenge', () => {
 
   it('returns null when the page is not the challenge', () => {
     expect(extractChallenge(fx('tracklist-matroda.html'))).toBeNull()
+  })
+})
+
+describe('IP block detection', () => {
+  it('detects the IP-block search response', () => {
+    expect(isIPBlocked(fx('ip-block-search.html'))).toBe(true)
+  })
+
+  it('detects the IP-block tracklist response', () => {
+    expect(isIPBlocked(fx('ip-block-tracklist.html'))).toBe(true)
+  })
+
+  it('does not flag the JS interstitial as IP-blocked', () => {
+    expect(isIPBlocked(fx('tracklist-neptune.html'))).toBe(false)
+  })
+
+  it('does not flag a real tracklist page as IP-blocked', () => {
+    expect(isIPBlocked(fx('tracklist-matroda.html'))).toBe(false)
+  })
+
+  it('extracts the client IP from the unblock page', () => {
+    expect(extractIPBlockedAddress(fx('ip-block-search.html'))).toMatch(/^(?:\d{1,3}\.){3}\d{1,3}$/)
+  })
+
+  it('returns null IP for non-blocked pages', () => {
+    expect(extractIPBlockedAddress(fx('tracklist-matroda.html'))).toBeNull()
   })
 })
 

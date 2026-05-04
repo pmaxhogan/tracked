@@ -8,6 +8,7 @@ import { selectCurrent } from '../lib/timestamp'
 import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields, type Logger } from '../lib/log'
+import { IPBlockedError } from '../lib/fetch'
 
 export const nowPlayingRoute = createRoute({
   method: 'post',
@@ -84,6 +85,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   try {
     tracklistUrl = await resolveTracklistUrl(env, videoId, videoUrl, log)
   } catch (e) {
+    if (e instanceof IPBlockedError) {
+      log.error('phase.search.ip_blocked', { videoId, videoUrl, clientIp: e.clientIp })
+      return respond('upstream_error', { videoUrl }, `1001 search: ip_blocked (${e.clientIp ?? 'unknown'})`)
+    }
     log.error('phase.search.throw', { videoId, videoUrl, ...errorFields(e) })
     return respond('upstream_error', { videoUrl }, `1001 search: ${(e as Error).message}`)
   }
@@ -101,6 +106,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     parsedTracks = scraped.tracks
     setAppleLink = scraped.setAppleLink
   } catch (e) {
+    if (e instanceof IPBlockedError) {
+      log.error('phase.scrape.ip_blocked', { tracklistUrl, clientIp: e.clientIp })
+      return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ip_blocked (${e.clientIp ?? 'unknown'})`)
+    }
     log.error('phase.scrape.throw', { tracklistUrl, ...errorFields(e) })
     return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${(e as Error).message}`)
   }

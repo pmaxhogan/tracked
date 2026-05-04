@@ -61,6 +61,36 @@ export function extractChallenge(html: string): ChallengeFields | null {
 }
 
 /**
+ * 1001tracklists rate-limits per IP. When tripped, expensive endpoints
+ * (search/result.php, /tracklist/...) return a 200 page whose body is
+ * actually a "Fill out the captcha to unblock your IP" form posting to
+ * /info/unblock_ip.html. Without this detection the parser sees zero
+ * tracklist rows and the route silently returns no_tracklist — a
+ * misleading status. Detect and surface as a typed error so the route
+ * can return a real upstream_error.
+ */
+export class IPBlockedError extends Error {
+  readonly clientIp: string | null
+  constructor(clientIp: string | null) {
+    super(clientIp ? `1001tracklists rate-limited IP ${clientIp}` : '1001tracklists rate-limited IP')
+    this.name = 'IPBlockedError'
+    this.clientIp = clientIp
+  }
+}
+
+const IP_BLOCK_FORM_RE = /action="\/info\/unblock_ip\.html"/
+const IP_BLOCK_IP_RE = /Your IP is ((?:\d{1,3}\.){3}\d{1,3})/
+
+export function isIPBlocked(html: string): boolean {
+  return IP_BLOCK_FORM_RE.test(html)
+}
+
+export function extractIPBlockedAddress(html: string): string | null {
+  const m = html.match(IP_BLOCK_IP_RE)
+  return m ? m[1]! : null
+}
+
+/**
  * 1001tracklists serves a JS interstitial on first contact: a "please wait"
  * page with a token var the browser is meant to hash and POST back. We do
  * the same thing here. After solving, the response sets a session cookie
@@ -72,6 +102,8 @@ export async function fetchHtml(url: string, state?: ChallengeState): Promise<{ 
   const setCookie = res.headers.get('set-cookie') ?? ''
   let cookie = mergeCookies(state?.cookie, setCookie)
   const html = await res.text()
+
+  if (isIPBlocked(html)) throw new IPBlockedError(extractIPBlockedAddress(html))
 
   const challenge = extractChallenge(html)
   if (!challenge) return { html, state: { cookie } }
@@ -114,6 +146,8 @@ export async function postForm(
   })
   const cookie = mergeCookies(state?.cookie, res.headers.get('set-cookie') ?? '')
   const html = await res.text()
+
+  if (isIPBlocked(html)) throw new IPBlockedError(extractIPBlockedAddress(html))
 
   const challenge = extractChallenge(html)
   if (!challenge) return { html, state: { cookie } }

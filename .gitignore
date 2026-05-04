@@ -10,3 +10,4 @@ logs/
 
 # Claude Code local config
 .claude/
+.gstack/
