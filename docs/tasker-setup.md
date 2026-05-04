@@ -59,21 +59,27 @@ The task runs on demand (e.g. via a home-screen widget or a notification action)
 
 5. **Branch on `%http_data.status`**
 
-   | Status         | UX                                                                                                   |
-   | -------------- | ---------------------------------------------------------------------------------------------------- |
-   | `ok`           | Build a Scene with `%http_data.tracks` (see step 6).                                                 |
-   | `unidentified` | Same Scene, but the row labeled `ID` shouldn't be tappable.                                          |
-   | `no_video`     | `Flash` toast: "Couldn't match this video on YouTube".                                               |
-   | `no_tracklist` | `Flash` toast: "No tracklist on 1001tracklists for this set".                                        |
-   | `upstream_error` | `Flash` toast with `%http_data.message`. Optionally offer a retry via a second tap.               |
+   | Status           | UX                                                                                                   |
+   | ---------------- | ---------------------------------------------------------------------------------------------------- |
+   | `ok`             | Build a Scene with `%http_data.tracks` (see step 6).                                                 |
+   | `unidentified`   | Same Scene. Rows with `isUnidentified: true` carry no deep links — render greyed-out and untappable. Rows with a non-null `idStatus` ("ID Remix" / "ID Edit" / etc.) DO have links but the playing variant may differ from the linked base track — surface the `idStatus` label. |
+   | `no_video`       | `Flash` toast: "Couldn't match this video on YouTube".                                               |
+   | `no_tracklist`   | `Flash` toast: "No tracklist on 1001tracklists for this set".                                        |
+   | `upstream_error` | `Flash` toast with `%http_data.message`. The message is structured: `1001 search: ip_blocked (<ip>)` or `1001 scrape: ip_blocked (<ip>)` means the upstream rate-limited us — usually transient, retry in a few minutes. Other messages indicate a real failure. |
 
 6. **Scene: tracklist popup**
+   - Header (when present): if `%http_data.setAppleLink` is non-null, show a small "▶ Open whole set in Apple Music" pinned row at the top.
    - Use a `ListView` element bound to `%http_data.tracks(:)`.
-   - Per-row layout (you can build this with a custom item layout):
-     - Title: `%http_data.tracks(:).title`
-     - Subtitle: `%http_data.tracks(:).artist` + `  ·  ` + `%http_data.tracks(:).startTime`
-     - Right-side icon: ` (Apple) if `%http_data.tracks(:).appleLink` is set, else `▶ ` (YouTube) if `youtubeLink` is set, else nothing.
-   - Item tap: `Browse URL` to `%http_data.tracks(arr1).appleLink` (preferred) or `%http_data.tracks(arr1).youtubeLink` (fallback). Skip if both are null.
+   - Per-row layout (custom item layout):
+     - **Artwork** (left thumbnail): `%http_data.tracks(:).artworkUrl` — server already normalises to 300×300. If null, render your own no-art placeholder.
+     - **Title**: `%http_data.tracks(:).title`. If `idStatus` is non-null, append a subtle " · ID Remix" / " · ID Edit" / etc. badge.
+     - **Subtitle**: `%http_data.tracks(:).artist`.
+     - **Time line**: `%http_data.tracks(:).startTime` + " · " + `%http_data.tracks(:).durationTime` (skip the second part when empty). Mashup-linked siblings share the same `durationTime`.
+     - **Right-side icon**: 🍎 (Apple) if `appleLink` is set, else ▶ (YouTube) if `youtubeLink` is set, else 🔗 (1001tracklists) if `trackUrl` is set, else nothing.
+     - **Visual state**: rows with `isCurrent: true` highlight (background tint or bold). Rows with `isUnidentified: true` greyed out and not tappable.
+   - **Item tap precedence**: `Browse URL` to the first non-null of `appleLink`, then `youtubeLink`, then `trackUrl`. Skip if all three are null.
+
+   The response always carries up to three groups (previous, current, next) so the user can disambiguate transitions and peek ahead. `isCurrent` is `true` only on the current group's members. Edge cases the response handles automatically: at the start of the set there's no previous; at the end there's no next; before any cued track the response is just `[firstCuedGroup]` with all `isCurrent: false` ("next up").
 
 7. **Network error** (the Off-error branch from step 4)
    - `Flash`: "Network error".
@@ -81,5 +87,5 @@ The task runs on demand (e.g. via a home-screen widget or a notification action)
 ## Tips
 
 - **Trigger**: bind this task to a Tasker widget on your home screen, or to a Quick Settings tile, or to an AutoNotification persistent control button — whichever flow feels least intrusive while listening.
-- **Polling vs. on-demand**: don't set this on a timer. The Worker caches results, but each call still hits at least 1001tracklists once per minute or so before the cache warms; tap-to-resolve when you actually care about a track.
+- **Polling vs. on-demand**: don't set this on a timer. The Worker caches the YouTube → tracklist mapping and the parsed tracks for 2 hours each (per-track Apple/YouTube links and the iTunes fallback have much longer TTLs since track ↔ deep-link mappings are essentially immutable). Even with caching, every fresh poll still risks tripping 1001tracklists' per-IP rate-limit upstream. Tap-to-resolve only when you actually care about a track.
 - **Token rotation**: if you ever roll `API_TOKEN` (Worker secret), update `%TRACKED_TOKEN` once in Tasker — the rest works unchanged.

@@ -49,6 +49,8 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
       "artist": "Odd Mob",
       "startTime": "1:16:30",
       "startSeconds": 4590,
+      "durationSeconds": 270,         // length the track occupies in the set (next-group start − this-group start; setEnd for the last group when videoDurationSeconds is sent)
+      "durationTime": "4:30",         // same, formatted "M:SS" / "H:MM:SS". Empty string when null.
       "isCurrent": true,
       "isUnidentified": false,
       "idStatus": null,               // "ID Remix" / "ID Edit" etc. when the base track is known but the playing variant isn't
@@ -83,11 +85,29 @@ Mashup-linked siblings (1001tracklists `w/`) count as a single group, so a curre
 
 `artworkUrl` is the album art URL, normalized server-side to a square **300×300** for both supported CDNs (Beatport's `image_size/300x300/…` and SoundCloud's `t300x300`). `null` when only 1001tracklists' placeholder was embedded — clients should render their own no-art indicator. Unknown CDNs are passed through unchanged so something is always surfaced when the page has a non-placeholder image.
 
+`durationSeconds` / `durationTime` is the **length the track occupies in this set** (not the studio length): `nextGroupStart − thisGroupStart` for non-last groups, or `videoDurationSeconds − thisGroupStart` for the last group when the caller sent `videoDurationSeconds`. Mashup-linked siblings share the group's window. `null` (and `""` for `durationTime`) when neither input is known or the cue is missing.
+
+When the upstream rate-limits us (1001tracklists per-IP captcha gate), the response is `status: "upstream_error"` with `message: "1001 search: ip_blocked (<ip>)"` (or `1001 scrape: …`) — both the home-IP direct-fetch path and the BrightData unlocker path detect the unblock-form page and surface it cleanly rather than silently degrading to `no_tracklist`.
+
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 
 ## Logs
 
 Worker observability is on (`observability.enabled: true` in `wrangler.jsonc`). Every request emits a stream of structured JSON log lines correlated by `reqId` (the Cloudflare `cf-ray` header). Each phase logs full input/output bodies and timing; every error path logs full error context (name, message, stack, upstream status/error code).
+
+`req.start` includes the Cloudflare `colo` and `country` from the request properties for regional triage. `req.end` includes a `counters` object summarising the request's footprint:
+
+```jsonc
+"counters": {
+  "cacheHits": 5,
+  "cacheMisses": 0,
+  "youtubeApiCalls": 0,    // 100 quota units each (search.list + videos.list)
+  "brightdataCalls": 0,    // ~$3/1000, used for tracklist scrape and medialink fallback
+  "itunesCalls": 0         // free
+}
+```
+
+A fully-cached request typically lands at ~20ms with all-zero upstream counters; a cold request is ~600ms and shows exactly which upstreams it had to call.
 
 ```bash
 # live, all events
@@ -122,7 +142,7 @@ curl -X POST http://localhost:8787/now-playing \
 Tests:
 
 ```bash
-npm test           # vitest, 27+ assertions across timestamp + scraper logic
+npm test           # vitest, ~100 assertions across timestamp + scraper + IP-block detection
 npm run typecheck
 ```
 
@@ -170,8 +190,8 @@ When the key is unset (local dev from a residential IP) we fall back to the home
 
 1. **YouTube resolve** — `search.list` (100 quota units) for the title; `videos.list` (1 unit) for durations; pick the result with the smallest abs delta from the provided duration (max 90s tolerance). Cached 30 days.
 2. **1001tracklists search** — POST to `/search/result.php` with the YouTube URL and a media-source filter pinned to YouTube. Result is the canonical tracklist URL or null. Cached 2 hours.
-3. **Anti-bot challenge** — 1001tracklists serves a JS interstitial on first contact: a `var <token>='<value>';` plus a form that POSTs back with `bChk = Java String.hashCode(<value>)`. The Worker re-implements `chop()` (Java's hash) and POSTs through the challenge. From Cloudflare egress IPs the page upgrades to a captcha that the JS solver can't clear — those requests route through Bright Data Web Unlocker instead.
-4. **Tracklist scrape** — `node-html-parser` over the (un-gated) tracklist HTML. Each `div.tlpItem` contributes one row: cue seconds come from a hidden `input[id$="_cue_seconds"]`, title/artist from `meta[itemprop="name|byArtist"]`, mashup-linked status from a `con` class on the row plus a `w/` track number. Cached 2 hours (and never cached when the parse comes back empty — that's almost always a captcha-gated response we want to retry, not a real zero-track tracklist).
+3. **Anti-bot challenges** — two independent gates from 1001tracklists. (a) The original JS interstitial: a `var <token>='<value>';` plus a form that POSTs back with `bChk = Java String.hashCode(<value>)`. The Worker re-implements `chop()` (Java's hash) and POSTs through the challenge. (b) The per-IP rate-limit page (`/info/unblock_ip.html` form, served as a 200 from `search/result.php` and tracklist GETs once an IP trips its quota). The Worker detects this on both direct-fetch and BrightData-unlocker paths and throws a typed `IPBlockedError`, surfaced as `upstream_error: "1001 search/scrape: ip_blocked (<ip>)"`. From Cloudflare egress IPs (production) the JS interstitial upgrades to a graphical captcha the solver can't clear, so the tracklist GET routes through Bright Data Web Unlocker — which in turn occasionally lands on a residential IP that's *also* rate-limited, and we surface that the same way.
+4. **Tracklist scrape** — `node-html-parser` over the (un-gated) tracklist HTML. Each `div.tlpItem` contributes one row. Cue seconds come from the JS-emitted `cueValueData` map (keyed by each row's inner `tlp{N}_content` id) — using the hidden form input directly is wrong because it defaults to `"0"` for uncued rows (mashup-linked siblings, trailing untimed extras), which would pollute every selection at probe=0. Title/artist from `meta[itemprop="name|byArtist"]`; mashup-linked status from the `con` class on the row. Cached 2 hours (skipped when the parse returns 0 tracks — that's almost always a transient captcha we want to retry, not a real zero-track tracklist).
 5. **Current-track selection** — group `w/` siblings, find the group whose `[startSeconds, nextGroupStart)` window contains `currentSeconds`, then always include the previous group (if any) and the next group (if any) so the caller has one-tap context. When `currentSeconds` is before any cued track, return only the first cued group with `isCurrent: false`.
 6. **Per-track Apple/YouTube links** — first try 1001tracklists' first-party AJAX `get_medialink.php?idObject=5&idItem=<n>` and parse the Apple Music embed iframe URL out of the response; fall back to the iTunes Search API for an Apple link if 1001tl has none. No per-track YouTube search (YouTube Data API quota is precious).
 
