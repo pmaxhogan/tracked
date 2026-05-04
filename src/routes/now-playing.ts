@@ -111,14 +111,16 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     setAppleLink,
   })
 
-  // Phase 4 — pick current tracks
-  const sel = selectCurrent(parsedTracks, body.currentSeconds)
+  // Phase 4 — pick current tracks (videoDurationSeconds caps the last group's
+  // duration when present; harmless to omit otherwise)
+  const sel = selectCurrent(parsedTracks, body.currentSeconds, body.videoDurationSeconds ?? null)
   log.info('phase.select.done', {
     currentSeconds: body.currentSeconds,
+    setEndSeconds: body.videoDurationSeconds ?? null,
     pickedCount: sel.picked.length,
     currentCount: sel.picked.filter((t) => t.isCurrent).length,
     anyUnidentified: sel.anyUnidentified,
-    pickedTitles: sel.picked.map((t) => `${t.startTime} ${t.artist} - ${t.title}${t.isCurrent ? ' *' : ''}`),
+    pickedTitles: sel.picked.map((t) => `${t.startTime} ${t.artist} - ${t.title} (${t.durationTime || '?'})${t.isCurrent ? ' *' : ''}`),
   })
   if (sel.picked.length === 0) {
     log.warn('phase.select.empty', { currentSeconds: body.currentSeconds, totalTracks: parsedTracks.length })

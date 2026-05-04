@@ -39,6 +39,13 @@ export type ResponseTrack = {
   artist: string
   startTime: string
   startSeconds: number | null
+  /** Length the track occupies in the set: nextGroupStart - thisGroupStart for non-last
+   *  groups; setEnd - thisGroupStart for the last group when the caller provided
+   *  videoDurationSeconds. null when neither input is known. Mashup-linked siblings
+   *  share their group's duration. */
+  durationSeconds: number | null
+  /** Same as durationSeconds, formatted "M:SS" / "H:MM:SS". Empty string when null. */
+  durationTime: string
   isCurrent: boolean
   isUnidentified: boolean
   /** "ID Remix" / "ID Edit" / etc. — non-null means the links point to the base track but the actual playing version is a not-yet-identified variant. */

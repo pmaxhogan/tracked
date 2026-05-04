@@ -34,6 +34,15 @@ export const ResponseTrackSchema = z
     artist: z.string(),
     startTime: z.string(),
     startSeconds: z.number().int().nullable(),
+    durationSeconds: z.number().int().nullable().openapi({
+      example: 270,
+      description:
+        "Length the track occupies in the set: nextGroupStart - thisGroupStart, except the last group uses videoDurationSeconds (request body) as its end if provided. Mashup-linked siblings share their group's duration. null when the next-group start or set-end is unknown.",
+    }),
+    durationTime: z.string().openapi({
+      example: '4:30',
+      description: "Same as durationSeconds formatted 'M:SS' / 'H:MM:SS'. Empty string when null.",
+    }),
     isCurrent: z.boolean(),
     isUnidentified: z.boolean(),
     idStatus: z.string().nullable().openapi({

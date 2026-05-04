@@ -48,9 +48,17 @@ export type SelectionResult = {
  *  - tracks without a cue (startSeconds === null) are skipped for current
  *    selection but stay attached to their parent group via isMashupLinked.
  */
-export function selectCurrent(tracks: ParsedTrack[], currentSeconds: number): SelectionResult {
+export function selectCurrent(
+  tracks: ParsedTrack[],
+  currentSeconds: number,
+  setEndSeconds: number | null = null,
+): SelectionResult {
   const groups = groupByMashup(tracks)
   if (groups.length === 0) return { picked: [], anyUnidentified: false }
+
+  // Per-track duration: based on group adjacency. All members of a w/ group
+  // share the group's window. Last group runs to setEndSeconds when known.
+  const durations = computeDurations(groups, setEndSeconds)
 
   // Find the group whose [start, nextStart) range contains currentSeconds.
   // Returns -1 if currentSeconds is before any cued group (which means the
@@ -88,24 +96,48 @@ export function selectCurrent(tracks: ParsedTrack[], currentSeconds: number): Se
     if (next) picked.push(...next)
   }
 
-  const response: ResponseTrack[] = picked.map((t) => ({
-    title: t.title,
-    artist: t.artist,
-    startTime: t.startTime,
-    startSeconds: t.startSeconds,
-    isCurrent: currentMembers.has(t),
-    isUnidentified: t.isUnidentified,
-    idStatus: t.idStatus,
-    appleLink: null,
-    youtubeLink: null,
-    trackUrl: t.trackUrl,
-    artworkUrl: t.artworkUrl,
-  }))
+  const response: ResponseTrack[] = picked.map((t) => {
+    const dur = durations.get(t) ?? null
+    return {
+      title: t.title,
+      artist: t.artist,
+      startTime: t.startTime,
+      startSeconds: t.startSeconds,
+      durationSeconds: dur,
+      durationTime: dur !== null ? formatTime(dur) : '',
+      isCurrent: currentMembers.has(t),
+      isUnidentified: t.isUnidentified,
+      idStatus: t.idStatus,
+      appleLink: null,
+      youtubeLink: null,
+      trackUrl: t.trackUrl,
+      artworkUrl: t.artworkUrl,
+    }
+  })
 
   return {
     picked: response,
     anyUnidentified: picked.some((t) => currentMembers.has(t) && t.isUnidentified),
   }
+}
+
+function computeDurations(
+  groups: ParsedTrack[][],
+  setEndSeconds: number | null,
+): Map<ParsedTrack, number | null> {
+  const out = new Map<ParsedTrack, number | null>()
+  for (let i = 0; i < groups.length; i++) {
+    const group = groups[i]!
+    const start = groupStartSeconds(group)
+    let dur: number | null = null
+    if (start !== null) {
+      const next = groups[i + 1]
+      const end = next ? groupStartSeconds(next) : setEndSeconds
+      if (end !== null && end >= start) dur = end - start
+    }
+    for (const t of group) out.set(t, dur)
+  }
+  return out
 }
 
 function groupByMashup(tracks: ParsedTrack[]): ParsedTrack[][] {

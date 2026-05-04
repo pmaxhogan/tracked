@@ -144,6 +144,63 @@ describe('selectCurrent', () => {
     expect(r.anyUnidentified).toBe(false)
   })
 
+  it('computes durationSeconds as nextGroupStart - thisStart for non-last groups', () => {
+    const r = selectCurrent(tracks, 400) // current = C; tracks A=0, B=150, C=300, D=600, E=900
+    const c = r.picked.find((t) => t.title === 'C')!
+    expect(c.durationSeconds).toBe(300) // 600 - 300
+    expect(c.durationTime).toBe('5:00')
+    const b = r.picked.find((t) => t.title === 'B')!
+    expect(b.durationSeconds).toBe(150) // 300 - 150
+    expect(b.durationTime).toBe('2:30')
+  })
+
+  it('last group duration is null when setEndSeconds not provided', () => {
+    const r = selectCurrent(tracks, 950) // current = E (last)
+    const e = r.picked.find((t) => t.title === 'E')!
+    expect(e.durationSeconds).toBeNull()
+    expect(e.durationTime).toBe('')
+  })
+
+  it('last group duration uses setEndSeconds when provided', () => {
+    const r = selectCurrent(tracks, 950, 1100) // E starts at 900, set ends at 1100
+    const e = r.picked.find((t) => t.title === 'E')!
+    expect(e.durationSeconds).toBe(200)
+    expect(e.durationTime).toBe('3:20')
+  })
+
+  it('mashup-linked siblings share their group duration', () => {
+    const ts: ParsedTrack[] = [
+      track(0, { title: 'A' }),
+      track(300, { title: 'B' }),
+      track(300, { title: 'B-mashup', isMashupLinked: true }),
+      track(600, { title: 'C' }),
+    ]
+    const r = selectCurrent(ts, 400)
+    const b = r.picked.find((t) => t.title === 'B')!
+    const bm = r.picked.find((t) => t.title === 'B-mashup')!
+    expect(b.durationSeconds).toBe(300) // 600 - 300
+    expect(bm.durationSeconds).toBe(300) // shares group window
+    expect(b.durationSeconds).toBe(bm.durationSeconds)
+  })
+
+  it('clamps to null when setEndSeconds is before the last group start (bad input)', () => {
+    const r = selectCurrent(tracks, 950, 800) // bogus: set ends before E starts
+    const e = r.picked.find((t) => t.title === 'E')!
+    expect(e.durationSeconds).toBeNull()
+  })
+
+  it('null-cue tracks have null duration', () => {
+    const ts: ParsedTrack[] = [
+      track(null, { title: 'pre' }),
+      track(300, { title: 'B' }),
+      track(600, { title: 'C' }),
+    ]
+    const r = selectCurrent(ts, 400)
+    const pre = r.picked.find((t) => t.title === 'pre')!
+    expect(pre.durationSeconds).toBeNull()
+    expect(pre.durationTime).toBe('')
+  })
+
   it('skips null-cue tracks for current selection', () => {
     const ts: ParsedTrack[] = [
       track(null, { title: 'pre' }),
