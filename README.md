@@ -55,7 +55,8 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
       "idStatus": null,               // "ID Remix" / "ID Edit" etc. when the base track is known but the playing variant isn't
       "appleLink": "https://music.apple.com/...",
       "youtubeLink": null,
-      "trackUrl": "https://www.1001tracklists.com/track/1x9zgrpp/odd-mob-left-to-right-aidan-rudd-remix/index.html"
+      "trackUrl": "https://www.1001tracklists.com/track/1x9zgrpp/odd-mob-left-to-right-aidan-rudd-remix/index.html",
+      "artworkUrl": "https://geo-media.beatport.com/image_size/300x300/abc-def.jpg"
     }
   ]
 }
@@ -66,6 +67,8 @@ Tracks within the ±transition window are returned with `isCurrent: false`. Mash
 `setAppleLink` (top-level) is the Apple Music album/playlist URL for the entire DJ set when 1001tracklists has one — parallel to `videoUrl` for the YouTube source. `null` for sets with no Apple Music release.
 
 `idStatus` (per-track) is `null` for fully-identified tracks. When 1001tracklists marks a row as a partial-ID variant of a known base track ("ID Remix", "ID Edit", "ID Bootleg", "ID Rework", etc.), `idStatus` carries that label, `isUnidentified` stays `false`, and `appleLink` / `youtubeLink` / `trackUrl` describe the **base track** — the actual playing variant may sound different. `isUnidentified: true` is reserved for fully-anonymous tracks (e.g. `"Cave Studio - ID"`); those skip link resolution entirely.
+
+`artworkUrl` is the album art URL, normalized server-side to a square **300×300** for both supported CDNs (Beatport's `image_size/300x300/…` and SoundCloud's `t300x300`). `null` when only 1001tracklists' placeholder was embedded — clients should render their own no-art indicator. Unknown CDNs are passed through unchanged so something is always surfaced when the page has a non-placeholder image.
 
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 

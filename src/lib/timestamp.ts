@@ -106,6 +106,7 @@ export function selectCurrent(
     appleLink: null,
     youtubeLink: null,
     trackUrl: t.trackUrl,
+    artworkUrl: t.artworkUrl,
   }))
 
   return {

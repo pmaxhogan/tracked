@@ -51,6 +51,10 @@ export const ResponseTrackSchema = z
       example: 'https://www.1001tracklists.com/track/1hf79cg5/tobehonest-where-ya-at/index.html',
       description: 'Canonical 1001tracklists track page (for opening track details, feedback, alt links). null when unidentified.',
     }),
+    artworkUrl: z.string().nullable().openapi({
+      example: 'https://geo-media.beatport.com/image_size/300x300/8702a65a-cfa7-4890-9476-4a346d36f169.jpg',
+      description: 'Square 300×300 album art (normalized — Beatport via image_size/300x300, SoundCloud via t300x300). null when only the 1001tl placeholder was embedded; clients should show their own no-art indicator.',
+    }),
   })
   .openapi('ResponseTrack')
 

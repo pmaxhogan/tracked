@@ -19,6 +19,8 @@ export type ParsedTrack = {
   trackId: string | null
   /** Canonical 1001tracklists track page URL. null when the meta url is missing. */
   trackUrl: string | null
+  /** Square 300×300 album art URL (Beatport CDN or SoundCloud CDN). null when the row only had a 1001tl placeholder. */
+  artworkUrl: string | null
   /** True only when the playing track is fully anonymous (e.g. "Cave Studio - ID"). Remix/edit variants of a known base track surface artist+title+links and use idStatus instead. */
   isUnidentified: boolean
   /**
@@ -45,4 +47,6 @@ export type ResponseTrack = {
   youtubeLink: string | null
   /** Canonical 1001tracklists track page URL. null when no meta url is present. */
   trackUrl: string | null
+  /** Square 300×300 album-art URL. null when only a placeholder was available. */
+  artworkUrl: string | null
 }

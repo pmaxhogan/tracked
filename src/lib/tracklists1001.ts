@@ -184,6 +184,15 @@ function parseRow(row: HTMLElement): ParsedTrack | null {
   const urlPath = urlMeta?.getAttribute('content') ?? ''
   const trackUrl = urlPath ? new URL(urlPath, ORIGIN).toString() : null
 
+  // Album art: <img class="artwork..."> uses src="/images/static/empty.png" as
+  // a lazy-load placeholder and data-src=<real CDN URL>. Some rows use
+  // src=<default_100.png> as a "no artwork available" placeholder. Both
+  // placeholders should resolve to null so callers can render their own
+  // no-art indicator.
+  const artImg = row.querySelector('img.artwork')
+  const artRaw = artImg?.getAttribute('data-src') ?? artImg?.getAttribute('src') ?? ''
+  const artworkUrl = normalizeArtworkUrl(artRaw)
+
   return {
     startTime: startTime || (Number.isFinite(startSeconds!) ? formatCue(startSeconds!) : ''),
     startSeconds: Number.isFinite(startSeconds!) ? (startSeconds as number) : null,
@@ -191,10 +200,40 @@ function parseRow(row: HTMLElement): ParsedTrack | null {
     title: title || 'ID',
     trackId: mediaTrackId ?? dataId,
     trackUrl,
+    artworkUrl,
     isUnidentified,
     idStatus,
     isMashupLinked,
   }
+}
+
+/**
+ * Normalize a 1001tl-embedded album-art URL to a 300×300 square. Returns null
+ * for any of the known placeholders (1001tl's default_100.png + the lazy-load
+ * empty.png). Unknown CDNs are passed through unchanged so we still surface
+ * something — the contract is "300×300 if we can, raw URL otherwise."
+ *
+ * Beatport (geo-media.beatport.com) supports any size via dynamic resizer.
+ * SoundCloud (i1.sndcdn.com / iN.sndcdn.com) only honors a fixed list of
+ * sizes; 300 is in that list so we use it.
+ */
+export function normalizeArtworkUrl(raw: string): string | null {
+  if (!raw) return null
+  // 1001tl placeholders — both relative and absolute forms.
+  if (
+    /\/images\/static\/empty\.png$/.test(raw) ||
+    /\/images\/artworks\/default_\d+\.png$/.test(raw)
+  ) {
+    return null
+  }
+  // Beatport: image_size/<W>x<H>/<uuid>.<ext>
+  const beatport = raw.match(/^(https:\/\/[^/]*beatport\.com\/image_size\/)\d+x\d+(\/[^/?#]+)/)
+  if (beatport) return `${beatport[1]}300x300${beatport[2]}`
+  // SoundCloud: artworks-<id>-t<W>x<H>.<ext>  (or the named alias forms)
+  const sndcdn = raw.match(/^(https:\/\/i\d*\.sndcdn\.com\/artworks-[^.-]+-(?:[^./-]+-)?)t?\d+x\d+(\.[a-z]+)/)
+  if (sndcdn) return `${sndcdn[1]}t300x300${sndcdn[2]}`
+  // Unknown CDN — pass through unmodified.
+  return /^https?:\/\//.test(raw) ? raw : null
 }
 
 function formatCue(seconds: number): string {

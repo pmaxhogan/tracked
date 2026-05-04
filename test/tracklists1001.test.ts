@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink } from '../src/lib/tracklists1001'
+import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl } from '../src/lib/tracklists1001'
 import { chop, extractChallenge } from '../src/lib/fetch'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -74,6 +74,20 @@ describe('parseTracklist (Matroda Space Miami)', () => {
     expect(ids.length).toBeGreaterThanOrEqual(1)
     expect(ids[0]!.title).toBe('ID')
     expect(ids[0]!.idStatus).toBeNull()
+  })
+
+  it('extracts artworkUrl from data-src and normalizes to 300x300', () => {
+    // Row 1 (TOBEHONEST - Where Ya At) has a Beatport thumbnail
+    const t = parsed.tracks[1]!
+    expect(t.artworkUrl).toBe(
+      'https://geo-media.beatport.com/image_size/300x300/8702a65a-cfa7-4890-9476-4a346d36f169.jpg',
+    )
+  })
+
+  it('returns null artworkUrl for rows that only embed the placeholder', () => {
+    // Row 9 (Cave Studio - ID) uses default_100.png as the src
+    const id = parsed.tracks.find((t) => t.isUnidentified && t.title === 'ID')!
+    expect(id.artworkUrl).toBeNull()
   })
 
   it('detects "ID Remix" rows: NOT isUnidentified, artist+title from base track, idStatus="ID Remix"', () => {
@@ -150,6 +164,45 @@ describe('extractSetAppleLink (unit)', () => {
     const html =
       '<iframe src="https://embed.music.apple.com/album/foo/999/gb/album/foo/999"></iframe>'
     expect(extractSetAppleLink(html)).toBe('https://music.apple.com/gb/album/foo/999')
+  })
+})
+
+describe('normalizeArtworkUrl', () => {
+  it.each([
+    'https://www.1001tracklists.com/images/static/empty.png',
+    '/images/static/empty.png',
+    'https://cdn.1001tracklists.com/images/artworks/default_100.png',
+    'https://cdn.1001tracklists.com/images/artworks/default_500.png',
+    '',
+  ])('returns null for placeholder %s', (raw) => {
+    expect(normalizeArtworkUrl(raw)).toBeNull()
+  })
+
+  it('rewrites Beatport size to 300x300 regardless of input size', () => {
+    expect(
+      normalizeArtworkUrl('https://geo-media.beatport.com/image_size/1400x1400/abc-def.jpg'),
+    ).toBe('https://geo-media.beatport.com/image_size/300x300/abc-def.jpg')
+    expect(
+      normalizeArtworkUrl('https://geo-media.beatport.com/image_size/60x60/abc-def.jpg'),
+    ).toBe('https://geo-media.beatport.com/image_size/300x300/abc-def.jpg')
+  })
+
+  it('rewrites SoundCloud size to t300x300', () => {
+    expect(
+      normalizeArtworkUrl('https://i1.sndcdn.com/artworks-sDgTuNY7UCiK-0-t500x500.jpg'),
+    ).toBe('https://i1.sndcdn.com/artworks-sDgTuNY7UCiK-0-t300x300.jpg')
+    expect(
+      normalizeArtworkUrl('https://i2.sndcdn.com/artworks-foo-bar-t120x120.jpg'),
+    ).toBe('https://i2.sndcdn.com/artworks-foo-bar-t300x300.jpg')
+  })
+
+  it('passes through unknown CDNs unchanged', () => {
+    expect(normalizeArtworkUrl('https://example.com/some/image.jpg')).toBe('https://example.com/some/image.jpg')
+  })
+
+  it('returns null for non-http inputs', () => {
+    expect(normalizeArtworkUrl('javascript:void(0)')).toBeNull()
+    expect(normalizeArtworkUrl('data:image/png;base64,xxx')).toBeNull()
   })
 })
 
