@@ -108,14 +108,33 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
   const root = parse(html)
   const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
 
+  const cueMap = parseCueValueData(html)
   const rows = root.querySelectorAll('div.tlpItem')
   const tracks: ParsedTrack[] = []
   for (const row of rows) {
-    const t = parseRow(row)
+    const t = parseRow(row, cueMap)
     if (t) tracks.push(t)
   }
 
   return { slug, setAppleLink: extractSetAppleLink(html), tracks }
+}
+
+/**
+ * 1001tracklists emits a JS block (`cueValueData`) that maps each cued track's
+ * inner content id (`tlp{N}_content`) to its cue in seconds. The hidden form
+ * input `_cue_seconds` defaults to "0" for uncued rows (mashup-linked siblings,
+ * trailing untimed extras), so reading the input alone makes those rows look
+ * like they start at 0:00. The JS map only contains real cues, so use it as
+ * the source of truth and fall back to null for anything not listed.
+ */
+export function parseCueValueData(html: string): Map<string, number> {
+  const out = new Map<string, number>()
+  const re = /cueValuesEntry\.seconds = (\d+);[\s\S]*?cueValuesEntry\.ids\[0\] = '([^']+)';/g
+  let m
+  while ((m = re.exec(html))) {
+    out.set(m[2]!, Number(m[1]!))
+  }
+  return out
 }
 
 /**
@@ -135,14 +154,18 @@ export function extractSetAppleLink(html: string): string | null {
   return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ''}`
 }
 
-function parseRow(row: HTMLElement): ParsedTrack | null {
+function parseRow(row: HTMLElement, cueMap: Map<string, number>): ParsedTrack | null {
   const dataId = row.getAttribute('data-id') ?? null
   const cls = row.getAttribute('class') ?? ''
   const isMashupLinked = / con(\s|$)/.test(cls)
 
-  const cueInput = row.querySelector(`input[id$="_cue_seconds"]`)
-  const cueSecondsRaw = cueInput?.getAttribute('value') ?? ''
-  const startSeconds = cueSecondsRaw === '' ? null : Number(cueSecondsRaw)
+  // Source of truth for the cue is the JS-emitted cueValueData map keyed by
+  // tlp{N}_content. Rows that aren't in the map (mashup-linked, trailing
+  // untimed extras) get null even when their hidden form input reads "0".
+  const contentDiv = row.querySelector('[id^="tlp"][id$="_content"]')
+  const contentId = contentDiv?.getAttribute('id') ?? ''
+  const cueFromMap = cueMap.get(contentId)
+  const startSeconds = cueFromMap === undefined ? null : cueFromMap
   const cueDiv = row.querySelector('div.cue')
   const startTime = (cueDiv?.text ?? '').trim()
 

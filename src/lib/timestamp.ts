@@ -133,7 +133,7 @@ function computeDurations(
     if (start !== null) {
       const next = groups[i + 1]
       const end = next ? groupStartSeconds(next) : setEndSeconds
-      if (end !== null && end >= start) dur = end - start
+      if (end !== null && end > start) dur = end - start
     }
     for (const t of group) out.set(t, dur)
   }

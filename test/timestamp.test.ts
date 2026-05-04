@@ -189,6 +189,12 @@ describe('selectCurrent', () => {
     expect(e.durationSeconds).toBeNull()
   })
 
+  it('clamps to null when setEndSeconds equals the last group start (zero-length last track)', () => {
+    const r = selectCurrent(tracks, 950, 900) // E starts at 900, set ends at 900 → no length
+    const e = r.picked.find((t) => t.title === 'E')!
+    expect(e.durationSeconds).toBeNull()
+  })
+
   it('null-cue tracks have null duration', () => {
     const ts: ParsedTrack[] = [
       track(null, { title: 'pre' }),

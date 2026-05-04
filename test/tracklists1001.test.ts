@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl } from '../src/lib/tracklists1001'
+import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData } from '../src/lib/tracklists1001'
 import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress } from '../src/lib/fetch'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -170,6 +170,46 @@ describe('parseTracklist (Max Styler — has set-level Apple Music album)', () =
 
   it('still parses tracks alongside', () => {
     expect(parsed.tracks.length).toBeGreaterThan(0)
+  })
+
+  it('marks mashup-linked rows with null startSeconds (no own cue)', () => {
+    const mashup = parsed.tracks.find((t) => t.isMashupLinked && t.title === "Let Em' Know")
+    expect(mashup).toBeDefined()
+    expect(mashup!.startSeconds).toBeNull()
+    expect(mashup!.startTime).toBe('')
+  })
+
+  it('marks trailing untimed extras with null startSeconds (not s=0)', () => {
+    // Several trailing rows — Drunken Kong, Shadow Child, etc. — appear after
+    // the last cued track but have no time. They must not collapse to s=0.
+    const trailing = parsed.tracks.filter(
+      (t) => !t.isMashupLinked && t.startSeconds === null,
+    )
+    expect(trailing.length).toBeGreaterThanOrEqual(5)
+  })
+
+  it('keeps the legitimate first track at startSeconds=0', () => {
+    const first = parsed.tracks[0]!
+    expect(first.startSeconds).toBe(0)
+    expect(first.startTime).toBe('0:00')
+  })
+})
+
+describe('parseCueValueData', () => {
+  it('extracts every cue mapping from the JS block', () => {
+    const map = parseCueValueData(fx('tracklist-maxstyler.html'))
+    expect(map.size).toBe(22)
+    expect(map.get('tlp0_content')).toBe(0)
+    expect(map.get('tlp1_content')).toBe(227)
+    expect(map.get('tlp23_content')).toBe(4400)
+    // Mashup row is NOT in the map (no own cue)
+    expect(map.has('tlp12_content')).toBe(false)
+    // Index 14 is missing in the page's emitted data — verify we don't synthesize it
+    expect(map.has('tlp14_content')).toBe(false)
+  })
+
+  it('returns empty map when no cueValueData block is present', () => {
+    expect(parseCueValueData('<html><body>nothing</body></html>').size).toBe(0)
   })
 })
 
