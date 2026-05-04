@@ -1,6 +1,6 @@
 import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
-import { fetchHtml, fetchWithTimeout, postForm, isIPBlocked, extractIPBlockedAddress, IPBlockedError, type ChallengeState } from './fetch'
+import { fetchHtml, fetchWithTimeout, postForm, isIPBlocked, extractIPBlockedAddress, IPBlockedError, looksLikeCfShell, CloudflareChallengeError, type ChallengeState } from './fetch'
 import { fetchViaUnlocker } from './unlocker'
 import type { Logger } from './log'
 
@@ -75,29 +75,47 @@ export async function fetchTracklist(
   log?.info('1001scrape.start', { tracklistUrl, viaUnlocker: !!opts.brightdataApiKey })
   const start = Date.now()
   if (opts.brightdataApiKey) {
-    const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log)
-    // unlocker already accepts 2xx; this is just defensive in case the body is empty.
-    if (!r.html) {
-      const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
-      log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage })
-      throw new Error(`unlocker tracklist fetch failed — ${detail}`)
+    // Up to 2 attempts: BrightData rotates exit IP between calls, so a CF
+    // shell on attempt 1 (residential IP without fresh CF clearance) often
+    // clears on attempt 2.
+    const MAX_ATTEMPTS = 2
+    let lastShellBytes = 0
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log)
+      if (!r.html) {
+        const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
+        log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt })
+        throw new Error(`unlocker tracklist fetch failed — ${detail}`)
+      }
+      if (isIPBlocked(r.html)) {
+        const clientIp = extractIPBlockedAddress(r.html)
+        log?.error('1001scrape.unlocker_ip_blocked', { tracklistUrl, clientIp, htmlBytes: r.html.length, attempt })
+        throw new IPBlockedError(clientIp)
+      }
+      if (looksLikeCfShell(r.html)) {
+        lastShellBytes = r.html.length
+        if (attempt < MAX_ATTEMPTS) {
+          log?.warn('1001scrape.unlocker_cf_shell_retry', { tracklistUrl, htmlBytes: r.html.length, attempt })
+          continue
+        }
+        log?.error('1001scrape.unlocker_cf_shell', { tracklistUrl, htmlBytes: r.html.length, attempt, attempts: MAX_ATTEMPTS })
+        throw new CloudflareChallengeError(`unlocker fetched a CF shell page for ${tracklistUrl} after ${MAX_ATTEMPTS} attempts (last ${lastShellBytes} bytes)`)
+      }
+      const result = parseTracklist(tracklistUrl, r.html)
+      log?.info('1001scrape.parsed', {
+        tracklistUrl,
+        htmlBytes: r.html.length,
+        trackCount: result.tracks.length,
+        unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
+        mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
+        ms: Date.now() - start,
+        attempt,
+      })
+      if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
+      return { result, state: opts.state ?? { cookie: '' } }
     }
-    if (isIPBlocked(r.html)) {
-      const clientIp = extractIPBlockedAddress(r.html)
-      log?.error('1001scrape.unlocker_ip_blocked', { tracklistUrl, clientIp, htmlBytes: r.html.length })
-      throw new IPBlockedError(clientIp)
-    }
-    const result = parseTracklist(tracklistUrl, r.html)
-    log?.info('1001scrape.parsed', {
-      tracklistUrl,
-      htmlBytes: r.html.length,
-      trackCount: result.tracks.length,
-      unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
-      mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
-      ms: Date.now() - start,
-    })
-    if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
-    return { result, state: opts.state ?? { cookie: '' } }
+    // Unreachable — loop either returns or throws.
+    throw new Error('unlocker retry loop exited unexpectedly')
   }
   const { html, state: s2 } = await fetchHtml(tracklistUrl, opts.state)
   const result = parseTracklist(tracklistUrl, html)

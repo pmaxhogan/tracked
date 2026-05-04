@@ -91,6 +91,35 @@ export function extractIPBlockedAddress(html: string): string | null {
 }
 
 /**
+ * Third bot gate: 1001tracklists' Cloudflare Turnstile pre-render shell. The
+ * response is a 200 carrying just the page chrome (header, search box, footer
+ * scripts) with `tlpItem` rows deferred until JS clears Turnstile. We see this
+ * when BrightData's exit IP doesn't have a fresh CF clearance cookie for the
+ * tracklist path. Distinct from IP-block (which has an unblock_ip form) and
+ * the JS interstitial (which has a chop() token + POST-back form). Detect on
+ * the absence of any track structure together with CF/Turnstile markers in
+ * the body — empty real tracklists are vanishingly rare and won't have those.
+ */
+export class CloudflareChallengeError extends Error {
+  constructor(message?: string) {
+    super(message ?? '1001tracklists served a Cloudflare challenge page (no tracklist body rendered)')
+    this.name = 'CloudflareChallengeError'
+  }
+}
+
+const TURNSTILE_RE = /turnstile-container|cf-turnstile|cf-mitigated|challenge-platform|sitekey/
+
+export function looksLikeCfShell(html: string): boolean {
+  // Strong signal: page mentions CF/Turnstile AND has zero track structure.
+  // We don't gate on size — some shells are 5KB, others 60KB depending on
+  // how much chrome 1001tl includes. The absence of tlpItem is what matters.
+  if (!TURNSTILE_RE.test(html)) return false
+  if (html.includes('class="tlpItem"') || html.includes(' tlpItem ')) return false
+  if (/cueValuesEntry\.seconds\s*=/.test(html)) return false
+  return true
+}
+
+/**
  * 1001tracklists serves a JS interstitial on first contact: a "please wait"
  * page with a token var the browser is meant to hash and POST back. We do
  * the same thing here. After solving, the response sets a session cookie

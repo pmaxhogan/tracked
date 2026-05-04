@@ -8,7 +8,7 @@ import { selectCurrent } from '../lib/timestamp'
 import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields, type Logger } from '../lib/log'
-import { IPBlockedError } from '../lib/fetch'
+import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 
 export const nowPlayingRoute = createRoute({
   method: 'post',
@@ -118,6 +118,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     if (e instanceof IPBlockedError) {
       log.error('phase.scrape.ip_blocked', { tracklistUrl, clientIp: e.clientIp })
       return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ip_blocked (${e.clientIp ?? 'unknown'})`)
+    }
+    if (e instanceof CloudflareChallengeError) {
+      log.error('phase.scrape.cf_challenge', { tracklistUrl, errorMessage: e.message })
+      return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: cf_challenge — ${e.message}`)
     }
     log.error('phase.scrape.throw', { tracklistUrl, ...errorFields(e) })
     return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${(e as Error).message}`)
