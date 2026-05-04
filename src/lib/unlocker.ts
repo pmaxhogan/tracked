@@ -84,7 +84,11 @@ export async function fetchViaUnlocker(
     throw new Error('unlocker account suspended (407) — top up Bright Data balance')
   }
 
-  if (status !== 200 && status !== 404) {
+  // 2xx ↔ success (1001tl's tracklist page often comes back as 206 due to
+  // chunked HTTP/1.1). 404 = legitimate "not found" → caller decides.
+  // Anything else is an upstream/proxy issue.
+  const ok = (status >= 200 && status < 300) || status === 404
+  if (!ok) {
     if (errorCode && RETRYABLE_ERROR_CODES.has(errorCode) && retriesLeft > 0) {
       log?.warn('unlocker.retrying', { url, status, errorCode, errorMessage, retriesLeft, ms })
       return fetchViaUnlocker(url, apiKey, log, zone, retriesLeft - 1)

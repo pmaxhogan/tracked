@@ -76,7 +76,8 @@ export async function fetchTracklist(
   const start = Date.now()
   if (opts.brightdataApiKey) {
     const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log)
-    if (r.status !== 200 || !r.html) {
+    // unlocker already accepts 2xx; this is just defensive in case the body is empty.
+    if (!r.html) {
       const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
       log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage })
       throw new Error(`unlocker tracklist fetch failed — ${detail}`)
@@ -184,12 +185,11 @@ function parseRow(row: HTMLElement): ParsedTrack | null {
   const urlPath = urlMeta?.getAttribute('content') ?? ''
   const trackUrl = urlPath ? new URL(urlPath, ORIGIN).toString() : null
 
-  // Album art: <img class="artwork..."> uses src="/images/static/empty.png" as
-  // a lazy-load placeholder and data-src=<real CDN URL>. Some rows use
-  // src=<default_100.png> as a "no artwork available" placeholder. Both
-  // placeholders should resolve to null so callers can render their own
-  // no-art indicator.
-  const artImg = row.querySelector('img.artwork')
+  // Album art lives on the row's `img.artM`. Two layouts:
+  //   - real art: <img data-src="<CDN URL>" src="/images/static/empty.png" class="artwork artM" …>
+  //   - no art: <img src="…/default_100.png" class="artM" …>  (no `artwork` class, no data-src)
+  // Prefer data-src; fall back to src. The normalizer maps both placeholders to null.
+  const artImg = row.querySelector('img.artM')
   const artRaw = artImg?.getAttribute('data-src') ?? artImg?.getAttribute('src') ?? ''
   const artworkUrl = normalizeArtworkUrl(artRaw)
 
