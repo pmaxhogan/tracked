@@ -81,17 +81,18 @@ export async function fetchTracklist(
     const MAX_ATTEMPTS = 2
     let lastShellBytes = 0
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log, {
-        // Make BrightData wait until the tracklist body is actually rendered
-        // before returning. Without this, an exit IP without warm CF clearance
-        // can hand back the chrome-only shell page and we'd have to detect it
-        // post-hoc via looksLikeCfShell. With it, BrightData's `expect_element`
-        // miss is itself a retryable error code that rotates exit IPs server-
-        // side. We keep the looksLikeCfShell shell-detect + 1 outer retry as
-        // belt-and-suspenders for cases where Brightdata returns the shell
-        // anyway (e.g. expect timed out and they fell back to "best effort").
-        expectElement: 'div.tlpItem',
-      })
+      // NOTE: tried passing `expectElement: 'div.tlpItem'` (BrightData's
+      // x-unblock-expect header) here. Documented as the right primitive
+      // for "wait for the tracklist to actually render before returning,"
+      // but on the /request REST endpoint it made things strictly worse —
+      // every probe came back as a CF shell where without the header the
+      // same URL succeeded. Best guess: when Unlocker's expect-loop times
+      // out it returns a best-effort shell instead of erroring, masking the
+      // success path that previously fired immediately. Keeping the
+      // expectElement plumbing in unlocker.ts so we can opt back in if
+      // BrightData fixes / clarifies the REST behavior, but not using it
+      // by default. Country=us pin alone is what's actually working.
+      const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log)
       if (!r.html) {
         const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
         log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt })
