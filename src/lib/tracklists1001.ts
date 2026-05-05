@@ -81,7 +81,17 @@ export async function fetchTracklist(
     const MAX_ATTEMPTS = 2
     let lastShellBytes = 0
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log)
+      const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log, {
+        // Make BrightData wait until the tracklist body is actually rendered
+        // before returning. Without this, an exit IP without warm CF clearance
+        // can hand back the chrome-only shell page and we'd have to detect it
+        // post-hoc via looksLikeCfShell. With it, BrightData's `expect_element`
+        // miss is itself a retryable error code that rotates exit IPs server-
+        // side. We keep the looksLikeCfShell shell-detect + 1 outer retry as
+        // belt-and-suspenders for cases where Brightdata returns the shell
+        // anyway (e.g. expect timed out and they fell back to "best effort").
+        expectElement: 'div.tlpItem',
+      })
       if (!r.html) {
         const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
         log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt })

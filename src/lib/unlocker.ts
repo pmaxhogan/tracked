@@ -41,25 +41,48 @@ export type UnlockerResult = {
   errorMessage: string | null
 }
 
+export type FetchViaUnlockerOpts = {
+  zone?: string
+  retriesLeft?: number
+  /**
+   * BrightData "manual expect" — pass a CSS selector and the Unlocker will
+   * keep rendering JS until the selector is in the DOM (or its internal
+   * timeout fires) before returning. Maps to the `x-unblock-expect` header
+   * documented under Web Unlocker > Manual 'expect' elements. Use this for
+   * pages whose content lands after a CF Turnstile clearance pass — without
+   * it the Unlocker can return an unrendered shell when our exit IP didn't
+   * have warm clearance for that URL. `expect_element` is in the retryable
+   * error set, so a miss naturally rotates IP and tries again.
+   */
+  expectElement?: string
+}
+
 export async function fetchViaUnlocker(
   url: string,
   apiKey: string,
   log?: Logger,
-  zone = DEFAULT_ZONE,
-  retriesLeft = MAX_RETRIES,
+  opts: FetchViaUnlockerOpts = {},
 ): Promise<UnlockerResult> {
+  const zone = opts.zone ?? DEFAULT_ZONE
+  const retriesLeft = opts.retriesLeft ?? MAX_RETRIES
+  const expectElement = opts.expectElement
+
   const start = Date.now()
   if (log) log.counters.brightdataCalls++
-  log?.info('unlocker.start', { url, zone, retriesLeft })
+  log?.info('unlocker.start', { url, zone, retriesLeft, expectElement: expectElement ?? null })
 
   let res: Response
   try {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    }
+    if (expectElement) {
+      headers['x-unblock-expect'] = JSON.stringify({ element: expectElement })
+    }
     res = await fetch(API_URL, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers,
       // country=us pins to the residential IP pool where 1001tracklists has
       // the warmest Cloudflare clearance cache — BrightData's docs say
       // Unlocker handles CF Turnstile automatically, but per-URL clearance
@@ -98,7 +121,7 @@ export async function fetchViaUnlocker(
   if (!ok) {
     if (errorCode && RETRYABLE_ERROR_CODES.has(errorCode) && retriesLeft > 0) {
       log?.warn('unlocker.retrying', { url, status, errorCode, errorMessage, retriesLeft, ms })
-      return fetchViaUnlocker(url, apiKey, log, zone, retriesLeft - 1)
+      return fetchViaUnlocker(url, apiKey, log, { zone, retriesLeft: retriesLeft - 1, expectElement })
     }
     log?.error('unlocker.failed', { url, status, errorCode, errorMessage, htmlBytes, ms })
     return { status, html: '', redirectedUrl: '', errorCode, errorMessage }
