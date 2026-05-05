@@ -60,7 +60,13 @@ export async function fetchViaUnlocker(
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ zone, url, format: 'json' }),
+      // country=us pins to the residential IP pool where 1001tracklists has
+      // the warmest Cloudflare clearance cache — BrightData's docs say
+      // Unlocker handles CF Turnstile automatically, but per-URL clearance
+      // varies by exit IP and we kept landing on cold ones for newer
+      // tracklists. Geo-pinning makes the rotation pull from the country
+      // most users hit 1001tl from, so the cookies are likeliest to exist.
+      body: JSON.stringify({ zone, url, format: 'json', country: 'us' }),
     })
   } catch (e) {
     log?.error('unlocker.transport_throw', { url, ms: Date.now() - start, error: e instanceof Error ? e.message : String(e) })
