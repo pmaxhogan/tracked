@@ -1,9 +1,19 @@
 export type Env = {
   CACHE: KVNamespace
+  /** Durable list of DJ subscriptions for the /subscriptions mini-app. */
+  SUBS: KVNamespace
   API_TOKEN: string
   YOUTUBE_API_KEY: string
   /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
   BRIGHTDATA_API_KEY?: string
+  /** Cloudflare Access team domain, e.g. "yourteam.cloudflareaccess.com". */
+  CF_ACCESS_TEAM_DOMAIN?: string
+  /** Cloudflare Access application AUD tag (from the Access app config). */
+  CF_ACCESS_AUD?: string
+  /** Comma-separated allowlist of emails permitted to use /subscriptions. */
+  CF_ACCESS_ALLOWED_EMAILS?: string
+  /** When "1" / "true", /subscriptions skips CF Access verification — local dev only. */
+  DEV_BYPASS_CF_ACCESS?: string
 }
 
 export type Status = 'ok' | 'no_video' | 'no_tracklist' | 'unidentified' | 'upstream_error'

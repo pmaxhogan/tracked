@@ -1,5 +1,6 @@
 import { OpenAPIHono } from '@hono/zod-openapi'
 import { nowPlayingRoute, nowPlayingHandler } from './routes/now-playing'
+import { subscriptionsApp } from './routes/subscriptions'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 
@@ -9,6 +10,11 @@ app.openapi(nowPlayingRoute, nowPlayingHandler)
 
 // Public root: just a hint. Anything past `/` requires the bearer token.
 app.get('/', (c) => c.text('tracked — POST /now-playing (Bearer auth). See /openapi.json'))
+
+// Mini-app for managing DJ subscriptions. Gated by Cloudflare Access (verified
+// inside the sub-app's middleware), NOT by the Tasker bearer token. Mounted
+// here before the wildcard bearerAuth so it isn't double-gated.
+app.route('/subscriptions', subscriptionsApp)
 
 // Bearer-gate everything else, including /openapi.json and /doc.
 app.use('*', bearerAuth)

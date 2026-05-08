@@ -5,3 +5,12 @@ YOUTUBE_API_KEY=replace-with-google-cloud-yt-data-api-key
 # required in prod on Cloudflare Workers (egress IPs are captcha-gated).
 # BRIGHTDATA_API_KEY=
 
+# /subscriptions mini-app — Cloudflare Access gate.
+# In prod these come from wrangler.jsonc `vars`. For `wrangler dev` you can
+# either set them to your real Access team/app and tunnel through cloudflared,
+# or set DEV_BYPASS_CF_ACCESS=1 below to skip verification entirely.
+# CF_ACCESS_TEAM_DOMAIN=yourteam.cloudflareaccess.com
+# CF_ACCESS_AUD=replace-with-the-app-aud-tag
+# CF_ACCESS_ALLOWED_EMAILS=you@example.com
+DEV_BYPASS_CF_ACCESS=1
+

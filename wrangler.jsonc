@@ -9,9 +9,36 @@
       "binding": "CACHE",
       "id": "8cb267cd79b346baa86d37ec9e1015ef",
       "preview_id": "c13978cb82b249f6b2b8939f92d1dad9"
+    },
+    {
+      // Durable storage for the /subscriptions mini-app (DJ slugs the user
+      // wants tracked). No TTLs; kept separate from CACHE so we never wipe it
+      // by mistake. Create with:
+      //   npx wrangler kv namespace create SUBS
+      //   npx wrangler kv namespace create SUBS --preview
+      // and paste the ids here.
+      "binding": "SUBS",
+      "id": "REPLACE_ME",
+      "preview_id": "REPLACE_ME"
     }
-  ]
+  ],
+  "vars": {
+    // Cloudflare Access team domain (e.g. "yourteam.cloudflareaccess.com").
+    // The /subscriptions/* routes verify the Cf-Access-Jwt-Assertion header
+    // against this team's JWKS. Leave blank locally and set DEV_BYPASS_CF_ACCESS=1
+    // in .dev.vars to skip verification during `wrangler dev`.
+    "CF_ACCESS_TEAM_DOMAIN": "",
+    // Application AUD tag from the Cloudflare Access app config. Set this in
+    // wrangler.jsonc (it's not a secret) so the deployed worker rejects
+    // tokens minted for any other Access app.
+    "CF_ACCESS_AUD": "",
+    // Comma-separated list of email addresses allowed to use the mini-app.
+    // The CF Access policy should already restrict this, but we double-check
+    // here so a misconfigured policy can't grant access.
+    "CF_ACCESS_ALLOWED_EMAILS": ""
+  }
   // Secrets (set via `wrangler secret put`):
   //   API_TOKEN          bearer token Tasker uses
   //   YOUTUBE_API_KEY    YouTube Data API v3 key
+  //   BRIGHTDATA_API_KEY (optional) Bright Data Web Unlocker key
 }

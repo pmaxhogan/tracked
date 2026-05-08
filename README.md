@@ -91,6 +91,27 @@ When the upstream rate-limits us (1001tracklists per-IP captcha gate), the respo
 
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 
+## Subscriptions mini-app
+
+`GET /subscriptions/` is a tiny single-user web UI for managing the list of DJs to track. Paste a 1001tracklists DJ URL like `https://www.1001tracklists.com/dj/lillypalmer/index.html` and only the slug (`lillypalmer`) is stored. Subscriptions live in a separate KV namespace (`SUBS`, no TTL) so they're durable independent of the cache.
+
+The UI is gated by **Cloudflare Access**, not the bearer token used for `/now-playing`. The worker doesn't trust the `Cf-Access-Authenticated-User-Email` header on its own — every `/subscriptions/*` request goes through `cfAccess` middleware that:
+
+1. Reads the `Cf-Access-Jwt-Assertion` header (or `CF_Authorization` cookie).
+2. Verifies the RS256 signature against the team's JWKS at `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` (cached in KV for 1h, refreshed on `kid` mismatch).
+3. Validates `iss` matches the team URL, `aud` matches `CF_ACCESS_AUD`, and `exp`/`nbf`/`iat` are in range (60s skew).
+4. Checks the `email` claim is in `CF_ACCESS_ALLOWED_EMAILS` (comma-separated).
+
+If any of `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` / `CF_ACCESS_ALLOWED_EMAILS` is unset the middleware **fails closed** (every request 500s) — there's no implicit "open" mode in production. For `wrangler dev` set `DEV_BYPASS_CF_ACCESS=1` in `.dev.vars` to skip verification.
+
+JSON API (also Access-gated):
+
+```
+GET  /subscriptions/api/list                      → { subscriptions: [{ slug, sourceUrl, addedAt }] }
+POST /subscriptions/api/add    { url: "..." }     → { added: bool, subscription: {...} }
+POST /subscriptions/api/remove { slug: "..." }    → { removed: bool }
+```
+
 ## Logs
 
 Worker observability is on (`observability.enabled: true` in `wrangler.jsonc`). Every request emits a stream of structured JSON log lines correlated by `reqId` (the Cloudflare `cf-ray` header). Each phase logs full input/output bodies and timing; every error path logs full error context (name, message, stack, upstream status/error code).
@@ -157,16 +178,27 @@ Point Tasker at the resulting `https://*.trycloudflare.com` URL.
 ## Deploy
 
 ```bash
-# 1. Create the KV namespace and paste both ids into wrangler.jsonc
+# 1. Create the KV namespaces and paste all four ids into wrangler.jsonc
 npx wrangler kv namespace create CACHE
 npx wrangler kv namespace create CACHE --preview
+npx wrangler kv namespace create SUBS
+npx wrangler kv namespace create SUBS --preview
 
 # 2. Set secrets
 echo $API_TOKEN          | npx wrangler secret put API_TOKEN
 echo $YOUTUBE_API_KEY    | npx wrangler secret put YOUTUBE_API_KEY
 echo $BRIGHTDATA_API_KEY | npx wrangler secret put BRIGHTDATA_API_KEY
 
-# 3. Deploy
+# 3. Set CF Access vars in wrangler.jsonc (`vars` block):
+#    CF_ACCESS_TEAM_DOMAIN     yourteam.cloudflareaccess.com
+#    CF_ACCESS_AUD             <app AUD tag from the Access dashboard>
+#    CF_ACCESS_ALLOWED_EMAILS  you@example.com[,other@example.com]
+
+# 4. Set up a Cloudflare Access "self-hosted" application covering the
+#    /subscriptions/* path of this worker's hostname, with a policy that
+#    allows only your email.
+
+# 5. Deploy
 npx wrangler deploy
 ```
 
@@ -201,12 +233,15 @@ When the key is unset (local dev from a residential IP) we fall back to the home
 src/
   index.ts                  OpenAPIHono app + /openapi.json
   routes/now-playing.ts     pipeline orchestrator
+  routes/subscriptions.ts   DJ subscriptions mini-app (HTML + JSON API)
   middleware/auth.ts        bearer token (timing-safe)
+  middleware/cf-access.ts   Cloudflare Access JWT verification (RS256 + JWKS)
   schemas.ts                zod request/response (also drives OpenAPI)
   types.ts
   lib/
     timestamp.ts            cue parsing + current-track selection
     tracklists1001.ts       search, scrape, medialink
+    subscriptions.ts        DJ slug parser + KV CRUD for the mini-app
     fetch.ts                challenge solver + cookie jar
     youtube.ts              YouTube Data API v3 client
     itunes.ts               Apple Music fallback search
@@ -215,5 +250,7 @@ test/
   fixtures/                 saved 1001tracklists HTML and JSON
   timestamp.test.ts
   tracklists1001.test.ts
+  subscriptions.test.ts
+  cf-access.test.ts
 docs/tasker-setup.md
 ```
