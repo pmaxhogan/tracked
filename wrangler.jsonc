@@ -38,7 +38,9 @@
     "CF_ACCESS_ALLOWED_EMAILS": ""
   }
   // Secrets (set via `wrangler secret put`):
-  //   API_TOKEN          bearer token Tasker uses
-  //   YOUTUBE_API_KEY    YouTube Data API v3 key
-  //   BRIGHTDATA_API_KEY (optional) Bright Data Web Unlocker key
+  //   API_TOKEN              bearer token Tasker uses
+  //   YOUTUBE_API_KEY        YouTube Data API v3 key
+  //   BRIGHTDATA_API_KEY     (optional) Bright Data Web Unlocker key
+  //   GOOGLE_OAUTH_CLIENT_ID OAuth client id for YouTube playlist write access
+  //   GOOGLE_OAUTH_CLIENT_SECRET  matching client secret
 }

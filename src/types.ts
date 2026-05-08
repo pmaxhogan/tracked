@@ -14,6 +14,9 @@ export type Env = {
   CF_ACCESS_ALLOWED_EMAILS?: string
   /** When "1" / "true", /subscriptions skips CF Access verification — local dev only. */
   DEV_BYPASS_CF_ACCESS?: string
+  /** Google OAuth 2.0 client (for YouTube playlist write access). Set via `wrangler secret put`. */
+  GOOGLE_OAUTH_CLIENT_ID?: string
+  GOOGLE_OAUTH_CLIENT_SECRET?: string
 }
 
 export type Status = 'ok' | 'no_video' | 'no_tracklist' | 'unidentified' | 'upstream_error'

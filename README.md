@@ -112,6 +112,35 @@ POST /subscriptions/api/add    { url: "..." }     → { added: bool, subscriptio
 POST /subscriptions/api/remove { slug: "..." }    → { removed: bool }
 ```
 
+### YouTube account connection
+
+The same page has a "Sign in with YouTube" button that runs an OAuth 2.0 authorization-code flow against Google so the worker can create and modify playlists on the connected channel. The flow is implemented in `src/lib/google-oauth.ts` and wired up in `src/routes/subscriptions.ts`:
+
+```
+GET  /subscriptions/oauth/start                   → 302 to Google consent (state cookie set)
+GET  /subscriptions/oauth/callback?code&state     → exchanges code, stores tokens, 302 back
+POST /subscriptions/oauth/disconnect              → revokes refresh token + clears KV
+GET  /subscriptions/api/youtube/status            → { connected, channelId, channelTitle, scope, ... }
+```
+
+Scope: `https://www.googleapis.com/auth/youtube` (read+write on the user's playlists/uploads). `access_type=offline` + `prompt=consent` ensures Google always issues a refresh token. The refresh token, current access token, expiry, and channel info are stored at `oauth:google` in the `SUBS` KV namespace; access tokens are auto-refreshed via `getAccessToken(env)` when they're within 60s of expiry. Disconnect calls Google's revoke endpoint and clears the KV entry.
+
+CSRF protection: the `/oauth/start` handler sets a single-use `yt_oauth_state` cookie (HttpOnly, Secure, SameSite=Lax, scoped to `/subscriptions/oauth`, 5-minute lifetime); the callback rejects mismatched/missing state.
+
+**One-time setup** (Google Cloud Console):
+
+1. Create or pick a project, enable the **YouTube Data API v3**.
+2. *APIs & Services → OAuth consent screen* — set up an "External" app, add yourself as a test user.
+3. *Credentials → Create Credentials → OAuth client ID* — type **Web application**. Authorized redirect URI:
+   ```
+   https://<your-worker-host>/subscriptions/oauth/callback
+   ```
+4. Copy the client id and client secret into worker secrets:
+   ```bash
+   echo $GOOGLE_OAUTH_CLIENT_ID     | npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID
+   echo $GOOGLE_OAUTH_CLIENT_SECRET | npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET
+   ```
+
 ## Logs
 
 Worker observability is on (`observability.enabled: true` in `wrangler.jsonc`). Every request emits a stream of structured JSON log lines correlated by `reqId` (the Cloudflare `cf-ray` header). Each phase logs full input/output bodies and timing; every error path logs full error context (name, message, stack, upstream status/error code).
@@ -185,9 +214,11 @@ npx wrangler kv namespace create SUBS
 npx wrangler kv namespace create SUBS --preview
 
 # 2. Set secrets
-echo $API_TOKEN          | npx wrangler secret put API_TOKEN
-echo $YOUTUBE_API_KEY    | npx wrangler secret put YOUTUBE_API_KEY
-echo $BRIGHTDATA_API_KEY | npx wrangler secret put BRIGHTDATA_API_KEY
+echo $API_TOKEN                 | npx wrangler secret put API_TOKEN
+echo $YOUTUBE_API_KEY           | npx wrangler secret put YOUTUBE_API_KEY
+echo $BRIGHTDATA_API_KEY        | npx wrangler secret put BRIGHTDATA_API_KEY
+echo $GOOGLE_OAUTH_CLIENT_ID    | npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID
+echo $GOOGLE_OAUTH_CLIENT_SECRET| npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET
 
 # 3. Set CF Access vars in wrangler.jsonc (`vars` block):
 #    CF_ACCESS_TEAM_DOMAIN     yourteam.cloudflareaccess.com
@@ -242,6 +273,7 @@ src/
     timestamp.ts            cue parsing + current-track selection
     tracklists1001.ts       search, scrape, medialink
     subscriptions.ts        DJ slug parser + KV CRUD for the mini-app
+    google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
     fetch.ts                challenge solver + cookie jar
     youtube.ts              YouTube Data API v3 client
     itunes.ts               Apple Music fallback search
@@ -252,5 +284,6 @@ test/
   tracklists1001.test.ts
   subscriptions.test.ts
   cf-access.test.ts
+  google-oauth.test.ts
 docs/tasker-setup.md
 ```

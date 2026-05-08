@@ -8,7 +8,22 @@ import {
   listSubscriptions,
   removeSubscription,
 } from '../lib/subscriptions'
+import {
+  buildAuthUrl,
+  clearTokens,
+  exchangeCode,
+  fetchChannelInfo,
+  loadTokens,
+  randomState,
+  redirectUriFor,
+  revokeToken,
+  saveTokens,
+  type StoredTokens,
+} from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
+import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
+
+const STATE_COOKIE = 'yt_oauth_state'
 
 export const subscriptionsApp = new Hono<{
   Bindings: Env
@@ -70,6 +85,112 @@ subscriptionsApp.post('/api/remove', async (c) => {
   }
 })
 
+// ─── YouTube / Google OAuth ─────────────────────────────────────────────────
+
+subscriptionsApp.get('/api/youtube/status', async (c) => {
+  const t = await loadTokens(c.env)
+  if (!t) return c.json({ connected: false })
+  return c.json({
+    connected: true,
+    channelId: t.channelId,
+    channelTitle: t.channelTitle,
+    scope: t.scope,
+    connectedAt: t.connectedAt,
+    // expiresAt is the ACCESS token's expiry; the refresh token's lifetime is
+    // governed by Google, surfaced only when revoked.
+    accessTokenExpiresAt: t.expiresAt,
+  })
+})
+
+subscriptionsApp.get('/oauth/start', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'oauth.start' })
+  if (!c.env.GOOGLE_OAUTH_CLIENT_ID || !c.env.GOOGLE_OAUTH_CLIENT_SECRET) {
+    log.error('oauth.start.misconfigured')
+    return c.text('GOOGLE_OAUTH_CLIENT_ID/SECRET not configured', 500)
+  }
+  const state = randomState()
+  const redirectUri = redirectUriFor(c.req.url)
+  setCookie(c, STATE_COOKIE, state, {
+    httpOnly: true,
+    secure: new URL(c.req.url).protocol === 'https:',
+    sameSite: 'Lax',
+    path: '/subscriptions/oauth',
+    maxAge: 60 * 5,
+  })
+  const url = buildAuthUrl({ clientId: c.env.GOOGLE_OAUTH_CLIENT_ID, redirectUri, state })
+  log.info('oauth.start.redirect', { redirectUri, by: c.get('cfAccessEmail') })
+  return c.redirect(url, 302)
+})
+
+subscriptionsApp.get('/oauth/callback', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'oauth.callback' })
+  const url = new URL(c.req.url)
+  const code = url.searchParams.get('code')
+  const stateParam = url.searchParams.get('state')
+  const stateCookie = getCookie(c, STATE_COOKIE)
+  const errParam = url.searchParams.get('error')
+
+  // Single-use cookie: clear regardless of outcome.
+  deleteCookie(c, STATE_COOKIE, { path: '/subscriptions/oauth' })
+
+  if (errParam) {
+    log.warn('oauth.callback.provider_error', { error: errParam })
+    return c.redirect(`/subscriptions/?yt_error=${encodeURIComponent(errParam)}`, 302)
+  }
+  if (!code || !stateParam || !stateCookie || stateParam !== stateCookie) {
+    log.warn('oauth.callback.state_mismatch', { hasCode: !!code, hasState: !!stateParam, hasCookie: !!stateCookie })
+    return c.redirect('/subscriptions/?yt_error=state_mismatch', 302)
+  }
+  if (!c.env.GOOGLE_OAUTH_CLIENT_ID || !c.env.GOOGLE_OAUTH_CLIENT_SECRET) {
+    log.error('oauth.callback.misconfigured')
+    return c.text('GOOGLE_OAUTH_CLIENT_ID/SECRET not configured', 500)
+  }
+
+  try {
+    const redirectUri = redirectUriFor(c.req.url)
+    const tok = await exchangeCode({
+      clientId: c.env.GOOGLE_OAUTH_CLIENT_ID,
+      clientSecret: c.env.GOOGLE_OAUTH_CLIENT_SECRET,
+      redirectUri,
+      code,
+    })
+    const channel = await fetchChannelInfo(tok.accessToken).catch(() => null)
+    const now = Math.floor(Date.now() / 1000)
+    const stored: StoredTokens = {
+      accessToken: tok.accessToken,
+      refreshToken: tok.refreshToken,
+      expiresAt: now + tok.expiresIn,
+      scope: tok.scope,
+      channelId: channel?.id ?? null,
+      channelTitle: channel?.title ?? null,
+      connectedAt: now,
+    }
+    await saveTokens(c.env, stored)
+    log.info('oauth.callback.connected', {
+      channelId: stored.channelId,
+      channelTitle: stored.channelTitle,
+      scope: stored.scope,
+      by: c.get('cfAccessEmail'),
+    })
+    return c.redirect('/subscriptions/?yt=connected', 302)
+  } catch (e) {
+    log.error('oauth.callback.exchange_failed', errorFields(e))
+    return c.redirect('/subscriptions/?yt_error=exchange_failed', 302)
+  }
+})
+
+subscriptionsApp.post('/oauth/disconnect', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'oauth.disconnect' })
+  const t = await loadTokens(c.env)
+  if (t) {
+    // Revoke the refresh token (which also invalidates derived access tokens).
+    await revokeToken(t.refreshToken)
+    await clearTokens(c.env)
+    log.info('oauth.disconnect.revoked', { channelTitle: t.channelTitle, by: c.get('cfAccessEmail') })
+  }
+  return c.json({ disconnected: true })
+})
+
 const PAGE_HTML = /* html */ `<!doctype html>
 <html lang="en">
 <head>
@@ -111,12 +232,24 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   .error { color: var(--danger); margin: 0.5rem 0 1rem; min-height: 1.2em; }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
+  .yt { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); margin-bottom: 1rem; }
+  .yt .info { flex: 1; min-width: 0; font-size: 0.9rem; }
+  .yt .info .title { font-weight: 600; }
+  .yt .info .sub { color: var(--muted); font-size: 0.8rem; }
+  .yt button.connect { background: #c4302b; }
 </style>
 </head>
 <body>
 <main>
   <h1>DJ subscriptions</h1>
   <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>.</p>
+  <div id="yt" class="yt" hidden>
+    <div class="info">
+      <div class="title" id="yt-title">YouTube</div>
+      <div class="sub" id="yt-sub"></div>
+    </div>
+    <button id="yt-action"></button>
+  </div>
   <form id="add-form">
     <input id="url" type="url" placeholder="https://www.1001tracklists.com/dj/.../index.html" required autofocus />
     <button type="submit">Add</button>
@@ -226,10 +359,56 @@ const PAGE_HTML = /* html */ `<!doctype html>
     add(url);
   });
 
+  // ── YouTube connect/disconnect ──────────────────────────────────────────
+  const $yt = document.getElementById('yt');
+  const $ytTitle = document.getElementById('yt-title');
+  const $ytSub = document.getElementById('yt-sub');
+  const $ytAction = document.getElementById('yt-action');
+
+  async function loadYouTubeStatus() {
+    const r = await fetch('/subscriptions/api/youtube/status', { credentials: 'same-origin' });
+    if (!r.ok) { $yt.hidden = true; return; }
+    const data = await r.json();
+    $yt.hidden = false;
+    if (data.connected) {
+      $ytTitle.textContent = 'YouTube · ' + (data.channelTitle || 'connected');
+      $ytSub.textContent = 'Granted: ' + (data.scope || '(unknown scope)');
+      $ytAction.textContent = 'Disconnect';
+      $ytAction.className = 'danger';
+      $ytAction.onclick = disconnectYouTube;
+    } else {
+      $ytTitle.textContent = 'YouTube';
+      $ytSub.textContent = 'Connect your account to let this app create and update playlists.';
+      $ytAction.textContent = 'Sign in with YouTube';
+      $ytAction.className = 'connect';
+      $ytAction.onclick = () => { window.location.href = '/subscriptions/oauth/start'; };
+    }
+  }
+
+  async function disconnectYouTube() {
+    if (!confirm('Disconnect this app from your YouTube account?')) return;
+    $ytAction.disabled = true;
+    try {
+      const r = await fetch('/subscriptions/oauth/disconnect', { method: 'POST', credentials: 'same-origin' });
+      if (!r.ok) { showError('disconnect failed (' + r.status + ')'); return; }
+      await loadYouTubeStatus();
+    } finally {
+      $ytAction.disabled = false;
+    }
+  }
+
+  // Surface ?yt=connected / ?yt_error=... after the OAuth round-trip.
+  const params = new URLSearchParams(location.search);
+  if (params.get('yt_error')) showError('YouTube connect failed: ' + params.get('yt_error'));
+  if (params.get('yt') || params.get('yt_error')) {
+    history.replaceState({}, '', location.pathname);
+  }
+
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
   load();
+  loadYouTubeStatus();
 })();
 </script>
 </body>
