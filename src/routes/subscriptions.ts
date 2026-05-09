@@ -133,6 +133,26 @@ subscriptionsApp.get('/api/state/:slug', async (c) => {
 })
 
 /**
+ * Returns whether the home proxy is currently in IP-block backoff and
+ * until when. The UI surfaces this so the user knows to solve the
+ * 1001tracklists captcha from their home network when the flag is set.
+ */
+subscriptionsApp.get('/api/home-proxy-status', async (c) => {
+  const { isHomeProxyBlocked } = await import('../lib/dj-index')
+  const blk = await isHomeProxyBlocked(c.env.CACHE)
+  return c.json(blk)
+})
+
+/** Manual override: clears the home-proxy IP-block backoff. Use after
+ *  solving the captcha at https://www.1001tracklists.com from the home
+ *  network so the next sync tries the home proxy again immediately. */
+subscriptionsApp.post('/api/home-proxy-status/clear', async (c) => {
+  const { clearHomeProxyBlocked } = await import('../lib/dj-index')
+  await clearHomeProxyBlocked(c.env.CACHE)
+  return c.json({ cleared: true })
+})
+
+/**
  * Diagnostic: probe several pagination URL formats for the DJ page and
  * report which one returns content different from page 1. Also stashes the
  * page-1 HTML into SUBS KV at `debug:dj:<slug>:html` (10 min TTL) so we can

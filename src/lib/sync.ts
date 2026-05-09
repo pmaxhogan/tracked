@@ -67,6 +67,17 @@ export type SubState = {
    */
   discoveredTracklistUrls?: string[]
   processedTracklistUrls: string[]
+  /**
+   * Per-URL failure counter. When a set scrape errors (CF shell, IP block,
+   * transport), we bump the count here. Once it crosses
+   * `ABANDON_AFTER_FAILURES`, we move it to processedTracklistUrls so the
+   * cron stops retrying — otherwise every cron tick re-attempts the same
+   * failing URLs forever, which is what kept re-triggering the home-proxy
+   * IP block. Cleared on success.
+   */
+  failureCounts?: Record<string, number>
+  /** URLs we've given up retrying (after ABANDON_AFTER_FAILURES failures). */
+  abandonedTracklistUrls?: string[]
   lastRunAt?: number
   lastError?: string
   lastRunStats?: {
@@ -77,6 +88,8 @@ export type SubState = {
     via: 'home-proxy' | 'unlocker' | 'direct' | 'mixed'
   }
 }
+
+const ABANDON_AFTER_FAILURES = 3
 
 export async function loadSubState(env: Env, slug: string): Promise<SubState | null> {
   return ((await env.SUBS.get(`${STATE_PREFIX}${slug}`, 'json')) as SubState | null) ?? null
@@ -171,7 +184,9 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
   for (const sub of subs) {
     const state = await loadSubState(env, sub.slug)
     if (!state || !state.discoveredTracklistUrls) continue
-    const pending = state.discoveredTracklistUrls.length - state.processedTracklistUrls.length
+    const abandoned = state.abandonedTracklistUrls?.length ?? 0
+    const pending =
+      state.discoveredTracklistUrls.length - state.processedTracklistUrls.length - abandoned
     if (pending > 0) candidates.push(sub)
   }
   if (candidates.length === 0) {
@@ -219,6 +234,7 @@ export async function syncOne(
     brightdataApiKey: env.BRIGHTDATA_API_KEY,
     homeProxyUrl: env.HOME_PROXY_URL,
     homeProxyToken: env.HOME_PROXY_TOKEN,
+    cacheKv: env.CACHE,
     log,
   }
 
@@ -297,22 +313,28 @@ export async function syncOne(
   }
 
   // 4. Walk tracklist URLs we haven't already processed. todo is drawn from
-  // the cumulative discovery set (state ∪ this-run), in the order we first
-  // saw them — newest at the front since 1001tl lists newest first.
+  // the cumulative discovery set (state ∪ this-run), excluding both
+  // already-processed and previously-abandoned URLs.
   const processed = new Set(state.processedTracklistUrls)
+  const abandoned = new Set(state.abandonedTracklistUrls ?? [])
+  const failureCounts: Record<string, number> = { ...(state.failureCounts ?? {}) }
   const allUrls = [...discovered]
-  const todo = allUrls.filter((u) => !processed.has(u)).slice(0, maxSets)
+  const todo = allUrls
+    .filter((u) => !processed.has(u) && !abandoned.has(u))
+    .slice(0, maxSets)
   log.info('sync.todo_window', {
     slug: sub.slug,
     totalUrls: allUrls.length,
     alreadyProcessed: processed.size,
+    abandoned: abandoned.size,
     todoThisRun: todo.length,
-    capped: allUrls.length - processed.size > maxSets,
+    capped: allUrls.length - processed.size - abandoned.size > maxSets,
   })
 
   let videoIdsFound = 0
   let videoIdsAdded = 0
   let setsProcessed = 0
+  let setsAbandonedThisRun = 0
   const viaSeen = new Set<string>()
 
   for (const setUrl of todo) {
@@ -363,11 +385,21 @@ export async function syncOne(
         })
       }
       processed.add(setUrl)
+      delete failureCounts[setUrl]
       setsProcessed += 1
     } catch (e) {
-      // Per-set errors don't block the rest of the run, and we deliberately
-      // do NOT mark this URL as processed — we'll retry next run.
-      log.warn('sync.set_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+      // Bump per-URL failure count. After ABANDON_AFTER_FAILURES, give up
+      // and mark the URL processed so the cron stops re-attempting it
+      // every tick (which is what kept re-triggering the home-proxy IP
+      // block). The user can manually clear state if they want a retry.
+      const fc = (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
+      const abandon = fc >= ABANDON_AFTER_FAILURES
+      log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })
+      if (abandon) {
+        abandoned.add(setUrl)
+        delete failureCounts[setUrl]
+        setsAbandonedThisRun += 1
+      }
     }
   }
 
@@ -376,6 +408,8 @@ export async function syncOne(
     artistName,
     discoveredTracklistUrls: [...discovered],
     processedTracklistUrls: [...processed],
+    abandonedTracklistUrls: [...abandoned],
+    failureCounts,
     lastRunAt: Math.floor(Date.now() / 1000),
     lastRunStats: {
       tracklistsSeen: discovered.size,
@@ -402,7 +436,8 @@ export async function syncOne(
       tracklistsProcessed: setsProcessed,
       videoIdsFound,
       videoIdsAdded,
-      tracklistsPending: Math.max(0, discovered.size - processed.size),
+      // Pending = discovered minus already-processed minus permanently-abandoned.
+      tracklistsPending: Math.max(0, discovered.size - processed.size - abandoned.size),
     },
   }
 }
