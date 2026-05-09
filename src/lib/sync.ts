@@ -38,7 +38,8 @@ import { makeLogger, errorFields, type Logger } from './log'
 
 const STATE_PREFIX = 'subs:state:'
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
-const PLAYLIST_DESCRIPTION = 'Auto-curated by tracked: every set this DJ has a YouTube recording for, scraped from 1001tracklists.'
+const playlistDescription = (artistName: string) =>
+  `Every set ${artistName} has a YouTube recording for on 1001tracklists.`
 // Each set scrape is a 2–4 s BrightData hit; 10 sets keeps a single request
 // inside Workers' wall-time budget. New subs with deeper history backfill
 // over multiple cron ticks (or repeated manual syncs).
@@ -161,7 +162,7 @@ export async function syncOne(
   const playlistTitle = `${artistName}${PLAYLIST_TITLE_SUFFIX}`
   let playlistId = state.playlistId
   if (!playlistId) {
-    playlistId = await findOrCreatePlaylist(playlistTitle, accessToken, log, sub.slug)
+    playlistId = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
   }
 
   // 3. Existing video ids in the playlist (defense in depth — wiped state mustn't dupe).
@@ -175,7 +176,7 @@ export async function syncOne(
   } catch (e) {
     if (e instanceof PlaylistNotFoundError) {
       log.warn('sync.playlist_stale', { slug: sub.slug, stalePlaylistId: playlistId })
-      playlistId = await findOrCreatePlaylist(playlistTitle, accessToken, log, sub.slug)
+      playlistId = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
       existingVideoIds = await listPlaylistVideoIds(playlistId, accessToken)
     } else {
       throw e
@@ -213,7 +214,7 @@ export async function syncOne(
               // Playlist disappeared mid-run. Re-resolve once and retry the
               // insert; subsequent iterations of the loop pick up the new id.
               log.warn('sync.playlist_stale_midrun', { slug: sub.slug, stalePlaylistId: playlistId })
-              playlistId = await findOrCreatePlaylist(playlistTitle, accessToken, log, sub.slug)
+              playlistId = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
               existingVideoIds = new Set() // fresh playlist starts empty
               await addVideoToPlaylist(playlistId, videoId, accessToken)
             } else {
@@ -275,6 +276,7 @@ export async function syncOne(
  */
 async function findOrCreatePlaylist(
   title: string,
+  artistName: string,
   accessToken: string,
   log: Logger,
   slug: string,
@@ -285,7 +287,7 @@ async function findOrCreatePlaylist(
     return existing.id
   }
   const created = await createPlaylist(
-    { title, description: PLAYLIST_DESCRIPTION, privacyStatus: 'private' },
+    { title, description: playlistDescription(artistName), privacyStatus: 'private' },
     accessToken,
   )
   log.info('sync.playlist_created', { slug, playlistId: created.id, title })

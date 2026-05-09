@@ -57,14 +57,15 @@ export type ParsedDjIndex = {
 export function parseDjIndex(html: string): ParsedDjIndex {
   const root = parse(html)
   // The actual H1 class on 1001tl as of 2026 is `titleNameH1`, but be
-  // tolerant: any H1 will do as a fallback. Strip surrounding whitespace and
-  // any trailing decorations like "Tracklists" / "DJ" stripes the template
-  // appends in some skins.
+  // tolerant: any H1 will do as a fallback. 1001tl's DJ-page H1 includes a
+  // " Tracklists Overview" suffix on the listing template — strip it so the
+  // playlist name is just the artist.
   let artistName: string | null = null
   const h1 = root.querySelector('h1.titleNameH1') ?? root.querySelector('h1')
   if (h1) {
-    const txt = decodeEntities(h1.text).trim().replace(/\s+/g, ' ')
-    artistName = txt || null
+    const raw = decodeEntities(h1.text).trim().replace(/\s+/g, ' ')
+    const trimmed = raw.replace(/\s+Tracklists Overview\s*$/i, '').trim()
+    artistName = trimmed || null
   }
 
   const seen = new Set<string>()

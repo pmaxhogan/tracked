@@ -36,6 +36,14 @@ describe('parseDjIndex', () => {
     expect(parseDjIndex('<h1>Boys Noize &amp; Friends</h1>').artistName).toBe('Boys Noize & Friends')
   })
 
+  it('strips the " Tracklists Overview" suffix that 1001tl appends on DJ listing pages', () => {
+    expect(parseDjIndex('<h1 class="titleNameH1">Lilly Palmer Tracklists Overview</h1>').artistName).toBe('Lilly Palmer')
+    // Mixed case + extra whitespace.
+    expect(parseDjIndex('<h1>Charlotte de Witte  tracklists overview </h1>').artistName).toBe('Charlotte de Witte')
+    // No suffix → name passes through unchanged.
+    expect(parseDjIndex('<h1>Charlotte de Witte</h1>').artistName).toBe('Charlotte de Witte')
+  })
+
   it('preserves first-occurrence order across duplicate hrefs', () => {
     const html = [
       '<a href="/tracklist/aaa/one.html">',
