@@ -4,6 +4,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-01-15",
   "observability": { "enabled": true },
+  // Daily cron: sweep every /subscriptions DJ and add new YouTube videos to
+  // their respective auto-playlists. 06:00 UTC keeps it well clear of US
+  // primetime when 1001tracklists itself is busiest.
+  "triggers": { "crons": ["0 6 * * *"] },
   "kv_namespaces": [
     {
       "binding": "CACHE",

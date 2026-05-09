@@ -3,6 +3,8 @@ import { nowPlayingRoute, nowPlayingHandler } from './routes/now-playing'
 import { subscriptionsApp } from './routes/subscriptions'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
+import { syncAll } from './lib/sync'
+import { makeLogger, errorFields } from './lib/log'
 
 const app = new OpenAPIHono<{ Bindings: Env }>()
 
@@ -39,4 +41,35 @@ app.doc('/openapi.json', {
   },
 })
 
-export default app
+/**
+ * Cron trigger handler. Configured in wrangler.jsonc → `triggers.crons` to fire
+ * once a day; sweeps every subscription and adds new YouTube videos to each
+ * DJ's auto-playlist. Safe to run more often than once per day — `syncOne`
+ * is idempotent — but the daily cadence is what's wired in production.
+ *
+ * `ctx.waitUntil` keeps the worker alive past `scheduled` returning so the
+ * sweep can finish even if it crosses CPU-time boundaries on individual subs.
+ */
+async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  const log = makeLogger({ task: 'cron.sync_all', cron: _event.cron, ts: _event.scheduledTime })
+  log.info('cron.sync_all.start')
+  ctx.waitUntil(
+    (async () => {
+      try {
+        const r = await syncAll(env, { log })
+        log.info('cron.sync_all.done', {
+          subs: r.results.length,
+          ok: r.results.filter((x) => x.ok).length,
+          totalAdded: r.results.reduce((a, x) => a + x.stats.videoIdsAdded, 0),
+        })
+      } catch (e) {
+        log.error('cron.sync_all.threw', errorFields(e))
+      }
+    })(),
+  )
+}
+
+export default {
+  fetch: app.fetch.bind(app),
+  scheduled,
+}

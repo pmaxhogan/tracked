@@ -13,6 +13,7 @@ import {
   clearTokens,
   exchangeCode,
   fetchChannelInfo,
+  getAccessToken,
   loadTokens,
   randomState,
   redirectUriFor,
@@ -22,6 +23,7 @@ import {
 } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
+import { syncAll, syncOne, loadSubState } from '../lib/sync'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -83,6 +85,51 @@ subscriptionsApp.post('/api/remove', async (c) => {
     log.error('subs.remove_throw', errorFields(e))
     return c.json({ error: 'internal' }, 500)
   }
+})
+
+// ─── Sync (scrape + add to playlist) ────────────────────────────────────────
+
+subscriptionsApp.post('/api/sync', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.sync_all',
+    by: c.get('cfAccessEmail'),
+  })
+  try {
+    const result = await syncAll(c.env, { log })
+    return c.json(result)
+  } catch (e) {
+    log.error('subs.sync_all_throw', errorFields(e))
+    return c.json({ error: 'sync_failed', message: e instanceof Error ? e.message : String(e) }, 500)
+  }
+})
+
+subscriptionsApp.post('/api/sync/:slug', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.sync_one',
+    by: c.get('cfAccessEmail'),
+  })
+  const slug = c.req.param('slug')
+  const subs = await listSubscriptions(c.env)
+  const sub = subs.find((s) => s.slug === slug)
+  if (!sub) return c.json({ error: 'not_subscribed', slug }, 404)
+  // syncOne needs a fresh access token; the helper auto-refreshes near expiry.
+  const tokenInfo = await getAccessToken(c.env)
+  if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
+  try {
+    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log })
+    return c.json(result)
+  } catch (e) {
+    log.error('subs.sync_one_throw', { slug, ...errorFields(e) })
+    return c.json({ error: 'sync_failed', message: e instanceof Error ? e.message : String(e) }, 500)
+  }
+})
+
+subscriptionsApp.get('/api/state/:slug', async (c) => {
+  const slug = c.req.param('slug')
+  const state = await loadSubState(c.env, slug)
+  return c.json({ slug, state })
 })
 
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
@@ -295,12 +342,44 @@ const PAGE_HTML = /* html */ `<!doctype html>
       added.textContent = s.addedAt ? 'added ' + fmtDate(s.addedAt) : '';
       meta.appendChild(added);
       li.appendChild(meta);
+      const sync = document.createElement('button');
+      sync.className = 'danger';
+      sync.textContent = 'Sync';
+      sync.addEventListener('click', () => syncSlug(s.slug, sync));
+      li.appendChild(sync);
       const rm = document.createElement('button');
       rm.className = 'danger';
       rm.textContent = 'Remove';
       rm.addEventListener('click', () => remove(s.slug, rm));
       li.appendChild(rm);
       $list.appendChild(li);
+    }
+  }
+
+  async function syncSlug(slug, btn) {
+    showError('');
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = 'Syncing…';
+    try {
+      const r = await fetch('/subscriptions/api/sync/' + encodeURIComponent(slug), {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        showError(data.message || data.error || ('sync failed (' + r.status + ')'));
+        return;
+      }
+      const stats = data.stats || {};
+      showError(
+        'synced ' + slug + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
+        (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
+        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)'
+      );
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
     }
   }
 
