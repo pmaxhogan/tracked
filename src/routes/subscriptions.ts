@@ -135,11 +135,11 @@ subscriptionsApp.get('/oauth/callback', async (c) => {
 
   if (errParam) {
     log.warn('oauth.callback.provider_error', { error: errParam })
-    return c.redirect(`/subscriptions/?yt_error=${encodeURIComponent(errParam)}`, 302)
+    return c.redirect(`/subscriptions?yt_error=${encodeURIComponent(errParam)}`, 302)
   }
   if (!code || !stateParam || !stateCookie || stateParam !== stateCookie) {
     log.warn('oauth.callback.state_mismatch', { hasCode: !!code, hasState: !!stateParam, hasCookie: !!stateCookie })
-    return c.redirect('/subscriptions/?yt_error=state_mismatch', 302)
+    return c.redirect('/subscriptions?yt_error=state_mismatch', 302)
   }
   if (!c.env.GOOGLE_OAUTH_CLIENT_ID || !c.env.GOOGLE_OAUTH_CLIENT_SECRET) {
     log.error('oauth.callback.misconfigured')
@@ -172,10 +172,10 @@ subscriptionsApp.get('/oauth/callback', async (c) => {
       scope: stored.scope,
       by: c.get('cfAccessEmail'),
     })
-    return c.redirect('/subscriptions/?yt=connected', 302)
+    return c.redirect('/subscriptions?yt=connected', 302)
   } catch (e) {
     log.error('oauth.callback.exchange_failed', errorFields(e))
-    return c.redirect('/subscriptions/?yt_error=exchange_failed', 302)
+    return c.redirect('/subscriptions?yt_error=exchange_failed', 302)
   }
 })
 
