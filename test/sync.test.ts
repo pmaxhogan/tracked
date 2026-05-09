@@ -5,6 +5,7 @@ import {
   prettifySlug,
   saveSubState,
   syncOne,
+  syncPendingOnly,
   type SubState,
 } from '../src/lib/sync'
 import { PlaylistNotFoundError } from '../src/lib/youtube-playlists'
@@ -98,6 +99,46 @@ describe('prettifySlug', () => {
 
   it('leaves run-on slugs alone (no way to split letter runs)', () => {
     expect(prettifySlug('lillypalmer')).toBe('Lillypalmer')
+  })
+})
+
+describe('syncPendingOnly', () => {
+  it('returns empty without calling YouTube when no sub has pending tracklists', async () => {
+    const env = makeEnv()
+    // Seed a subscription with state where discovered == processed (nothing pending).
+    await env.SUBS.put('subs:list', JSON.stringify(['lillypalmer']))
+    await env.SUBS.put(
+      'subs:item:lillypalmer',
+      JSON.stringify({ sourceUrl: 'https://www.1001tracklists.com/dj/lillypalmer/', addedAt: 0 }),
+    )
+    await env.SUBS.put(
+      'subs:state:lillypalmer',
+      JSON.stringify({
+        playlistId: 'PL',
+        artistName: 'Lilly Palmer',
+        discoveredTracklistUrls: ['https://x/tracklist/a'],
+        processedTracklistUrls: ['https://x/tracklist/a'],
+      }),
+    )
+
+    const r = await syncPendingOnly(env)
+    expect(r.results).toEqual([])
+    // syncPendingOnly fast-skips before calling crawl/findPlaylist/etc.
+    expect(crawlDjIndex).not.toHaveBeenCalled()
+    expect(findPlaylistByTitle).not.toHaveBeenCalled()
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+  })
+
+  it('returns empty for subs that have never been synced (no state row)', async () => {
+    const env = makeEnv()
+    await env.SUBS.put('subs:list', JSON.stringify(['fresh']))
+    await env.SUBS.put(
+      'subs:item:fresh',
+      JSON.stringify({ sourceUrl: 'https://www.1001tracklists.com/dj/fresh/', addedAt: 0 }),
+    )
+
+    const r = await syncPendingOnly(env)
+    expect(r.results).toEqual([])
   })
 })
 
@@ -301,6 +342,25 @@ describe('syncOne', () => {
       ['PL2', 'vidSecond12'],
     ])
     expect(r.stats.videoIdsAdded).toBe(2)
+  })
+
+  it('skips the DJ crawl when skipDjCrawl=true and uses state.discoveredTracklistUrls instead', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLcached',
+      artistName: 'Lilly Palmer',
+      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
+      processedTracklistUrls: ['https://x/tracklist/a'],
+    })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidB12345678')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(crawlDjIndex).not.toHaveBeenCalled()
+    expect(r.artistName).toBe('Lilly Palmer')
+    expect(r.stats.tracklistsSeen).toBe(2)
+    expect(r.stats.tracklistsProcessed).toBe(1) // only /b was pending
+    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLcached', 'vidB12345678', 'tok')
   })
 
   it('falls back to a prettified slug when no name is available anywhere', async () => {

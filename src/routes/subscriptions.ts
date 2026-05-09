@@ -478,7 +478,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
       }
       const stats = data.stats || {};
       const pending = stats.tracklistsPending || 0;
-      const more = pending > 0 ? ' · ' + pending + ' more set' + (pending === 1 ? '' : 's') + ' pending — click Sync again' : '';
+      const more = pending > 0 ? ' · ' + pending + ' more pending — auto-continuing every 5 min' : '';
       showError(
         'synced ' + slug + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
         (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +

@@ -3,7 +3,7 @@ import { nowPlayingRoute, nowPlayingHandler } from './routes/now-playing'
 import { subscriptionsApp } from './routes/subscriptions'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
-import { syncAll } from './lib/sync'
+import { syncAll, syncPendingOnly } from './lib/sync'
 import { makeLogger, errorFields } from './lib/log'
 
 const app = new OpenAPIHono<{ Bindings: Env }>()
@@ -42,28 +42,33 @@ app.doc('/openapi.json', {
 })
 
 /**
- * Cron trigger handler. Configured in wrangler.jsonc → `triggers.crons` to fire
- * once a day; sweeps every subscription and adds new YouTube videos to each
- * DJ's auto-playlist. Safe to run more often than once per day — `syncOne`
- * is idempotent — but the daily cadence is what's wired in production.
+ * Cron trigger handler. Configured in wrangler.jsonc → `triggers.crons` with
+ * two expressions:
+ *   - `0 6 * * *`     daily — full discovery + processing (`syncAll`)
+ *   - `*\/5 * * * *`  every 5 min — drain pending only (`syncPendingOnly`),
+ *                     fast-skips when nothing to do
+ *
+ * The frequent drain cron is what continues a backfill after the user
+ * triggers a manual sync; they no longer have to keep clicking the button.
  *
  * `ctx.waitUntil` keeps the worker alive past `scheduled` returning so the
  * sweep can finish even if it crosses CPU-time boundaries on individual subs.
  */
-async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-  const log = makeLogger({ task: 'cron.sync_all', cron: _event.cron, ts: _event.scheduledTime })
-  log.info('cron.sync_all.start')
+async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  const isDaily = event.cron === '0 6 * * *'
+  const log = makeLogger({ task: isDaily ? 'cron.sync_all' : 'cron.sync_pending', cron: event.cron, ts: event.scheduledTime })
+  log.info('cron.start')
   ctx.waitUntil(
     (async () => {
       try {
-        const r = await syncAll(env, { log })
-        log.info('cron.sync_all.done', {
+        const r = isDaily ? await syncAll(env, { log }) : await syncPendingOnly(env, { log })
+        log.info('cron.done', {
           subs: r.results.length,
-          ok: r.results.filter((x) => x.ok).length,
           totalAdded: r.results.reduce((a, x) => a + x.stats.videoIdsAdded, 0),
+          totalStillPending: r.results.reduce((a, x) => a + x.stats.tracklistsPending, 0),
         })
       } catch (e) {
-        log.error('cron.sync_all.threw', errorFields(e))
+        log.error('cron.threw', errorFields(e))
       }
     })(),
   )

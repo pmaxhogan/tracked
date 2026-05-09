@@ -88,6 +88,14 @@ export type SyncOpts = {
   log?: Logger
   /** Cap how many *new* tracklist pages we fetch+process for this sub. */
   maxSetsPerRun?: number
+  /**
+   * Skip the DJ-page crawl entirely and process pending tracklists from
+   * `state.discoveredTracklistUrls`. Used by the frequent "drain pending"
+   * cron — we don't need to re-discover new sets on every 5-minute tick
+   * (the daily 06:00 UTC cron does that), and skipping the crawl saves
+   * the BrightData/home-proxy round-trip + ~14 AJAX hops per sub.
+   */
+  skipDjCrawl?: boolean
 }
 
 export type SyncOneResult = {
@@ -146,6 +154,52 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
 }
 
 /**
+ * Drain pending tracklists across every subscription without re-discovering
+ * new sets. Used by the frequent (every-N-min) cron to chip away at large
+ * backfills — manual sync handles only one batch, this handler keeps going
+ * automatically until pending hits zero.
+ *
+ * Subs with no pending or no prior discovery state are skipped; the daily
+ * 06:00 UTC sync handles initial discovery for them.
+ */
+export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ results: SyncOneResult[] }> {
+  const log = opts.log ?? makeLogger({ task: 'sync.pending' })
+  const subs = await listSubscriptions(env)
+  const candidates: Subscription[] = []
+  for (const sub of subs) {
+    const state = await loadSubState(env, sub.slug)
+    if (!state || !state.discoveredTracklistUrls) continue
+    const pending = state.discoveredTracklistUrls.length - state.processedTracklistUrls.length
+    if (pending > 0) candidates.push(sub)
+  }
+  if (candidates.length === 0) {
+    log.info('sync.pending.nothing_to_do', { totalSubs: subs.length })
+    return { results: [] }
+  }
+  log.info('sync.pending.start', { totalSubs: subs.length, candidatesWithPending: candidates.length })
+  const tokenInfo = await getAccessToken(env)
+  if (!tokenInfo) {
+    log.error('sync.pending.no_oauth_tokens')
+    throw new Error('YouTube account not connected')
+  }
+  const results: SyncOneResult[] = []
+  for (const sub of candidates) {
+    try {
+      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, skipDjCrawl: true })
+      results.push(r)
+    } catch (e) {
+      log.error('sync.pending.sub_threw', { slug: sub.slug, ...errorFields(e) })
+    }
+  }
+  log.info('sync.pending.done', {
+    candidatesProcessed: results.length,
+    totalAdded: results.reduce((a, r) => a + r.stats.videoIdsAdded, 0),
+    totalStillPending: results.reduce((a, r) => a + r.stats.tracklistsPending, 0),
+  })
+  return { results }
+}
+
+/**
  * Sync a single subscription. Public for the manual `/api/sync/<slug>`
  * endpoint; `syncAll` calls this for each sub.
  */
@@ -166,28 +220,39 @@ export async function syncOne(
     log,
   }
 
-  // 1. Crawl the DJ's paginated index. The page is JS-infinite-scroll in the
-  // browser, but 1001tl exposes the same content under static pageN.html
-  // URLs — so we walk those, accumulating into the per-sub discovery set.
-  // Fast subsequent syncs still mostly hit page 1 + bail at `no_new`.
-  const crawl = await crawlDjIndex(sub.slug, {
-    ...fetchOpts,
-    maxPages: DEFAULT_MAX_DJ_PAGES,
-    deadlineMs: deadline,
-  })
-  const artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
-  // Union with previously-discovered URLs — earlier pages may have failed
-  // to fetch this run but we don't want to lose them from the todo set.
+  // 1. Discover tracklists. Either crawl the DJ index (the fresh-discovery
+  // path, used by the daily cron + initial manual syncs) OR skip the crawl
+  // entirely and rely on `state.discoveredTracklistUrls` (used by the
+  // frequent drain-pending cron — discovery doesn't need to repeat every
+  // few minutes, and skipping saves ~14 AJAX hops per sub).
   const discovered = new Set<string>(state.discoveredTracklistUrls ?? [])
-  for (const u of crawl.tracklistUrls) discovered.add(u)
-  log.info('sync.dj_parsed', {
-    slug: sub.slug,
-    artistName,
-    pagesWalked: crawl.pagesWalked,
-    stopReason: crawl.stopReason,
-    tracklistsSeenThisRun: crawl.tracklistUrls.length,
-    tracklistsKnownTotal: discovered.size,
-  })
+  let artistName: string
+  if (opts.skipDjCrawl) {
+    artistName = state.artistName ?? prettifySlug(sub.slug)
+    log.info('sync.skip_crawl', {
+      slug: sub.slug,
+      artistName,
+      tracklistsKnownTotal: discovered.size,
+    })
+  } else {
+    const crawl = await crawlDjIndex(sub.slug, {
+      ...fetchOpts,
+      maxPages: DEFAULT_MAX_DJ_PAGES,
+      deadlineMs: deadline,
+    })
+    artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
+    // Union with previously-discovered URLs — earlier pages may have failed
+    // to fetch this run but we don't want to lose them from the todo set.
+    for (const u of crawl.tracklistUrls) discovered.add(u)
+    log.info('sync.dj_parsed', {
+      slug: sub.slug,
+      artistName,
+      pagesWalked: crawl.pagesWalked,
+      stopReason: crawl.stopReason,
+      tracklistsSeenThisRun: crawl.tracklistUrls.length,
+      tracklistsKnownTotal: discovered.size,
+    })
+  }
 
   // 2. Resolve / create the playlist. State first, then YT lookup, then create.
   const playlistTitle = `${artistName}${PLAYLIST_TITLE_SUFFIX}`
