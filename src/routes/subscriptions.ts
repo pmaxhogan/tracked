@@ -34,7 +34,13 @@ export const subscriptionsApp = new Hono<{
 
 subscriptionsApp.use('*', cfAccess)
 
-subscriptionsApp.get('/', (c) => c.html(PAGE_HTML))
+subscriptionsApp.get('/', (c) => {
+  // The page bundles its own JS inline. no-store keeps browsers from
+  // serving a stale page after a deploy, which would mean stale UI logic
+  // (e.g. a banner that doesn't auto-refresh).
+  c.header('Cache-Control', 'no-store')
+  return c.html(PAGE_HTML)
+})
 
 subscriptionsApp.get('/api/list', async (c) => {
   const subs = await listSubscriptions(c.env)
