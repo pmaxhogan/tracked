@@ -14,4 +14,7 @@
   // Secrets (set via `wrangler secret put`):
   //   API_TOKEN          bearer token Tasker uses
   //   YOUTUBE_API_KEY    YouTube Data API v3 key
+  //   BRIGHTDATA_API_KEY (optional) Bright Data Web Unlocker API key
+  //   HOME_PROXY_URL     (optional) https URL of the residential-IP forwarder
+  //   HOME_PROXY_TOKEN   (optional) bearer required by the forwarder
 }

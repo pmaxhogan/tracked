@@ -4,6 +4,10 @@ export type Env = {
   YOUTUBE_API_KEY: string
   /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
   BRIGHTDATA_API_KEY?: string
+  /** Optional. When both are set, tracklist GETs try a residential-IP forwarder
+   *  (e.g. cloudflared → Node script on a NAS) before falling back to BrightData. */
+  HOME_PROXY_URL?: string
+  HOME_PROXY_TOKEN?: string
 }
 
 export type Status = 'ok' | 'no_video' | 'no_tracklist' | 'unidentified' | 'upstream_error'

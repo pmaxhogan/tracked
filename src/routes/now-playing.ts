@@ -218,7 +218,12 @@ async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Pr
   }
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
-  const { result } = await fetchTracklist(tracklistUrl, { brightdataApiKey: env.BRIGHTDATA_API_KEY, log })
+  const { result } = await fetchTracklist(tracklistUrl, {
+    brightdataApiKey: env.BRIGHTDATA_API_KEY,
+    homeProxyUrl: env.HOME_PROXY_URL,
+    homeProxyToken: env.HOME_PROXY_TOKEN,
+    log,
+  })
   if (result.tracks.length > 0) {
     const value: CachedTracklist = { tracks: result.tracks, setAppleLink: result.setAppleLink }
     await putJson(env.CACHE, key, value, TTL.TRACKLIST_PAGE)
