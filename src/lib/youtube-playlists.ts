@@ -30,9 +30,25 @@ async function authedFetch(
   return fetcher(url, { ...init, headers })
 }
 
-async function expectOk(res: Response, op: string): Promise<void> {
+/**
+ * Thrown by any read/write op when YouTube reports the playlist (or playlist
+ * item) we referenced no longer exists. Common cause: the user deleted the
+ * playlist in the YouTube UI after we'd cached its id in KV state. The sync
+ * orchestrator catches this and re-resolves by title (or creates fresh).
+ */
+export class PlaylistNotFoundError extends Error {
+  constructor(public readonly op: string, public readonly playlistId?: string) {
+    super(`youtube ${op}: playlist not found${playlistId ? ` (${playlistId})` : ''}`)
+    this.name = 'PlaylistNotFoundError'
+  }
+}
+
+async function expectOk(res: Response, op: string, playlistIdHint?: string): Promise<void> {
   if (res.ok) return
   const body = await res.text().catch(() => '')
+  if (res.status === 404 && /playlistNotFound/.test(body)) {
+    throw new PlaylistNotFoundError(op, playlistIdHint)
+  }
   throw new Error(`youtube ${op} ${res.status}: ${body.slice(0, 500)}`)
 }
 
@@ -104,7 +120,7 @@ export async function listPlaylistVideoIds(
     })
     if (pageToken) params.set('pageToken', pageToken)
     const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'playlistItems.list')
+    await expectOk(res, 'playlistItems.list', playlistId)
     const data = (await res.json()) as {
       items?: Array<{ contentDetails?: { videoId?: string } }>
       nextPageToken?: string
@@ -133,5 +149,5 @@ export async function addVideoToPlaylist(
     { method: 'POST', body: JSON.stringify(body) },
     fetcher,
   )
-  await expectOk(res, 'playlistItems.insert')
+  await expectOk(res, 'playlistItems.insert', playlistId)
 }

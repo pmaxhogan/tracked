@@ -32,6 +32,7 @@ import {
   createPlaylist,
   findPlaylistByTitle,
   listPlaylistVideoIds,
+  PlaylistNotFoundError,
 } from './youtube-playlists'
 import { makeLogger, errorFields, type Logger } from './log'
 
@@ -160,22 +161,26 @@ export async function syncOne(
   const playlistTitle = `${artistName}${PLAYLIST_TITLE_SUFFIX}`
   let playlistId = state.playlistId
   if (!playlistId) {
-    const existing = await findPlaylistByTitle(playlistTitle, accessToken)
-    if (existing) {
-      playlistId = existing.id
-      log.info('sync.playlist_found', { slug: sub.slug, playlistId, title: playlistTitle })
-    } else {
-      const created = await createPlaylist(
-        { title: playlistTitle, description: PLAYLIST_DESCRIPTION, privacyStatus: 'private' },
-        accessToken,
-      )
-      playlistId = created.id
-      log.info('sync.playlist_created', { slug: sub.slug, playlistId, title: playlistTitle })
-    }
+    playlistId = await findOrCreatePlaylist(playlistTitle, accessToken, log, sub.slug)
   }
 
-  // 3. Existing video ids in the playlist (defense in depth — wiped state mustn't dupe)
-  const existingVideoIds = await listPlaylistVideoIds(playlistId, accessToken)
+  // 3. Existing video ids in the playlist (defense in depth — wiped state mustn't dupe).
+  // If the cached playlistId references a playlist the user has since deleted
+  // (or that was never visible to this account), the list call 404s with
+  // playlistNotFound. Treat that as a state-staleness signal: drop the id,
+  // re-resolve by title (or create fresh), and retry.
+  let existingVideoIds: Set<string>
+  try {
+    existingVideoIds = await listPlaylistVideoIds(playlistId, accessToken)
+  } catch (e) {
+    if (e instanceof PlaylistNotFoundError) {
+      log.warn('sync.playlist_stale', { slug: sub.slug, stalePlaylistId: playlistId })
+      playlistId = await findOrCreatePlaylist(playlistTitle, accessToken, log, sub.slug)
+      existingVideoIds = await listPlaylistVideoIds(playlistId, accessToken)
+    } else {
+      throw e
+    }
+  }
 
   // 4. Walk tracklist URLs we haven't already processed.
   const processed = new Set(state.processedTracklistUrls)
@@ -201,7 +206,20 @@ export async function syncOne(
       if (videoId) {
         videoIdsFound += 1
         if (!existingVideoIds.has(videoId)) {
-          await addVideoToPlaylist(playlistId, videoId, accessToken)
+          try {
+            await addVideoToPlaylist(playlistId, videoId, accessToken)
+          } catch (e) {
+            if (e instanceof PlaylistNotFoundError) {
+              // Playlist disappeared mid-run. Re-resolve once and retry the
+              // insert; subsequent iterations of the loop pick up the new id.
+              log.warn('sync.playlist_stale_midrun', { slug: sub.slug, stalePlaylistId: playlistId })
+              playlistId = await findOrCreatePlaylist(playlistTitle, accessToken, log, sub.slug)
+              existingVideoIds = new Set() // fresh playlist starts empty
+              await addVideoToPlaylist(playlistId, videoId, accessToken)
+            } else {
+              throw e
+            }
+          }
           existingVideoIds.add(videoId)
           videoIdsAdded += 1
           log.info('sync.added', { slug: sub.slug, setUrl, videoId, playlistId })
@@ -247,6 +265,31 @@ export async function syncOne(
       videoIdsAdded,
     },
   }
+}
+
+/**
+ * Resolve a playlist by title — find an existing one with that exact title
+ * on the user's channel, or create a fresh private playlist. Used both on
+ * first sync and as the recovery path when cached state references a
+ * deleted playlist.
+ */
+async function findOrCreatePlaylist(
+  title: string,
+  accessToken: string,
+  log: Logger,
+  slug: string,
+): Promise<string> {
+  const existing = await findPlaylistByTitle(title, accessToken)
+  if (existing) {
+    log.info('sync.playlist_found', { slug, playlistId: existing.id, title })
+    return existing.id
+  }
+  const created = await createPlaylist(
+    { title, description: PLAYLIST_DESCRIPTION, privacyStatus: 'private' },
+    accessToken,
+  )
+  log.info('sync.playlist_created', { slug, playlistId: created.id, title })
+  return created.id
 }
 
 /**

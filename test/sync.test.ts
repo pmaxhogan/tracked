@@ -7,6 +7,7 @@ import {
   syncOne,
   type SubState,
 } from '../src/lib/sync'
+import { PlaylistNotFoundError } from '../src/lib/youtube-playlists'
 
 // Stub the network-touching primitives so syncOne becomes a deterministic
 // orchestrator test. This is the most important behavior to lock down: state
@@ -21,12 +22,17 @@ vi.mock('../src/lib/dj-index', async () => {
     parseSetYouTubeId: vi.fn(),
   }
 })
-vi.mock('../src/lib/youtube-playlists', () => ({
-  findPlaylistByTitle: vi.fn(),
-  createPlaylist: vi.fn(),
-  listPlaylistVideoIds: vi.fn(),
-  addVideoToPlaylist: vi.fn(),
-}))
+vi.mock('../src/lib/youtube-playlists', async () => {
+  const actual =
+    await vi.importActual<typeof import('../src/lib/youtube-playlists')>('../src/lib/youtube-playlists')
+  return {
+    ...actual,
+    findPlaylistByTitle: vi.fn(),
+    createPlaylist: vi.fn(),
+    listPlaylistVideoIds: vi.fn(),
+    addVideoToPlaylist: vi.fn(),
+  }
+})
 
 import { fetch1001Html, parseDjIndex, parseSetYouTubeId } from '../src/lib/dj-index'
 import {
@@ -227,6 +233,63 @@ describe('syncOne', () => {
 
     const r = await syncOne(env, sub, 'tok')
     expect(r.artistName).toBe('Lilly Palmer')
+  })
+
+  it('recovers when the cached playlistId 404s on listPlaylistVideoIds (stale state)', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLdeleted',
+      artistName: 'X',
+      processedTracklistUrls: [],
+    })
+    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
+      artistName: 'X',
+      tracklistUrls: ['https://x/tracklist/a'],
+    })
+    // First list call → 404, recovery flow re-resolves and returns empty.
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new PlaylistNotFoundError('playlistItems.list', 'PLdeleted'))
+      .mockResolvedValueOnce(new Set())
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLrecovered', title: 'X (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('newVid12345')
+
+    const r = await syncOne(env, sub, 'tok')
+
+    expect(r.ok).toBe(true)
+    expect(r.playlistId).toBe('PLrecovered')
+    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLrecovered', 'newVid12345', 'tok')
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.playlistId).toBe('PLrecovered')
+  })
+
+  it('recovers when the playlist disappears mid-run on the first add', async () => {
+    const env = makeEnv()
+    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
+      artistName: 'X',
+      tracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
+    })
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ id: 'PL1', title: 'X (1001tklists)' })
+      .mockResolvedValueOnce({ id: 'PL2', title: 'X (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce('vidFirst123')
+      .mockReturnValueOnce('vidSecond12')
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new PlaylistNotFoundError('playlistItems.insert', 'PL1'))
+      .mockResolvedValue(undefined)
+
+    const r = await syncOne(env, sub, 'tok')
+
+    // Both videos end up in the recovered playlist.
+    expect(r.playlistId).toBe('PL2')
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(3) // failed insert on PL1 + retry on PL2 + second set on PL2
+    const calls = (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])
+    expect(calls).toEqual([
+      ['PL1', 'vidFirst123'],
+      ['PL2', 'vidFirst123'],
+      ['PL2', 'vidSecond12'],
+    ])
+    expect(r.stats.videoIdsAdded).toBe(2)
   })
 
   it('falls back to a prettified slug when no name is available anywhere', async () => {
