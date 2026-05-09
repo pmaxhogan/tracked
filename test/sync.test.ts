@@ -118,6 +118,7 @@ describe('syncOne', () => {
       tracklistsProcessed: 3,
       videoIdsFound: 2,
       videoIdsAdded: 2,
+      tracklistsPending: 0,
     })
 
     // State persisted with all three URLs marked processed and the playlistId cached.

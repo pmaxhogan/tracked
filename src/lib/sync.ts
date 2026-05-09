@@ -25,7 +25,7 @@
 
 import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
-import { fetch1001Html, parseDjIndex, parseSetYouTubeId } from './dj-index'
+import { fetch1001Html, parseDjIndex, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { getAccessToken } from './google-oauth'
 import {
   addVideoToPlaylist,
@@ -85,6 +85,9 @@ export type SyncOneResult = {
     tracklistsProcessed: number
     videoIdsFound: number
     videoIdsAdded: number
+    /** Tracklists discovered on the DJ page but not yet processed (cap or
+     *  per-set failure). Run sync again to chip away at them. */
+    tracklistsPending: number
   }
 }
 
@@ -114,7 +117,7 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
         ok: false,
         error: e instanceof Error ? e.message : String(e),
         artistName: sub.slug,
-        stats: { tracklistsSeen: 0, tracklistsProcessed: 0, videoIdsFound: 0, videoIdsAdded: 0 },
+        stats: { tracklistsSeen: 0, tracklistsProcessed: 0, videoIdsFound: 0, videoIdsAdded: 0, tracklistsPending: 0 },
       })
     }
   }
@@ -245,7 +248,13 @@ export async function syncOne(
           log.info('sync.already_in_playlist', { slug: sub.slug, setUrl, videoId })
         }
       } else {
-        log.info('sync.no_youtube_on_set', { slug: sub.slug, setUrl })
+        // Diagnostic fingerprint so we can tell at a glance whether the page
+        // truly has no YT or whether the parser missed an embed shape.
+        log.info('sync.no_youtube_on_set', {
+          slug: sub.slug,
+          setUrl,
+          fingerprint: youtubeFingerprint(setFetched.html),
+        })
       }
       processed.add(setUrl)
       setsProcessed += 1
@@ -281,6 +290,7 @@ export async function syncOne(
       tracklistsProcessed: setsProcessed,
       videoIdsFound,
       videoIdsAdded,
+      tracklistsPending: Math.max(0, parsed.tracklistUrls.length - processed.size),
     },
   }
 }

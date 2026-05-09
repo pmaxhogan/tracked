@@ -33,9 +33,16 @@ import type { Logger } from './log'
 const ORIGIN = 'https://www.1001tracklists.com'
 const TRACKLIST_HREF_RE = /href="(\/tracklist\/[^"#?]+\.html)"/g
 const VIDEO_ID_RE = /[A-Za-z0-9_-]{11}/
-const EMBED_RE = /youtube\.com\/embed\/([A-Za-z0-9_-]{11})/g
+// Match the player iframe URL (the canonical "this set has a YouTube
+// recording" signal). Both youtube.com/embed and the privacy-enhanced
+// youtube-nocookie.com/embed are valid; 1001tl has used both over time.
+const EMBED_RE = /(?:youtube(?:-nocookie)?\.com)\/embed\/([A-Za-z0-9_-]{11})/g
 // og:video / og:video:url tags occasionally surface the watch URL too.
-const WATCH_RE = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/g
+const WATCH_RE = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/v\/)([A-Za-z0-9_-]{11})/g
+// Common JS-variable / data-attribute carriers for the set's video id when
+// the player iframe is rendered lazily.
+const DATA_ATTR_RE = /data-(?:yt|youtube)(?:-?id)?="([A-Za-z0-9_-]{11})"/g
+const JS_VAR_RE = /(?:videoId|ytId|youtubeId)\s*[:=]\s*["']([A-Za-z0-9_-]{11})["']/g
 
 export type ParsedDjIndex = {
   /** Best guess at the DJ's display name. Falls back to slug-prettified when missing. */
@@ -94,15 +101,38 @@ export function parseDjIndex(html: string): ParsedDjIndex {
  */
 export function parseSetYouTubeId(html: string): string | null {
   const candidates: string[] = []
-  let m: RegExpExecArray | null
-  EMBED_RE.lastIndex = 0
-  while ((m = EMBED_RE.exec(html))) candidates.push(m[1]!)
-  WATCH_RE.lastIndex = 0
-  while ((m = WATCH_RE.exec(html))) candidates.push(m[1]!)
+  for (const re of [EMBED_RE, WATCH_RE, DATA_ATTR_RE, JS_VAR_RE]) {
+    re.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(html))) candidates.push(m[1]!)
+  }
   for (const c of candidates) {
     if (VIDEO_ID_RE.test(c) && !isYouTubeChannelLike(c)) return c
   }
   return null
+}
+
+/**
+ * Rough fingerprint of how YouTube-y a set page is, used in the
+ * `sync.no_youtube_on_set` diagnostic to tell at a glance whether the parser
+ * is missing real embeds vs. the page truly has none. No hot-path use.
+ */
+export function youtubeFingerprint(html: string): {
+  htmlBytes: number
+  embedCount: number
+  watchCount: number
+  shortLinkCount: number
+  channelCount: number
+  iframeCount: number
+} {
+  return {
+    htmlBytes: html.length,
+    embedCount: (html.match(/youtube(?:-nocookie)?\.com\/embed\//g) ?? []).length,
+    watchCount: (html.match(/youtube\.com\/watch\?v=/g) ?? []).length,
+    shortLinkCount: (html.match(/youtu\.be\//g) ?? []).length,
+    channelCount: (html.match(/youtube\.com\/(?:channel|user|@)/g) ?? []).length,
+    iframeCount: (html.match(/<iframe[^>]*youtube/gi) ?? []).length,
+  }
 }
 
 // Channel ids start with "UC" + 22 chars and aren't 11 chars long, so the
