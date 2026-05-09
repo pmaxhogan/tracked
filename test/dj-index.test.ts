@@ -1,7 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { parseDjIndex, parseSetYouTubeId } from '../src/lib/dj-index'
+import { vi } from 'vitest'
+import { crawlDjIndex, parseDjIndex, parseSetYouTubeId } from '../src/lib/dj-index'
+
+// crawlDjIndex internally calls fetch1001Html, which goes through the home
+// proxy / unlocker / direct cascade. For unit tests we stub it module-level.
+vi.mock('../src/lib/fetch', async () => {
+  const actual = await vi.importActual<typeof import('../src/lib/fetch')>('../src/lib/fetch')
+  return { ...actual, fetchHtml: vi.fn() }
+})
+vi.mock('../src/lib/unlocker', () => ({ fetchViaUnlocker: vi.fn() }))
+vi.mock('../src/lib/homeProxy', () => ({ fetchViaHomeProxy: vi.fn() }))
+
+import { fetchHtml } from '../src/lib/fetch'
 
 const ORIGIN = 'https://www.1001tracklists.com'
 
@@ -106,5 +118,94 @@ describe('parseSetYouTubeId', () => {
     // tracklist-matroda was archived with `youtube.com/embed/79n8BaQAL2Q` as
     // the player iframe — that's the set's main video id.
     expect(parseSetYouTubeId(html)).toBe('79n8BaQAL2Q')
+  })
+
+  it('matches the youtube-nocookie embed form', () => {
+    expect(parseSetYouTubeId('<iframe src="https://www.youtube-nocookie.com/embed/abcDEFghi12">')).toBe('abcDEFghi12')
+  })
+
+  it('matches a data-yt-id attribute when the iframe is lazy-loaded', () => {
+    expect(parseSetYouTubeId('<div class="player" data-yt-id="dQw4w9WgXcQ"></div>')).toBe('dQw4w9WgXcQ')
+  })
+
+  it('matches a videoId JS-variable initializer', () => {
+    expect(parseSetYouTubeId('<script>var videoId = "tf42CVmF6V0"; setupPlayer();</script>')).toBe('tf42CVmF6V0')
+  })
+})
+
+describe('crawlDjIndex', () => {
+  function htmlWith(urls: string[], h1 = 'Test DJ'): string {
+    return `<h1>${h1}</h1>` + urls.map((u) => `<a href="${u.replace(/^https:\/\/www\.1001tracklists\.com/, '')}">x</a>`).join('')
+  }
+
+  it('walks pages until an empty page, accumulates URLs, captures artistName from page 1', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html', '/tracklist/b/y.html'], 'Lilly Palmer'), state: { cookie: '' } })
+      .mockResolvedValueOnce({ html: htmlWith(['/tracklist/c/z.html'], 'Lilly Palmer'), state: { cookie: '' } })
+      .mockResolvedValueOnce({ html: '<html><body>nothing</body></html>', state: { cookie: '' } })
+
+    const r = await crawlDjIndex('lillypalmer')
+    expect(r.artistName).toBe('Lilly Palmer')
+    expect(r.tracklistUrls).toEqual([
+      'https://www.1001tracklists.com/tracklist/a/x.html',
+      'https://www.1001tracklists.com/tracklist/b/y.html',
+      'https://www.1001tracklists.com/tracklist/c/z.html',
+    ])
+    expect(r.pagesWalked).toBe(3)
+    expect(r.stopReason).toBe('empty')
+    // Verify the URL pattern: page 1 → /index.html, page 2+ → /pageN.html.
+    const urls = fh.mock.calls.map((c) => c[0])
+    expect(urls).toEqual([
+      'https://www.1001tracklists.com/dj/lillypalmer/index.html',
+      'https://www.1001tracklists.com/dj/lillypalmer/page2.html',
+      'https://www.1001tracklists.com/dj/lillypalmer/page3.html',
+    ])
+  })
+
+  it('stops with no_new when an out-of-range page repeats already-seen URLs', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } })
+      .mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } })
+
+    const r = await crawlDjIndex('x')
+    expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/a/x.html'])
+    expect(r.stopReason).toBe('no_new')
+  })
+
+  it('respects maxPages and reports max_pages stopReason', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    // Each page contributes new URLs so neither empty nor no_new fires.
+    fh.mockImplementation(async (url: string) => {
+      const page = url.match(/page(\d+)\.html/)?.[1] ?? '1'
+      return { html: htmlWith([`/tracklist/${page}/x.html`]), state: { cookie: '' } }
+    })
+
+    const r = await crawlDjIndex('x', { maxPages: 2 })
+    expect(r.pagesWalked).toBe(2)
+    expect(r.stopReason).toBe('max_pages')
+  })
+
+  it('respects deadlineMs and reports deadline stopReason', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } })
+    // deadlineMs already in the past → loop never enters page 2.
+    const r = await crawlDjIndex('x', { deadlineMs: Date.now() - 1, maxPages: 5 })
+    expect(r.pagesWalked).toBe(0)
+    expect(r.stopReason).toBe('deadline')
+  })
+
+  it('treats a per-page fetch failure as fetch_failed and keeps prior pages', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } }).mockRejectedValueOnce(
+      new Error('CF shell on page 2'),
+    )
+    const r = await crawlDjIndex('x')
+    expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/a/x.html'])
+    expect(r.stopReason).toBe('fetch_failed')
   })
 })

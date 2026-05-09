@@ -25,7 +25,7 @@
 
 import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
-import { fetch1001Html, parseDjIndex, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
+import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { getAccessToken } from './google-oauth'
 import {
   addVideoToPlaylist,
@@ -44,10 +44,24 @@ const playlistDescription = (artistName: string) =>
 // inside Workers' wall-time budget. New subs with deeper history backfill
 // over multiple cron ticks (or repeated manual syncs).
 const DEFAULT_MAX_SETS_PER_RUN = 10
+// DJ-page pagination is also BrightData-paid; cap so a deep history doesn't
+// blow the wall-clock budget. Most DJs fit in <10 pages.
+const DEFAULT_MAX_DJ_PAGES = 20
+// Hard wall-clock deadline so we save state and return cleanly before
+// Cloudflare kills the worker. Workers' fetch event budget is ~30 s; we
+// leave headroom for network I/O on the response itself.
+const SYNC_DEADLINE_MS = 25_000
 
 export type SubState = {
   playlistId?: string
   artistName?: string
+  /**
+   * Union over time of every tracklist URL we've ever seen on this DJ's
+   * paginated index. The DJ index uses JS infinite-scroll, so a single
+   * fetch only sees ~15 newest sets; we walk pageN.html on first sync to
+   * build this and merge in newly-appearing URLs on every subsequent run.
+   */
+  discoveredTracklistUrls?: string[]
   processedTracklistUrls: string[]
   lastRunAt?: number
   lastError?: string
@@ -141,6 +155,7 @@ export async function syncOne(
 ): Promise<SyncOneResult> {
   const log = opts.log ?? makeLogger({ task: 'sync.one', slug: sub.slug })
   const maxSets = opts.maxSetsPerRun ?? DEFAULT_MAX_SETS_PER_RUN
+  const deadline = Date.now() + SYNC_DEADLINE_MS
   const state: SubState = (await loadSubState(env, sub.slug)) ?? { processedTracklistUrls: [] }
   const fetchOpts = {
     brightdataApiKey: env.BRIGHTDATA_API_KEY,
@@ -149,16 +164,27 @@ export async function syncOne(
     log,
   }
 
-  // 1. DJ index page
-  const djUrl = djUrlFor(sub.slug)
-  const djFetched = await fetch1001Html(djUrl, fetchOpts)
-  const parsed = parseDjIndex(djFetched.html)
-  const artistName = parsed.artistName ?? state.artistName ?? prettifySlug(sub.slug)
+  // 1. Crawl the DJ's paginated index. The page is JS-infinite-scroll in the
+  // browser, but 1001tl exposes the same content under static pageN.html
+  // URLs — so we walk those, accumulating into the per-sub discovery set.
+  // Fast subsequent syncs still mostly hit page 1 + bail at `no_new`.
+  const crawl = await crawlDjIndex(sub.slug, {
+    ...fetchOpts,
+    maxPages: DEFAULT_MAX_DJ_PAGES,
+    deadlineMs: deadline,
+  })
+  const artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
+  // Union with previously-discovered URLs — earlier pages may have failed
+  // to fetch this run but we don't want to lose them from the todo set.
+  const discovered = new Set<string>(state.discoveredTracklistUrls ?? [])
+  for (const u of crawl.tracklistUrls) discovered.add(u)
   log.info('sync.dj_parsed', {
     slug: sub.slug,
-    via: djFetched.via,
     artistName,
-    tracklistsSeen: parsed.tracklistUrls.length,
+    pagesWalked: crawl.pagesWalked,
+    stopReason: crawl.stopReason,
+    tracklistsSeenThisRun: crawl.tracklistUrls.length,
+    tracklistsKnownTotal: discovered.size,
   })
 
   // 2. Resolve / create the playlist. State first, then YT lookup, then create.
@@ -201,23 +227,34 @@ export async function syncOne(
     }
   }
 
-  // 4. Walk tracklist URLs we haven't already processed.
+  // 4. Walk tracklist URLs we haven't already processed. todo is drawn from
+  // the cumulative discovery set (state ∪ this-run), in the order we first
+  // saw them — newest at the front since 1001tl lists newest first.
   const processed = new Set(state.processedTracklistUrls)
-  const todo = parsed.tracklistUrls.filter((u) => !processed.has(u)).slice(0, maxSets)
+  const allUrls = [...discovered]
+  const todo = allUrls.filter((u) => !processed.has(u)).slice(0, maxSets)
   log.info('sync.todo_window', {
     slug: sub.slug,
-    totalUrls: parsed.tracklistUrls.length,
+    totalUrls: allUrls.length,
     alreadyProcessed: processed.size,
     todoThisRun: todo.length,
-    capped: parsed.tracklistUrls.length - processed.size > maxSets,
+    capped: allUrls.length - processed.size > maxSets,
   })
 
   let videoIdsFound = 0
   let videoIdsAdded = 0
   let setsProcessed = 0
-  const viaSeen = new Set<string>([djFetched.via])
+  const viaSeen = new Set<string>()
 
   for (const setUrl of todo) {
+    if (Date.now() >= deadline) {
+      log.warn('sync.deadline_hit_during_set_loop', {
+        slug: sub.slug,
+        setsProcessed,
+        setsRemainingInWindow: todo.length - setsProcessed,
+      })
+      break
+    }
     try {
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
@@ -268,14 +305,20 @@ export async function syncOne(
   const next: SubState = {
     playlistId,
     artistName,
+    discoveredTracklistUrls: [...discovered],
     processedTracklistUrls: [...processed],
     lastRunAt: Math.floor(Date.now() / 1000),
     lastRunStats: {
-      tracklistsSeen: parsed.tracklistUrls.length,
+      tracklistsSeen: discovered.size,
       tracklistsProcessed: setsProcessed,
       videoIdsFound,
       videoIdsAdded,
-      via: viaSeen.size === 1 ? ([...viaSeen][0] as 'home-proxy' | 'unlocker' | 'direct') : 'mixed',
+      via:
+        viaSeen.size === 0
+          ? 'direct'
+          : viaSeen.size === 1
+            ? ([...viaSeen][0] as 'home-proxy' | 'unlocker' | 'direct')
+            : 'mixed',
     },
   }
   await saveSubState(env, sub.slug, next)
@@ -286,11 +329,11 @@ export async function syncOne(
     artistName,
     playlistId,
     stats: {
-      tracklistsSeen: parsed.tracklistUrls.length,
+      tracklistsSeen: discovered.size,
       tracklistsProcessed: setsProcessed,
       videoIdsFound,
       videoIdsAdded,
-      tracklistsPending: Math.max(0, parsed.tracklistUrls.length - processed.size),
+      tracklistsPending: Math.max(0, discovered.size - processed.size),
     },
   }
 }

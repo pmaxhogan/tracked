@@ -153,6 +153,92 @@ function decodeEntities(s: string): string {
     .replace(/&nbsp;/g, ' ')
 }
 
+/**
+ * Walk the DJ's paginated index pages (`/dj/<slug>/index.html`,
+ * `/dj/<slug>/page2.html`, …) and return the union of every tracklist URL
+ * observed plus the artist name (taken from page 1's H1).
+ *
+ * **Why this exists:** the DJ page only renders ~15 sets in the initial HTML
+ * — the rest is loaded via JS infinite-scroll. So a single fetch misses the
+ * back-catalog. We follow 1001tl's static pagination URLs instead, which
+ * return the same content the JS would lazy-load.
+ *
+ * Stop conditions (any one ends the walk):
+ *   - empty page (no tracklist hrefs at all → past end)
+ *   - new-URL count is zero on a non-first page (overflow page returns the
+ *     same content as the last valid page → past end on some skins)
+ *   - `maxPages` reached
+ *   - `deadlineMs` reached (wall clock — guards Workers' 30s budget)
+ *   - per-page fetch threw (e.g. CF shell, BrightData failure) — we keep
+ *     what we already collected rather than failing the whole sync
+ */
+export async function crawlDjIndex(
+  slug: string,
+  opts: Fetch1001Opts & { maxPages?: number; deadlineMs?: number } = {},
+): Promise<{
+  artistName: string | null
+  tracklistUrls: string[]
+  pagesWalked: number
+  stopReason: 'empty' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed'
+}> {
+  const maxPages = opts.maxPages ?? 20
+  const log = opts.log
+  let artistName: string | null = null
+  const seen: string[] = []
+  const seenSet = new Set<string>()
+  let pagesWalked = 0
+  let stopReason: 'empty' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed' = 'max_pages'
+
+  for (let page = 1; page <= maxPages; page++) {
+    if (opts.deadlineMs && Date.now() >= opts.deadlineMs) {
+      log?.warn('crawlDjIndex.deadline', { slug, pagesWalked })
+      stopReason = 'deadline'
+      break
+    }
+    const url =
+      page === 1
+        ? `${ORIGIN}/dj/${slug}/index.html`
+        : `${ORIGIN}/dj/${slug}/page${page}.html`
+    let html: string
+    try {
+      const r = await fetch1001Html(url, opts)
+      html = r.html
+    } catch (e) {
+      log?.warn('crawlDjIndex.page_failed', {
+        slug,
+        page,
+        error: e instanceof Error ? e.message : String(e),
+      })
+      stopReason = 'fetch_failed'
+      break
+    }
+    pagesWalked++
+    const parsed = parseDjIndex(html)
+    if (page === 1) artistName = parsed.artistName
+    if (parsed.tracklistUrls.length === 0) {
+      log?.info('crawlDjIndex.empty_page', { slug, page })
+      stopReason = 'empty'
+      break
+    }
+    let added = 0
+    for (const u of parsed.tracklistUrls) {
+      if (!seenSet.has(u)) {
+        seenSet.add(u)
+        seen.push(u)
+        added++
+      }
+    }
+    log?.info('crawlDjIndex.page_done', { slug, page, urlsOnPage: parsed.tracklistUrls.length, addedNew: added })
+    // Some pagination implementations return page 1 again for out-of-range
+    // numbers; if every URL on this page is one we've seen, we're past end.
+    if (page > 1 && added === 0) {
+      stopReason = 'no_new'
+      break
+    }
+  }
+  return { artistName, tracklistUrls: seen, pagesWalked, stopReason }
+}
+
 export type Fetch1001Opts = {
   brightdataApiKey?: string
   homeProxyUrl?: string

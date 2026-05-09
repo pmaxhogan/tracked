@@ -18,7 +18,7 @@ vi.mock('../src/lib/dj-index', async () => {
   return {
     ...actual,
     fetch1001Html: vi.fn(),
-    parseDjIndex: vi.fn(),
+    crawlDjIndex: vi.fn(),
     parseSetYouTubeId: vi.fn(),
   }
 })
@@ -34,7 +34,7 @@ vi.mock('../src/lib/youtube-playlists', async () => {
   }
 })
 
-import { fetch1001Html, parseDjIndex, parseSetYouTubeId } from '../src/lib/dj-index'
+import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-index'
 import {
   addVideoToPlaylist,
   createPlaylist,
@@ -70,9 +70,22 @@ function makeEnv(): Env {
 
 const sub = { slug: 'lillypalmer', sourceUrl: 'https://www.1001tracklists.com/dj/lillypalmer/', addedAt: 0 }
 
+function mockCrawl(tracklistUrls: string[], artistName: string | null = 'X') {
+  ;(crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+    artistName,
+    tracklistUrls,
+    pagesWalked: 1,
+    stopReason: 'empty',
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
-  ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: '<html></html>', via: 'direct', state: { cookie: '' } })
+  ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+    html: '<set/>',
+    via: 'direct',
+    state: { cookie: '' },
+  })
   ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set<string>())
 })
 
@@ -91,10 +104,7 @@ describe('prettifySlug', () => {
 describe('syncOne', () => {
   it('creates a new playlist on first run, scrapes each set, adds non-duplicate videos, and writes state', async () => {
     const env = makeEnv()
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'Lilly Palmer',
-      tracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'],
-    })
+    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'], 'Lilly Palmer')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
     ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLnew', title: 'Lilly Palmer (1001tklists)' })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>)
@@ -137,10 +147,7 @@ describe('syncOne', () => {
     // playlist; listing it immediately after create 404s with
     // playlistNotFound. A new playlist is empty by definition, so just skip.
     const env = makeEnv()
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'Lilly Palmer',
-      tracklistUrls: ['https://x/tracklist/a'],
-    })
+    mockCrawl(['https://x/tracklist/a'], 'Lilly Palmer')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
     ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLnew', title: 'Lilly Palmer (1001tklists)' })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
@@ -154,10 +161,7 @@ describe('syncOne', () => {
 
   it('reuses a same-titled playlist found by lookup instead of creating a new one', async () => {
     const env = makeEnv()
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'Lilly Palmer',
-      tracklistUrls: ['https://x/tracklist/a'],
-    })
+    mockCrawl(['https://x/tracklist/a'], 'Lilly Palmer')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLold', title: 'Lilly Palmer (1001tklists)' })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
 
@@ -175,10 +179,7 @@ describe('syncOne', () => {
       artistName: 'Lilly Palmer',
       processedTracklistUrls: ['https://x/tracklist/old'],
     })
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'Lilly Palmer',
-      tracklistUrls: ['https://x/tracklist/old', 'https://x/tracklist/new'],
-    })
+    mockCrawl(['https://x/tracklist/old', 'https://x/tracklist/new'], 'Lilly Palmer')
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidNew11234')
 
     await syncOne(env, sub, 'tok')
@@ -192,10 +193,7 @@ describe('syncOne', () => {
 
   it('skips videos already in the playlist (defense against wiped state)', async () => {
     const env = makeEnv()
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'X',
-      tracklistUrls: ['https://x/tracklist/a'],
-    })
+    mockCrawl(['https://x/tracklist/a'], 'X')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
     ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set(['alreadyIn12']))
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('alreadyIn12')
@@ -210,7 +208,7 @@ describe('syncOne', () => {
   it('caps to maxSetsPerRun and leaves remaining URLs unprocessed for next run', async () => {
     const env = makeEnv()
     const urls = Array.from({ length: 50 }, (_, i) => `https://x/tracklist/${i}`)
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({ artistName: 'X', tracklistUrls: urls })
+    mockCrawl(urls, 'X')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
 
@@ -224,14 +222,11 @@ describe('syncOne', () => {
 
   it('continues past a per-set fetch failure without marking that URL processed', async () => {
     const env = makeEnv()
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'X',
-      tracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
-    })
+    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b'], 'X')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
-    // First call resolves the DJ page, then fails for /a, then succeeds for /b.
+    // The DJ-index walk is mocked above; here we mock per-set fetches:
+    // /a fails, /b succeeds.
     ;(fetch1001Html as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ html: '<dj>', via: 'direct', state: { cookie: '' } })
       .mockRejectedValueOnce(new Error('transient'))
       .mockResolvedValueOnce({ html: '<set>', via: 'direct', state: { cookie: '' } })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('goodVid1234')
@@ -251,7 +246,7 @@ describe('syncOne', () => {
       artistName: 'Lilly Palmer',
       processedTracklistUrls: [],
     } satisfies SubState)
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({ artistName: null, tracklistUrls: [] })
+    mockCrawl([], null)
 
     const r = await syncOne(env, sub, 'tok')
     expect(r.artistName).toBe('Lilly Palmer')
@@ -264,10 +259,7 @@ describe('syncOne', () => {
       artistName: 'X',
       processedTracklistUrls: [],
     })
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'X',
-      tracklistUrls: ['https://x/tracklist/a'],
-    })
+    mockCrawl(['https://x/tracklist/a'], 'X')
     // First list call → 404, recovery flow re-resolves and returns empty.
     ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>)
       .mockRejectedValueOnce(new PlaylistNotFoundError('playlistItems.list', 'PLdeleted'))
@@ -286,10 +278,7 @@ describe('syncOne', () => {
 
   it('recovers when the playlist disappears mid-run on the first add', async () => {
     const env = makeEnv()
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
-      artistName: 'X',
-      tracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
-    })
+    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b'], 'X')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ id: 'PL1', title: 'X (1001tklists)' })
       .mockResolvedValueOnce({ id: 'PL2', title: 'X (1001tklists)' })
@@ -316,7 +305,7 @@ describe('syncOne', () => {
 
   it('falls back to a prettified slug when no name is available anywhere', async () => {
     const env = makeEnv()
-    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({ artistName: null, tracklistUrls: [] })
+    mockCrawl([], null)
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
     ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'Lillypalmer (1001tklists)' })
 
