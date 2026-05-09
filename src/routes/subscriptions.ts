@@ -132,6 +132,111 @@ subscriptionsApp.get('/api/state/:slug', async (c) => {
   return c.json({ slug, state })
 })
 
+/**
+ * Diagnostic: probe several pagination URL formats for the DJ page and
+ * report which one returns content different from page 1. Also stashes the
+ * page-1 HTML into SUBS KV at `debug:dj:<slug>:html` (10 min TTL) so we can
+ * inspect it offline via wrangler kv to figure out what scroll-loader the
+ * page actually uses. Behind CF Access like everything else here.
+ */
+subscriptionsApp.get('/api/debug/dj-pagination/:slug', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.debug_pagination',
+  })
+  const slug = c.req.param('slug')
+  const fetchOpts = {
+    brightdataApiKey: c.env.BRIGHTDATA_API_KEY,
+    homeProxyUrl: c.env.HOME_PROXY_URL,
+    homeProxyToken: c.env.HOME_PROXY_TOKEN,
+    log,
+  }
+  const { fetch1001Html, parseDjIndex } = await import('../lib/dj-index')
+
+  const candidates = [
+    `https://www.1001tracklists.com/dj/${slug}/index.html`,
+    `https://www.1001tracklists.com/dj/${slug}/page2.html`,
+    `https://www.1001tracklists.com/dj/${slug}/index.html?page=2`,
+    `https://www.1001tracklists.com/dj/${slug}/?page=2`,
+    `https://www.1001tracklists.com/dj/${slug}/?p=2`,
+    `https://www.1001tracklists.com/dj/${slug}/2.html`,
+  ]
+  const results: Array<{
+    url: string
+    ok: boolean
+    htmlBytes?: number
+    trackCount?: number
+    firstTrack?: string | null
+    lastTrack?: string | null
+    error?: string
+  }> = []
+  let page1Html: string | null = null
+  for (const url of candidates) {
+    try {
+      const r = await fetch1001Html(url, fetchOpts)
+      const parsed = parseDjIndex(r.html)
+      if (url.endsWith('/index.html')) page1Html = r.html
+      results.push({
+        url,
+        ok: true,
+        htmlBytes: r.html.length,
+        trackCount: parsed.tracklistUrls.length,
+        firstTrack: parsed.tracklistUrls[0] ?? null,
+        lastTrack: parsed.tracklistUrls[parsed.tracklistUrls.length - 1] ?? null,
+      })
+    } catch (e) {
+      results.push({ url, ok: false, error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  if (page1Html) {
+    await c.env.SUBS.put(`debug:dj:${slug}:html`, page1Html, { expirationTtl: 600 })
+  }
+  // The DJ index loads /js/framework.js asynchronously, which defines the
+  // infinite-scroll handler `loadInfiniteScrollData`. Fetch that and pull
+  // out the AJAX URL it calls so we can paginate properly.
+  let frameworkSnippets: string[] = []
+  let frameworkBytes = 0
+  try {
+    const fw = await fetch1001Html('https://www.1001tracklists.com/js/framework.js', fetchOpts)
+    frameworkBytes = fw.html.length
+    await c.env.SUBS.put(`debug:dj:${slug}:framework_js`, fw.html, { expirationTtl: 600 })
+    // Pull a window of source around the function definition.
+    const idx = fw.html.indexOf('loadInfiniteScrollData')
+    if (idx !== -1) {
+      // capture 600 bytes around each occurrence (max 4 occurrences)
+      let from = 0
+      let count = 0
+      while (count < 4) {
+        const i = fw.html.indexOf('loadInfiniteScrollData', from)
+        if (i === -1) break
+        frameworkSnippets.push(fw.html.slice(Math.max(0, i - 100), i + 600))
+        from = i + 1
+        count++
+      }
+    }
+  } catch (e) {
+    frameworkSnippets.push(`framework.js fetch failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  // Surface inline-script fragments that look pagination-related — the
+  // scroll loader's AJAX URL often lives in one of them.
+  const scriptHints: string[] = []
+  if (page1Html) {
+    const reHints = [
+      /['"]\/?ajax\/[^'"]+['"]/g,
+      /['"]\/dj\/[^'"]*\/[^'"]*['"]/g,
+      /(?:get_dj|loadMore|loadTracklists|infinite[Ss]croll|nextPage)[^\n]{0,120}/g,
+      /XMLHttpRequest|fetch\(\s*['"][^'"]+['"]/g,
+    ]
+    for (const re of reHints) {
+      let m: RegExpExecArray | null
+      while ((m = re.exec(page1Html)) && scriptHints.length < 30) {
+        scriptHints.push(m[0])
+      }
+    }
+  }
+  return c.json({ slug, results, scriptHints, frameworkBytes, frameworkSnippets })
+})
+
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
 
 subscriptionsApp.get('/api/youtube/status', async (c) => {

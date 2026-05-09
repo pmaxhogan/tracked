@@ -19,6 +19,7 @@
 import { parse } from 'node-html-parser'
 import {
   fetchHtml,
+  fetchWithTimeout,
   isIPBlocked,
   extractIPBlockedAddress,
   IPBlockedError,
@@ -153,24 +154,43 @@ function decodeEntities(s: string): string {
     .replace(/&nbsp;/g, ' ')
 }
 
+// 1001tl's DJ-index page is JS infinite-scroll: the initial HTML only
+// renders ~15 newest sets, and `loadInfiniteScrollData()` (defined in
+// /js/framework.js) POSTs to `/ajax/get_data.php` to fetch more. The
+// payload is form-encoded:
+//
+//   type=overview        constant for DJ-index pagination
+//   dj=<DJ_ID>           internal short id (e.g. '80q82k2'), embedded in
+//                        the page as `iScrollParams.dj = '...'`
+//   width=<innerWidth>   used server-side to estimate row height; 1920 works
+//   pos=<count>          number of items currently shown
+//   id=<lastDataId>      data-id attribute of the last visible .oItm row
+//   count=<requested>    how many more items to return; ~15 fits page-1 sizing
+//
+// Response shape: { success: bool, data: '<html chunk of more .oItm rows>',
+// end?: bool, captcha?: bool, captchaHTML?: '...' }. We only need success+data
+// (or end). Captcha is rare and surfaces as a CloudflareChallengeError-style
+// no-progress signal.
+const DJ_ID_RE = /iScrollParams\s*\.\s*dj\s*=\s*['"]([^'"]+)['"]/
+const O_ITM_DATA_ID_RE = /<div[^>]*\boItm\b[^>]*\bdata-id="([^"]+)"/g
+const AJAX_URL = `${ORIGIN}/ajax/get_data.php`
+
 /**
- * Walk the DJ's paginated index pages (`/dj/<slug>/index.html`,
- * `/dj/<slug>/page2.html`, …) and return the union of every tracklist URL
- * observed plus the artist name (taken from page 1's H1).
+ * Walk the DJ's index by fetching page 1 statically and then driving the
+ * same `/ajax/get_data.php` infinite-scroll endpoint that the browser uses.
+ * Returns the union of all tracklist URLs, artist name (from page 1 H1),
+ * pages walked (1 = initial only, N = initial + N-1 AJAX calls), and a
+ * stop reason for the log.
  *
- * **Why this exists:** the DJ page only renders ~15 sets in the initial HTML
- * — the rest is loaded via JS infinite-scroll. So a single fetch misses the
- * back-catalog. We follow 1001tl's static pagination URLs instead, which
- * return the same content the JS would lazy-load.
- *
- * Stop conditions (any one ends the walk):
- *   - empty page (no tracklist hrefs at all → past end)
- *   - new-URL count is zero on a non-first page (overflow page returns the
- *     same content as the last valid page → past end on some skins)
+ * Stop conditions:
+ *   - `end: true` in the AJAX response (1001tl explicitly says no more)
+ *   - new-URL count zero on an AJAX response (defensive — past end)
  *   - `maxPages` reached
- *   - `deadlineMs` reached (wall clock — guards Workers' 30s budget)
- *   - per-page fetch threw (e.g. CF shell, BrightData failure) — we keep
- *     what we already collected rather than failing the whole sync
+ *   - `deadlineMs` reached (wall clock — guards Workers' 30 s budget)
+ *   - AJAX call threw / parsing failed — we keep what we've collected
+ *
+ * If we can't extract a DJ id or last-data-id from page 1's HTML, the
+ * function degrades gracefully to "page 1 only" with stopReason='no_pagination'.
  */
 export async function crawlDjIndex(
   slug: string,
@@ -179,32 +199,63 @@ export async function crawlDjIndex(
   artistName: string | null
   tracklistUrls: string[]
   pagesWalked: number
-  stopReason: 'empty' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed'
+  stopReason: 'end' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed' | 'no_pagination'
 }> {
   const maxPages = opts.maxPages ?? 20
   const log = opts.log
-  let artistName: string | null = null
-  const seen: string[] = []
-  const seenSet = new Set<string>()
-  let pagesWalked = 0
-  let stopReason: 'empty' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed' = 'max_pages'
 
-  for (let page = 1; page <= maxPages; page++) {
+  // Page 1 is the static fetch — we need its HTML for both the URLs and
+  // the pagination keys (DJ id + last-data-id).
+  let page1Html: string
+  try {
+    const r = await fetch1001Html(`${ORIGIN}/dj/${slug}/index.html`, opts)
+    page1Html = r.html
+  } catch (e) {
+    log?.warn('crawlDjIndex.page1_failed', { slug, error: e instanceof Error ? e.message : String(e) })
+    return { artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed' }
+  }
+  const parsed1 = parseDjIndex(page1Html)
+  const seenSet = new Set<string>(parsed1.tracklistUrls)
+  const all: string[] = [...parsed1.tracklistUrls]
+  let pagesWalked = 1
+  log?.info('crawlDjIndex.page_done', {
+    slug,
+    page: 1,
+    via: 'static',
+    urlsOnPage: parsed1.tracklistUrls.length,
+    addedNew: parsed1.tracklistUrls.length,
+  })
+
+  const djId = page1Html.match(DJ_ID_RE)?.[1] ?? null
+  const lastDataId = lastOItmDataId(page1Html)
+  if (!djId || !lastDataId || parsed1.tracklistUrls.length === 0) {
+    log?.warn('crawlDjIndex.no_pagination_keys', {
+      slug,
+      hasDjId: !!djId,
+      hasLastDataId: !!lastDataId,
+      urlsOnPage1: parsed1.tracklistUrls.length,
+    })
+    return { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason: 'no_pagination' }
+  }
+
+  let cursorDataId = lastDataId
+  let cursorPos = parsed1.tracklistUrls.length
+  let stopReason: 'end' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed' | 'no_pagination' = 'max_pages'
+
+  for (let page = 2; page <= maxPages; page++) {
     if (opts.deadlineMs && Date.now() >= opts.deadlineMs) {
       log?.warn('crawlDjIndex.deadline', { slug, pagesWalked })
       stopReason = 'deadline'
       break
     }
-    const url =
-      page === 1
-        ? `${ORIGIN}/dj/${slug}/index.html`
-        : `${ORIGIN}/dj/${slug}/page${page}.html`
-    let html: string
+    let chunk: { ok: boolean; end: boolean; dataHtml: string }
     try {
-      const r = await fetch1001Html(url, opts)
-      html = r.html
+      chunk = await fetchInfiniteScrollChunk(
+        { djId, pos: cursorPos, dataId: cursorDataId, count: 15, refererSlug: slug },
+        opts,
+      )
     } catch (e) {
-      log?.warn('crawlDjIndex.page_failed', {
+      log?.warn('crawlDjIndex.ajax_failed', {
         slug,
         page,
         error: e instanceof Error ? e.message : String(e),
@@ -212,31 +263,124 @@ export async function crawlDjIndex(
       stopReason = 'fetch_failed'
       break
     }
-    pagesWalked++
-    const parsed = parseDjIndex(html)
-    if (page === 1) artistName = parsed.artistName
-    if (parsed.tracklistUrls.length === 0) {
-      log?.info('crawlDjIndex.empty_page', { slug, page })
-      stopReason = 'empty'
+    if (!chunk.ok) {
+      log?.warn('crawlDjIndex.ajax_not_ok', { slug, page })
+      stopReason = 'fetch_failed'
       break
     }
+    pagesWalked++
+
+    const newUrls = extractTracklistUrls(chunk.dataHtml)
     let added = 0
-    for (const u of parsed.tracklistUrls) {
+    for (const u of newUrls) {
       if (!seenSet.has(u)) {
         seenSet.add(u)
-        seen.push(u)
+        all.push(u)
         added++
       }
     }
-    log?.info('crawlDjIndex.page_done', { slug, page, urlsOnPage: parsed.tracklistUrls.length, addedNew: added })
-    // Some pagination implementations return page 1 again for out-of-range
-    // numbers; if every URL on this page is one we've seen, we're past end.
-    if (page > 1 && added === 0) {
+    log?.info('crawlDjIndex.page_done', { slug, page, via: 'ajax', urlsOnPage: newUrls.length, addedNew: added, end: chunk.end })
+
+    if (chunk.end) {
+      stopReason = 'end'
+      break
+    }
+    if (added === 0) {
       stopReason = 'no_new'
       break
     }
+
+    const nextDataId = lastOItmDataId(chunk.dataHtml)
+    if (!nextDataId) {
+      // No further data-ids returned — we've drained the list.
+      stopReason = 'end'
+      break
+    }
+    cursorDataId = nextDataId
+    cursorPos += newUrls.length
   }
-  return { artistName, tracklistUrls: seen, pagesWalked, stopReason }
+
+  return { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason }
+}
+
+function lastOItmDataId(html: string): string | null {
+  let last: string | null = null
+  let m: RegExpExecArray | null
+  O_ITM_DATA_ID_RE.lastIndex = 0
+  while ((m = O_ITM_DATA_ID_RE.exec(html))) last = m[1]!
+  return last
+}
+
+function extractTracklistUrls(html: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  let m: RegExpExecArray | null
+  TRACKLIST_HREF_RE.lastIndex = 0
+  while ((m = TRACKLIST_HREF_RE.exec(html))) {
+    const abs = ORIGIN + m[1]!
+    if (!seen.has(abs)) {
+      seen.add(abs)
+      out.push(abs)
+    }
+  }
+  return out
+}
+
+/**
+ * POST /ajax/get_data.php with the form-encoded scroll cursor. Direct
+ * fetch only — the AJAX endpoint historically isn't behind 1001tl's CF
+ * challenge gate the way the page HTML is, mirroring how the medialink
+ * AJAX works direct from Workers in tracklists1001.ts. If a deployment
+ * starts seeing 522s or CF shells here, BrightData fallback can be
+ * grafted in following the medialink-direct-then-unlocker pattern.
+ */
+async function fetchInfiniteScrollChunk(
+  cursor: { djId: string; pos: number; dataId: string; count: number; refererSlug: string },
+  opts: Fetch1001Opts,
+): Promise<{ ok: boolean; end: boolean; dataHtml: string }> {
+  const body = new URLSearchParams({
+    type: 'overview',
+    dj: cursor.djId,
+    width: '1920',
+    pos: String(cursor.pos),
+    id: cursor.dataId,
+    count: String(cursor.count),
+  })
+  const referer = `${ORIGIN}/dj/${cursor.refererSlug}/index.html`
+  const start = Date.now()
+  const res = await fetchWithTimeout(AJAX_URL, {
+    method: 'POST',
+    timeoutMs: 8000,
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'XMLHttpRequest',
+      Accept: 'application/json,text/javascript,*/*;q=0.01',
+      Referer: referer,
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    },
+    body,
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    opts.log?.warn('crawlDjIndex.ajax_http_status', { status: res.status, ms: Date.now() - start, body: text.slice(0, 300) })
+    return { ok: false, end: false, dataHtml: '' }
+  }
+  let json: { success?: boolean; end?: boolean; data?: string; captcha?: boolean }
+  try {
+    json = JSON.parse(text)
+  } catch {
+    opts.log?.warn('crawlDjIndex.ajax_parse_failed', { ms: Date.now() - start, body: text.slice(0, 300) })
+    return { ok: false, end: false, dataHtml: '' }
+  }
+  if (json.captcha) {
+    opts.log?.warn('crawlDjIndex.ajax_captcha', { ms: Date.now() - start })
+    return { ok: false, end: false, dataHtml: '' }
+  }
+  if (!json.success && !json.end) {
+    return { ok: false, end: false, dataHtml: '' }
+  }
+  return { ok: true, end: !!json.end, dataHtml: json.data ?? '' }
 }
 
 export type Fetch1001Opts = {

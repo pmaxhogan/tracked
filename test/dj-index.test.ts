@@ -4,16 +4,17 @@ import { resolve } from 'node:path'
 import { vi } from 'vitest'
 import { crawlDjIndex, parseDjIndex, parseSetYouTubeId } from '../src/lib/dj-index'
 
-// crawlDjIndex internally calls fetch1001Html, which goes through the home
-// proxy / unlocker / direct cascade. For unit tests we stub it module-level.
+// crawlDjIndex internally fetches page 1 via fetch1001Html (home-proxy /
+// unlocker / direct cascade) and then drives /ajax/get_data.php via direct
+// POST. We stub both for unit tests.
 vi.mock('../src/lib/fetch', async () => {
   const actual = await vi.importActual<typeof import('../src/lib/fetch')>('../src/lib/fetch')
-  return { ...actual, fetchHtml: vi.fn() }
+  return { ...actual, fetchHtml: vi.fn(), fetchWithTimeout: vi.fn() }
 })
 vi.mock('../src/lib/unlocker', () => ({ fetchViaUnlocker: vi.fn() }))
 vi.mock('../src/lib/homeProxy', () => ({ fetchViaHomeProxy: vi.fn() }))
 
-import { fetchHtml } from '../src/lib/fetch'
+import { fetchHtml, fetchWithTimeout } from '../src/lib/fetch'
 
 const ORIGIN = 'https://www.1001tracklists.com'
 
@@ -134,76 +135,175 @@ describe('parseSetYouTubeId', () => {
 })
 
 describe('crawlDjIndex', () => {
-  function htmlWith(urls: string[], h1 = 'Test DJ'): string {
-    return `<h1>${h1}</h1>` + urls.map((u) => `<a href="${u.replace(/^https:\/\/www\.1001tracklists\.com/, '')}">x</a>`).join('')
+  /**
+   * Build a page-1 HTML containing the necessary pagination keys: an H1, a
+   * set of .oItm rows (each with a data-id and an inner anchor to a tracklist
+   * URL), and the inline `iScrollParams.dj = '...'` script. Without all
+   * three, crawlDjIndex degrades to no_pagination.
+   */
+  function page1Html(opts: {
+    artist?: string
+    djId?: string
+    items: Array<{ dataId: string; href: string }>
+  }): string {
+    const items = opts.items
+      .map(
+        (it) =>
+          `<div class="bItm action oItm" data-id="${it.dataId}"><a href="${it.href}">x</a></div>`,
+      )
+      .join('')
+    return `<h1 class="titleNameH1">${opts.artist ?? 'Test'}</h1>${items}<script>iScrollParams.dj = '${opts.djId ?? 'abc123'}';</script>`
   }
 
-  it('walks pages until an empty page, accumulates URLs, captures artistName from page 1', async () => {
+  function ajaxResponse(body: object): Response {
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  it('fetches page 1 and drives /ajax/get_data.php for subsequent pages until end:true', async () => {
     const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
-    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html', '/tracklist/b/y.html'], 'Lilly Palmer'), state: { cookie: '' } })
-      .mockResolvedValueOnce({ html: htmlWith(['/tracklist/c/z.html'], 'Lilly Palmer'), state: { cookie: '' } })
-      .mockResolvedValueOnce({ html: '<html><body>nothing</body></html>', state: { cookie: '' } })
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({
+      html: page1Html({
+        artist: 'Lilly Palmer',
+        djId: '80q82k2',
+        items: [
+          { dataId: 'd1', href: '/tracklist/a/one.html' },
+          { dataId: 'd2', href: '/tracklist/b/two.html' },
+        ],
+      }),
+      state: { cookie: '' },
+    })
+    // First AJAX page: 2 new
+    fwt.mockResolvedValueOnce(
+      ajaxResponse({
+        success: true,
+        data: '<div class="oItm" data-id="d3"><a href="/tracklist/c/three.html">x</a></div><div class="oItm" data-id="d4"><a href="/tracklist/d/four.html">x</a></div>',
+      }),
+    )
+    // Second AJAX page: 1 new + end
+    fwt.mockResolvedValueOnce(
+      ajaxResponse({
+        success: true,
+        end: true,
+        data: '<div class="oItm" data-id="d5"><a href="/tracklist/e/five.html">x</a></div>',
+      }),
+    )
 
     const r = await crawlDjIndex('lillypalmer')
     expect(r.artistName).toBe('Lilly Palmer')
     expect(r.tracklistUrls).toEqual([
-      'https://www.1001tracklists.com/tracklist/a/x.html',
-      'https://www.1001tracklists.com/tracklist/b/y.html',
-      'https://www.1001tracklists.com/tracklist/c/z.html',
+      'https://www.1001tracklists.com/tracklist/a/one.html',
+      'https://www.1001tracklists.com/tracklist/b/two.html',
+      'https://www.1001tracklists.com/tracklist/c/three.html',
+      'https://www.1001tracklists.com/tracklist/d/four.html',
+      'https://www.1001tracklists.com/tracklist/e/five.html',
     ])
     expect(r.pagesWalked).toBe(3)
-    expect(r.stopReason).toBe('empty')
-    // Verify the URL pattern: page 1 → /index.html, page 2+ → /pageN.html.
-    const urls = fh.mock.calls.map((c) => c[0])
-    expect(urls).toEqual([
-      'https://www.1001tracklists.com/dj/lillypalmer/index.html',
-      'https://www.1001tracklists.com/dj/lillypalmer/page2.html',
-      'https://www.1001tracklists.com/dj/lillypalmer/page3.html',
-    ])
+    expect(r.stopReason).toBe('end')
+    // Verify the AJAX call shape: form-encoded POST with the correct cursor params.
+    const ajaxCalls = fwt.mock.calls
+    expect(ajaxCalls[0]![0]).toBe('https://www.1001tracklists.com/ajax/get_data.php')
+    const init1 = ajaxCalls[0]![1]!
+    expect(init1.method).toBe('POST')
+    const body1 = (init1.body as URLSearchParams).toString()
+    expect(body1).toContain('type=overview')
+    expect(body1).toContain('dj=80q82k2')
+    expect(body1).toContain('pos=2') // 2 items shown after page 1
+    expect(body1).toContain('id=d2') // last data-id from page 1
+    // Second AJAX call's cursor advances using the previous chunk's data.
+    const body2 = (ajaxCalls[1]![1]!.body as URLSearchParams).toString()
+    expect(body2).toContain('pos=4') // 2 + 2 items shown
+    expect(body2).toContain('id=d4') // last data-id from chunk 1
   })
 
-  it('stops with no_new when an out-of-range page repeats already-seen URLs', async () => {
+  it('degrades to no_pagination when page 1 lacks pagination keys', async () => {
     const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
-    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } })
-      .mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } })
+    // No iScrollParams script and no .oItm data-ids → can't paginate.
+    fh.mockResolvedValueOnce({
+      html: '<h1>Test</h1><a href="/tracklist/x/y.html">x</a>',
+      state: { cookie: '' },
+    })
 
     const r = await crawlDjIndex('x')
-    expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/a/x.html'])
+    expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/x/y.html'])
+    expect(r.pagesWalked).toBe(1)
+    expect(r.stopReason).toBe('no_pagination')
+  })
+
+  it('stops with no_new when an AJAX chunk introduces only already-seen URLs', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({
+      html: page1Html({ djId: 'd', items: [{ dataId: 'd1', href: '/tracklist/a/one.html' }] }),
+      state: { cookie: '' },
+    })
+    fwt.mockResolvedValueOnce(
+      ajaxResponse({
+        success: true,
+        // Same URL we already saw on page 1 → added=0 → no_new.
+        data: '<div class="oItm" data-id="d1"><a href="/tracklist/a/one.html">x</a></div>',
+      }),
+    )
+
+    const r = await crawlDjIndex('x')
+    expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/a/one.html'])
     expect(r.stopReason).toBe('no_new')
   })
 
   it('respects maxPages and reports max_pages stopReason', async () => {
     const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
-    // Each page contributes new URLs so neither empty nor no_new fires.
-    fh.mockImplementation(async (url: string) => {
-      const page = url.match(/page(\d+)\.html/)?.[1] ?? '1'
-      return { html: htmlWith([`/tracklist/${page}/x.html`]), state: { cookie: '' } }
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({
+      html: page1Html({ djId: 'd', items: [{ dataId: 'd1', href: '/tracklist/1/x.html' }] }),
+      state: { cookie: '' },
     })
+    // Each AJAX call introduces a new URL so neither end nor no_new fires.
+    let n = 1
+    fwt.mockImplementation(async () =>
+      ajaxResponse({
+        success: true,
+        data: `<div class="oItm" data-id="d${++n}"><a href="/tracklist/${n}/x.html">x</a></div>`,
+      }),
+    )
 
-    const r = await crawlDjIndex('x', { maxPages: 2 })
-    expect(r.pagesWalked).toBe(2)
+    const r = await crawlDjIndex('x', { maxPages: 3 })
+    expect(r.pagesWalked).toBe(3)
     expect(r.stopReason).toBe('max_pages')
   })
 
-  it('respects deadlineMs and reports deadline stopReason', async () => {
+  it('honors deadlineMs and reports deadline stopReason', async () => {
     const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
-    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } })
-    // deadlineMs already in the past → loop never enters page 2.
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({
+      html: page1Html({ djId: 'd', items: [{ dataId: 'd1', href: '/tracklist/a/x.html' }] }),
+      state: { cookie: '' },
+    })
+    // Deadline already in the past → loop never enters the AJAX phase.
     const r = await crawlDjIndex('x', { deadlineMs: Date.now() - 1, maxPages: 5 })
-    expect(r.pagesWalked).toBe(0)
+    expect(r.pagesWalked).toBe(1) // page 1 still happened
     expect(r.stopReason).toBe('deadline')
+    expect(fwt).not.toHaveBeenCalled()
   })
 
-  it('treats a per-page fetch failure as fetch_failed and keeps prior pages', async () => {
+  it('treats an AJAX failure as fetch_failed and keeps prior pages', async () => {
     const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
-    fh.mockResolvedValueOnce({ html: htmlWith(['/tracklist/a/x.html']), state: { cookie: '' } }).mockRejectedValueOnce(
-      new Error('CF shell on page 2'),
-    )
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({
+      html: page1Html({ djId: 'd', items: [{ dataId: 'd1', href: '/tracklist/a/x.html' }] }),
+      state: { cookie: '' },
+    })
+    fwt.mockRejectedValueOnce(new Error('AJAX upstream timeout'))
     const r = await crawlDjIndex('x')
     expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/a/x.html'])
     expect(r.stopReason).toBe('fetch_failed')
