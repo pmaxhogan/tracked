@@ -161,25 +161,40 @@ export async function syncOne(
   // 2. Resolve / create the playlist. State first, then YT lookup, then create.
   const playlistTitle = `${artistName}${PLAYLIST_TITLE_SUFFIX}`
   let playlistId = state.playlistId
+  // Track whether the resolution path went through `playlists.insert` so we
+  // can skip the immediately-following `playlistItems.list`. YouTube's read
+  // API takes a few seconds to see a freshly-created playlist; listing it
+  // right away 404s with playlistNotFound even though the id is valid. A
+  // newly-created playlist is by definition empty, so the list call is also
+  // unnecessary — known-empty is the right baseline.
+  let justCreated = false
   if (!playlistId) {
-    playlistId = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+    const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+    playlistId = r.id
+    justCreated = r.justCreated
   }
 
   // 3. Existing video ids in the playlist (defense in depth — wiped state mustn't dupe).
   // If the cached playlistId references a playlist the user has since deleted
   // (or that was never visible to this account), the list call 404s with
   // playlistNotFound. Treat that as a state-staleness signal: drop the id,
-  // re-resolve by title (or create fresh), and retry.
+  // re-resolve by title (or create fresh), and retry — skipping the list
+  // again if recovery created a fresh playlist.
   let existingVideoIds: Set<string>
-  try {
-    existingVideoIds = await listPlaylistVideoIds(playlistId, accessToken)
-  } catch (e) {
-    if (e instanceof PlaylistNotFoundError) {
-      log.warn('sync.playlist_stale', { slug: sub.slug, stalePlaylistId: playlistId })
-      playlistId = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+  if (justCreated) {
+    existingVideoIds = new Set()
+  } else {
+    try {
       existingVideoIds = await listPlaylistVideoIds(playlistId, accessToken)
-    } else {
-      throw e
+    } catch (e) {
+      if (e instanceof PlaylistNotFoundError) {
+        log.warn('sync.playlist_stale', { slug: sub.slug, stalePlaylistId: playlistId })
+        const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+        playlistId = r.id
+        existingVideoIds = r.justCreated ? new Set() : await listPlaylistVideoIds(playlistId, accessToken)
+      } else {
+        throw e
+      }
     }
   }
 
@@ -214,8 +229,10 @@ export async function syncOne(
               // Playlist disappeared mid-run. Re-resolve once and retry the
               // insert; subsequent iterations of the loop pick up the new id.
               log.warn('sync.playlist_stale_midrun', { slug: sub.slug, stalePlaylistId: playlistId })
-              playlistId = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
-              existingVideoIds = new Set() // fresh playlist starts empty
+              const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+              playlistId = r.id
+              // Found existing same-titled → list to avoid dupes; freshly created → empty.
+              existingVideoIds = r.justCreated ? new Set() : await listPlaylistVideoIds(playlistId, accessToken)
               await addVideoToPlaylist(playlistId, videoId, accessToken)
             } else {
               throw e
@@ -280,18 +297,18 @@ async function findOrCreatePlaylist(
   accessToken: string,
   log: Logger,
   slug: string,
-): Promise<string> {
+): Promise<{ id: string; justCreated: boolean }> {
   const existing = await findPlaylistByTitle(title, accessToken)
   if (existing) {
     log.info('sync.playlist_found', { slug, playlistId: existing.id, title })
-    return existing.id
+    return { id: existing.id, justCreated: false }
   }
   const created = await createPlaylist(
     { title, description: playlistDescription(artistName), privacyStatus: 'private' },
     accessToken,
   )
   log.info('sync.playlist_created', { slug, playlistId: created.id, title })
-  return created.id
+  return { id: created.id, justCreated: true }
 }
 
 /**

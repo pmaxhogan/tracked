@@ -131,6 +131,26 @@ describe('syncOne', () => {
     ])
   })
 
+  it('skips listPlaylistVideoIds after creating a fresh playlist (eventual-consistency 404 avoidance)', async () => {
+    // YouTube\'s read API takes a few seconds to see a freshly-created
+    // playlist; listing it immediately after create 404s with
+    // playlistNotFound. A new playlist is empty by definition, so just skip.
+    const env = makeEnv()
+    ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
+      artistName: 'Lilly Palmer',
+      tracklistUrls: ['https://x/tracklist/a'],
+    })
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
+    ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLnew', title: 'Lilly Palmer (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+
+    const r = await syncOne(env, sub, 'tok')
+
+    expect(r.ok).toBe(true)
+    expect(listPlaylistVideoIds).not.toHaveBeenCalled()
+    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLnew', 'vidA1234567', 'tok')
+  })
+
   it('reuses a same-titled playlist found by lookup instead of creating a new one', async () => {
     const env = makeEnv()
     ;(parseDjIndex as ReturnType<typeof vi.fn>).mockReturnValue({
