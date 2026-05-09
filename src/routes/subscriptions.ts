@@ -665,6 +665,13 @@ const PAGE_HTML = /* html */ `<!doctype html>
   load();
   loadYouTubeStatus();
   loadProxyStatus();
+  // Re-poll the home-proxy status so the banner reflects KV changes
+  // initiated outside this tab (e.g. clearing via curl, or a sync run
+  // tripping a fresh backoff in the background).
+  setInterval(loadProxyStatus, 15_000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) loadProxyStatus();
+  });
 })();
 </script>
 </body>
