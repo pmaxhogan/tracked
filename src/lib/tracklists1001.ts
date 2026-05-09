@@ -2,6 +2,7 @@ import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
 import { fetchHtml, fetchWithTimeout, postForm, isIPBlocked, extractIPBlockedAddress, IPBlockedError, looksLikeCfShell, CloudflareChallengeError, type ChallengeState } from './fetch'
 import { fetchViaUnlocker } from './unlocker'
+import { fetchViaHomeProxy } from './homeProxy'
 import type { Logger } from './log'
 
 const ORIGIN = 'https://www.1001tracklists.com'
@@ -63,6 +64,12 @@ export type FetchTracklistOpts = {
    *  1001tracklists serves to Cloudflare Worker IPs). When absent, fetch directly
    *  — fine from a residential IP, fails on Workers. */
   brightdataApiKey?: string
+  /** When both are set, try the residential-IP forwarder FIRST. On any failure
+   *  (transport error, CF shell, IP block, zero-track parse) we fall through
+   *  to BrightData if its key is set, else direct. Free + same residential-IP
+   *  characteristics that already work in dev. */
+  homeProxyUrl?: string
+  homeProxyToken?: string
   state?: ChallengeState
   log?: Logger
 }
@@ -72,8 +79,48 @@ export async function fetchTracklist(
   opts: FetchTracklistOpts = {},
 ): Promise<{ result: ScrapedTracklist; state: ChallengeState }> {
   const log = opts.log
-  log?.info('1001scrape.start', { tracklistUrl, viaUnlocker: !!opts.brightdataApiKey })
+  const haveHomeProxy = !!(opts.homeProxyUrl && opts.homeProxyToken)
+  log?.info('1001scrape.start', {
+    tracklistUrl,
+    viaHomeProxy: haveHomeProxy,
+    viaUnlocker: !!opts.brightdataApiKey,
+  })
   const start = Date.now()
+
+  // Attempt 0: residential-IP forwarder. Cheap (free) and uses the same kind
+  // of IP that already works in dev. On any failure mode that the BrightData
+  // path also handles (CF shell, IP block, transport, zero-track parse) we
+  // fall through to BrightData rather than surfacing the error — the home
+  // proxy is the preferred path, not the only path.
+  if (haveHomeProxy) {
+    const r = await fetchViaHomeProxy(tracklistUrl, opts.homeProxyUrl!, opts.homeProxyToken!, log)
+    if (r.html) {
+      if (isIPBlocked(r.html)) {
+        const clientIp = extractIPBlockedAddress(r.html)
+        log?.warn('1001scrape.homeproxy_ip_blocked_falling_back', { tracklistUrl, clientIp, htmlBytes: r.html.length, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
+      } else if (looksLikeCfShell(r.html)) {
+        log?.warn('1001scrape.homeproxy_cf_shell_falling_back', { tracklistUrl, htmlBytes: r.html.length, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
+      } else {
+        const result = parseTracklist(tracklistUrl, r.html)
+        if (result.tracks.length > 0) {
+          log?.info('1001scrape.parsed_homeproxy', {
+            tracklistUrl,
+            htmlBytes: r.html.length,
+            trackCount: result.tracks.length,
+            unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
+            mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
+            ms: Date.now() - start,
+          })
+          return { result, state: opts.state ?? { cookie: '' } }
+        }
+        log?.warn('1001scrape.homeproxy_zero_tracks_falling_back', { tracklistUrl, htmlBytes: r.html.length, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
+        logEmptyParseDiagnostics(r.html, tracklistUrl, log)
+      }
+    } else {
+      log?.warn('1001scrape.homeproxy_unusable_falling_back', { tracklistUrl, status: r.status, errorMessage: r.errorMessage, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
+    }
+  }
+
   if (opts.brightdataApiKey) {
     // Up to 2 attempts: BrightData rotates exit IP between calls, so a CF
     // shell on attempt 1 (residential IP without fresh CF clearance) often

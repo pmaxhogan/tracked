@@ -103,6 +103,7 @@ Worker observability is on (`observability.enabled: true` in `wrangler.jsonc`). 
   "cacheMisses": 0,
   "youtubeApiCalls": 0,    // 100 quota units each (search.list + videos.list)
   "brightdataCalls": 0,    // ~$3/1000, used for tracklist scrape and medialink fallback
+  "homeProxyCalls": 0,     // free, residential-IP forwarder; preferred over brightdata when configured
   "itunesCalls": 0         // free
 }
 ```
@@ -166,25 +167,65 @@ echo $API_TOKEN          | npx wrangler secret put API_TOKEN
 echo $YOUTUBE_API_KEY    | npx wrangler secret put YOUTUBE_API_KEY
 echo $BRIGHTDATA_API_KEY | npx wrangler secret put BRIGHTDATA_API_KEY
 
+# Optional: residential-IP forwarder (see "Home proxy" below)
+echo $HOME_PROXY_URL     | npx wrangler secret put HOME_PROXY_URL
+echo $HOME_PROXY_TOKEN   | npx wrangler secret put HOME_PROXY_TOKEN
+
 # 3. Deploy
 npx wrangler deploy
 ```
 
 ## Network strategy
 
-1001tracklists treats Cloudflare Workers' egress IPs as bots and serves a captcha interstitial on tracklist *page* GETs (the search endpoint, oddly, comes through fine). To bypass that without having to babysit CAPTCHAs, the tracklist page GET routes through **Bright Data Web Unlocker** when `BRIGHTDATA_API_KEY` is set.
+1001tracklists treats Cloudflare Workers' egress IPs as bots and serves a captcha interstitial on tracklist *page* GETs (the search endpoint, oddly, comes through fine). The tracklist GET has up to three escape hatches in priority order:
 
-| upstream                              | how we fetch it                                          |
-| ------------------------------------- | -------------------------------------------------------- |
-| YouTube Data API                       | direct `fetch()`                                          |
-| iTunes Search API                      | direct `fetch()`                                          |
-| 1001tracklists `/search/result.php`    | direct `fetch()` (works from Worker IPs)                 |
-| 1001tracklists tracklist page          | Bright Data Web Unlocker if key set, else direct (dev)    |
-| 1001tracklists `get_medialink.php` AJAX| direct `fetch()` (no captcha there)                       |
+1. **Home proxy** (free) — a residential-IP HTTP forwarder we run ourselves on a NAS, exposed via cloudflared. Tried first when `HOME_PROXY_URL` + `HOME_PROXY_TOKEN` are set.
+2. **Bright Data Web Unlocker** (~$3/1k) — tried when the home proxy isn't configured or returns a CF shell / IP-block / unparseable body. Requires `BRIGHTDATA_API_KEY`.
+3. **Direct `fetch()`** — only useful in local dev from a residential IP; runs the JS-challenge solver in `src/lib/fetch.ts`. Always fails on Workers.
 
-When the key is unset (local dev from a residential IP) we fall back to the home-grown JS-challenge solver in `src/lib/fetch.ts`.
+| upstream                              | how we fetch it                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
+| YouTube Data API                       | direct `fetch()`                                                                |
+| iTunes Search API                      | direct `fetch()`                                                                |
+| 1001tracklists `/search/result.php`    | direct `fetch()` (works from Worker IPs)                                        |
+| 1001tracklists tracklist page          | home proxy → Bright Data Unlocker → direct (whichever is configured, in order)  |
+| 1001tracklists `get_medialink.php` AJAX| direct `fetch()`, with Bright Data raced as a fallback on timeout                |
 
-**Cost**: at ~$3/1,000 successful requests with Web Unlocker and KV caching the search mapping + parsed tracklist for 2 hours each (short on purpose — new tracklists and newly-IDed tracks should show up quickly), ~20–40 lookups/month works out to under $0.50/month. Medialink (per-track Apple/YT) and Apple-Music fallback lookups have separate, much longer TTLs since track ↔ deep-link mapping is essentially immutable.
+**Cost**: at ~$3/1,000 successful requests with Web Unlocker and KV caching the search mapping + parsed tracklist for 2 hours each (short on purpose — new tracklists and newly-IDed tracks should show up quickly), ~20–40 lookups/month works out to under $0.50/month. With the home proxy configured the BrightData spend drops to whatever the residential link can't cover (per-IP rate limits, NAS downtime). Medialink (per-track Apple/YT) and Apple-Music fallback lookups have separate, much longer TTLs since track ↔ deep-link mapping is essentially immutable.
+
+### Home proxy
+
+Why: BrightData occasionally serves a Cloudflare shell on tracklist pages (residential-IP rotation lands on an exit IP without warm CF clearance) and Worker IPs always do. A residential IP we control sidesteps both.
+
+What: a tiny Node service (`scripts/nas-fetch-proxy.mjs`) that accepts `GET /?url=<encoded>` with a shared bearer, fetches the target, and streams the response back. Bound to `127.0.0.1` on the NAS and exposed publicly via your existing cloudflared tunnel. Target hostnames are allowlisted (defaults to `www.1001tracklists.com`) so a leaked bearer can't open-proxy the world.
+
+Setup (assumes you already have cloudflared running on the NAS):
+
+1. Run the forwarder on the NAS. PM2/systemd/docker — whatever you already use to keep things up:
+   ```bash
+   PROXY_TOKEN=<long-random> node scripts/nas-fetch-proxy.mjs
+   ```
+   Env knobs: `PORT` (default 8088), `BIND` (default 127.0.0.1), `ALLOWED_HOSTS` (default `www.1001tracklists.com,1001tracklists.com`), `REQUEST_TIMEOUT_MS` (default 20000).
+2. Add a public hostname to your cloudflared tunnel pointing at the forwarder. Either via the Zero Trust dashboard (Tunnels → your tunnel → Public Hostnames → Add) or in `config.yml`:
+   ```yaml
+   ingress:
+     - hostname: tracked-proxy.<yourdomain>
+       service: http://localhost:8088
+     - service: http_status:404   # keep the catch-all last
+   ```
+   `cloudflared tunnel route dns <tunnel> tracked-proxy.<yourdomain>` if the DNS record isn't already there, then restart cloudflared.
+3. Smoke test from anywhere — should return your residential IP, not a Cloudflare PoP:
+   ```bash
+   curl -H "Authorization: Bearer $PROXY_TOKEN" \
+     "https://tracked-proxy.<yourdomain>/?url=https://api.ipify.org"
+   ```
+4. Set the secrets on the Worker:
+   ```bash
+   echo "https://tracked-proxy.<yourdomain>" | npx wrangler secret put HOME_PROXY_URL
+   echo $PROXY_TOKEN                          | npx wrangler secret put HOME_PROXY_TOKEN
+   ```
+
+Failure handling: any of {transport throw, non-2xx, CF shell, IP-block page, parsed-zero-tracks} on the home-proxy attempt logs a `1001scrape.homeproxy_*_falling_back` warning and proceeds to the next configured path. The Worker can't speak WireGuard so it can't be on your tailnet directly — this forwarder is the bridge.
 
 ## How it works
 
@@ -206,11 +247,15 @@ src/
   types.ts
   lib/
     timestamp.ts            cue parsing + current-track selection
-    tracklists1001.ts       search, scrape, medialink
+    tracklists1001.ts       search, scrape, medialink (homeProxy → unlocker → direct)
     fetch.ts                challenge solver + cookie jar
+    homeProxy.ts            residential-IP forwarder client (pairs with scripts/nas-fetch-proxy.mjs)
+    unlocker.ts             Bright Data Web Unlocker client
     youtube.ts              YouTube Data API v3 client
     itunes.ts               Apple Music fallback search
     cache.ts                KV helpers + sha1 + TTLs
+scripts/
+  nas-fetch-proxy.mjs       Node http server that runs on the NAS and forwards to 1001tl
 test/
   fixtures/                 saved 1001tracklists HTML and JSON
   timestamp.test.ts
