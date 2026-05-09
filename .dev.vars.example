@@ -11,3 +11,20 @@ YOUTUBE_API_KEY=replace-with-google-cloud-yt-data-api-key
 # HOME_PROXY_URL=https://tracked-proxy.example.com
 # HOME_PROXY_TOKEN=replace-with-a-long-random-string
 
+# /subscriptions mini-app — Cloudflare Access gate.
+# In prod these come from wrangler.jsonc `vars`. For `wrangler dev` you can
+# either set them to your real Access team/app and tunnel through cloudflared,
+# or set DEV_BYPASS_CF_ACCESS=1 below to skip verification entirely.
+# CF_ACCESS_TEAM_DOMAIN=yourteam.cloudflareaccess.com
+# CF_ACCESS_AUD=replace-with-the-app-aud-tag
+# CF_ACCESS_ALLOWED_EMAILS=you@example.com
+DEV_BYPASS_CF_ACCESS=1
+
+# Google OAuth 2.0 client credentials for YouTube playlist write access.
+# Create an OAuth 2.0 Client ID (type: Web application) in Google Cloud Console,
+# enable the YouTube Data API v3, and add an authorized redirect URI of
+#   <your-worker-host>/subscriptions/oauth/callback
+# (for `wrangler dev` via the cloudflared tunnel, the trycloudflare.com host).
+# GOOGLE_OAUTH_CLIENT_ID=
+# GOOGLE_OAUTH_CLIENT_SECRET=
+

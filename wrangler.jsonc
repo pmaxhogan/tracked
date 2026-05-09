@@ -9,12 +9,40 @@
       "binding": "CACHE",
       "id": "8cb267cd79b346baa86d37ec9e1015ef",
       "preview_id": "c13978cb82b249f6b2b8939f92d1dad9"
+    },
+    {
+      // Durable storage for the /subscriptions mini-app (DJ slugs the user
+      // wants tracked). No TTLs; kept separate from CACHE so we never wipe it
+      // by mistake. Create with:
+      //   npx wrangler kv namespace create SUBS
+      //   npx wrangler kv namespace create SUBS --preview
+      // and paste the ids here.
+      "binding": "SUBS",
+      "id": "6189a771499e43fe80544efd63bd7830",
+      "preview_id": "9afbf5f55a5541a88c6685bcc1fea10b"
     }
-  ]
+  ],
+  "vars": {
+    // Cloudflare Access team domain (e.g. "yourteam.cloudflareaccess.com").
+    // The /subscriptions/* routes verify the Cf-Access-Jwt-Assertion header
+    // against this team's JWKS. Leave blank locally and set DEV_BYPASS_CF_ACCESS=1
+    // in .dev.vars to skip verification during `wrangler dev`.
+    "CF_ACCESS_TEAM_DOMAIN": "pmaxhogan.cloudflareaccess.com",
+    // Application AUD tag from the Cloudflare Access app config. Set this in
+    // wrangler.jsonc (it's not a secret) so the deployed worker rejects
+    // tokens minted for any other Access app.
+    "CF_ACCESS_AUD": "2e506a47b5074faa2f414e1d8e2bd80b3a19ba75b1a7e8b0608926b1bafc2ad8",
+    // Comma-separated list of email addresses allowed to use the mini-app.
+    // The CF Access policy should already restrict this, but we double-check
+    // here so a misconfigured policy can't grant access.
+    "CF_ACCESS_ALLOWED_EMAILS": "pmaxhogan@gmail.com"
+  }
   // Secrets (set via `wrangler secret put`):
-  //   API_TOKEN          bearer token Tasker uses
-  //   YOUTUBE_API_KEY    YouTube Data API v3 key
-  //   BRIGHTDATA_API_KEY (optional) Bright Data Web Unlocker API key
-  //   HOME_PROXY_URL     (optional) https URL of the residential-IP forwarder
-  //   HOME_PROXY_TOKEN   (optional) bearer required by the forwarder
+  //   API_TOKEN                  bearer token Tasker uses
+  //   YOUTUBE_API_KEY            YouTube Data API v3 key
+  //   BRIGHTDATA_API_KEY         (optional) Bright Data Web Unlocker API key
+  //   HOME_PROXY_URL             (optional) https URL of the residential-IP forwarder
+  //   HOME_PROXY_TOKEN           (optional) bearer required by the forwarder
+  //   GOOGLE_OAUTH_CLIENT_ID     OAuth client id for YouTube playlist write access
+  //   GOOGLE_OAUTH_CLIENT_SECRET matching client secret
 }

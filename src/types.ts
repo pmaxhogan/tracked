@@ -1,5 +1,7 @@
 export type Env = {
   CACHE: KVNamespace
+  /** Durable list of DJ subscriptions for the /subscriptions mini-app. */
+  SUBS: KVNamespace
   API_TOKEN: string
   YOUTUBE_API_KEY: string
   /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
@@ -8,6 +10,17 @@ export type Env = {
    *  (e.g. cloudflared → Node script on a NAS) before falling back to BrightData. */
   HOME_PROXY_URL?: string
   HOME_PROXY_TOKEN?: string
+  /** Cloudflare Access team domain, e.g. "yourteam.cloudflareaccess.com". */
+  CF_ACCESS_TEAM_DOMAIN?: string
+  /** Cloudflare Access application AUD tag (from the Access app config). */
+  CF_ACCESS_AUD?: string
+  /** Comma-separated allowlist of emails permitted to use /subscriptions. */
+  CF_ACCESS_ALLOWED_EMAILS?: string
+  /** When "1" / "true", /subscriptions skips CF Access verification — local dev only. */
+  DEV_BYPASS_CF_ACCESS?: string
+  /** Google OAuth 2.0 client (for YouTube playlist write access). Set via `wrangler secret put`. */
+  GOOGLE_OAUTH_CLIENT_ID?: string
+  GOOGLE_OAUTH_CLIENT_SECRET?: string
 }
 
 export type Status = 'ok' | 'no_video' | 'no_tracklist' | 'unidentified' | 'upstream_error'
