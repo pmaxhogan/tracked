@@ -40,10 +40,12 @@ const STATE_PREFIX = 'subs:state:'
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
 const playlistDescription = (artistName: string) =>
   `Every set ${artistName} has a YouTube recording for on 1001tracklists.`
-// Each set scrape is a 2–4 s BrightData hit; 10 sets keeps a single request
-// inside Workers' wall-time budget. New subs with deeper history backfill
-// over multiple cron ticks (or repeated manual syncs).
-const DEFAULT_MAX_SETS_PER_RUN = 10
+// Per-set scrape via home proxy is ~250 ms; via BrightData ~3–4 s. 30 sets
+// fits in ~8 s home-proxy / 25 s BrightData (deadline-bound either way).
+// Big enough that a 145-set first-time backfill is ~5 cron ticks instead
+// of 15, but small enough to keep YouTube quota usage bounded — at 50
+// quota per insert, 30 inserts × 4 subs = 6 000 of the daily 10 000.
+const DEFAULT_MAX_SETS_PER_RUN = 30
 // DJ-page pagination is also BrightData-paid; cap so a deep history doesn't
 // blow the wall-clock budget. Most DJs fit in <10 pages.
 const DEFAULT_MAX_DJ_PAGES = 20
