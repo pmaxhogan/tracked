@@ -409,12 +409,23 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .yt .info .title { font-weight: 600; }
   .yt .info .sub { color: var(--muted); font-size: 0.8rem; }
   .yt button.connect { background: #c4302b; }
+  .banner { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--danger); border-radius: 6px; background: var(--card); margin-bottom: 1rem; font-size: 0.9rem; }
+  .banner .info { flex: 1; min-width: 0; }
+  .banner .info .title { font-weight: 600; color: var(--danger); }
+  .banner .info .sub { color: var(--muted); font-size: 0.8rem; }
 </style>
 </head>
 <body>
 <main>
   <h1>DJ subscriptions</h1>
   <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>.</p>
+  <div id="proxy-banner" class="banner" hidden>
+    <div class="info">
+      <div class="title">Home proxy IP-blocked at 1001tracklists</div>
+      <div class="sub" id="proxy-banner-sub"></div>
+    </div>
+    <button id="proxy-clear">Clear backoff</button>
+  </div>
   <div id="yt" class="yt" hidden>
     <div class="info">
       <div class="title" id="yt-title">YouTube</div>
@@ -610,11 +621,50 @@ const PAGE_HTML = /* html */ `<!doctype html>
     history.replaceState({}, '', location.pathname);
   }
 
+  // ── Home-proxy IP-block backoff banner ─────────────────────────────────
+  const $proxyBanner = document.getElementById('proxy-banner');
+  const $proxyBannerSub = document.getElementById('proxy-banner-sub');
+  const $proxyClear = document.getElementById('proxy-clear');
+
+  async function loadProxyStatus() {
+    try {
+      const r = await fetch('/subscriptions/api/home-proxy-status', { credentials: 'same-origin' });
+      if (!r.ok) { $proxyBanner.hidden = true; return; }
+      const data = await r.json();
+      if (data.blocked && data.until) {
+        const untilDate = new Date(data.until * 1000);
+        $proxyBannerSub.textContent =
+          'Skipping home proxy until ' + untilDate.toLocaleTimeString() +
+          '. Solve the captcha at 1001tracklists.com from your home network, then click Clear.';
+        $proxyBanner.hidden = false;
+      } else {
+        $proxyBanner.hidden = true;
+      }
+    } catch { $proxyBanner.hidden = true; }
+  }
+
+  $proxyClear.addEventListener('click', async () => {
+    $proxyClear.disabled = true;
+    const original = $proxyClear.textContent;
+    $proxyClear.textContent = 'Clearing…';
+    try {
+      const r = await fetch('/subscriptions/api/home-proxy-status/clear', {
+        method: 'POST', credentials: 'same-origin',
+      });
+      if (!r.ok) { showError('clear failed (' + r.status + ')'); return; }
+      await loadProxyStatus();
+    } finally {
+      $proxyClear.disabled = false;
+      $proxyClear.textContent = original;
+    }
+  });
+
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
   load();
   loadYouTubeStatus();
+  loadProxyStatus();
 })();
 </script>
 </body>
