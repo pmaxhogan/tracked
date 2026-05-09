@@ -46,9 +46,11 @@ const playlistDescription = (artistName: string) =>
 // of 15, but small enough to keep YouTube quota usage bounded — at 50
 // quota per insert, 30 inserts × 4 subs = 6 000 of the daily 10 000.
 const DEFAULT_MAX_SETS_PER_RUN = 30
-// DJ-page pagination is also BrightData-paid; cap so a deep history doesn't
-// blow the wall-clock budget. Most DJs fit in <10 pages.
-const DEFAULT_MAX_DJ_PAGES = 20
+// AJAX pagination hops are ~30 ms each (the endpoint is JSON, not a CF-gated
+// page), so 100 pages costs ~3 s of the 25 s sync deadline. End-of-list is
+// signaled explicitly by `end:true` from 1001tl and almost always fires
+// first; this cap is just a safety net for a DJ with a wildly deep history.
+const DEFAULT_MAX_DJ_PAGES = 100
 // Hard wall-clock deadline so we save state and return cleanly before
 // Cloudflare kills the worker. Workers' fetch event budget is ~30 s; we
 // leave headroom for network I/O on the response itself.
