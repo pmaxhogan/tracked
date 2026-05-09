@@ -260,15 +260,19 @@ npx wrangler deploy
 
 Why: BrightData occasionally serves a Cloudflare shell on tracklist pages (residential-IP rotation lands on an exit IP without warm CF clearance) and Worker IPs always do. A residential IP we control sidesteps both.
 
-What: a tiny Node service (`scripts/nas-fetch-proxy.mjs`) that accepts `GET /?url=<encoded>` with a shared bearer, fetches the target, and streams the response back. Bound to `127.0.0.1` on the NAS and exposed publicly via your existing cloudflared tunnel. Target hostnames are allowlisted (defaults to `www.1001tracklists.com`) so a leaked bearer can't open-proxy the world.
+What: a tiny Node service (`scripts/nas-fetch-proxy.mjs`) that accepts `GET /?url=<encoded>` with a shared bearer, fetches the target, and streams the response back. Exposed publicly via your existing cloudflared tunnel. Target hostnames are allowlisted (defaults to `www.1001tracklists.com`) so a leaked bearer can't open-proxy the world. When `UPSTREAM_1001TL_EMAIL`/`UPSTREAM_1001TL_PASSWORD` are configured, the forwarder logs in once, persists the session cookies (`uid`, `sid`, `guid`) to disk, and injects them on every 1001tl request — that's what lets us bypass the upstream Turnstile captcha gate that even residential IPs hit on cold-cache URLs.
 
 Setup (assumes you already have cloudflared running on the NAS):
 
 1. Run the forwarder on the NAS. PM2/systemd/docker — whatever you already use to keep things up:
    ```bash
-   PROXY_TOKEN=<long-random> node scripts/nas-fetch-proxy.mjs
+   PROXY_TOKEN=<long-random> \
+   UPSTREAM_1001TL_EMAIL=you@example.com \
+   UPSTREAM_1001TL_PASSWORD=<password> \
+   COOKIE_FILE=/data/1001tl-cookies.json \
+   node scripts/nas-fetch-proxy.mjs
    ```
-   Env knobs: `PORT` (default 8088), `BIND` (default 127.0.0.1), `ALLOWED_HOSTS` (default `www.1001tracklists.com,1001tracklists.com`), `REQUEST_TIMEOUT_MS` (default 20000).
+   Env knobs: `PORT` (default 8088), `BIND` (default 0.0.0.0 — container-friendly; set 127.0.0.1 if running on the host directly), `ALLOWED_HOSTS` (default `www.1001tracklists.com,1001tracklists.com`), `REQUEST_TIMEOUT_MS` (default 20000), `UPSTREAM_1001TL_EMAIL`/`UPSTREAM_1001TL_PASSWORD` (optional; enables logged-in mode), `COOKIE_FILE` (default `/data/1001tl-cookies.json` — persist on a volume so restarts don't re-login).
 2. Add a public hostname to your cloudflared tunnel pointing at the forwarder. Either via the Zero Trust dashboard (Tunnels → your tunnel → Public Hostnames → Add) or in `config.yml`:
    ```yaml
    ingress:
