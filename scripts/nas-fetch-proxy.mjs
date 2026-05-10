@@ -28,7 +28,7 @@
  *   ALLOWED_HOSTS            default "www.1001tracklists.com,1001tracklists.com"
  *   REQUEST_TIMEOUT_MS       default 20000
  *   UPSTREAM_1001TL_EMAIL    optional; enables logged-in mode for 1001tl
- *   UPSTREAM_1001TL_PASSWORD optional; raw password (nbsp prefix is added on the wire)
+ *   UPSTREAM_1001TL_PASSWORD optional; enables logged-in mode for 1001tl
  *   COOKIE_FILE              default /data/1001tl-cookies.json
  */
 
@@ -56,10 +56,6 @@ const TL_HOST = '1001tracklists.com'
 const TL_LOGIN_URL = 'https://www.1001tracklists.com/action/login.html'
 const TL_EMAIL = process.env.UPSTREAM_1001TL_EMAIL ?? ''
 const TL_PASSWORD = process.env.UPSTREAM_1001TL_PASSWORD ?? ''
-// 1001tl's frontend JS prepends a U+00A0 (nbsp) to the password before
-// submitting the form. Mirror that or login fails with "email and/or password
-// is incorrect." even with a valid password.
-const TL_PASSWORD_WIRE = TL_PASSWORD ? ` ${TL_PASSWORD}` : ''
 const COOKIE_FILE = process.env.COOKIE_FILE ?? '/data/1001tl-cookies.json'
 
 // Browser UA used both for the in-process login and the override below.
@@ -178,7 +174,7 @@ async function doLogin() {
   // 2) POST login form
   const body = new URLSearchParams({
     email: TL_EMAIL,
-    password: TL_PASSWORD_WIRE,
+    password: TL_PASSWORD,
     referer: 'https://www.1001tracklists.com/',
   }).toString()
   const loginRes = await fetch(TL_LOGIN_URL, {
