@@ -390,9 +390,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
     :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --accent: #0969da; --danger: #cf222e; --card: #f6f8fa; --border: #d0d7de; }
   }
   * { box-sizing: border-box; }
-  /* The HTML `hidden` attribute uses display:none, but our explicit
-     .yt/.banner display:flex rules override that (class > UA [hidden]).
-     Force [hidden] back to none so $el.hidden = true actually hides. */
+  /* HTML hidden attribute uses display:none, but our explicit .yt/.banner
+     display:flex rules override that. Force [hidden] back to none. */
   [hidden] { display: none !important; }
   body { margin: 0; padding: 2rem 1rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--fg); }
   main { max-width: 640px; margin: 0 auto; }
