@@ -219,4 +219,123 @@ describe('selectCurrent', () => {
     expect(r.picked.map((t) => t.title)).toEqual(['pre', 'B', 'C'])
     expect(r.picked.find((t) => t.title === 'B')!.isCurrent).toBe(true)
   })
+
+  describe('trailing uncued tracks (interpolated by setEndSeconds)', () => {
+    // Habstrakt b2b JSTJR-style sparse tracklist: a couple of cued opener
+    // tracks and a long tail of untimed extras. Without interpolation the last
+    // cued track would pin as "current" forever past its cue.
+    //
+    // Cued gap is 80s (670 → 750), so the median-bounded slot for trailing
+    // tracks is 80s. evenSlot = (2759 - 750) / 21 = 95.7s; we cap at 80s.
+    // Trailing effective starts: 830, 910, 990, 1070, 1150, 1230, 1310, 1390,
+    // 1470, 1550, 1630, 1710, 1790, 1870, 1950, 2030, 2110, 2190, 2270, 2350.
+    const trailingTitles = Array.from({ length: 20 }, (_, i) => `T${i + 1}`)
+    const sparse: ParsedTrack[] = [
+      track(670, { title: 'Lemme Get Down' }), // 11:10
+      track(750, { title: 'Guest List' }), // 12:30 — last cue
+      ...trailingTitles.map((title) => track(null, { title })),
+    ]
+    const setEnd = 2759 // 45:59
+
+    it('does NOT pin the last cued group as current well past its cue', () => {
+      const r = selectCurrent(sparse, 1668, setEnd) // 27:48
+      const current = r.picked.find((t) => t.isCurrent)
+      expect(current).toBeDefined()
+      expect(current!.title).not.toBe('Guest List')
+      expect(current!.title).not.toBe('Lemme Get Down')
+    })
+
+    it('picks a trailing uncued group whose slot contains currentSeconds (mid-set)', () => {
+      // 1668 lands in T11's slot [1630, 1710).
+      const r = selectCurrent(sparse, 1668, setEnd)
+      const current = r.picked.find((t) => t.isCurrent)!
+      expect(current.title).toBe('T11')
+      expect(r.picked.map((t) => t.title)).toEqual(['T10', 'T11', 'T12'])
+    })
+
+    it('picks an early trailing group when currentSeconds is just past the last cue', () => {
+      // 1112 lands in T4's slot [1070, 1150).
+      const r = selectCurrent(sparse, 1112, setEnd) // 18:32
+      const current = r.picked.find((t) => t.isCurrent)!
+      expect(current.title).toBe('T4')
+      expect(r.picked.map((t) => t.title)).toEqual(['T3', 'T4', 'T5'])
+    })
+
+    it('falls back to the last interpolated group near setEndSeconds', () => {
+      const r = selectCurrent(sparse, 2700, setEnd) // ≈ end of set
+      const current = r.picked.find((t) => t.isCurrent)!
+      expect(current.title).toBe('T20')
+      // T20 is the last group → no next.
+      expect(r.picked.map((t) => t.title)).toEqual(['T19', 'T20'])
+    })
+
+    it('gives every interpolated trailing group a finite durationSeconds', () => {
+      const r = selectCurrent(sparse, 1668, setEnd)
+      for (const t of r.picked) {
+        expect(t.durationSeconds).not.toBeNull()
+        expect(t.durationSeconds!).toBeGreaterThan(0)
+      }
+    })
+
+    it('falls back to the old (pin-last-cued) behavior when setEndSeconds is omitted', () => {
+      // No setEndSeconds → no interpolation; Guest List is the last cued group
+      // and stays "current" for any currentSeconds past its cue.
+      const r = selectCurrent(sparse, 1668)
+      const current = r.picked.find((t) => t.isCurrent)!
+      expect(current.title).toBe('Guest List')
+    })
+
+    it('does not interpolate when setEndSeconds is not strictly after the last cue', () => {
+      // Bogus input (setEnd ≤ lastCuedStart): treat as if setEnd weren't given.
+      const r = selectCurrent(sparse, 1668, 700)
+      const current = r.picked.find((t) => t.isCurrent)!
+      expect(current.title).toBe('Guest List')
+    })
+
+    it('caps the slot by evenSlot so trailing tracks never extend past setEndSeconds', () => {
+      // Only one cued track (no gap to seed the median), so slot = evenSlot.
+      // evenSlot = (200 - 100) / (4 + 1) = 20.
+      const tl: ParsedTrack[] = [
+        track(100, { title: 'A' }),
+        track(null, { title: 'T1' }),
+        track(null, { title: 'T2' }),
+        track(null, { title: 'T3' }),
+        track(null, { title: 'T4' }),
+      ]
+      const r = selectCurrent(tl, 175, 200)
+      // T4 starts at 100 + 20*4 = 180; T3 at 160. 175 falls in T3's slot.
+      const current = r.picked.find((t) => t.isCurrent)!
+      expect(current.title).toBe('T3')
+    })
+
+    it('caps the slot by median to avoid inflating the last cued group', () => {
+      // 3 cued gaps each 60s → median = 60. evenSlot = (1000 - 200) / 3 ≈ 267.
+      // Slot = min(60, 267) = 60. Without median capping D would extend to 467
+      // and "swallow" any currentSeconds up to 467 — keeping the listener
+      // pinned on a short opener that ended long ago.
+      const tl: ParsedTrack[] = [
+        track(20, { title: 'A' }),
+        track(80, { title: 'B' }),
+        track(140, { title: 'C' }),
+        track(200, { title: 'D' }), // last cue
+        track(null, { title: 'T1' }),
+        track(null, { title: 'T2' }),
+      ]
+      // 300 is past D's median-bounded window [200,260) and into T1 [260,320).
+      const r = selectCurrent(tl, 300, 1000)
+      const current = r.picked.find((t) => t.isCurrent)!
+      expect(current.title).toBe('T1')
+    })
+
+    it('leaves a tracklist with no cues at all unmatched (returns nothing current)', () => {
+      const allUncued: ParsedTrack[] = [
+        track(null, { title: 'X' }),
+        track(null, { title: 'Y' }),
+      ]
+      const r = selectCurrent(allUncued, 100, 500)
+      // No cue to anchor the interpolation; "before first cued group" branch
+      // also no-ops because there are no cued groups.
+      expect(r.picked).toEqual([])
+    })
+  })
 })
