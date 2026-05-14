@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData } from '../src/lib/tracklists1001'
 import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
+import { selectCurrent } from '../src/lib/timestamp'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
@@ -218,11 +219,15 @@ describe('parseTracklist (Max Styler — has set-level Apple Music album)', () =
     expect(parsed.tracks.length).toBeGreaterThan(0)
   })
 
-  it('marks mashup-linked rows with null startSeconds (no own cue)', () => {
+  it("inherits the parent cue on mashup-linked rows that share an entry's ids[N]", () => {
+    // 1001tl emits the mashup partner as `cueValuesEntry.ids[1] = 'tlp12_content'`
+    // in the same entry as its parent (tlp11_content at 2325s). The row still
+    // has the visual `w/` marker (class "con"); the cue is just stored on the
+    // shared entry rather than its own block.
     const mashup = parsed.tracks.find((t) => t.isMashupLinked && t.title === "Let Em' Know")
     expect(mashup).toBeDefined()
-    expect(mashup!.startSeconds).toBeNull()
-    expect(mashup!.startTime).toBe('')
+    expect(mashup!.startSeconds).toBe(2325)
+    expect(mashup!.isMashupLinked).toBe(true)
   })
 
   it('marks trailing untimed extras with null startSeconds (not s=0)', () => {
@@ -241,17 +246,93 @@ describe('parseTracklist (Max Styler — has set-level Apple Music album)', () =
   })
 })
 
+describe('parseTracklist + selectCurrent (Habstrakt b2b JSTJR — regression)', () => {
+  // Captured 2026-05-14 from the live page. Reproduces the original bug:
+  // every track has a cue (last at 44:40), but the row right after Guest
+  // List (Badders, tlp9_content) is encoded as ids[1] of Guest List's
+  // cueValuesEntry. With the old ids[0]-only regex, Badders had
+  // startSeconds=null; the old selectCurrent then saw Guest List's "next
+  // start" as null and pinned Guest List as current for every offset past
+  // 12:30.
+  const url =
+    'https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-1001tracklists-x-dj-lovers-club-pres.-waterways-amsterdam-dance-event-netherlands-2024-11-11.html'
+  const parsed = parseTracklist(url, fx('tracklist-habstrakt.html'))
+  const setEnd = 2759 // user-reported videoDurationSeconds
+
+  it('parses every cued track including the mashup-partner cue', () => {
+    expect(parsed.tracks).toHaveLength(31)
+    const badders = parsed.tracks.find((t) => t.title === 'Badders')!
+    expect(badders.startSeconds).toBe(750)
+    const guestList = parsed.tracks.find((t) => t.title === 'Guest List')!
+    expect(guestList.startSeconds).toBe(750)
+  })
+
+  it('selectCurrent at 1668s (27:48) picks the track cued exactly there', () => {
+    const r = selectCurrent(parsed.tracks, 1668, setEnd)
+    const current = r.picked.find((t) => t.isCurrent)!
+    expect(current.title).toBe('Outer Space (CHYL Remix)')
+    expect(current.startSeconds).toBe(1668)
+  })
+
+  it('treats the two ids[N]-paired rows at 12:30 (Guest List w/ Badders) as one group', () => {
+    // Currently playing at 12:35: 1001tl paired Guest List (ids[0]) with
+    // Badders (ids[1]) at cue 750. Both must show isCurrent=true so the
+    // caller can render the mashup pair together.
+    const r = selectCurrent(parsed.tracks, 755, setEnd)
+    const cur = r.picked.filter((t) => t.isCurrent).map((t) => t.title)
+    expect(cur).toContain('Guest List')
+    expect(cur).toContain('Badders')
+  })
+
+  it('selectCurrent at 1112s (18:32) picks the track whose window contains it', () => {
+    // Cue 950 (Marlon Hoffstadt — It's That Time) → next real cue 1125
+    // (Eminem — Shake That). 1112 falls in [950, 1125).
+    const r = selectCurrent(parsed.tracks, 1112, setEnd)
+    const current = r.picked.find((t) => t.isCurrent)!
+    expect(current.title).toBe("It's That Time")
+    expect(current.startSeconds).toBe(950)
+  })
+
+  it('does NOT pin Guest List as current well past its cue', () => {
+    for (const sec of [1112, 1668, 2500]) {
+      const r = selectCurrent(parsed.tracks, sec, setEnd)
+      const current = r.picked.find((t) => t.isCurrent)
+      expect(current?.title).not.toBe('Guest List')
+    }
+  })
+})
+
 describe('parseCueValueData', () => {
   it('extracts every cue mapping from the JS block', () => {
     const map = parseCueValueData(fx('tracklist-maxstyler.html'))
-    expect(map.size).toBe(22)
+    // 22 cued entries; the mashup partner (tlp12) shares its parent's cue
+    // via ids[1] in the same entry, so the map size is 23 (22 + 1 sibling).
+    expect(map.size).toBe(23)
     expect(map.get('tlp0_content')).toBe(0)
     expect(map.get('tlp1_content')).toBe(227)
     expect(map.get('tlp23_content')).toBe(4400)
-    // Mashup row is NOT in the map (no own cue)
-    expect(map.has('tlp12_content')).toBe(false)
+    // Mashup partner shares the parent entry's cue (tlp11 at 2325s).
+    expect(map.get('tlp12_content')).toBe(2325)
+    expect(map.get('tlp11_content')).toBe(2325)
     // Index 14 is missing in the page's emitted data — verify we don't synthesize it
     expect(map.has('tlp14_content')).toBe(false)
+  })
+
+  it('captures every ids[N] in a multi-id entry (Habstrakt b2b mashup pattern)', () => {
+    const block = `
+      cueValuesEntry = {};
+      cueValuesEntry.seconds = 750;
+      cueValuesEntry.ids = [];
+      cueValuesEntry.ids[0] = 'tlp8_content';
+      cueValuesEntry.ids[1] = 'tlp9_content';
+      cueValuesEntry = {};
+      cueValuesEntry.seconds = 840;
+      cueValuesEntry.ids[0] = 'tlp10_content';
+    `
+    const map = parseCueValueData(block)
+    expect(map.get('tlp8_content')).toBe(750)
+    expect(map.get('tlp9_content')).toBe(750) // the sibling — would be missing without the fix
+    expect(map.get('tlp10_content')).toBe(840)
   })
 
   it('returns empty map when no cueValueData block is present', () => {

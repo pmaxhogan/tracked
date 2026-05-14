@@ -218,8 +218,20 @@ function computeDurations(
 function groupByMashup(tracks: ParsedTrack[]): ParsedTrack[][] {
   const groups: ParsedTrack[][] = []
   for (const t of tracks) {
-    if (t.isMashupLinked && groups.length > 0) {
-      groups[groups.length - 1]!.push(t)
+    const last = groups[groups.length - 1]
+    // Merge into the previous group when (a) 1001tl marks the row as a
+    // mashup-linked sibling via the " con" class, or (b) the row shares a
+    // cue with the previous group — 1001tl encodes that as multiple
+    // `cueValuesEntry.ids[N]` on one entry. Habstrakt-style trRow layouts
+    // don't carry " con", so without the cue-equality check the sibling
+    // would land in its own group with the same start as the parent,
+    // making selectCurrent's range matcher treat the parent's window as
+    // zero-length and skip past it.
+    const sharesCue = last != null &&
+      t.startSeconds !== null &&
+      groupStartSeconds(last) === t.startSeconds
+    if (last && (t.isMashupLinked || sharesCue)) {
+      last.push(t)
     } else {
       groups.push([t])
     }

@@ -236,13 +236,27 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
  * trailing untimed extras), so reading the input alone makes those rows look
  * like they start at 0:00. The JS map only contains real cues, so use it as
  * the source of truth and fall back to null for anything not listed.
+ *
+ * A single `cueValuesEntry` may hold multiple `ids[N]` entries — 1001tl uses
+ * `ids[1+]` for additional rows that share the parent cue (e.g. a track and
+ * its mashup partner both cued at 12:30). Capture every `ids[N]` so those
+ * sibling rows aren't left looking uncued, which would otherwise leave a
+ * null gap in the timeline and confuse `selectCurrent`'s range matcher.
  */
 export function parseCueValueData(html: string): Map<string, number> {
   const out = new Map<string, number>()
-  const re = /cueValuesEntry\.seconds = (\d+);[\s\S]*?cueValuesEntry\.ids\[0\] = '([^']+)';/g
-  let m
-  while ((m = re.exec(html))) {
-    out.set(m[2]!, Number(m[1]!))
+  // Walk each entry block (delimited by `cueValuesEntry = {}`) and pair its
+  // .seconds with every .ids[N] in the same block.
+  const blocks = html.split(/cueValuesEntry\s*=\s*\{\}/)
+  for (const block of blocks) {
+    const sm = block.match(/cueValuesEntry\.seconds\s*=\s*(\d+)/)
+    if (!sm) continue
+    const seconds = Number(sm[1])
+    const idRe = /cueValuesEntry\.ids\[\d+\]\s*=\s*'([^']+)'/g
+    let im
+    while ((im = idRe.exec(block))) {
+      out.set(im[1]!, seconds)
+    }
   }
   return out
 }
