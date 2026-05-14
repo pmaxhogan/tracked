@@ -77,6 +77,8 @@ The response always carries a small adjacent-context window so the caller doesn'
 
 Mashup-linked siblings (1001tracklists `w/`) count as a single group, so a current pair returns both members with `isCurrent: true`, and prev/next can themselves be pairs.
 
+**Trailing uncued tracks** (the long tail of untimed rows that 1001tracklists often leaves at the bottom of sparsely-identified sets) get interpolated start times when `videoDurationSeconds` is sent — without that, playback past the last cue would pin the last cued track as "current" forever even when it clearly ended minutes ago. The slot used for each trailing group is `min(medianCuedDuration, evenSlot)`, where `evenSlot` evenly splits the remaining video time across `(lastCuedGroup + trailingGroups)`. Capping by the median of observed cued-track gaps keeps a short opener from being projected to play through the rest of the set; capping by `evenSlot` keeps trailing tracks from extending past `videoDurationSeconds`. Interpolation only runs on **trailing** uncued groups — leading/internal uncued rows keep `startSeconds: null` and the existing "before-first-cue" fallback handles intros. Per-track `startSeconds` is still the raw cue (`null` for trailing rows); only the internal range-matching uses the interpolated value.
+
 `trackUrl` is the canonical 1001tracklists track page (good for opening track details / submitting a fix); `null` when there's no meta url on the row.
 
 `setAppleLink` (top-level) is the Apple Music album/playlist URL for the entire DJ set when 1001tracklists has one — parallel to `videoUrl` for the YouTube source. `null` for sets with no Apple Music release.
