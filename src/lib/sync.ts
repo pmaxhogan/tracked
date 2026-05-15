@@ -35,8 +35,43 @@ import {
   PlaylistNotFoundError,
 } from './youtube-playlists'
 import { makeLogger, errorFields, type Logger } from './log'
+import { getJson, putJson, TTL } from './cache'
 
 const STATE_PREFIX = 'subs:state:'
+const PLAYLIST_VIDEO_IDS_PREFIX = 'yt:plvids:'
+
+/**
+ * Cached wrapper around `listPlaylistVideoIds`. The 5-min drain-pending cron
+ * calls this for every sub with pending work; without a cache it costs 1 YT
+ * quota unit per playlist page per tick (~3 000 units/day for a few subs with
+ * mid-sized playlists, all of it wasted because nothing changed since the
+ * previous tick). The cache is invalidated by writing back the updated set
+ * after every insert (see `cachePlaylistVideoIds`), so it only goes stale if
+ * the user edits the playlist directly on YouTube — in which case the 6h TTL
+ * reconciles eventually.
+ */
+async function getCachedPlaylistVideoIds(
+  env: Env,
+  playlistId: string,
+  accessToken: string,
+  log: Logger,
+): Promise<Set<string>> {
+  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
+  const cached = await getJson<{ videoIds: string[] }>(env.CACHE, key)
+  if (cached) {
+    log.info('sync.playlist_video_ids.cache_hit', { playlistId, count: cached.videoIds.length })
+    return new Set(cached.videoIds)
+  }
+  log.info('sync.playlist_video_ids.cache_miss', { playlistId })
+  const ids = await listPlaylistVideoIds(playlistId, accessToken)
+  await cachePlaylistVideoIds(env, playlistId, ids)
+  return ids
+}
+
+async function cachePlaylistVideoIds(env: Env, playlistId: string, ids: Set<string>): Promise<void> {
+  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
+  await putJson(env.CACHE, key, { videoIds: [...ids] }, TTL.PLAYLIST_VIDEO_IDS)
+}
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
 const playlistDescription = (artistName: string) =>
   `Every set ${artistName} has a YouTube recording for on 1001tracklists.`
@@ -297,15 +332,21 @@ export async function syncOne(
   let existingVideoIds: Set<string>
   if (justCreated) {
     existingVideoIds = new Set()
+    await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
   } else {
     try {
-      existingVideoIds = await listPlaylistVideoIds(playlistId, accessToken)
+      existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log)
     } catch (e) {
       if (e instanceof PlaylistNotFoundError) {
         log.warn('sync.playlist_stale', { slug: sub.slug, stalePlaylistId: playlistId })
         const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
         playlistId = r.id
-        existingVideoIds = r.justCreated ? new Set() : await listPlaylistVideoIds(playlistId, accessToken)
+        if (r.justCreated) {
+          existingVideoIds = new Set()
+          await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
+        } else {
+          existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log)
+        }
       } else {
         throw e
       }
@@ -363,7 +404,12 @@ export async function syncOne(
               const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
               playlistId = r.id
               // Found existing same-titled → list to avoid dupes; freshly created → empty.
-              existingVideoIds = r.justCreated ? new Set() : await listPlaylistVideoIds(playlistId, accessToken)
+              if (r.justCreated) {
+                existingVideoIds = new Set()
+                await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
+              } else {
+                existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log)
+              }
               await addVideoToPlaylist(playlistId, videoId, accessToken)
             } else {
               throw e
@@ -425,6 +471,12 @@ export async function syncOne(
     },
   }
   await saveSubState(env, sub.slug, next)
+  // Write the post-insert video set back so the next cron tick reads it from
+  // KV instead of paying YT quota to re-fetch. Only on actual change — a
+  // no-op run shouldn't re-extend the TTL on a cache the API already populated.
+  if (videoIdsAdded > 0) {
+    await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
+  }
 
   return {
     slug: sub.slug,

@@ -7,6 +7,12 @@ export const TTL = {
   TRACKLIST_PAGE: 60 * 60 * 2,
   MEDIALINK: 60 * 60 * 24 * 30,
   APPLE: 60 * 60 * 24 * 90,
+  /** Snapshot of a YouTube playlist's videoId set, keyed by playlistId. The
+   *  5-min sync cron would otherwise re-fetch this every tick per sub. We
+   *  update the cache after every insert in-run, so the only reason it can
+   *  drift is the user manually editing the playlist outside the worker —
+   *  6h reconciliation catches that without hammering the quota. */
+  PLAYLIST_VIDEO_IDS: 60 * 60 * 6,
 } as const
 
 export async function getJson<T>(kv: KVNamespace, key: string): Promise<T | undefined> {
