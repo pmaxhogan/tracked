@@ -106,7 +106,7 @@ subscriptionsApp.post('/api/sync', async (c) => {
     return c.json(result)
   } catch (e) {
     log.error('subs.sync_all_throw', errorFields(e))
-    return c.json({ error: 'sync_failed', message: e instanceof Error ? e.message : String(e) }, 500)
+    return c.json({ error: 'sync_failed', ...errorFields(e) }, 500)
   }
 })
 
@@ -128,7 +128,7 @@ subscriptionsApp.post('/api/sync/:slug', async (c) => {
     return c.json(result)
   } catch (e) {
     log.error('subs.sync_one_throw', { slug, ...errorFields(e) })
-    return c.json({ error: 'sync_failed', message: e instanceof Error ? e.message : String(e) }, 500)
+    return c.json({ error: 'sync_failed', ...errorFields(e) }, 500)
   }
 })
 
@@ -412,6 +412,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
   li .meta .added { color: var(--muted); font-size: 0.8rem; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   .error { color: var(--danger); margin: 0.5rem 0 1rem; min-height: 1.2em; }
+  .error-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; color: var(--muted); white-space: pre-wrap; word-break: break-word; max-height: 16em; overflow: auto; margin: 0.4rem 0 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 4px; background: var(--card); }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
   .yt { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); margin-bottom: 1rem; }
   .yt .info { flex: 1; min-width: 0; font-size: 0.9rem; }
@@ -460,7 +461,15 @@ const PAGE_HTML = /* html */ `<!doctype html>
   const $url = document.getElementById('url');
   const $btn = $form.querySelector('button');
 
-  function showError(msg) { $error.textContent = msg ?? ''; }
+  function showError(msg, detail) {
+    $error.textContent = msg ?? '';
+    if (detail) {
+      const pre = document.createElement('pre');
+      pre.className = 'error-detail';
+      pre.textContent = detail;
+      $error.appendChild(pre);
+    }
+  }
 
   function fmtDate(epoch) {
     if (!epoch) return '';
@@ -513,7 +522,9 @@ const PAGE_HTML = /* html */ `<!doctype html>
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        showError(data.message || data.error || ('sync failed (' + r.status + ')'));
+        const msg = data.errorMessage || data.message || data.error || ('sync failed (' + r.status + ')');
+        const detail = data.errorStack || (data.errorName && data.errorName !== 'Error' ? data.errorName : null);
+        showError('sync failed: ' + msg, detail);
         return;
       }
       const stats = data.stats || {};
