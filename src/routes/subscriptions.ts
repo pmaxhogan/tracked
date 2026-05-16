@@ -14,6 +14,7 @@ import {
   exchangeCode,
   fetchChannelInfo,
   getAccessToken,
+  GoogleOAuthRefreshFailed,
   loadTokens,
   randomState,
   redirectUriFor,
@@ -120,6 +121,10 @@ subscriptionsApp.post('/api/sync', async (c) => {
     const result = await syncAll(c.env, { log })
     return c.json(result)
   } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      log.warn('subs.sync_all_reauth', { status: e.status })
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
     log.error('subs.sync_all_throw', errorFields(e))
     return c.json({ error: 'sync_failed', ...errorFields(e) }, 500)
   }
@@ -142,6 +147,10 @@ subscriptionsApp.post('/api/sync/:slug', async (c) => {
     const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log })
     return c.json(result)
   } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      log.warn('subs.sync_one_reauth', { slug, status: e.status })
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
     log.error('subs.sync_one_throw', { slug, ...errorFields(e) })
     return c.json({ error: 'sync_failed', ...errorFields(e) }, 500)
   }
@@ -486,6 +495,16 @@ const PAGE_HTML = /* html */ `<!doctype html>
     }
   }
 
+  function showReauthError() {
+    $error.textContent = 'YouTube token rejected by Google (refresh token expired or revoked). Reconnect to continue syncing.';
+    const btn = document.createElement('button');
+    btn.textContent = 'Reconnect YouTube';
+    btn.className = 'connect';
+    btn.style.marginLeft = '0.5rem';
+    btn.addEventListener('click', () => { window.location.href = '/subscriptions/oauth/start'; });
+    $error.appendChild(btn);
+  }
+
   function fmtDate(epoch) {
     if (!epoch) return '';
     try { return new Date(epoch * 1000).toLocaleDateString(); } catch { return ''; }
@@ -539,6 +558,13 @@ const PAGE_HTML = /* html */ `<!doctype html>
       let data = {};
       try { data = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON body, fall through */ }
       if (!r.ok) {
+        if (r.status === 412 && data.error === 'youtube_reauth_required') {
+          showReauthError();
+          // The server has cleared stored tokens; refresh the YouTube
+          // panel so the "Sign in with YouTube" button reappears.
+          loadYouTubeStatus();
+          return;
+        }
         const msg = data.errorMessage || data.message || data.error || ('sync failed (' + r.status + ')');
         const detail = data.errorStack
           || (data.errorName && data.errorName !== 'Error' ? data.errorName : null)
