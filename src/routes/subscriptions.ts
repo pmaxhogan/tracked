@@ -34,6 +34,21 @@ export const subscriptionsApp = new Hono<{
 
 subscriptionsApp.use('*', cfAccess)
 
+// Backstop: any throw that escapes a route handler would otherwise become
+// Hono's default plaintext "Internal Server Error" body, which the UI
+// can't parse and degrades to a generic "sync failed (500)" toast. Return
+// JSON with the full error context (already captured for logs) so the
+// browser can render the message + stack.
+subscriptionsApp.onError((e, c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.unhandled',
+    path: new URL(c.req.url).pathname,
+  })
+  log.error('subs.unhandled_throw', errorFields(e))
+  return c.json({ error: 'internal', ...errorFields(e) }, 500)
+})
+
 subscriptionsApp.get('/', (c) => {
   // The page bundles its own JS inline. no-store keeps browsers from
   // serving a stale page after a deploy, which would mean stale UI logic
@@ -117,13 +132,13 @@ subscriptionsApp.post('/api/sync/:slug', async (c) => {
     by: c.get('cfAccessEmail'),
   })
   const slug = c.req.param('slug')
-  const subs = await listSubscriptions(c.env)
-  const sub = subs.find((s) => s.slug === slug)
-  if (!sub) return c.json({ error: 'not_subscribed', slug }, 404)
-  // syncOne needs a fresh access token; the helper auto-refreshes near expiry.
-  const tokenInfo = await getAccessToken(c.env)
-  if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
   try {
+    const subs = await listSubscriptions(c.env)
+    const sub = subs.find((s) => s.slug === slug)
+    if (!sub) return c.json({ error: 'not_subscribed', slug }, 404)
+    // syncOne needs a fresh access token; the helper auto-refreshes near expiry.
+    const tokenInfo = await getAccessToken(c.env)
+    if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
     const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log })
     return c.json(result)
   } catch (e) {
@@ -520,10 +535,14 @@ const PAGE_HTML = /* html */ `<!doctype html>
         method: 'POST',
         credentials: 'same-origin',
       });
-      const data = await r.json().catch(() => ({}));
+      const raw = await r.text();
+      let data = {};
+      try { data = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON body, fall through */ }
       if (!r.ok) {
         const msg = data.errorMessage || data.message || data.error || ('sync failed (' + r.status + ')');
-        const detail = data.errorStack || (data.errorName && data.errorName !== 'Error' ? data.errorName : null);
+        const detail = data.errorStack
+          || (data.errorName && data.errorName !== 'Error' ? data.errorName : null)
+          || (raw && raw !== msg ? raw : null);
         showError('sync failed: ' + msg, detail);
         return;
       }
