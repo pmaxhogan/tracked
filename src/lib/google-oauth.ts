@@ -118,10 +118,39 @@ export async function refreshAccessToken(opts: {
   })
   if (!r.ok) {
     const body = await r.text().catch(() => '')
-    throw new Error(`oauth refresh: ${r.status} ${body}`)
+    throw new GoogleOAuthRefreshFailed(r.status, body)
   }
   const data = (await r.json()) as TokenResponse
   return { accessToken: data.access_token, expiresIn: data.expires_in, scope: data.scope ?? '' }
+}
+
+/**
+ * Refresh failed. `invalidGrant` is true when Google rejected the refresh
+ * token itself (revoked, expired in a Testing-mode app, etc.) — that's a
+ * permanent state and the stored tokens should be cleared so the UI can
+ * prompt re-consent. Other failures (5xx, transient network) leave tokens
+ * intact for retry.
+ */
+export class GoogleOAuthRefreshFailed extends Error {
+  readonly status: number
+  readonly body: string
+  readonly invalidGrant: boolean
+  constructor(status: number, body: string) {
+    super(`oauth refresh: ${status} ${body}`)
+    this.name = 'GoogleOAuthRefreshFailed'
+    this.status = status
+    this.body = body
+    let invalidGrant = false
+    if (status === 400) {
+      try {
+        const parsed = JSON.parse(body) as { error?: string }
+        invalidGrant = parsed?.error === 'invalid_grant'
+      } catch {
+        /* non-JSON body, leave invalidGrant=false */
+      }
+    }
+    this.invalidGrant = invalidGrant
+  }
 }
 
 export async function revokeToken(token: string, fetcher: typeof fetch = fetch): Promise<void> {
@@ -161,12 +190,25 @@ export async function getAccessToken(env: Env, fetcher: typeof fetch = fetch): P
   if (!env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET) {
     throw new Error('GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET not configured')
   }
-  const refreshed = await refreshAccessToken({
-    clientId: env.GOOGLE_OAUTH_CLIENT_ID,
-    clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
-    refreshToken: t.refreshToken,
-    fetcher,
-  })
+  let refreshed
+  try {
+    refreshed = await refreshAccessToken({
+      clientId: env.GOOGLE_OAUTH_CLIENT_ID,
+      clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+      refreshToken: t.refreshToken,
+      fetcher,
+    })
+  } catch (e) {
+    // invalid_grant means Google revoked the refresh token (most often:
+    // Testing-mode OAuth app's 7-day TTL elapsed, or the user revoked from
+    // their Google account). Clear the stored tokens so the UI's connect
+    // panel and the YouTube-status endpoint reflect reality instead of
+    // showing a stale "connected as …" while every sync errors.
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      await clearTokens(env)
+    }
+    throw e
+  }
   const next: StoredTokens = {
     ...t,
     accessToken: refreshed.accessToken,
