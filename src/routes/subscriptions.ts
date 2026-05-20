@@ -25,6 +25,10 @@ import {
 import { makeLogger, errorFields } from '../lib/log'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 import { syncAll, syncOne, loadSubState } from '../lib/sync'
+import { fetchTracklist } from '../lib/tracklists1001'
+import { buildCommentDraft, InvalidTracklistUrl } from '../lib/youtube-comment-draft'
+import { getJson, putJson, TTL } from '../lib/cache'
+import type { ParsedTrack } from '../types'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -108,6 +112,108 @@ subscriptionsApp.post('/api/remove', async (c) => {
     return c.json({ error: 'internal' }, 500)
   }
 })
+
+// ─── Comment draft (preview only — does NOT post to YouTube) ────────────────
+
+/**
+ * Returns a ready-to-paste YouTube comment body for a given tracklist URL:
+ * timestamped lines + a `1001.tl/<id>` short-link credit (bare host, no
+ * scheme). The user copies it and pastes manually — there is intentionally
+ * no auto-post path yet, because YouTube's spam classifier is hostile to
+ * repetitive-with-link comments and we want to see how a handful survive
+ * by hand before automating.
+ *
+ * Shares the `/now-playing` `tl:<slug>` KV cache so repeat draft requests
+ * for the same tracklist don't pay BrightData again. Mirrors the cache
+ * shape used by routes/now-playing.ts.
+ */
+subscriptionsApp.post('/api/comments/draft', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.comment_draft',
+    by: c.get('cfAccessEmail'),
+  })
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400)
+  }
+  const tracklistUrl =
+    typeof (body as { tracklistUrl?: unknown })?.tracklistUrl === 'string'
+      ? (body as { tracklistUrl: string }).tracklistUrl.trim()
+      : ''
+  if (!tracklistUrl) return c.json({ error: 'missing_tracklistUrl' }, 400)
+
+  try {
+    const tracks = await loadTracksCached(c.env, tracklistUrl, log)
+    const draft = buildCommentDraft(tracklistUrl, { tracks })
+    log.info('subs.comment_draft.ok', {
+      tracklistUrl,
+      includedGroups: draft.includedGroups,
+      droppedUncued: draft.droppedUncued,
+      droppedForLength: draft.droppedForLength,
+      truncated: draft.truncated,
+      bodyChars: draft.body.length,
+    })
+    return c.json({
+      tracklistUrl,
+      shortLink: draft.shortLink,
+      body: draft.body,
+      includedGroups: draft.includedGroups,
+      droppedUncued: draft.droppedUncued,
+      droppedForLength: draft.droppedForLength,
+      truncated: draft.truncated,
+    })
+  } catch (e) {
+    if (e instanceof InvalidTracklistUrl) {
+      return c.json({ error: 'invalid_tracklistUrl', message: e.message }, 400)
+    }
+    log.error('subs.comment_draft.throw', { tracklistUrl, ...errorFields(e) })
+    return c.json({ error: 'draft_failed', ...errorFields(e) }, 500)
+  }
+})
+
+/**
+ * Shared 2h-TTL `tl:<slug>` cache. Same key + shape as
+ * routes/now-playing.ts so the two endpoints split the BrightData cost.
+ * Handles the legacy `ParsedTrack[]` cache schema for back-compat with
+ * older entries (now-playing's helper does the same).
+ */
+async function loadTracksCached(
+  env: Env,
+  tracklistUrl: string,
+  log: ReturnType<typeof makeLogger>,
+): Promise<ParsedTrack[]> {
+  const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
+  const key = `tl:${slug}`
+  type Cached = { tracks: ParsedTrack[]; setAppleLink: string | null }
+  const cached = await getJson<Cached | ParsedTrack[]>(env.CACHE, key)
+  if (cached) {
+    log.counters.cacheHits++
+    if (Array.isArray(cached)) {
+      log.info('cache.hit', { key, trackCount: cached.length, schema: 'legacy' })
+      return cached
+    }
+    log.info('cache.hit', { key, trackCount: cached.tracks.length })
+    return cached.tracks
+  }
+  log.counters.cacheMisses++
+  log.info('cache.miss', { key })
+  const { result } = await fetchTracklist(tracklistUrl, {
+    brightdataApiKey: env.BRIGHTDATA_API_KEY,
+    homeProxyUrl: env.HOME_PROXY_URL,
+    homeProxyToken: env.HOME_PROXY_TOKEN,
+    log,
+  })
+  if (result.tracks.length > 0) {
+    await putJson(env.CACHE, key, { tracks: result.tracks, setAppleLink: result.setAppleLink }, TTL.TRACKLIST_PAGE)
+    log.info('cache.put', { key, trackCount: result.tracks.length, ttlSeconds: TTL.TRACKLIST_PAGE })
+  } else {
+    log.warn('cache.skip_empty', { key, reason: 'parsed 0 tracks; likely a transient captcha — not caching' })
+  }
+  return result.tracks
+}
 
 // ─── Sync (scrape + add to playlist) ────────────────────────────────────────
 
@@ -447,6 +553,16 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .banner .info { flex: 1; min-width: 0; }
   .banner .info .title { font-weight: 600; color: var(--danger); }
   .banner .info .sub { color: var(--muted); font-size: 0.8rem; }
+  .draft { margin-top: 2rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); }
+  .draft h2 { font-size: 1rem; margin: 0 0 0.4rem; }
+  .draft .sub { color: var(--muted); font-size: 0.8rem; margin: 0 0 0.75rem; }
+  .draft .row { display: flex; gap: 0.5rem; }
+  .draft input[type="url"] { flex: 1; padding: 0.5rem 0.6rem; font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; }
+  .draft .out { margin-top: 0.75rem; }
+  .draft textarea { width: 100%; min-height: 14em; padding: 0.6rem 0.75rem; font: 0.85rem ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; resize: vertical; }
+  .draft .meta { color: var(--muted); font-size: 0.75rem; margin-top: 0.4rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
+  .draft .meta button { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  .draft .truncated { color: var(--danger); }
 </style>
 </head>
 <body>
@@ -474,6 +590,22 @@ const PAGE_HTML = /* html */ `<!doctype html>
   <div id="error" class="error" role="alert"></div>
   <ul id="list"></ul>
   <div id="empty" class="empty" hidden>No subscriptions yet.</div>
+  <section class="draft">
+    <h2>YouTube comment draft</h2>
+    <p class="sub">Paste a 1001tracklists tracklist URL to generate a timestamped comment body you can copy and paste manually onto the matching YouTube video. The link uses <code>1001.tl/&lt;id&gt;</code> without a scheme to look less link-heavy to YT's spam filter. Nothing is auto-posted.</p>
+    <form id="draft-form" class="row">
+      <input id="draft-url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../...html" required />
+      <button type="submit">Draft</button>
+    </form>
+    <div id="draft-error" class="error" role="alert"></div>
+    <div id="draft-out" class="out" hidden>
+      <textarea id="draft-body" readonly></textarea>
+      <div class="meta">
+        <button id="draft-copy" type="button">Copy</button>
+        <span id="draft-stats"></span>
+      </div>
+    </div>
+  </section>
   <footer>Signed in as <span id="who"></span></footer>
 </main>
 <script>
@@ -722,6 +854,76 @@ const PAGE_HTML = /* html */ `<!doctype html>
       $proxyClear.disabled = false;
       $proxyClear.textContent = original;
     }
+  });
+
+  // ── Comment draft (preview-only — never posts to YouTube) ──────────────
+  const $draftForm = document.getElementById('draft-form');
+  const $draftUrl = document.getElementById('draft-url');
+  const $draftOut = document.getElementById('draft-out');
+  const $draftBody = document.getElementById('draft-body');
+  const $draftStats = document.getElementById('draft-stats');
+  const $draftError = document.getElementById('draft-error');
+  const $draftCopy = document.getElementById('draft-copy');
+  const $draftBtn = $draftForm.querySelector('button[type="submit"]');
+
+  function showDraftError(msg) {
+    $draftError.textContent = msg ?? '';
+  }
+
+  $draftForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    showDraftError('');
+    const url = $draftUrl.value.trim();
+    if (!url) return;
+    $draftBtn.disabled = true;
+    const original = $draftBtn.textContent;
+    $draftBtn.textContent = 'Working…';
+    try {
+      const r = await fetch('/subscriptions/api/comments/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ tracklistUrl: url }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        showDraftError(data.message || data.errorMessage || data.error || ('draft failed (' + r.status + ')'));
+        $draftOut.hidden = true;
+        return;
+      }
+      $draftBody.value = data.body || '';
+      const bits = [
+        data.includedGroups + ' line' + (data.includedGroups === 1 ? '' : 's'),
+        data.shortLink,
+      ];
+      if (data.droppedUncued > 0) bits.push(data.droppedUncued + ' uncued dropped');
+      if (data.truncated) bits.push('TRUNCATED — ' + data.droppedForLength + ' trailing line(s) cut to fit');
+      $draftStats.textContent = bits.join(' · ');
+      $draftStats.className = data.truncated ? 'truncated' : '';
+      $draftOut.hidden = false;
+    } catch (err) {
+      showDraftError(err && err.message ? err.message : String(err));
+      $draftOut.hidden = true;
+    } finally {
+      $draftBtn.disabled = false;
+      $draftBtn.textContent = original;
+    }
+  });
+
+  $draftCopy.addEventListener('click', async () => {
+    const text = $draftBody.value;
+    if (!text) return;
+    const original = $draftCopy.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      $draftCopy.textContent = 'Copied!';
+    } catch {
+      // Fallback for non-secure contexts (e.g. wrangler dev over IP, no HTTPS).
+      $draftBody.select();
+      document.execCommand && document.execCommand('copy');
+      $draftCopy.textContent = 'Copied!';
+    }
+    setTimeout(() => { $draftCopy.textContent = original; }, 1500);
   });
 
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.

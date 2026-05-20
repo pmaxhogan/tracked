@@ -215,7 +215,7 @@ function computeDurations(
   return out
 }
 
-function groupByMashup(tracks: ParsedTrack[]): ParsedTrack[][] {
+export function groupByMashup(tracks: ParsedTrack[]): ParsedTrack[][] {
   const groups: ParsedTrack[][] = []
   for (const t of tracks) {
     const last = groups[groups.length - 1]

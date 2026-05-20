@@ -114,6 +114,34 @@ POST /subscriptions/api/add    { url: "..." }     → { added: bool, subscriptio
 POST /subscriptions/api/remove { slug: "..." }    → { removed: bool }
 ```
 
+### YouTube comment draft (preview only — does not post)
+
+`POST /subscriptions/api/comments/draft` renders a copy-pasteable YouTube comment body for a given tracklist URL: timestamped lines (`H:MM:SS Artist - Title`, mashup-linked siblings combined onto one line with ` w/ `) plus a `1001.tl/<id>` credit footer. The page has a "YouTube comment draft" panel that calls this and offers a Copy button.
+
+```jsonc
+POST /subscriptions/api/comments/draft
+{ "tracklistUrl": "https://www.1001tracklists.com/tracklist/l3uw499/...html" }
+
+→ {
+  "tracklistUrl":    "https://...",
+  "shortLink":       "1001.tl/l3uw499",     // bare host, no scheme — see below
+  "body":            "0:00 …\n2:30 …\n\nTracklist: 1001.tl/l3uw499",
+  "includedGroups":  27,                     // mashup pair = one group = one line
+  "droppedUncued":   0,                      // uncued tracks omitted (no timestamp to seek to)
+  "droppedForLength": 0,                     // trailing lines cut to fit YT's 10k char cap
+  "truncated":       false
+}
+```
+
+Deliberately preview-only: posting these to YouTube via `commentThreads.insert` is technically straightforward, but YouTube's spam classifier is hostile to link-containing, near-identical comments posted in bulk by the same channel — and the channel taking the hit would be the user's, not the app's. The current flow surfaces drafts for the user to post by hand so they can eyeball spam-filter outcomes on a handful before any automation is built.
+
+Two design choices to keep the spam classifier friendly:
+
+- **Bare-host short link** (`1001.tl/<id>`, not `https://1001.tl/<id>`). YouTube auto-renders both, but the schemeless form contributes less to the "this comment is mostly links" heuristic.
+- **No timestamp on uncued tracks.** YouTube only auto-linkifies timestamps at the start of a line. A line without one looks like padding and adds noise; dropping them keeps the body tight.
+
+Tracklist parsing reuses the same `tl:<slug>` 2-hour KV cache as `/now-playing`, so generating a draft right after the Tasker integration looked the set up costs nothing extra.
+
 ### YouTube account connection
 
 The same page has a "Sign in with YouTube" button that runs an OAuth 2.0 authorization-code flow against Google so the worker can create and modify playlists on the connected channel. The flow is implemented in `src/lib/google-oauth.ts` and wired up in `src/routes/subscriptions.ts`:
@@ -321,6 +349,7 @@ src/
     tracklists1001.ts       search, scrape, medialink (homeProxy → unlocker → direct)
     subscriptions.ts        DJ slug parser + KV CRUD for the mini-app
     google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
+    youtube-comment-draft.ts  pure renderer: tracks → YT comment body + 1001.tl credit
     fetch.ts                challenge solver + cookie jar
     homeProxy.ts            residential-IP forwarder client (pairs with scripts/nas-fetch-proxy.mjs)
     unlocker.ts             Bright Data Web Unlocker client
