@@ -496,7 +496,7 @@ export async function syncOne(
 
 /**
  * Resolve a playlist by title — find an existing one with that exact title
- * on the user's channel, or create a fresh private playlist. Used both on
+ * on the user's channel, or create a fresh public playlist. Used both on
  * first sync and as the recovery path when cached state references a
  * deleted playlist.
  */
@@ -513,7 +513,7 @@ async function findOrCreatePlaylist(
     return { id: existing.id, justCreated: false }
   }
   const created = await createPlaylist(
-    { title, description: playlistDescription(artistName), privacyStatus: 'private' },
+    { title, description: playlistDescription(artistName), privacyStatus: 'public' },
     accessToken,
   )
   log.info('sync.playlist_created', { slug, playlistId: created.id, title })

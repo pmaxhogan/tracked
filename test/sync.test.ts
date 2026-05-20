@@ -160,7 +160,7 @@ describe('syncOne', () => {
     expect(createPlaylist).toHaveBeenCalledOnce()
     expect((createPlaylist as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
       title: 'Lilly Palmer (1001tklists)',
-      privacyStatus: 'private',
+      privacyStatus: 'public',
       description: 'Every set Lilly Palmer has a YouTube recording for on 1001tracklists.',
     })
     expect(addVideoToPlaylist).toHaveBeenCalledTimes(2)
