@@ -86,7 +86,7 @@ export async function createPlaylist(
 ): Promise<Playlist> {
   const body = {
     snippet: { title: opts.title, description: opts.description ?? '' },
-    status: { privacyStatus: opts.privacyStatus ?? 'private' },
+    status: { privacyStatus: opts.privacyStatus ?? 'public' },
   }
   const res = await authedFetch(
     `${API}/playlists?part=snippet,status`,

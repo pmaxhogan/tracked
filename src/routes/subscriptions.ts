@@ -434,6 +434,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
   li a:hover { text-decoration: underline; }
   li .meta { flex: 1; min-width: 0; }
   li .meta .added { color: var(--muted); font-size: 0.8rem; }
+  #list-actions { display: flex; justify-content: flex-end; margin-bottom: 0.5rem; }
+  #list-actions button { background: transparent; color: var(--accent); border: 1px solid var(--border); padding: 0.3rem 0.6rem; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   .error { color: var(--danger); margin: 0.5rem 0 1rem; min-height: 1.2em; }
   .error-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; color: var(--muted); white-space: pre-wrap; word-break: break-word; max-height: 16em; overflow: auto; margin: 0.4rem 0 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 4px; background: var(--card); }
@@ -472,6 +474,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
     <button type="submit">Add</button>
   </form>
   <div id="error" class="error" role="alert"></div>
+  <div id="list-actions" hidden><button id="sync-all">Sync all</button></div>
   <ul id="list"></ul>
   <div id="empty" class="empty" hidden>No subscriptions yet.</div>
   <footer>Signed in as <span id="who"></span></footer>
@@ -484,6 +487,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
   const $form = document.getElementById('add-form');
   const $url = document.getElementById('url');
   const $btn = $form.querySelector('button');
+  const $listActions = document.getElementById('list-actions');
+  const $syncAll = document.getElementById('sync-all');
 
   function showError(msg, detail) {
     $error.textContent = msg ?? '';
@@ -512,8 +517,9 @@ const PAGE_HTML = /* html */ `<!doctype html>
 
   function render(subs) {
     $list.innerHTML = '';
-    if (!subs.length) { $empty.hidden = false; return; }
+    if (!subs.length) { $empty.hidden = false; $listActions.hidden = true; return; }
     $empty.hidden = true;
+    $listActions.hidden = false;
     for (const s of subs) {
       const li = document.createElement('li');
       const meta = document.createElement('div');
@@ -531,8 +537,9 @@ const PAGE_HTML = /* html */ `<!doctype html>
       meta.appendChild(added);
       li.appendChild(meta);
       const sync = document.createElement('button');
-      sync.className = 'danger';
+      sync.className = 'danger sync-btn';
       sync.textContent = 'Sync';
+      sync.dataset.slug = s.slug;
       sync.addEventListener('click', () => syncSlug(s.slug, sync));
       li.appendChild(sync);
       const rm = document.createElement('button');
@@ -633,6 +640,22 @@ const PAGE_HTML = /* html */ `<!doctype html>
       btn.disabled = false;
     }
   }
+
+  $syncAll.addEventListener('click', async () => {
+    const btns = Array.from($list.querySelectorAll('button.sync-btn'));
+    if (!btns.length) return;
+    $syncAll.disabled = true;
+    const original = $syncAll.textContent;
+    $syncAll.textContent = 'Syncing all…';
+    try {
+      // Serial: mirrors clicking each row's Sync one after the other, and
+      // keeps us under YouTube quota / 1001tracklists rate limits.
+      for (const b of btns) await syncSlug(b.dataset.slug, b);
+    } finally {
+      $syncAll.disabled = false;
+      $syncAll.textContent = original;
+    }
+  });
 
   $form.addEventListener('submit', (e) => {
     e.preventDefault();

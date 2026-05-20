@@ -52,7 +52,7 @@ describe('findPlaylistByTitle', () => {
 })
 
 describe('createPlaylist', () => {
-  it('POSTs the title + private status by default', async () => {
+  it('POSTs the title + public status by default', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(
       jsonResponse({ id: 'newPL', snippet: { title: 'A (1001tklists)' } }),
     ) as unknown as typeof fetch
@@ -62,7 +62,7 @@ describe('createPlaylist', () => {
     expect(init.method).toBe('POST')
     const body = JSON.parse(init.body as string)
     expect(body.snippet.title).toBe('A (1001tklists)')
-    expect(body.status.privacyStatus).toBe('private')
+    expect(body.status.privacyStatus).toBe('public')
   })
 
   it('respects an explicit privacyStatus override', async () => {
