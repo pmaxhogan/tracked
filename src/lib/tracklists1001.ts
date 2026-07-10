@@ -41,15 +41,111 @@ export async function searchByYouTubeUrl(
   return { result, state: s2 }
 }
 
-export function parseSearchResult(html: string): SearchResult {
+/** A single tracklist row on a `/search/result.php` results page. */
+export type TracklistCandidate = { tracklistUrl: string; title: string }
+
+/**
+ * Parse every tracklist result row (`div.bItm.action.oItm`) into a
+ * {url, visible title} pair. The URL comes from the row's `window.open(...)`
+ * onclick; the title from the `.bTitle a` anchor. Order is preserved (the page
+ * orders by whatever `orderby` was posted — default `added`, newest first).
+ */
+export function parseSearchResults(html: string): TracklistCandidate[] {
   const root = parse(html)
   const rows = root.querySelectorAll('div.bItm.action.oItm')
+  const out: TracklistCandidate[] = []
   for (const r of rows) {
     const onclick = r.getAttribute('onclick') ?? ''
     const m = onclick.match(/window\.open\('(\/tracklist\/[^']+)'/)
-    if (m) return { tracklistUrl: ORIGIN + m[1] }
+    if (!m) continue
+    const anchor = r.querySelector('div.bTitle a') ?? r.querySelector('.bTitle')
+    const title = decodeEntities((anchor?.text ?? '').trim())
+    out.push({ tracklistUrl: ORIGIN + m[1], title })
   }
-  return { tracklistUrl: null }
+  return out
+}
+
+export function parseSearchResult(html: string): SearchResult {
+  const first = parseSearchResults(html)[0]
+  return { tracklistUrl: first ? first.tracklistUrl : null }
+}
+
+/**
+ * Tracklist text-search (search_selection=9, no media-source filter) — used as
+ * a fallback when we don't have (or couldn't confirm) a YouTube URL to pin the
+ * match. 1001tl returns any tracklist whose name matches the query text, so we
+ * rank the rows against `title` and only accept a confident match (or a lone
+ * result). Returns the same {tracklistUrl|null} shape as searchByYouTubeUrl.
+ */
+export async function searchByTitle(
+  title: string,
+  state?: ChallengeState,
+  log?: Logger,
+): Promise<{ result: SearchResult; state: ChallengeState }> {
+  log?.info('1001titlesearch.start', { title })
+  const start = Date.now()
+  const { html, state: s2 } = await postForm(
+    `${ORIGIN}/search/result.php`,
+    { main_search: title, search_selection: '9', orderby: 'added' },
+    state,
+  )
+  const candidates = parseSearchResults(html)
+  const best = pickBestTracklist(title, candidates)
+  log?.info('1001titlesearch.done', {
+    title,
+    htmlBytes: html.length,
+    candidateCount: candidates.length,
+    candidates: candidates.slice(0, 8).map((c) => ({ title: c.title, url: c.tracklistUrl })),
+    chosen: best ? { title: best.title, url: best.tracklistUrl, score: Number(best.score.toFixed(3)) } : null,
+    ms: Date.now() - start,
+  })
+  return { result: { tracklistUrl: best ? best.tracklistUrl : null }, state: s2 }
+}
+
+/** Lowercase, drop punctuation to spaces, collapse whitespace. */
+function normText(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+/**
+ * Similarity of a search query to a candidate tracklist title in [0,1]:
+ * exact-normalized = 1, one containing the other = 0.9, otherwise token-set
+ * Jaccard. Handles the common case where the 1001tl title is the YouTube
+ * notification title minus a trailing date/qualifier (or vice versa).
+ */
+export function scoreTitleMatch(query: string, candidate: string): number {
+  const nq = normText(query)
+  const nc = normText(candidate)
+  if (!nq || !nc) return 0
+  if (nq === nc) return 1
+  if (nq.includes(nc) || nc.includes(nq)) return 0.9
+  const tq = new Set(nq.split(' '))
+  const tc = new Set(nc.split(' '))
+  let inter = 0
+  for (const t of tc) if (tq.has(t)) inter++
+  const union = new Set([...tq, ...tc]).size
+  return union ? inter / union : 0
+}
+
+/**
+ * Pick the best-matching tracklist row. Accepts the top-scored candidate when
+ * it clears a modest similarity floor, OR the sole candidate regardless of
+ * score (a lone hit for a specific DJ-set query is almost always the set).
+ * Returns null when nothing is a plausible match — better a clear "not found"
+ * than a confidently-wrong tracklist.
+ */
+export function pickBestTracklist(
+  query: string,
+  candidates: TracklistCandidate[],
+): (TracklistCandidate & { score: number }) | null {
+  if (candidates.length === 0) return null
+  let best = { ...candidates[0]!, score: scoreTitleMatch(query, candidates[0]!.title) }
+  for (const c of candidates.slice(1)) {
+    const score = scoreTitleMatch(query, c.title)
+    if (score > best.score) best = { ...c, score }
+  }
+  if (candidates.length === 1 || best.score >= 0.34) return best
+  return null
 }
 
 export type ScrapedTracklist = {

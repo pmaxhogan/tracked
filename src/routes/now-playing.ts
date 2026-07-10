@@ -2,7 +2,7 @@ import { createRoute, type RouteHandler } from '@hono/zod-openapi'
 import { NowPlayingRequest, NowPlayingResponse, ErrorResponse } from '../schemas'
 import type { Env, ParsedTrack, ResponseTrack, Status } from '../types'
 import { resolveVideo, extractVideoId } from '../lib/youtube'
-import { searchByYouTubeUrl, fetchTracklist, fetchMediaLinks, type MediaLinks } from '../lib/tracklists1001'
+import { searchByYouTubeUrl, searchByTitle, fetchTracklist, fetchMediaLinks, type MediaLinks } from '../lib/tracklists1001'
 import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
 import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
@@ -27,6 +27,11 @@ export const nowPlayingRoute = createRoute({
 })
 
 type Res = typeof NowPlayingResponse._type
+
+/** Which signal resolved the tracklist — logged for triage. */
+type TracklistVia = 'youtube_url' | 'youtube_title' | 'posted_title'
+
+const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 
 export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings: Env }> = async (c) => {
   const reqId = c.req.raw.headers.get('cf-ray') ?? `local-${Math.random().toString(36).slice(2, 10)}`
@@ -61,51 +66,103 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     return c.json(payload, 200)
   }
 
-  // Phase 1 — resolve videoId
+  // Phase 1 (step a) — best-effort resolve a YouTube video from the notif data.
+  // A miss here is NO LONGER fatal: we fall through to searching 1001tracklists
+  // by title (steps c/d) so a YouTube-side hiccup (duration tie-break outside
+  // tolerance, the exact upload missing from the top results, a quota/5xx blip)
+  // can't block a set that 1001tl actually has.
+  const originalTitle = body.videoTitle ?? null
   let videoId: string | null = null
+  let videoUrl: string | null = null
+  let ytMatchTitle: string | null = null // title of the matched YT video (may differ from the notification title)
+  let ytError: string | null = null // set if the YouTube lookup threw; folded into the final message, not fatal
   if (body.videoUrl) {
     videoId = extractVideoId(body.videoUrl)
-    log.info('phase.video.from_url', { input: body.videoUrl, videoId })
-    if (!videoId) {
-      log.error('phase.video.unparseable_url', { input: body.videoUrl })
-      return respond('no_video', {}, 'could not parse a YouTube video id from videoUrl')
+    if (videoId) {
+      videoUrl = watchUrl(videoId)
+      log.info('phase.video.from_url', { input: body.videoUrl, videoId })
+    } else {
+      log.warn('phase.video.unparseable_url', { input: body.videoUrl })
     }
-  } else if (body.videoTitle) {
-    log.info('phase.video.from_title', { videoTitle: body.videoTitle, videoDurationSeconds: body.videoDurationSeconds })
+  } else if (originalTitle) {
+    log.info('phase.video.from_title', { videoTitle: originalTitle, videoDurationSeconds: body.videoDurationSeconds })
     try {
-      videoId = await resolveYouTube(env, body.videoTitle, body.videoDurationSeconds, log)
+      const yt = await resolveYouTube(env, originalTitle, body.videoDurationSeconds, log)
+      if (yt) {
+        videoId = yt.videoId
+        videoUrl = watchUrl(yt.videoId)
+        ytMatchTitle = yt.matchTitle || null
+        log.info('phase.video.resolved', { videoId, videoUrl, matchTitle: ytMatchTitle })
+      } else {
+        log.warn('phase.video.no_match', { videoTitle: originalTitle, videoDurationSeconds: body.videoDurationSeconds })
+      }
     } catch (e) {
+      ytError = (e as Error).message
       log.error('phase.video.youtube_throw', errorFields(e))
-      return respond('upstream_error', {}, `youtube: ${(e as Error).message}`)
-    }
-    if (!videoId) {
-      log.warn('phase.video.no_match', { videoTitle: body.videoTitle, videoDurationSeconds: body.videoDurationSeconds })
-      return respond('no_video')
     }
   } else {
     log.error('phase.video.no_input')
     return respond('no_video', {}, 'videoUrl or videoTitle is required')
   }
-  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`
-  log.info('phase.video.resolved', { videoId, videoUrl })
 
-  // Phase 2 — find a tracklist
+  // Phase 2 (steps b→d) — find a tracklist, trying each available signal until
+  // one hits: (b) the resolved YouTube URL, (c) the resolved video's title,
+  // (d) the original POSTed notification title.
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
+  type Attempt = { via: TracklistVia; kind: 'url' | 'title'; query: string }
+  const attempts: Attempt[] = []
+  if (videoUrl && videoId) attempts.push({ via: 'youtube_url', kind: 'url', query: videoUrl })
+  if (ytMatchTitle) attempts.push({ via: 'youtube_title', kind: 'title', query: ytMatchTitle })
+  if (originalTitle && !(ytMatchTitle && norm(ytMatchTitle) === norm(originalTitle))) {
+    attempts.push({ via: 'posted_title', kind: 'title', query: originalTitle })
+  }
+  log.info('phase.search.plan', { attempts: attempts.map((a) => ({ via: a.via, query: a.query })) })
+
   let tracklistUrl: string | null = null
-  try {
-    tracklistUrl = await resolveTracklistUrl(env, videoId, videoUrl, log)
-  } catch (e) {
-    if (e instanceof IPBlockedError) {
-      log.error('phase.search.ip_blocked', { videoId, videoUrl, clientIp: e.clientIp })
-      return respond('upstream_error', { videoUrl }, `1001 search: ip_blocked (${e.clientIp ?? 'unknown'})`)
+  let tracklistVia: TracklistVia | null = null
+  for (const a of attempts) {
+    try {
+      const url =
+        a.kind === 'url'
+          ? await resolveTracklistByUrl(env, videoId!, a.query, log)
+          : await resolveTracklistByTitle(env, a.query, log)
+      log.info('phase.search.attempt', { via: a.via, kind: a.kind, query: a.query, tracklistUrl: url })
+      if (url) {
+        tracklistUrl = url
+        tracklistVia = a.via
+        break
+      }
+    } catch (e) {
+      // An IP block / CF challenge will hit every subsequent attempt too, so
+      // stop and surface it as the (transient, retryable) upstream error.
+      if (e instanceof IPBlockedError) {
+        log.error('phase.search.ip_blocked', { via: a.via, clientIp: e.clientIp })
+        return respond('upstream_error', { videoUrl }, `1001 search: ip_blocked (${e.clientIp ?? 'unknown'})`)
+      }
+      log.error('phase.search.attempt_throw', { via: a.via, kind: a.kind, query: a.query, ...errorFields(e) })
+      // Other errors are per-attempt; try the next signal.
     }
-    log.error('phase.search.throw', { videoId, videoUrl, ...errorFields(e) })
-    return respond('upstream_error', { videoUrl }, `1001 search: ${(e as Error).message}`)
   }
+
   if (!tracklistUrl) {
-    log.info('phase.search.no_tracklist', { videoId, videoUrl })
-    return respond('no_tracklist', { videoUrl })
+    const searched = attempts.map((a) => a.via)
+    if (videoId) {
+      // We DID find a YouTube video; 1001tl just has no tracklist for it.
+      const msg = `matched YouTube video${ytMatchTitle ? ` "${ytMatchTitle}"` : ''} but 1001tracklists has no tracklist for it (searched: ${searched.join(', ') || 'none'})`
+      log.info('phase.search.no_tracklist', { videoId, videoUrl, searched })
+      return respond('no_tracklist', { videoUrl }, msg)
+    }
+    // No YouTube video AND no title match on 1001tl — say which, so the toast is actionable.
+    const bits: string[] = []
+    if (originalTitle) bits.push(`no confident YouTube match for "${originalTitle}"`)
+    else if (body.videoUrl) bits.push(`could not parse a video id from "${body.videoUrl}" (and no videoTitle to search by)`)
+    if (ytError) bits.push(`youtube lookup errored (${ytError})`)
+    if (originalTitle) bits.push(`1001tracklists title search found nothing`)
+    const msg = bits.join('; ') || 'could not resolve a video or tracklist'
+    log.warn('phase.search.no_video_no_tracklist', { originalTitle, ytError, searched })
+    return respond('no_video', {}, msg)
   }
-  log.info('phase.search.resolved', { tracklistUrl })
+  log.info('phase.search.resolved', { tracklistUrl, via: tracklistVia })
 
   // Phase 3 — scrape the tracklist
   let parsedTracks: ParsedTrack[]
@@ -164,25 +221,30 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   return c.json(payload, 200)
 }
 
-async function resolveYouTube(env: Env, title: string, dur: number | undefined, log: Logger): Promise<string | null> {
+type YouTubeMatch = { videoId: string; matchTitle: string }
+
+async function resolveYouTube(env: Env, title: string, dur: number | undefined, log: Logger): Promise<YouTubeMatch | null> {
   const key = `yt:${await sha1Hex(title)}:${dur ?? 'x'}`
-  const cached = await getJson<{ videoId: string | null }>(env.CACHE, key)
+  // Older cache entries stored only { videoId }; matchTitle is optional so they
+  // still deserialize (step c just gets skipped for those until the TTL rolls).
+  const cached = await getJson<{ videoId: string | null; matchTitle?: string | null }>(env.CACHE, key)
   if (cached) {
     log.counters.cacheHits++
     log.info('cache.hit', { key, value: cached })
-    return cached.videoId
+    return cached.videoId ? { videoId: cached.videoId, matchTitle: cached.matchTitle ?? '' } : null
   }
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
   log.counters.youtubeApiCalls++
   const r = await resolveVideo(title, dur, env.YOUTUBE_API_KEY, log)
-  const videoId = r?.videoId ?? null
-  await putJson(env.CACHE, key, { videoId }, TTL.YT_VIDEO)
-  log.info('cache.put', { key, value: { videoId }, ttlSeconds: TTL.YT_VIDEO })
-  return videoId
+  const value = { videoId: r?.videoId ?? null, matchTitle: r?.matchTitle ?? null }
+  await putJson(env.CACHE, key, value, TTL.YT_VIDEO)
+  log.info('cache.put', { key, value, ttlSeconds: TTL.YT_VIDEO })
+  return r ? { videoId: r.videoId, matchTitle: r.matchTitle } : null
 }
 
-async function resolveTracklistUrl(env: Env, videoId: string, videoUrl: string, log: Logger): Promise<string | null> {
+/** search 1001tl by the resolved YouTube URL (media-source pinned — exact). Cached by videoId. */
+async function resolveTracklistByUrl(env: Env, videoId: string, videoUrl: string, log: Logger): Promise<string | null> {
   const key = `s1001:${videoId}`
   const cached = await getJson<{ tracklistUrl: string | null }>(env.CACHE, key)
   if (cached) {
@@ -193,6 +255,23 @@ async function resolveTracklistUrl(env: Env, videoId: string, videoUrl: string, 
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
   const { result } = await searchByYouTubeUrl(videoUrl, undefined, log)
+  await putJson(env.CACHE, key, { tracklistUrl: result.tracklistUrl }, TTL.TRACKLIST_SEARCH)
+  log.info('cache.put', { key, value: result, ttlSeconds: TTL.TRACKLIST_SEARCH })
+  return result.tracklistUrl
+}
+
+/** search 1001tl by free-text title (ranked). Cached by normalized title hash. */
+async function resolveTracklistByTitle(env: Env, title: string, log: Logger): Promise<string | null> {
+  const key = `s1001t:${await sha1Hex(title.trim().toLowerCase())}`
+  const cached = await getJson<{ tracklistUrl: string | null }>(env.CACHE, key)
+  if (cached) {
+    log.counters.cacheHits++
+    log.info('cache.hit', { key, value: cached })
+    return cached.tracklistUrl
+  }
+  log.counters.cacheMisses++
+  log.info('cache.miss', { key })
+  const { result } = await searchByTitle(title, undefined, log)
   await putJson(env.CACHE, key, { tracklistUrl: result.tracklistUrl }, TTL.TRACKLIST_SEARCH)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.TRACKLIST_SEARCH })
   return result.tracklistUrl

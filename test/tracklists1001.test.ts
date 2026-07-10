@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData } from '../src/lib/tracklists1001'
+import { parseSearchResult, parseSearchResults, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData } from '../src/lib/tracklists1001'
 import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
 import { selectCurrent } from '../src/lib/timestamp'
 
@@ -110,6 +110,66 @@ describe('parseSearchResult', () => {
   it('returns null when there are no matches', () => {
     const r = parseSearchResult(fx('search-no-result.html'))
     expect(r.tracklistUrl).toBeNull()
+  })
+})
+
+describe('parseSearchResults (title-search rows)', () => {
+  it('returns each row with its url and visible title', () => {
+    const rows = parseSearchResults(fx('search-result.html'))
+    expect(rows.length).toBe(1)
+    expect(rows[0]!.tracklistUrl).toBe(
+      'https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html',
+    )
+    expect(rows[0]!.title).toBe('Matroda @ Club Space Miami, United States')
+  })
+
+  it('returns [] when the page has no result rows', () => {
+    expect(parseSearchResults(fx('search-no-result.html'))).toEqual([])
+  })
+})
+
+describe('scoreTitleMatch', () => {
+  it('scores an exact normalized match as 1', () => {
+    expect(scoreTitleMatch('Matroda @ Club Space', 'matroda club space')).toBe(1)
+  })
+
+  it('scores containment (1001tl title is the notif title minus the date) high', () => {
+    // The notification title carries a trailing date the 1001tl anchor omits.
+    const s = scoreTitleMatch(
+      'Matroda @ Club Space Miami, United States 2023-08-05',
+      'Matroda @ Club Space Miami, United States',
+    )
+    expect(s).toBeGreaterThanOrEqual(0.9)
+  })
+
+  it('scores an unrelated title low', () => {
+    expect(scoreTitleMatch('Matroda @ Club Space Miami 2023', 'John Summit @ Red Rocks 2024')).toBeLessThan(0.34)
+  })
+})
+
+describe('pickBestTracklist', () => {
+  const rows = parseSearchResults(fx('search-result.html'))
+
+  it('accepts the lone candidate for a specific query', () => {
+    const best = pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', rows)
+    expect(best?.tracklistUrl).toBe(rows[0]!.tracklistUrl)
+  })
+
+  it('returns null when nothing is a plausible match among several', () => {
+    const many = [
+      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'John Summit @ Red Rocks 2024' },
+      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Fisher @ Coachella 2022' },
+    ]
+    expect(pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', many)).toBeNull()
+  })
+
+  it('picks the highest-scoring candidate when several match to different degrees', () => {
+    const many = [
+      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'Matroda — studio mix' },
+      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Matroda @ Club Space Miami, United States' },
+    ]
+    const best = pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', many)
+    expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
   })
 })
 

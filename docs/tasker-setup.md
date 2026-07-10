@@ -63,8 +63,8 @@ The task runs on demand (e.g. via a home-screen widget or a notification action)
    | ---------------- | ---------------------------------------------------------------------------------------------------- |
    | `ok`             | Build a Scene with `%http_data.tracks` (see step 6).                                                 |
    | `unidentified`   | Same Scene. Rows with `isUnidentified: true` carry no deep links — render greyed-out and untappable. Rows with a non-null `idStatus` ("ID Remix" / "ID Edit" / etc.) DO have links but the playing variant may differ from the linked base track — surface the `idStatus` label. |
-   | `no_video`       | `Flash` toast: "Couldn't match this video on YouTube".                                               |
-   | `no_tracklist`   | `Flash` toast: "No tracklist on 1001tracklists for this set".                                        |
+   | `no_video`       | `Flash` toast: "Couldn't match this video on YouTube". Now also means "…and a direct 1001tracklists title search found nothing either." `%http_data.message` explains specifically (e.g. `no confident YouTube match for "<title>"; 1001tracklists title search found nothing`) — worth flashing the message instead of the fixed string. |
+   | `no_tracklist`   | `Flash` toast: "No tracklist on 1001tracklists for this set". `%http_data.message` says whether a YouTube video was matched and which searches ran. |
    | `upstream_error` | `Flash` toast with `%http_data.message`. The message is structured: `1001 search: ip_blocked (<ip>)` or `1001 scrape: ip_blocked (<ip>)` means the upstream rate-limited us — usually transient, retry in a few minutes. Other messages indicate a real failure. |
 
 6. **Scene: tracklist popup**
