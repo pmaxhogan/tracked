@@ -128,13 +128,12 @@ describe('parseSearchResults (title-search rows)', () => {
   })
 })
 
-describe('scoreTitleMatch', () => {
+describe('scoreTitleMatch (pairwise, no result-set context)', () => {
   it('scores an exact normalized match as 1', () => {
     expect(scoreTitleMatch('Matroda @ Club Space', 'matroda club space')).toBe(1)
   })
 
   it('scores containment (1001tl title is the notif title minus the date) high', () => {
-    // The notification title carries a trailing date the 1001tl anchor omits.
     const s = scoreTitleMatch(
       'Matroda @ Club Space Miami, United States 2023-08-05',
       'Matroda @ Club Space Miami, United States',
@@ -142,33 +141,56 @@ describe('scoreTitleMatch', () => {
     expect(s).toBeGreaterThanOrEqual(0.9)
   })
 
-  it('scores an unrelated title low', () => {
-    expect(scoreTitleMatch('Matroda @ Club Space Miami 2023', 'John Summit @ Red Rocks 2024')).toBeLessThan(0.34)
+  it('uses overlap coefficient so surplus query tokens (date, "4hr set") do not sink a real match', () => {
+    // The bug that regressed this: Jaccard put this at 0.333 (< threshold) and
+    // the match was dropped. Overlap coefficient keeps it well above 0.5.
+    const s = scoreTitleMatch(
+      'Gorgon City - 4hr Set @ Space Miami, Dec 27 2025',
+      'Gorgon City @ Club Space Miami, United States',
+    )
+    expect(s).toBeGreaterThan(0.5)
   })
 })
 
-describe('pickBestTracklist', () => {
-  const rows = parseSearchResults(fx('search-result.html'))
+describe('pickBestTracklist (IDF-weighted, real Gorgon City search page)', () => {
+  const rows = parseSearchResults(fx('search-gorgon-multi.html'))
 
+  it('has the tricky shape: many identical "Club Space Miami" titles differing only by date', () => {
+    const dupes = rows.filter((r) => r.title === 'Gorgon City @ Club Space Miami, United States')
+    expect(dupes.length).toBeGreaterThanOrEqual(5)
+  })
+
+  it('picks the date 1001tl ranked first (its order, not our text score, breaks the tie)', () => {
+    const best = pickBestTracklist('Gorgon City - 4hr Set @ Space Miami, Dec 27 2025', rows)
+    expect(best?.tracklistUrl).toContain('gorgon-city-club-space-miami-united-states-2025-12-27')
+  })
+
+  it('rejects a venue-only match: different artist, same shared Club Space Miami boilerplate', () => {
+    expect(pickBestTracklist('SomeUnknownDJ @ Club Space Miami, United States 2025-12-27', rows)).toBeNull()
+  })
+})
+
+describe('pickBestTracklist (synthetic edge cases)', () => {
   it('accepts the lone candidate for a specific query', () => {
+    const rows = parseSearchResults(fx('search-result.html'))
     const best = pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', rows)
     expect(best?.tracklistUrl).toBe(rows[0]!.tracklistUrl)
   })
 
-  it('returns null when nothing is a plausible match among several', () => {
+  it('returns null when the set is not in the results (only unrelated sets)', () => {
     const many = [
-      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'John Summit @ Red Rocks 2024' },
-      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Fisher @ Coachella 2022' },
+      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'John Summit @ Red Rocks, United States' },
+      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Fisher @ Coachella, United States' },
     ]
     expect(pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', many)).toBeNull()
   })
 
-  it('picks the highest-scoring candidate when several match to different degrees', () => {
+  it('recovers a correct match ranked below an unrelated row (walks past the miss)', () => {
     const many = [
-      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'Matroda — studio mix' },
-      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Matroda @ Club Space Miami, United States' },
+      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'Fisher @ Coachella, United States' },
+      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Eli Brown @ Mixmag The Lab Mendoza, Argentina' },
     ]
-    const best = pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', many)
+    const best = pickBestTracklist('Eli Brown | Mixmag Lab Mendoza', many)
     expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
   })
 })

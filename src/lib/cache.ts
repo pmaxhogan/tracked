@@ -7,6 +7,12 @@ export const TTL = {
   TRACKLIST_PAGE: 60 * 60 * 2,
   MEDIALINK: 60 * 60 * 24 * 30,
   APPLE: 60 * 60 * 24 * 90,
+  /** Durable audit record of each /now-playing call, keyed `np:<epochMs>:<reqId>`.
+   *  Workers Logs only retains ~3 days, but bugs here are often noticed weeks
+   *  later (e.g. a wrong timestamp spotted in an old screenshot). 90 days keeps
+   *  the input (currentSeconds, videoDuration) and the selection durably
+   *  inspectable via `wrangler kv key list --prefix np:`. */
+  AUDIT: 60 * 60 * 24 * 90,
   /** Snapshot of a YouTube playlist's videoId set, keyed by playlistId. The
    *  5-min sync cron would otherwise re-fetch this every tick per sub. We
    *  update the cache after every insert in-run, so the only reason it can

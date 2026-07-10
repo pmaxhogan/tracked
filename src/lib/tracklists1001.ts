@@ -108,10 +108,36 @@ function normText(s: string): string {
 }
 
 /**
- * Similarity of a search query to a candidate tracklist title in [0,1]:
- * exact-normalized = 1, one containing the other = 0.9, otherwise token-set
- * Jaccard. Handles the common case where the 1001tl title is the YouTube
- * notification title minus a trailing date/qualifier (or vice versa).
+ * Boilerplate tokens that carry no matching signal in a DJ-set title: articles
+ * and the YouTube-title cruft that never appears in 1001tl's canonical title
+ * ("4hr set", "official video", "full set", …). Stripped before scoring so they
+ * don't dilute the token overlap. NOT a venue/geography list — those are
+ * downweighted dynamically via IDF (see pickBestTracklist), because "which words
+ * are boilerplate" depends on the result set (a search full of Club Space Miami
+ * sets makes "space/miami" uninformative; a different search wouldn't).
+ */
+const NOISE_TOKENS = new Set([
+  'the', 'a', 'an', 'set', 'live', 'liveset', 'dj', 'mix', 'full', 'fullset',
+  'official', 'video', 'audio', 'hd', 'hq', '4k', '1080p', '720p',
+])
+const DURATION_TOKEN = /^\d+(h|hr|hrs|hour|hours|min|mins|m)$/
+
+/** Significant (non-noise) tokens of a title, as a set. */
+function sigTokens(s: string): Set<string> {
+  const out = new Set<string>()
+  for (const t of normText(s).split(' ')) {
+    if (!t || NOISE_TOKENS.has(t) || DURATION_TOKEN.test(t)) continue
+    out.add(t)
+  }
+  return out
+}
+
+/**
+ * Pairwise title similarity in [0,1] with no result-set context: exact = 1,
+ * containment = 0.9, else token overlap coefficient (|shared| / |smaller set|).
+ * Overlap coefficient (not Jaccard) so a noisy query — the YouTube title with
+ * an extra date / "4hr set" — isn't penalized for its surplus tokens. Used as
+ * the fallback when there's only one candidate (no IDF signal to weight with).
  */
 export function scoreTitleMatch(query: string, candidate: string): number {
   const nq = normText(query)
@@ -119,32 +145,83 @@ export function scoreTitleMatch(query: string, candidate: string): number {
   if (!nq || !nc) return 0
   if (nq === nc) return 1
   if (nq.includes(nc) || nc.includes(nq)) return 0.9
-  const tq = new Set(nq.split(' '))
-  const tc = new Set(nc.split(' '))
+  const tq = sigTokens(query)
+  const tc = sigTokens(candidate)
+  if (tq.size === 0 || tc.size === 0) return 0
   let inter = 0
   for (const t of tc) if (tq.has(t)) inter++
-  const union = new Set([...tq, ...tc]).size
-  return union ? inter / union : 0
+  return inter / Math.min(tq.size, tc.size)
 }
 
 /**
- * Pick the best-matching tracklist row. Accepts the top-scored candidate when
- * it clears a modest similarity floor, OR the sole candidate regardless of
- * score (a lone hit for a specific DJ-set query is almost always the set).
- * Returns null when nothing is a plausible match — better a clear "not found"
- * than a confidently-wrong tracklist.
+ * Pick the tracklist that best matches `query` from 1001tl's search rows.
+ *
+ * Two hard facts about this data shaped the algorithm:
+ *  1. Same-venue sets share an IDENTICAL visible title ("Gorgon City @ Club
+ *     Space Miami, United States" appears 7× for different dates — the date is
+ *     only in the URL). So a text score literally cannot pick the right date;
+ *     only 1001tl's own ranking (which sees the date) can. We therefore walk
+ *     candidates in 1001tl's order and take the FIRST that clears the bar,
+ *     rather than re-sorting by score.
+ *  2. Venue/geography words ("club space miami united states") are shared
+ *     boilerplate across most results, so overlap on them is meaningless. We
+ *     weight each token by IDF over the candidate set — tokens common across
+ *     results (venue) count little; rare tokens (the artist/event) count a lot —
+ *     and require the match to include a distinctive shared token, so a query
+ *     that only shares the venue with an unrelated set is rejected.
+ *
+ * Score = IDF-weighted coverage of a candidate's tokens by the query, i.e. "how
+ * much of this tracklist's distinctive identity does the query account for."
+ * Returns null when nothing clears the bar — better "not found" than a
+ * confidently-wrong tracklist.
  */
 export function pickBestTracklist(
   query: string,
   candidates: TracklistCandidate[],
 ): (TracklistCandidate & { score: number }) | null {
   if (candidates.length === 0) return null
-  let best = { ...candidates[0]!, score: scoreTitleMatch(query, candidates[0]!.title) }
-  for (const c of candidates.slice(1)) {
-    const score = scoreTitleMatch(query, c.title)
-    if (score > best.score) best = { ...c, score }
+  if (candidates.length === 1) {
+    const score = scoreTitleMatch(query, candidates[0]!.title)
+    // A lone hit for a specific set query is almost always right; require only
+    // that it shares some real token, to reject a totally unrelated single row.
+    return score > 0 ? { ...candidates[0]!, score } : null
   }
-  if (candidates.length === 1 || best.score >= 0.34) return best
+
+  const N = candidates.length
+  const qt = sigTokens(query)
+  const cts = candidates.map((c) => sigTokens(c.title))
+  const df = new Map<string, number>()
+  for (const ct of cts) for (const t of ct) df.set(t, (df.get(t) ?? 0) + 1)
+  const idf = (t: string) => Math.log((N + 1) / ((df.get(t) ?? 0) + 1)) + 1
+  // A token is "boilerplate" only when it recurs across most of the result set.
+  const isCommon = (t: string) => (df.get(t) ?? 0) > N / 2
+
+  const ACCEPT = 0.5
+  let best: (TracklistCandidate & { score: number }) | null = null
+  for (let i = 0; i < N; i++) {
+    const c = candidates[i]!
+    const nq = normText(query)
+    const nc = normText(c.title)
+    let score: number
+    if (nq === nc || (nc && (nq.includes(nc) || nc.includes(nq)))) {
+      score = 0.95
+    } else {
+      const ct = cts[i]!
+      const shared = [...ct].filter((t) => qt.has(t))
+      const distinctive = shared.some((t) => !isCommon(t))
+      if (shared.length < 2 || !distinctive) {
+        score = 0
+      } else {
+        let num = 0
+        for (const t of shared) num += idf(t)
+        let den = 0
+        for (const t of ct) den += idf(t)
+        score = den > 0 ? num / den : 0
+      }
+    }
+    if (!best || score > best.score) best = { ...c, score }
+    if (score >= ACCEPT) return { ...c, score } // first over the bar, in 1001tl relevance order
+  }
   return null
 }
 

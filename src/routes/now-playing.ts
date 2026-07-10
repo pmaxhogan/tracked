@@ -33,6 +33,24 @@ type TracklistVia = 'youtube_url' | 'youtube_title' | 'posted_title'
 
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 
+/**
+ * Cache-key versions. Every cached value embeds the version of the logic that
+ * produced it (`family:v<N>:...`), so when that logic changes we bump the number
+ * and stale entries from the old code are ignored — they age out via TTL instead
+ * of being served. This is the fix for the class of bug where we shipped a
+ * correct change but a cached wrong value (e.g. a `null` tracklist from the old
+ * over-strict ranking) kept being returned. Bump the family whose shape or
+ * semantics changed; leave the rest.
+ */
+const CV = {
+  yt: 1, // YouTube resolve → { videoId, matchTitle }
+  searchUrl: 1, // 1001tl search by YouTube URL
+  searchTitle: 2, // 1001tl search by title — v2: IDF-weighted ranking (v1 over-rejected valid matches)
+  tracklist: 1, // parsed tracklist page
+  medialink: 1, // per-track Apple/YouTube links
+  apple: 1, // iTunes Apple-link fallback
+} as const
+
 export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings: Env }> = async (c) => {
   const reqId = c.req.raw.headers.get('cf-ray') ?? `local-${Math.random().toString(36).slice(2, 10)}`
   const log = makeLogger({ reqId })
@@ -52,6 +70,30 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     country: cf?.country ?? null,
   })
 
+  // Durable, best-effort audit record (90-day TTL) so a request is still
+  // diagnosable long after Workers Logs ages out. Never blocks or breaks the
+  // response — runs after it via waitUntil, and swallows its own errors.
+  const bgAudit = (rec: Record<string, unknown>) => {
+    const p = putJson(
+      env.CACHE,
+      `np:${Date.now()}:${reqId}`,
+      {
+        t: new Date().toISOString(),
+        reqId,
+        videoTitle: body.videoTitle ?? null,
+        currentSeconds: body.currentSeconds,
+        videoDurationSeconds: body.videoDurationSeconds ?? null,
+        ...rec,
+      },
+      TTL.AUDIT,
+    ).catch((e) => log.warn('audit.write_failed', errorFields(e)))
+    try {
+      c.executionCtx.waitUntil(p)
+    } catch {
+      /* no executionCtx (dev/tests): let it run fire-and-forget */
+    }
+  }
+
   const respond = (status: Status, extras: Partial<Res> = {}, message?: string) => {
     const payload = {
       status,
@@ -63,6 +105,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       ...extras,
     } satisfies Res
     log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
+    bgAudit({ status, videoUrl: payload.videoUrl, tracklistUrl: payload.tracklistUrl, message: message ?? null })
     return c.json(payload, 200)
   }
 
@@ -193,9 +236,18 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   // Phase 4 — pick current tracks (videoDurationSeconds caps the last group's
   // duration when present; harmless to omit otherwise)
   const sel = selectCurrent(parsedTracks, body.currentSeconds, body.videoDurationSeconds ?? null)
+  const cued = parsedTracks.map((t) => t.startSeconds).filter((s): s is number => s !== null)
+  const currentStartSeconds = sel.picked.find((t) => t.isCurrent)?.startSeconds ?? null
   log.info('phase.select.done', {
     currentSeconds: body.currentSeconds,
     setEndSeconds: body.videoDurationSeconds ?? null,
+    // The current group's own cue, and how far the reported playback position
+    // sits past it. A large positive skew here with an otherwise-sensible
+    // tracklist is the fingerprint of a bad currentSeconds from the phone.
+    currentStartSeconds,
+    currentSkewSeconds: currentStartSeconds !== null ? body.currentSeconds - currentStartSeconds : null,
+    firstCueSeconds: cued.length ? cued[0] : null,
+    lastCueSeconds: cued.length ? cued[cued.length - 1] : null,
     pickedCount: sel.picked.length,
     currentCount: sel.picked.filter((t) => t.isCurrent).length,
     anyUnidentified: sel.anyUnidentified,
@@ -218,13 +270,21 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
   const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks: enriched } satisfies Res
   log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
+  bgAudit({
+    status,
+    videoUrl,
+    tracklistUrl,
+    tracklistVia,
+    currentStartSeconds,
+    currentTracks: enriched.filter((t) => t.isCurrent).map((t) => ({ artist: t.artist, title: t.title, startTime: t.startTime, startSeconds: t.startSeconds })),
+  })
   return c.json(payload, 200)
 }
 
 type YouTubeMatch = { videoId: string; matchTitle: string }
 
 async function resolveYouTube(env: Env, title: string, dur: number | undefined, log: Logger): Promise<YouTubeMatch | null> {
-  const key = `yt:${await sha1Hex(title)}:${dur ?? 'x'}`
+  const key = `yt:v${CV.yt}:${await sha1Hex(title)}:${dur ?? 'x'}`
   // Older cache entries stored only { videoId }; matchTitle is optional so they
   // still deserialize (step c just gets skipped for those until the TTL rolls).
   const cached = await getJson<{ videoId: string | null; matchTitle?: string | null }>(env.CACHE, key)
@@ -245,7 +305,7 @@ async function resolveYouTube(env: Env, title: string, dur: number | undefined, 
 
 /** search 1001tl by the resolved YouTube URL (media-source pinned — exact). Cached by videoId. */
 async function resolveTracklistByUrl(env: Env, videoId: string, videoUrl: string, log: Logger): Promise<string | null> {
-  const key = `s1001:${videoId}`
+  const key = `s1001:v${CV.searchUrl}:${videoId}`
   const cached = await getJson<{ tracklistUrl: string | null }>(env.CACHE, key)
   if (cached) {
     log.counters.cacheHits++
@@ -262,7 +322,7 @@ async function resolveTracklistByUrl(env: Env, videoId: string, videoUrl: string
 
 /** search 1001tl by free-text title (ranked). Cached by normalized title hash. */
 async function resolveTracklistByTitle(env: Env, title: string, log: Logger): Promise<string | null> {
-  const key = `s1001t:${await sha1Hex(title.trim().toLowerCase())}`
+  const key = `s1001t:v${CV.searchTitle}:${await sha1Hex(title.trim().toLowerCase())}`
   const cached = await getJson<{ tracklistUrl: string | null }>(env.CACHE, key)
   if (cached) {
     log.counters.cacheHits++
@@ -281,7 +341,7 @@ type CachedTracklist = { tracks: ParsedTrack[]; setAppleLink: string | null }
 
 async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Promise<CachedTracklist> {
   const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
-  const key = `tl:${slug}`
+  const key = `tl:v${CV.tracklist}:${slug}`
   // Backwards compat: older cache entries were a bare ParsedTrack[]. If we
   // hit one of those, normalize and ignore the (missing) setAppleLink — it'll
   // be picked up on the next refresh after TTL expires.
@@ -339,7 +399,7 @@ async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: Respon
 }
 
 async function getMediaLinks(env: Env, trackId: string, log: Logger): Promise<MediaLinks> {
-  const key = `ml:${trackId}`
+  const key = `ml:v${CV.medialink}:${trackId}`
   const cached = await getJson<MediaLinks>(env.CACHE, key)
   if (cached) {
     log.counters.cacheHits++
@@ -357,7 +417,7 @@ async function getMediaLinks(env: Env, trackId: string, log: Logger): Promise<Me
 }
 
 async function lookupAppleCached(env: Env, artist: string, title: string, log: Logger): Promise<string | null> {
-  const key = `am:${await sha1Hex(`${artist}|${title}`)}`
+  const key = `am:v${CV.apple}:${await sha1Hex(`${artist}|${title}`)}`
   const cached = await getJson<{ url: string | null }>(env.CACHE, key)
   if (cached) {
     log.counters.cacheHits++
