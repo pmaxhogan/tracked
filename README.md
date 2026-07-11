@@ -242,6 +242,19 @@ echo $HOME_PROXY_TOKEN   | npx wrangler secret put HOME_PROXY_TOKEN
 npx wrangler deploy
 ```
 
+### Continuous deployment (Workers Builds)
+
+Pushes to `main` auto-deploy via Cloudflare's native Git integration ([Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/)) — no GitHub Actions deploy step, no `CLOUDFLARE_API_TOKEN` secret in the repo. The connection is a one-time OAuth step in the dashboard:
+
+1. **Workers & Pages → `tracked` → Settings → Builds → Connect**, authorize the Cloudflare GitHub app on `pmaxhogan/tracked`, and pick `main` as the production branch. (The dashboard Worker name **must** match `name` in `wrangler.jsonc` — both are `tracked` — or the build fails.)
+2. Build settings:
+   - **Build command:** `npm run typecheck && npm test` — a red build aborts before deploy, so broken code never ships.
+   - **Deploy command:** `npx wrangler deploy` (the default).
+   - Deps install automatically from `package-lock.json`; no `npm ci` needed in the build command.
+3. Push to `main` → Cloudflare runs typecheck + tests, then `wrangler deploy`. Non-`main` branches get a preview version (`npx wrangler versions upload`) instead of a production deploy, with the preview URL posted back as a PR comment.
+
+Connecting an **existing** Worker leaves its secrets, KV bindings, crons, and `vars` in place — Workers Builds only adds the build/deploy-on-push pipeline. Secrets are never read from the repo (they're not in it); set/rotate them with `wrangler secret put` as before. The `.github/workflows/ci.yml` job still runs typecheck + tests on pull requests for pre-merge feedback.
+
 ## Network strategy
 
 1001tracklists treats Cloudflare Workers' egress IPs as bots and serves a captcha interstitial on tracklist *page* GETs (the search endpoint, oddly, comes through fine). The tracklist GET has up to three escape hatches in priority order:
