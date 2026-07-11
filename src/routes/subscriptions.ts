@@ -287,6 +287,54 @@ subscriptionsApp.get('/api/debug/dj-pagination/:slug', async (c) => {
   return c.json({ slug, results, scriptHints, frameworkBytes, frameworkSnippets })
 })
 
+// ─── Audit trail (Recent requests) ──────────────────────────────────────────
+
+/**
+ * Newest-first page of /now-playing audit summaries. now-playing.ts writes each
+ * request as `np:<invertedTs>:<reqId>` with a compact summary in KV metadata, so
+ * a single `list()` returns the most recent N rows (with their summary) in one
+ * round-trip — no per-row get. Pass `cursor` (from a prior response) to page into
+ * older records. Behind CF Access like everything here.
+ */
+subscriptionsApp.get('/api/audit', async (c) => {
+  const n = parseInt(c.req.query('limit') || '50', 10)
+  const limit = Math.min(Math.max(Number.isFinite(n) ? n : 50, 1), 200)
+  const cursor = c.req.query('cursor') || undefined
+  const res = await c.env.CACHE.list<Record<string, unknown>>({ prefix: 'np:', limit, cursor })
+  const records = await Promise.all(
+    res.keys.map(async (k) => {
+      const base = { key: k.name, expiration: k.expiration ?? null }
+      if (k.metadata) return { ...base, ...k.metadata }
+      // Legacy record written before metadata summaries existed (flat shape).
+      // Bounded work: only pre-upgrade keys lack metadata, and they age out.
+      const v = await c.env.CACHE.get<Record<string, any>>(k.name, 'json')
+      if (!v) return base
+      return {
+        ...base,
+        t: v.t,
+        status: v.status,
+        title: v.videoTitle ?? v.input?.videoTitle ?? v.videoUrl ?? '',
+        cs: v.currentSeconds ?? v.input?.currentSeconds ?? null,
+        dur: v.videoDurationSeconds ?? v.input?.videoDurationSeconds ?? null,
+        via: v.tracklistVia ?? v.search?.via ?? null,
+        skew: v.select?.currentSkewSeconds ?? null,
+        impossible: v.impossibleTimestamp ?? false,
+        ms: v.meta?.totalMs ?? null,
+      }
+    }),
+  )
+  return c.json({ records, cursor: res.list_complete ? null : res.cursor, listComplete: res.list_complete })
+})
+
+/** Full audit record for one request (the value behind an `np:` key). */
+subscriptionsApp.get('/api/audit-detail', async (c) => {
+  const key = c.req.query('key') || ''
+  if (!key.startsWith('np:')) return c.json({ error: 'bad_key' }, 400)
+  const record = await c.env.CACHE.get(key, 'json')
+  if (!record) return c.json({ error: 'not_found' }, 404)
+  return c.json({ record })
+})
+
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
 
 subscriptionsApp.get('/api/youtube/status', async (c) => {
@@ -449,6 +497,37 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .banner .info { flex: 1; min-width: 0; }
   .banner .info .title { font-weight: 600; color: var(--danger); }
   .banner .info .sub { color: var(--muted); font-size: 0.8rem; }
+  /* ── Recent requests (audit trail) ── */
+  section#audit { margin-top: 2.25rem; }
+  .audit-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
+  .audit-head h2 { font-size: 1.05rem; margin: 0; }
+  .audit-actions { display: flex; align-items: center; gap: 0.9rem; }
+  .audit-actions .chk { color: var(--muted); font-size: 0.8rem; display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; user-select: none; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); padding: 0.35rem 0.7rem; font-size: 0.85rem; }
+  #audit-more { width: 100%; margin-top: 0.25rem; }
+  .arow { border: 1px solid var(--border); border-radius: 6px; background: var(--card); margin-bottom: 0.4rem; overflow: hidden; }
+  .arow.err { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .arow-head { display: flex; align-items: center; gap: 0.55rem; padding: 0.5rem 0.7rem; cursor: pointer; }
+  .arow-head:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+  .badge { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.14rem 0.42rem; border-radius: 999px; white-space: nowrap; }
+  .badge.ok { background: rgba(63,185,80,0.18); color: #3fb950; }
+  .badge.unidentified { background: rgba(210,153,34,0.18); color: #d29922; }
+  .badge.no_video, .badge.no_tracklist, .badge.upstream_error { background: rgba(248,81,73,0.18); color: var(--danger); }
+  .arow .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; }
+  .arow .when { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
+  .arow .pos { font-variant-numeric: tabular-nums; font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
+  .arow .via { font-size: 0.7rem; color: var(--muted); white-space: nowrap; }
+  .arow .flag { color: var(--danger); font-weight: 700; }
+  .arow-detail { border-top: 1px solid var(--border); padding: 0.6rem 0.8rem; font-size: 0.82rem; line-height: 1.5; }
+  .arow-detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.75rem; margin: 0 0 0.2rem; }
+  .arow-detail dt { color: var(--muted); }
+  .arow-detail dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .arow-detail .grp { font-weight: 700; margin: 0.55rem 0 0.2rem; font-size: 0.8rem; }
+  .arow-detail .grp:first-child { margin-top: 0; }
+  .arow-detail a { color: var(--accent); }
+  .arow-detail .warn { color: var(--danger); }
+  .arow-detail ol { margin: 0.15rem 0 0; padding-left: 1.1rem; }
+  .arow-detail .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
 </style>
 </head>
 <body>
@@ -477,6 +556,20 @@ const PAGE_HTML = /* html */ `<!doctype html>
   <div id="list-actions" hidden><button id="sync-all">Sync all</button></div>
   <ul id="list"></ul>
   <div id="empty" class="empty" hidden>No subscriptions yet.</div>
+
+  <section id="audit">
+    <div class="audit-head">
+      <h2>Recent requests</h2>
+      <div class="audit-actions">
+        <label class="chk"><input type="checkbox" id="audit-errors-only" /> problems only</label>
+        <button id="audit-refresh" class="ghost">Refresh</button>
+      </div>
+    </div>
+    <div id="audit-list"></div>
+    <div id="audit-empty" class="empty" hidden>No requests recorded yet.</div>
+    <button id="audit-more" class="ghost" hidden>Load older</button>
+  </section>
+
   <footer>Signed in as <span id="who"></span></footer>
 </main>
 <script>
@@ -747,12 +840,192 @@ const PAGE_HTML = /* html */ `<!doctype html>
     }
   });
 
+  // ── Recent requests (audit trail) ──────────────────────────────────────
+  const $auditList = document.getElementById('audit-list');
+  const $auditEmpty = document.getElementById('audit-empty');
+  const $auditMore = document.getElementById('audit-more');
+  const $auditRefresh = document.getElementById('audit-refresh');
+  const $auditErrorsOnly = document.getElementById('audit-errors-only');
+  let auditCursor = null;
+  let auditRecords = [];
+  const PROBLEM = new Set(['no_video', 'no_tracklist', 'upstream_error']);
+  const BIG_SKEW = 600; // |pos − track start| over 10 min → flag as suspicious
+
+  // Audit values include third-party 1001tracklists titles and the phoned-in
+  // video title — untrusted. esc() is used in both text and attribute contexts,
+  // so it must also escape quotes (textContent→innerHTML would not).
+  function esc(s) {
+    return (s == null ? '' : String(s))
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function clock(s) {
+    if (s == null || isNaN(s)) return '—';
+    s = Math.round(s);
+    const neg = s < 0; s = Math.abs(s);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const mm = h ? String(m).padStart(2, '0') : String(m);
+    return (neg ? '-' : '') + (h ? h + ':' : '') + mm + ':' + String(sec).padStart(2, '0');
+  }
+  function relTime(iso) {
+    const t = Date.parse(iso); if (isNaN(t)) return '';
+    const d = Math.round((Date.now() - t) / 1000);
+    if (d < 60) return d + 's ago';
+    if (d < 3600) return Math.floor(d / 60) + 'm ago';
+    if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+    return Math.floor(d / 86400) + 'd ago';
+  }
+  function link(u, label) {
+    // Only linkify http(s) — anything else (javascript:, data:, …) renders as
+    // plain escaped text so a hostile URL can't become a clickable script URI.
+    if (!u) return '—';
+    var lo = String(u).toLowerCase();
+    if (!(lo.startsWith('http://') || lo.startsWith('https://'))) return esc(u);
+    return '<a href="' + esc(u) + '" target="_blank" rel="noreferrer noopener">' + esc(label || u) + '</a>';
+  }
+
+  function renderAudit() {
+    const errOnly = $auditErrorsOnly.checked;
+    const rows = auditRecords.filter((r) => !errOnly || PROBLEM.has(r.status) || r.impossible);
+    $auditList.innerHTML = '';
+    if (auditRecords.length === 0) { $auditEmpty.textContent = 'No requests recorded yet.'; $auditEmpty.hidden = false; }
+    else if (rows.length === 0) { $auditEmpty.textContent = 'No problems in the loaded requests.'; $auditEmpty.hidden = false; }
+    else { $auditEmpty.hidden = true; }
+    for (const r of rows) {
+      const row = document.createElement('div');
+      row.className = 'arow' + (PROBLEM.has(r.status) ? ' err' : '');
+      const head = document.createElement('div');
+      head.className = 'arow-head';
+      const skewBad = r.skew != null && Math.abs(r.skew) > BIG_SKEW;
+      head.innerHTML =
+        '<span class="badge ' + esc(r.status || '') + '">' + esc(r.status || '?') + '</span>' +
+        '<span class="title">' + esc(r.title || '(no title)') + '</span>' +
+        (r.via ? '<span class="via">via ' + esc(r.via) + '</span>' : '') +
+        '<span class="pos">' + clock(r.cs) + (r.dur ? ' / ' + clock(r.dur) : '') +
+          (r.impossible ? ' <span class="flag" title="reported position is past the end of the video">!</span>' : '') +
+          (skewBad ? ' <span class="flag" title="large gap between reported position and selected track start">Δ' + clock(r.skew) + '</span>' : '') +
+        '</span>' +
+        '<span class="when" title="' + esc(r.t) + '">' + esc(relTime(r.t)) + '</span>';
+      row.appendChild(head);
+      const detail = document.createElement('div');
+      detail.className = 'arow-detail';
+      detail.hidden = true;
+      row.appendChild(detail);
+      let loaded = false;
+      head.addEventListener('click', async () => {
+        detail.hidden = !detail.hidden;
+        if (detail.hidden || loaded) return;
+        loaded = true;
+        detail.innerHTML = '<span class="when">loading…</span>';
+        try {
+          const resp = await fetch('/subscriptions/api/audit-detail?key=' + encodeURIComponent(r.key), { credentials: 'same-origin' });
+          const data = await resp.json();
+          detail.innerHTML = data && data.record ? auditDetailHtml(data.record) : '<span class="warn">detail not found</span>';
+        } catch { detail.innerHTML = '<span class="warn">failed to load detail</span>'; loaded = false; }
+      });
+      $auditList.appendChild(row);
+    }
+  }
+
+  function dl(pairs) {
+    return '<dl>' + pairs.filter(Boolean).map((p) => '<dt>' + esc(p[0]) + '</dt><dd>' + p[1] + '</dd>').join('') + '</dl>';
+  }
+
+  function auditDetailHtml(r) {
+    // Legacy records (pre-metadata) stored fields flat; lift them into the
+    // nested shape the renderer expects so old history still displays.
+    if (!r.input) {
+      r = {
+        t: r.t, reqId: r.reqId, status: r.status, message: r.message,
+        input: { videoTitle: r.videoTitle, videoUrl: r.videoUrl, currentSeconds: r.currentSeconds, videoDurationSeconds: r.videoDurationSeconds },
+        impossibleTimestamp: r.impossibleTimestamp,
+        youtube: r.youtube || { videoId: null, videoUrl: r.videoUrl, matchTitle: null, error: null },
+        search: r.search || { attempts: [], via: r.tracklistVia || null, tracklistUrl: r.tracklistUrl || null },
+        select: r.select || ((r.currentStartSeconds != null || r.currentTracks) ? {
+          currentStartSeconds: r.currentStartSeconds != null ? r.currentStartSeconds : null,
+          currentSkewSeconds: (r.currentStartSeconds != null && r.currentSeconds != null) ? r.currentSeconds - r.currentStartSeconds : null,
+          trackCount: null, unidentifiedCount: null, currentTracks: r.currentTracks || [],
+        } : null),
+        meta: r.meta || {},
+      };
+    }
+    const inp = r.input || {}, yt = r.youtube || {}, se = r.search || {}, sel = r.select, meta = r.meta || {};
+    const out = [];
+
+    out.push('<div class="grp">Input</div>');
+    out.push(dl([
+      ['title', esc(inp.videoTitle) || '—'],
+      inp.videoUrl ? ['videoUrl', link(inp.videoUrl)] : null,
+      ['position', clock(inp.currentSeconds) + (inp.videoDurationSeconds ? ' / ' + clock(inp.videoDurationSeconds) : '') +
+        (r.impossibleTimestamp ? ' <span class="warn">— past end of video (client bug?)</span>' : '')],
+    ]));
+
+    out.push('<div class="grp">YouTube match</div>');
+    out.push(dl([
+      ['videoId', yt.videoId ? '<span class="mono">' + esc(yt.videoId) + '</span> ' + link('https://youtu.be/' + yt.videoId, 'open') : '<span class="warn">no match</span>'],
+      yt.matchTitle ? ['matched title', esc(yt.matchTitle)] : null,
+      yt.error ? ['error', '<span class="warn">' + esc(yt.error) + '</span>'] : null,
+    ]));
+
+    out.push('<div class="grp">Tracklist search</div>');
+    const attempts = (se.attempts && se.attempts.length)
+      ? '<ol>' + se.attempts.map((a) => '<li>' + esc(a.via) + ': <span class="mono">' + esc(a.query) + '</span>' + (a.via === se.via ? ' ✓' : '') + '</li>').join('') + '</ol>'
+      : '—';
+    out.push(dl([
+      ['attempts', attempts],
+      ['matched via', se.via ? esc(se.via) : '<span class="warn">no tracklist found</span>'],
+      se.tracklistUrl ? ['tracklist', link(se.tracklistUrl, 'open')] : null,
+    ]));
+
+    if (sel) {
+      out.push('<div class="grp">Selection</div>');
+      const skewBad = sel.currentSkewSeconds != null && Math.abs(sel.currentSkewSeconds) > BIG_SKEW;
+      const cur = (sel.currentTracks || []).map((t) => '<li>' + esc(t.startTime) + ' — ' + esc(t.artist) + ' – ' + esc(t.title) + '</li>').join('');
+      out.push(dl([
+        ['current track start', clock(sel.currentStartSeconds)],
+        ['skew (pos − start)', '<span class="' + (skewBad ? 'warn' : '') + '">' + clock(sel.currentSkewSeconds) + '</span>'],
+        ['tracks in set', (sel.trackCount != null ? sel.trackCount : '—') + (sel.unidentifiedCount ? ' (' + sel.unidentifiedCount + ' unidentified)' : '')],
+        ['now playing', cur ? '<ol>' + cur + '</ol>' : '—'],
+      ]));
+    }
+
+    out.push('<div class="grp">Meta</div>');
+    out.push(dl([
+      ['status', esc(r.status) + (r.message ? ' — ' + esc(r.message) : '')],
+      ['when', esc(r.t)],
+      ['edge', esc([meta.colo, meta.country].filter(Boolean).join(' · ')) || '—'],
+      ['took', meta.totalMs != null ? meta.totalMs + ' ms' : '—'],
+      ['reqId', '<span class="mono">' + esc(r.reqId) + '</span>'],
+    ]));
+    return out.join('');
+  }
+
+  async function loadAudit(reset) {
+    if (reset) { auditCursor = null; auditRecords = []; }
+    const params = new URLSearchParams({ limit: '50' });
+    if (auditCursor) params.set('cursor', auditCursor);
+    try {
+      const r = await fetch('/subscriptions/api/audit?' + params.toString(), { credentials: 'same-origin' });
+      if (!r.ok) return;
+      const data = await r.json();
+      auditRecords = auditRecords.concat(data.records || []);
+      auditCursor = data.cursor || null;
+      $auditMore.hidden = !auditCursor;
+      renderAudit();
+    } catch { /* leave prior state */ }
+  }
+
+  $auditRefresh.addEventListener('click', () => loadAudit(true));
+  $auditErrorsOnly.addEventListener('change', renderAudit);
+  $auditMore.addEventListener('click', () => loadAudit(false));
+
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
   load();
   loadYouTubeStatus();
   loadProxyStatus();
+  loadAudit(true);
   // Re-poll the home-proxy status so the banner reflects KV changes
   // initiated outside this tab (e.g. clearing via curl, or a sync run
   // tripping a fresh backoff in the background).

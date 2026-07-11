@@ -70,23 +70,66 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     country: cf?.country ?? null,
   })
 
+  // Mutable audit context, filled in as each phase completes. bgAudit reads it
+  // at write time, so even an early error return records whatever we managed to
+  // resolve before bailing (e.g. the YouTube match on a later no_tracklist).
+  const audit: {
+    youtube?: { videoId: string | null; videoUrl: string | null; matchTitle: string | null; error: string | null }
+    search?: { attempts: Array<{ via: TracklistVia; query: string }>; via: TracklistVia | null; tracklistUrl: string | null }
+    select?: {
+      currentStartSeconds: number | null
+      currentSkewSeconds: number | null
+      trackCount: number | null
+      unidentifiedCount: number | null
+      currentTracks: Array<{ artist: string; title: string; startTime: string; startSeconds: number | null }>
+    }
+  } = {}
+
   // Durable, best-effort audit record (90-day TTL) so a request is still
-  // diagnosable long after Workers Logs ages out. Never blocks or breaks the
-  // response — runs after it via waitUntil, and swallows its own errors.
-  const bgAudit = (rec: Record<string, unknown>) => {
-    const p = putJson(
-      env.CACHE,
-      `np:${Date.now()}:${reqId}`,
-      {
-        t: new Date().toISOString(),
-        reqId,
-        videoTitle: body.videoTitle ?? null,
-        currentSeconds: body.currentSeconds,
-        videoDurationSeconds: body.videoDurationSeconds ?? null,
-        ...rec,
-      },
-      TTL.AUDIT,
-    ).catch((e) => log.warn('audit.write_failed', errorFields(e)))
+  // diagnosable long after Workers Logs ages out — this is the data behind the
+  // admin panel's "Recent requests" view. Never blocks or breaks the response —
+  // runs after it via waitUntil, and swallows its own errors.
+  const bgAudit = (final: { status: Status; message?: string | null }) => {
+    const cs = body.currentSeconds
+    const dur = body.videoDurationSeconds ?? null
+    // A reported position past the video's own length is physically impossible
+    // and the fingerprint of a client-side bug (e.g. the Tasker `* 1.5` that
+    // inflated the position). Flag it so the panel can highlight it.
+    const impossibleTimestamp = dur != null && cs > dur
+    const record = {
+      t: new Date().toISOString(),
+      reqId,
+      status: final.status,
+      message: final.message ?? null,
+      input: { videoTitle: body.videoTitle ?? null, videoUrl: body.videoUrl ?? null, currentSeconds: cs, videoDurationSeconds: dur },
+      impossibleTimestamp,
+      youtube: audit.youtube ?? null,
+      search: audit.search ?? null,
+      select: audit.select ?? null,
+      meta: { colo: cf?.colo ?? null, country: cf?.country ?? null, totalMs: Date.now() - tStart },
+    }
+    // Compact summary stored in KV metadata so the admin list view is a single
+    // list() round-trip (no per-row get). Must stay under KV's 1024-byte cap —
+    // hence the title truncation and short field names.
+    const summary = {
+      t: record.t,
+      status: final.status,
+      title: (body.videoTitle ?? body.videoUrl ?? '').slice(0, 100),
+      cs,
+      dur,
+      via: audit.search?.via ?? null,
+      skew: audit.select?.currentSkewSeconds ?? null,
+      impossible: impossibleTimestamp,
+      ms: record.meta.totalMs,
+    }
+    // Inverted-timestamp key: KV list() only returns keys ascending, so we key
+    // by (2^43-ish − now) zero-padded, making ascending order == newest-first.
+    // This lets the panel fetch the most recent N in one page even past 1000
+    // total records (a forward-epoch key could only page from the oldest).
+    const invTs = String(10_000_000_000_000 - Date.now()).padStart(14, '0')
+    const p = env.CACHE
+      .put(`np:${invTs}:${reqId}`, JSON.stringify(record), { expirationTtl: TTL.AUDIT, metadata: summary })
+      .catch((e) => log.warn('audit.write_failed', errorFields(e)))
     try {
       c.executionCtx.waitUntil(p)
     } catch {
@@ -105,7 +148,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       ...extras,
     } satisfies Res
     log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
-    bgAudit({ status, videoUrl: payload.videoUrl, tracklistUrl: payload.tracklistUrl, message: message ?? null })
+    bgAudit({ status, message: message ?? null })
     return c.json(payload, 200)
   }
 
@@ -147,6 +190,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     log.error('phase.video.no_input')
     return respond('no_video', {}, 'videoUrl or videoTitle is required')
   }
+  audit.youtube = { videoId, videoUrl, matchTitle: ytMatchTitle, error: ytError }
 
   // Phase 2 (steps b→d) — find a tracklist, trying each available signal until
   // one hits: (b) the resolved YouTube URL, (c) the resolved video's title,
@@ -160,6 +204,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     attempts.push({ via: 'posted_title', kind: 'title', query: originalTitle })
   }
   log.info('phase.search.plan', { attempts: attempts.map((a) => ({ via: a.via, query: a.query })) })
+  audit.search = { attempts: attempts.map((a) => ({ via: a.via, query: a.query })), via: null, tracklistUrl: null }
 
   let tracklistUrl: string | null = null
   let tracklistVia: TracklistVia | null = null
@@ -185,6 +230,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       log.error('phase.search.attempt_throw', { via: a.via, kind: a.kind, query: a.query, ...errorFields(e) })
       // Other errors are per-attempt; try the next signal.
     }
+  }
+  if (audit.search) {
+    audit.search.via = tracklistVia
+    audit.search.tracklistUrl = tracklistUrl
   }
 
   if (!tracklistUrl) {
@@ -238,6 +287,15 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   const sel = selectCurrent(parsedTracks, body.currentSeconds, body.videoDurationSeconds ?? null)
   const cued = parsedTracks.map((t) => t.startSeconds).filter((s): s is number => s !== null)
   const currentStartSeconds = sel.picked.find((t) => t.isCurrent)?.startSeconds ?? null
+  audit.select = {
+    currentStartSeconds,
+    currentSkewSeconds: currentStartSeconds !== null ? body.currentSeconds - currentStartSeconds : null,
+    trackCount: parsedTracks.length,
+    unidentifiedCount: parsedTracks.filter((t) => t.isUnidentified).length,
+    currentTracks: sel.picked
+      .filter((t) => t.isCurrent)
+      .map((t) => ({ artist: t.artist, title: t.title, startTime: t.startTime, startSeconds: t.startSeconds })),
+  }
   log.info('phase.select.done', {
     currentSeconds: body.currentSeconds,
     setEndSeconds: body.videoDurationSeconds ?? null,
@@ -270,14 +328,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
   const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks: enriched } satisfies Res
   log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
-  bgAudit({
-    status,
-    videoUrl,
-    tracklistUrl,
-    tracklistVia,
-    currentStartSeconds,
-    currentTracks: enriched.filter((t) => t.isCurrent).map((t) => ({ artist: t.artist, title: t.title, startTime: t.startTime, startSeconds: t.startSeconds })),
-  })
+  bgAudit({ status })
   return c.json(payload, 200)
 }
 
