@@ -537,4 +537,35 @@ describe('parseMediaLinks', () => {
     const r = parseMediaLinks(json)
     expect(r.youtubeLink).toBe('https://www.youtube.com/watch?v=h8CtvP1rEy8')
   })
+
+  it('builds a SoundCloud widget-player link from the source-10 playerId', () => {
+    const r = parseMediaLinks(json)
+    // playerId 2131221114 → api track URL wrapped in the widget player.
+    expect(r.soundcloudLink).toBe(
+      'https://w.soundcloud.com/player/?url=' +
+        encodeURIComponent('https://api.soundcloud.com/tracks/2131221114'),
+    )
+  })
+
+  it('falls back to parsing the api URL out of the iframe when playerId is not a bare id', () => {
+    const r = parseMediaLinks({
+      success: true,
+      data: [
+        {
+          source: '10',
+          playerId: 'scWidget_999',
+          player:
+            '<iframe src="https://w.soundcloud.com/player/?url=https://api.soundcloud.com/tracks/555&amp;show_artwork=true"></iframe>',
+        },
+      ],
+    })
+    expect(r.soundcloudLink).toBe(
+      'https://w.soundcloud.com/player/?url=' + encodeURIComponent('https://api.soundcloud.com/tracks/555'),
+    )
+  })
+
+  it('returns null links (incl. soundcloud) when the response is unsuccessful', () => {
+    const r = parseMediaLinks({ success: false })
+    expect(r).toEqual({ appleLink: null, youtubeLink: null, soundcloudLink: null })
+  })
 })

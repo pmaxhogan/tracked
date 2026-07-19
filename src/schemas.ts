@@ -111,6 +111,7 @@ export const TracklistTrackSchema = z
     artworkUrl: z.string().nullable().openapi({ description: 'Square 300×300 album art (Beatport/SoundCloud CDN, normalized). null when only the 1001tl placeholder was present.' }),
     appleLink: z.string().nullable().openapi({ description: 'Apple Music deep link. Always null when resolveLinks is false or the track is unidentified.' }),
     youtubeLink: z.string().nullable().openapi({ description: 'YouTube deep link. Always null when resolveLinks is false or the track is unidentified.' }),
+    soundcloudLink: z.string().nullable().openapi({ description: 'SoundCloud widget-player URL — plays free (with ads) in the browser and is downloadable by yt-dlp without cookies. Always null when resolveLinks is false or the track has no SoundCloud source.' }),
     isUnidentified: z.boolean().openapi({ description: 'True only when the playing track is fully anonymous (e.g. "Cave Studio - ID"). Partial-ID variants set idStatus instead and keep their base-track fields.' }),
     idStatus: z.string().nullable().openapi({ example: 'ID Remix', description: 'Non-null when this row is a partial-ID variant of a known base track ("ID Remix", "ID Edit", ...). The artist/title/links describe the BASE track; the playing version may differ.' }),
     isMashupLinked: z.boolean().openapi({ description: 'True when this row is a "w/" mashup sibling of the previous row (shares its cue position).' }),
