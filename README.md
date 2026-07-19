@@ -162,6 +162,17 @@ POST /subscriptions/api/add    { url: "..." }     → { added: bool, subscriptio
 POST /subscriptions/api/remove { slug: "..." }    → { removed: bool }
 ```
 
+### Tracklist viewer
+
+`GET /subscriptions/tracklist` is a standalone page (linked from the top of the subscriptions page) where you paste a 1001tracklists **tracklist** URL and get a clean per-song list: each row shows the artist – title, cue time, a **YouTube** icon that links straight to the track's video, and an **Apple Music** button, whenever 1001tracklists has those links. It's the browser-facing companion to the bearer-gated `POST /tracklist` API; because the browser only carries the Cloudflare Access cookie (not the bearer token), the page calls its own Access-gated endpoint:
+
+```
+GET  /subscriptions/tracklist                     → the viewer page (HTML)
+POST /subscriptions/api/tracklist { url: "..." }  → { tracklistUrl, slug, setAppleLink, trackCount, tracks: [...] }
+```
+
+Both `POST /tracklist` and `POST /subscriptions/api/tracklist` resolve through the same shared scrape + cache (`lib/tracklist-resolve.ts`), so a set opened in the viewer is warm for the API and vice-versa. The page accepts `?url=` to deep-link a specific tracklist (it prefills and auto-loads).
+
 ### YouTube account connection
 
 The same page has a "Sign in with YouTube" button that runs an OAuth 2.0 authorization-code flow against Google so the worker can create and modify playlists on the connected channel. The flow is implemented in `src/lib/google-oauth.ts` and wired up in `src/routes/subscriptions.ts`:

@@ -61,6 +61,80 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   return { tracks: [], setAppleLink: result.setAppleLink }
 }
 
+/** One track in the flattened, link-enriched output shape. */
+export type TracklistTrackOut = {
+  index: number
+  artist: string
+  title: string
+  startTime: string
+  startSeconds: number | null
+  trackId: string | null
+  trackUrl: string | null
+  artworkUrl: string | null
+  appleLink: string | null
+  youtubeLink: string | null
+  isUnidentified: boolean
+  idStatus: string | null
+  isMashupLinked: boolean
+}
+
+export type FullTracklist = {
+  slug: string
+  setAppleLink: string | null
+  tracks: TracklistTrackOut[]
+}
+
+/**
+ * Scrape a tracklist and flatten it to the API/UI output shape: one object per
+ * track with name, artist, id, cue timestamps and (optionally) Apple/YouTube
+ * deep links. Shared by the bearer-gated `/tracklist` route and the CF
+ * Access-gated `/subscriptions/api/tracklist` endpoint so both stay identical.
+ *
+ * Propagates IPBlockedError / CloudflareChallengeError from the scrape; a
+ * zero-track parse comes back as `tracks: []` for the caller to surface.
+ */
+export async function resolveFullTracklist(
+  env: Env,
+  tracklistUrl: string,
+  opts: { resolveLinks: boolean },
+  log: Logger,
+): Promise<FullTracklist> {
+  const scraped = await resolveTracklistPage(env, tracklistUrl, log)
+  const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
+
+  // Only rows with a numeric medialink id are eligible for link enrichment
+  // (mirrors /now-playing); unidentified rows and rows keyed by a non-numeric
+  // data-id are skipped. Dedupe ids so a track repeated in the set is fetched once.
+  const links = new Map<string, MediaLinks>()
+  if (opts.resolveLinks) {
+    const ids = [...new Set(scraped.tracks.filter((t) => !t.isUnidentified && t.trackId && /^\d+$/.test(t.trackId)).map((t) => t.trackId!))]
+    log.info('tracklist.links.plan', { eligible: ids.length })
+    const resolved = await Promise.all(ids.map(async (id) => [id, await resolveTrackMediaLinks(env, id, log)] as const))
+    for (const [id, ml] of resolved) links.set(id, ml)
+  }
+
+  const tracks: TracklistTrackOut[] = scraped.tracks.map((t, index) => {
+    const ml = t.trackId ? links.get(t.trackId) : undefined
+    return {
+      index,
+      artist: t.artist,
+      title: t.title,
+      startTime: t.startTime,
+      startSeconds: t.startSeconds,
+      trackId: t.trackId,
+      trackUrl: t.trackUrl,
+      artworkUrl: t.artworkUrl,
+      appleLink: ml?.appleLink ?? null,
+      youtubeLink: ml?.youtubeLink ?? null,
+      isUnidentified: t.isUnidentified,
+      idStatus: t.idStatus,
+      isMashupLinked: t.isMashupLinked,
+    }
+  })
+
+  return { slug, setAppleLink: scraped.setAppleLink, tracks }
+}
+
 /**
  * Resolve (or serve from cache) the per-track Apple Music + YouTube deep links
  * for a 1001tracklists internal track id. Cached by track id.

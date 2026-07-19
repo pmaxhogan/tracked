@@ -2,7 +2,7 @@ import { createRoute, type RouteHandler } from '@hono/zod-openapi'
 import { TracklistRequest, TracklistResponse, ErrorResponse } from '../schemas'
 import type { Env } from '../types'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
-import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
+import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields } from '../lib/log'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
@@ -46,15 +46,9 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
   }
   log.info('tracklist.start', { tracklistUrl, resolveLinks })
 
-  // Phase 1 — scrape (or serve cached) the parsed tracklist.
-  let tracks
-  let setAppleLink: string | null
-  let slug: string
+  let full
   try {
-    const scraped = await resolveTracklistPage(env, tracklistUrl, log)
-    tracks = scraped.tracks
-    setAppleLink = scraped.setAppleLink
-    slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
+    full = await resolveFullTracklist(env, tracklistUrl, { resolveLinks }, log)
   } catch (e) {
     if (e instanceof IPBlockedError) {
       log.error('tracklist.ip_blocked', { tracklistUrl, clientIp: e.clientIp })
@@ -71,48 +65,23 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
   // A zero-track parse is the fingerprint of a captcha/CF-shell that slipped
   // past the block detectors, not a real empty set — surface it as upstream so
   // the caller retries rather than trusting an empty list.
-  if (tracks.length === 0) {
+  if (full.tracks.length === 0) {
     log.warn('tracklist.empty', { tracklistUrl })
     return c.json({ error: 'upstream_error', message: 'parsed 0 tracks (likely a transient captcha) — try again shortly' }, 502)
   }
 
-  // Phase 2 — optionally enrich identified tracks with Apple/YouTube deep links.
-  // Only rows with a numeric medialink id are eligible (mirrors /now-playing);
-  // unidentified rows and rows keyed by a non-numeric data-id are skipped.
-  const links = new Map<string, { appleLink: string | null; youtubeLink: string | null }>()
-  if (resolveLinks) {
-    const ids = [...new Set(tracks.filter((t) => !t.isUnidentified && t.trackId && /^\d+$/.test(t.trackId)).map((t) => t.trackId!))]
-    log.info('tracklist.links.plan', { eligible: ids.length })
-    const resolved = await Promise.all(
-      ids.map(async (id) => [id, await resolveTrackMediaLinks(env, id, log)] as const),
-    )
-    for (const [id, ml] of resolved) links.set(id, ml)
+  const payload = {
+    tracklistUrl,
+    slug: full.slug,
+    setAppleLink: full.setAppleLink,
+    linksResolved: resolveLinks,
+    trackCount: full.tracks.length,
+    tracks: full.tracks,
   }
-
-  const outTracks = tracks.map((t, index) => {
-    const ml = t.trackId ? links.get(t.trackId) : undefined
-    return {
-      index,
-      artist: t.artist,
-      title: t.title,
-      startTime: t.startTime,
-      startSeconds: t.startSeconds,
-      trackId: t.trackId,
-      trackUrl: t.trackUrl,
-      artworkUrl: t.artworkUrl,
-      appleLink: ml?.appleLink ?? null,
-      youtubeLink: ml?.youtubeLink ?? null,
-      isUnidentified: t.isUnidentified,
-      idStatus: t.idStatus,
-      isMashupLinked: t.isMashupLinked,
-    }
-  })
-
-  const payload = { tracklistUrl, slug, setAppleLink, linksResolved: resolveLinks, trackCount: outTracks.length, tracks: outTracks }
   log.info('tracklist.done', {
     tracklistUrl,
-    trackCount: outTracks.length,
-    unidentifiedCount: tracks.filter((t) => t.isUnidentified).length,
+    trackCount: full.tracks.length,
+    unidentifiedCount: full.tracks.filter((t) => t.isUnidentified).length,
     linksResolved: resolveLinks,
     totalMs: Date.now() - tStart,
     counters: log.counters,
