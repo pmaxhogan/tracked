@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseSearchResults, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData } from '../src/lib/tracklists1001'
+import { parseSearchResult, parseSearchResults, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData, normalizeTracklistUrl } from '../src/lib/tracklists1001'
 import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
 import { selectCurrent } from '../src/lib/timestamp'
 
@@ -192,6 +192,49 @@ describe('pickBestTracklist (synthetic edge cases)', () => {
     ]
     const best = pickBestTracklist('Eli Brown | Mixmag Lab Mendoza', many)
     expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
+  })
+})
+
+describe('normalizeTracklistUrl', () => {
+  const canonical = 'https://www.1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html'
+
+  it('passes through a canonical tracklist URL', () => {
+    expect(normalizeTracklistUrl(canonical)).toBe(canonical)
+  })
+
+  it('adds a scheme when missing', () => {
+    expect(normalizeTracklistUrl('www.1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html')).toBe(canonical)
+  })
+
+  it('upgrades a bare (www-less) host to the canonical www origin', () => {
+    expect(normalizeTracklistUrl('1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html')).toBe(canonical)
+  })
+
+  it('accepts an id-only path', () => {
+    expect(normalizeTracklistUrl('https://www.1001tracklists.com/tracklist/l3uw499')).toBe(
+      'https://www.1001tracklists.com/tracklist/l3uw499',
+    )
+  })
+
+  it('drops query string and fragment', () => {
+    expect(normalizeTracklistUrl(canonical + '?utm=x#frag')).toBe(canonical)
+  })
+
+  it('rejects a DJ page URL', () => {
+    expect(normalizeTracklistUrl('https://www.1001tracklists.com/dj/lillypalmer/index.html')).toBeNull()
+  })
+
+  it('rejects a non-1001tracklists host', () => {
+    expect(normalizeTracklistUrl('https://example.com/tracklist/l3uw499/x.html')).toBeNull()
+  })
+
+  it('rejects a bare slug (no /tracklist/ path)', () => {
+    expect(normalizeTracklistUrl('l3uw499')).toBeNull()
+  })
+
+  it('rejects empty / whitespace input', () => {
+    expect(normalizeTracklistUrl('')).toBeNull()
+    expect(normalizeTracklistUrl('   ')).toBeNull()
   })
 })
 

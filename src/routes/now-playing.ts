@@ -2,7 +2,8 @@ import { createRoute, type RouteHandler } from '@hono/zod-openapi'
 import { NowPlayingRequest, NowPlayingResponse, ErrorResponse } from '../schemas'
 import type { Env, ParsedTrack, ResponseTrack, Status } from '../types'
 import { resolveVideo, extractVideoId } from '../lib/youtube'
-import { searchByYouTubeUrl, searchByTitle, fetchTracklist, fetchMediaLinks, type MediaLinks } from '../lib/tracklists1001'
+import { searchByYouTubeUrl, searchByTitle } from '../lib/tracklists1001'
+import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
 import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
@@ -46,9 +47,10 @@ const CV = {
   yt: 1, // YouTube resolve → { videoId, matchTitle }
   searchUrl: 1, // 1001tl search by YouTube URL
   searchTitle: 2, // 1001tl search by title — v2: IDF-weighted ranking (v1 over-rejected valid matches)
-  tracklist: 1, // parsed tracklist page
-  medialink: 1, // per-track Apple/YouTube links
   apple: 1, // iTunes Apple-link fallback
+  // NB: the `tracklist` (parsed page) and `medialink` (per-track links) cache
+  // families moved to lib/tracklist-resolve.ts (TRACKLIST_CV) so /now-playing
+  // and /tracklist share the same cache keys.
 } as const
 
 export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings: Env }> = async (c) => {
@@ -260,7 +262,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   let parsedTracks: ParsedTrack[]
   let setAppleLink: string | null = null
   try {
-    const scraped = await resolveTracklist(env, tracklistUrl, log)
+    const scraped = await resolveTracklistPage(env, tracklistUrl, log)
     parsedTracks = scraped.tracks
     setAppleLink = scraped.setAppleLink
   } catch (e) {
@@ -388,42 +390,6 @@ async function resolveTracklistByTitle(env: Env, title: string, log: Logger): Pr
   return result.tracklistUrl
 }
 
-type CachedTracklist = { tracks: ParsedTrack[]; setAppleLink: string | null }
-
-async function resolveTracklist(env: Env, tracklistUrl: string, log: Logger): Promise<CachedTracklist> {
-  const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
-  const key = `tl:v${CV.tracklist}:${slug}`
-  // Backwards compat: older cache entries were a bare ParsedTrack[]. If we
-  // hit one of those, normalize and ignore the (missing) setAppleLink — it'll
-  // be picked up on the next refresh after TTL expires.
-  const cached = await getJson<CachedTracklist | ParsedTrack[]>(env.CACHE, key)
-  if (cached) {
-    log.counters.cacheHits++
-    if (Array.isArray(cached)) {
-      log.info('cache.hit', { key, trackCount: cached.length, schema: 'legacy' })
-      return { tracks: cached, setAppleLink: null }
-    }
-    log.info('cache.hit', { key, trackCount: cached.tracks.length, setAppleLink: cached.setAppleLink })
-    return cached
-  }
-  log.counters.cacheMisses++
-  log.info('cache.miss', { key })
-  const { result } = await fetchTracklist(tracklistUrl, {
-    brightdataApiKey: env.BRIGHTDATA_API_KEY,
-    homeProxyUrl: env.HOME_PROXY_URL,
-    homeProxyToken: env.HOME_PROXY_TOKEN,
-    log,
-  })
-  if (result.tracks.length > 0) {
-    const value: CachedTracklist = { tracks: result.tracks, setAppleLink: result.setAppleLink }
-    await putJson(env.CACHE, key, value, TTL.TRACKLIST_PAGE)
-    log.info('cache.put', { key, trackCount: result.tracks.length, setAppleLink: result.setAppleLink, ttlSeconds: TTL.TRACKLIST_PAGE })
-    return value
-  }
-  log.warn('cache.skip_empty', { key, reason: 'parsed 0 tracks; likely a transient captcha — not caching' })
-  return { tracks: [], setAppleLink: result.setAppleLink }
-}
-
 async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: ResponseTrack, log: Logger): Promise<{ appleLink: string | null; youtubeLink: string | null }> {
   if (t.isUnidentified) {
     log.info('links.skip_unidentified', { artist: t.artist, title: t.title })
@@ -434,7 +400,7 @@ async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: Respon
   let youtube: string | null = null
 
   if (parsed?.trackId && /^\d+$/.test(parsed.trackId)) {
-    const ml = await getMediaLinks(env, parsed.trackId, log)
+    const ml = await resolveTrackMediaLinks(env, parsed.trackId, log)
     apple = ml.appleLink
     youtube = ml.youtubeLink
     log.info('links.medialink_result', { trackId: parsed.trackId, artist: t.artist, title: t.title, apple, youtube })
@@ -447,24 +413,6 @@ async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: Respon
     log.info('links.itunes_fallback_result', { artist: t.artist, title: t.title, apple })
   }
   return { appleLink: apple, youtubeLink: youtube }
-}
-
-async function getMediaLinks(env: Env, trackId: string, log: Logger): Promise<MediaLinks> {
-  const key = `ml:v${CV.medialink}:${trackId}`
-  const cached = await getJson<MediaLinks>(env.CACHE, key)
-  if (cached) {
-    log.counters.cacheHits++
-    log.info('cache.hit', { key, value: cached })
-    return cached
-  }
-  log.counters.cacheMisses++
-  log.info('cache.miss', { key })
-  // medialink primary path is direct fetch; brightdata is only the timeout
-  // fallback. Counter is bumped on the actual unlocker call (see lib).
-  const { result } = await fetchMediaLinks(trackId, { log, brightdataApiKey: env.BRIGHTDATA_API_KEY })
-  await putJson(env.CACHE, key, result, TTL.MEDIALINK)
-  log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
-  return result
 }
 
 async function lookupAppleCached(env: Env, artist: string, title: string, log: Logger): Promise<string | null> {

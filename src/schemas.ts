@@ -79,5 +79,51 @@ export const NowPlayingResponse = z
   .openapi('NowPlayingResponse')
 
 export const ErrorResponse = z
-  .object({ error: z.string() })
+  .object({ error: z.string(), message: z.string().optional() })
   .openapi('ErrorResponse')
+
+// ─── GET-a-whole-tracklist endpoint ─────────────────────────────────────────
+
+export const TracklistRequest = z
+  .object({
+    url: z.string().min(1).openapi({
+      example: 'https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html',
+      description:
+        'A 1001tracklists tracklist URL. The scheme and leading "www." are optional; any query string or fragment is ignored. Must point at /tracklist/<id>/... — DJ pages and other hosts are rejected with 400.',
+    }),
+    resolveLinks: z.boolean().optional().default(true).openapi({
+      example: true,
+      description:
+        'When true (default) each identified track is enriched with its Apple Music and YouTube deep links via 1001tracklists’ medialink API (one extra upstream call per track, cached 30 days). Set false to skip that and return only what the tracklist page itself yields (still includes trackUrl + artworkUrl), which is faster for large sets.',
+    }),
+  })
+  .openapi('TracklistRequest')
+
+export const TracklistTrackSchema = z
+  .object({
+    index: z.number().int().openapi({ description: 'Zero-based position of the track within the set.' }),
+    artist: z.string(),
+    title: z.string(),
+    startTime: z.string().openapi({ example: '1:16:30', description: 'Cue time as shown on the page ("H:MM:SS" / "M:SS"). Empty string when the row has no cue.' }),
+    startSeconds: z.number().int().nullable().openapi({ description: 'Cue time in seconds. null when the row is uncued (e.g. a mashup-linked sibling or a trailing untimed extra).' }),
+    trackId: z.string().nullable().openapi({ description: 'Internal 1001tracklists track id (used for the medialink API). null when unextractable.' }),
+    trackUrl: z.string().nullable().openapi({ example: 'https://www.1001tracklists.com/track/1hf79cg5/tobehonest-where-ya-at/index.html', description: 'Canonical 1001tracklists track page. null when the row carries no track meta url.' }),
+    artworkUrl: z.string().nullable().openapi({ description: 'Square 300×300 album art (Beatport/SoundCloud CDN, normalized). null when only the 1001tl placeholder was present.' }),
+    appleLink: z.string().nullable().openapi({ description: 'Apple Music deep link. Always null when resolveLinks is false or the track is unidentified.' }),
+    youtubeLink: z.string().nullable().openapi({ description: 'YouTube deep link. Always null when resolveLinks is false or the track is unidentified.' }),
+    isUnidentified: z.boolean().openapi({ description: 'True only when the playing track is fully anonymous (e.g. "Cave Studio - ID"). Partial-ID variants set idStatus instead and keep their base-track fields.' }),
+    idStatus: z.string().nullable().openapi({ example: 'ID Remix', description: 'Non-null when this row is a partial-ID variant of a known base track ("ID Remix", "ID Edit", ...). The artist/title/links describe the BASE track; the playing version may differ.' }),
+    isMashupLinked: z.boolean().openapi({ description: 'True when this row is a "w/" mashup sibling of the previous row (shares its cue position).' }),
+  })
+  .openapi('TracklistTrack')
+
+export const TracklistResponse = z
+  .object({
+    tracklistUrl: z.string().openapi({ description: 'The canonical tracklist URL that was scraped.' }),
+    slug: z.string().openapi({ example: 'l3uw499', description: "1001tracklists' short id for the tracklist." }),
+    setAppleLink: z.string().nullable().openapi({ description: 'Apple Music album link for the whole DJ set, when 1001tracklists embeds one. null otherwise.' }),
+    linksResolved: z.boolean().openapi({ description: 'Whether per-track Apple/YouTube links were resolved (echoes the request’s resolveLinks).' }),
+    trackCount: z.number().int(),
+    tracks: z.array(TracklistTrackSchema),
+  })
+  .openapi('TracklistResponse')
