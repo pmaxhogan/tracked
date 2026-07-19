@@ -225,6 +225,36 @@ export function pickBestTracklist(
   return null
 }
 
+/**
+ * Normalize a user-supplied 1001tracklists tracklist URL to its canonical
+ * `https://www.1001tracklists.com/tracklist/<id>/<name>.html` form. Accepts:
+ *   https://www.1001tracklists.com/tracklist/l3uw499/matroda-....html
+ *   www.1001tracklists.com/tracklist/l3uw499/matroda-....html   (no scheme)
+ *   1001tracklists.com/tracklist/l3uw499                        (id only)
+ *   https://.../tracklist/l3uw499/...html?foo=bar#frag          (query/frag dropped)
+ *
+ * Rejects anything that isn't a 1001tracklists tracklist URL (DJ pages, other
+ * hosts, bare slugs). Returns null on reject.
+ */
+export function normalizeTracklistUrl(input: string): string | null {
+  const s = input.trim()
+  if (!s) return null
+  const urlStr = /^https?:\/\//i.test(s) ? s : `https://${s}`
+  let u: URL
+  try {
+    u = new URL(urlStr)
+  } catch {
+    return null
+  }
+  if (!/^(www\.)?1001tracklists\.com$/i.test(u.hostname)) return null
+  // Path must be /tracklist/<id>[/<name>...]. The id is 1001tl's short
+  // alphanumeric slug (e.g. "l3uw499").
+  const m = u.pathname.match(/^\/tracklist\/[a-z0-9]+(?:\/[^?#]*)?$/i)
+  if (!m) return null
+  // Drop query/fragment; force the canonical www host.
+  return `${ORIGIN}${u.pathname}`
+}
+
 export type ScrapedTracklist = {
   slug: string
   /** Apple Music album/playlist link for the whole set, when 1001tl embeds one. null otherwise. */

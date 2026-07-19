@@ -93,6 +93,52 @@ Mashup-linked siblings (1001tracklists `w/`) count as a single group, so a curre
 
 When the upstream rate-limits us (1001tracklists per-IP captcha gate), the response is `status: "upstream_error"` with `message: "1001 search: ip_blocked (<ip>)"` (or `1001 scrape: …`) — both the home-IP direct-fetch path and the BrightData unlocker path detect the unblock-form page and surface it cleanly rather than silently degrading to `no_tracklist`.
 
+### Dump a whole tracklist
+
+`POST /tracklist` takes a 1001tracklists tracklist URL and returns every track as JSON — the "give me the whole set" counterpart to `/now-playing` (which returns only the track playing at a given offset). Same bearer auth, and it shares the same scrape + cache as `/now-playing`, so a set fetched by one endpoint is warm for the other.
+
+```
+POST /tracklist
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "url": "https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html",
+  "resolveLinks": true
+}
+```
+
+The scheme and leading `www.` are optional and any query string / fragment is ignored; the URL must point at `/tracklist/<id>/…` (DJ pages and other hosts are rejected with `400 invalid_url`). `resolveLinks` defaults to `true` — each identified track is enriched with its Apple Music and YouTube deep links (one cached upstream call per track); set it to `false` to skip that and return faster (you still get `trackUrl` and `artworkUrl` straight from the page).
+
+```jsonc
+{
+  "tracklistUrl": "https://www.1001tracklists.com/tracklist/l3uw499/...html",
+  "slug": "l3uw499",
+  "setAppleLink": null,          // Apple Music album for the WHOLE set, when 1001tl has one
+  "linksResolved": true,         // echoes the request's resolveLinks
+  "trackCount": 32,
+  "tracks": [
+    {
+      "index": 0,
+      "artist": "Matroda",
+      "title": "LEFT TO RIGHT (Aidan Rudd Remix)",
+      "startTime": "0:00",
+      "startSeconds": 0,
+      "trackId": "909720",
+      "trackUrl": "https://www.1001tracklists.com/track/.../index.html",
+      "artworkUrl": "https://geo-media.beatport.com/image_size/300x300/....jpg",
+      "appleLink": "https://music.apple.com/us/album/...?i=...",
+      "youtubeLink": "https://www.youtube.com/watch?v=...",
+      "isUnidentified": false,
+      "idStatus": null,
+      "isMashupLinked": false
+    }
+  ]
+}
+```
+
+Per-track field semantics (`startSeconds`, `trackUrl`, `artworkUrl`, `idStatus`, `isUnidentified`, `isMashupLinked`) are identical to `/now-playing` — see the notes above. Unlike `/now-playing`, this endpoint uses **HTTP status codes** rather than a `status` field: `400` for a bad URL, `401` for a missing/invalid bearer token, and `502 upstream_error` when 1001tracklists rate-limits us (per-IP captcha gate) or the page parses to zero tracks (the fingerprint of a transient captcha that slipped past the block detectors — retry shortly).
+
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 
 ## Subscriptions mini-app
@@ -115,6 +161,17 @@ GET  /subscriptions/api/list                      → { subscriptions: [{ slug, 
 POST /subscriptions/api/add    { url: "..." }     → { added: bool, subscription: {...} }
 POST /subscriptions/api/remove { slug: "..." }    → { removed: bool }
 ```
+
+### Tracklist viewer
+
+`GET /subscriptions/tracklist` is a standalone page (linked from the top of the subscriptions page) where you paste a 1001tracklists **tracklist** URL and get a clean per-song list: each row shows the artist – title, cue time, a **YouTube** icon that links straight to the track's video, and an **Apple Music** button, whenever 1001tracklists has those links. It's the browser-facing companion to the bearer-gated `POST /tracklist` API; because the browser only carries the Cloudflare Access cookie (not the bearer token), the page calls its own Access-gated endpoint:
+
+```
+GET  /subscriptions/tracklist                     → the viewer page (HTML)
+POST /subscriptions/api/tracklist { url: "..." }  → { tracklistUrl, slug, setAppleLink, trackCount, tracks: [...] }
+```
+
+Both `POST /tracklist` and `POST /subscriptions/api/tracklist` resolve through the same shared scrape + cache (`lib/tracklist-resolve.ts`), so a set opened in the viewer is warm for the API and vice-versa. The page accepts `?url=` to deep-link a specific tracklist (it prefills and auto-loads).
 
 ### YouTube account connection
 
@@ -333,7 +390,8 @@ Browse this history in the **admin panel** at `/subscriptions` → **Recent requ
 ```
 src/
   index.ts                  OpenAPIHono app + /openapi.json
-  routes/now-playing.ts     pipeline orchestrator
+  routes/now-playing.ts     pipeline orchestrator (track playing at an offset)
+  routes/tracklist.ts       whole-tracklist → JSON dump
   routes/subscriptions.ts   DJ subscriptions mini-app (HTML + JSON API)
   middleware/auth.ts        bearer token (timing-safe)
   middleware/cf-access.ts   Cloudflare Access JWT verification (RS256 + JWKS)
@@ -341,7 +399,8 @@ src/
   types.ts
   lib/
     timestamp.ts            cue parsing + current-track selection
-    tracklists1001.ts       search, scrape, medialink (homeProxy → unlocker → direct)
+    tracklists1001.ts       search, scrape, medialink, URL parsing (homeProxy → unlocker → direct)
+    tracklist-resolve.ts    cached tracklist-page + per-track-link resolvers (shared by both API routes)
     subscriptions.ts        DJ slug parser + KV CRUD for the mini-app
     google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
     fetch.ts                challenge solver + cookie jar

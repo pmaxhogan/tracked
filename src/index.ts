@@ -1,5 +1,6 @@
 import { OpenAPIHono } from '@hono/zod-openapi'
 import { nowPlayingRoute, nowPlayingHandler } from './routes/now-playing'
+import { tracklistRoute, tracklistHandler } from './routes/tracklist'
 import { subscriptionsApp } from './routes/subscriptions'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
@@ -9,9 +10,10 @@ import { makeLogger, errorFields } from './lib/log'
 const app = new OpenAPIHono<{ Bindings: Env }>()
 
 app.openapi(nowPlayingRoute, nowPlayingHandler)
+app.openapi(tracklistRoute, tracklistHandler)
 
 // Public root: just a hint. Anything past `/` requires the bearer token.
-app.get('/', (c) => c.text('tracked — POST /now-playing (Bearer auth). See /openapi.json'))
+app.get('/', (c) => c.text('tracked — POST /now-playing, POST /tracklist (Bearer auth). See /openapi.json'))
 
 // Browsers auto-request /favicon.ico for every page; serve a tiny 204 so it
 // doesn't fall through to the bearer-token gate and show up as 401 noise in

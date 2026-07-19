@@ -25,6 +25,9 @@ import {
 import { makeLogger, errorFields } from '../lib/log'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 import { syncAll, syncOne, loadSubState } from '../lib/sync'
+import { normalizeTracklistUrl } from '../lib/tracklists1001'
+import { resolveFullTracklist } from '../lib/tracklist-resolve'
+import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -56,6 +59,52 @@ subscriptionsApp.get('/', (c) => {
   // (e.g. a banner that doesn't auto-refresh).
   c.header('Cache-Control', 'no-store')
   return c.html(PAGE_HTML)
+})
+
+// Standalone "tracklist viewer" page: paste a 1001tracklists URL, get a clean
+// per-song list with a YouTube icon-link and an Apple Music button when 1001tl
+// has them. Data comes from the CF-Access-gated /api/tracklist below (NOT the
+// bearer-gated /tracklist API route — the browser only holds the Access cookie).
+subscriptionsApp.get('/tracklist', (c) => {
+  c.header('Cache-Control', 'no-store')
+  return c.html(TRACKLIST_PAGE_HTML)
+})
+
+subscriptionsApp.post('/api/tracklist', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.tracklist', by: c.get('cfAccessEmail') })
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400)
+  }
+  const rawUrl = typeof (body as { url?: unknown })?.url === 'string' ? (body as { url: string }).url : ''
+  if (!rawUrl) return c.json({ error: 'missing_url' }, 400)
+  const tracklistUrl = normalizeTracklistUrl(rawUrl)
+  if (!tracklistUrl) {
+    log.warn('subs.tracklist.bad_url', { url: rawUrl })
+    return c.json({ error: 'invalid_url', message: 'not a 1001tracklists tracklist URL' }, 400)
+  }
+  log.info('subs.tracklist.start', { tracklistUrl })
+  try {
+    const full = await resolveFullTracklist(c.env, tracklistUrl, { resolveLinks: true }, log)
+    if (full.tracks.length === 0) {
+      log.warn('subs.tracklist.empty', { tracklistUrl })
+      return c.json({ error: 'upstream_error', message: 'parsed 0 tracks (likely a transient captcha) — try again shortly' }, 502)
+    }
+    return c.json({ tracklistUrl, slug: full.slug, setAppleLink: full.setAppleLink, trackCount: full.tracks.length, tracks: full.tracks })
+  } catch (e) {
+    if (e instanceof IPBlockedError) {
+      log.error('subs.tracklist.ip_blocked', { tracklistUrl, clientIp: e.clientIp })
+      return c.json({ error: 'upstream_error', message: `1001 scrape: ip_blocked (${e.clientIp ?? 'unknown'})` }, 502)
+    }
+    if (e instanceof CloudflareChallengeError) {
+      log.error('subs.tracklist.cf_challenge', { tracklistUrl, errorMessage: e.message })
+      return c.json({ error: 'upstream_error', message: `1001 scrape: cf_challenge — ${e.message}` }, 502)
+    }
+    log.error('subs.tracklist.throw', { tracklistUrl, ...errorFields(e) })
+    return c.json({ error: 'upstream_error', message: `1001 scrape: ${(e as Error).message}` }, 502)
+  }
 })
 
 subscriptionsApp.get('/api/list', async (c) => {
@@ -533,7 +582,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
 <body>
 <main>
   <h1>DJ subscriptions</h1>
-  <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>.</p>
+  <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>. &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer →</a></p>
   <div id="proxy-banner" class="banner" hidden>
     <div class="info">
       <div class="title">Home proxy IP-blocked at 1001tracklists</div>
@@ -1033,6 +1082,241 @@ const PAGE_HTML = /* html */ `<!doctype html>
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) loadProxyStatus();
   });
+})();
+</script>
+</body>
+</html>`
+
+const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>tracked — tracklist viewer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0e1116; --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --danger: #f85149; --card: #161b22; --border: #30363d;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --accent: #0969da; --danger: #cf222e; --card: #f6f8fa; --border: #d0d7de; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; padding: 2rem 1rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+  p.lead { color: var(--muted); margin: 0 0 1.25rem; }
+  p.lead a { color: var(--accent); text-decoration: none; }
+  p.lead a:hover { text-decoration: underline; }
+  form { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  input[type="url"] { flex: 1; padding: 0.6rem 0.75rem; font: inherit; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; }
+  input[type="url"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button.load { padding: 0.6rem 1rem; font: inherit; background: var(--accent); color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+  button.load:disabled { opacity: 0.5; cursor: progress; }
+  .error { color: var(--danger); margin: 0.25rem 0 1rem; min-height: 1.2em; white-space: pre-wrap; }
+  .setmeta { color: var(--muted); font-size: 0.85rem; margin: 0 0 1rem; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+  .setmeta a { color: var(--accent); text-decoration: none; }
+  .setmeta a:hover { text-decoration: underline; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li.track { display: flex; align-items: center; gap: 0.75rem; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 8px; background: var(--card); margin-bottom: 0.45rem; }
+  li.track .num { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.8rem; width: 1.8rem; text-align: right; flex: none; }
+  li.track img.art { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; flex: none; background: var(--border); }
+  li.track .art.ph { width: 40px; height: 40px; border-radius: 4px; flex: none; background: var(--border); }
+  li.track .meta { flex: 1; min-width: 0; }
+  li.track .title { font-weight: 600; font-size: 0.92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li.track .title a { color: inherit; text-decoration: none; }
+  li.track .title a:hover { text-decoration: underline; }
+  li.track .sub { color: var(--muted); font-size: 0.78rem; display: flex; align-items: center; gap: 0.5rem; margin-top: 0.1rem; }
+  li.track .cue { font-variant-numeric: tabular-nums; }
+  li.track .tag { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.1rem 0.4rem; border-radius: 999px; background: rgba(210,153,34,0.18); color: #d29922; }
+  li.track .actions { display: flex; align-items: center; gap: 0.5rem; flex: none; }
+  a.yt { display: inline-flex; align-items: center; line-height: 0; border-radius: 4px; }
+  a.yt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  a.apple { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.35rem 0.6rem; font-size: 0.78rem; font-weight: 600; text-decoration: none; color: var(--fg); background: transparent; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
+  a.apple:hover { border-color: var(--accent); color: var(--accent); }
+  .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
+  footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Tracklist viewer</h1>
+  <p class="lead">Paste a 1001tracklists tracklist URL to see a clean per-song list with direct YouTube and Apple Music links. &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a></p>
+  <form id="load-form">
+    <input id="url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" required autofocus />
+    <button type="submit" class="load">Load</button>
+  </form>
+  <div id="error" class="error" role="alert"></div>
+  <div id="setmeta" class="setmeta" hidden></div>
+  <ul id="tracks"></ul>
+  <div id="empty" class="empty" hidden></div>
+  <footer>Signed in as <span id="who"></span></footer>
+</main>
+<script>
+(() => {
+  const $form = document.getElementById('load-form');
+  const $url = document.getElementById('url');
+  const $btn = $form.querySelector('button');
+  const $error = document.getElementById('error');
+  const $setmeta = document.getElementById('setmeta');
+  const $tracks = document.getElementById('tracks');
+  const $empty = document.getElementById('empty');
+
+  // Static, data-free SVG for the YouTube glyph — safe to inject as innerHTML.
+  const YT_SVG = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="#FF0000" d="M23 7.5a3 3 0 0 0-2.1-2.1C19 5 12 5 12 5s-7 0-8.9.4A3 3 0 0 0 1 7.5 31 31 0 0 0 .6 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1C5 19 12 19 12 19s7 0 8.9-.4a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.4 12 31 31 0 0 0 23 7.5Z"/><path fill="#fff" d="M9.8 15.5v-7l6 3.5-6 3.5Z"/></svg>';
+  const APPLE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" fill="currentColor"><path d="M16.4 12.8c0-2.2 1.8-3.3 1.9-3.3-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.6.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.4 0-2.8.8-3.5 2.1-1.5 2.6-.4 6.5 1.1 8.6.7 1 1.5 2.2 2.6 2.2 1 0 1.4-.7 2.7-.7 1.2 0 1.6.7 2.7.6 1.1 0 1.8-1 2.5-2 .8-1.2 1.1-2.3 1.1-2.3s-2.1-.8-2.1-3.2ZM14.3 5.9c.6-.7 1-1.7.9-2.7-.9 0-1.9.6-2.5 1.3-.5.6-1 1.6-.9 2.6 1 .1 2-.5 2.5-1.2Z"/></svg>';
+
+  // Untrusted third-party text (artist/title from 1001tracklists) — build every
+  // node with textContent, and only ever set href to an http(s) URL, so a
+  // hostile value can never become markup or a javascript: link.
+  function safeHref(a, u) {
+    if (!u) return false;
+    const lo = String(u).toLowerCase();
+    if (!(lo.startsWith('http://') || lo.startsWith('https://'))) return false;
+    a.href = u; a.target = '_blank'; a.rel = 'noreferrer noopener';
+    return true;
+  }
+
+  function render(data) {
+    $tracks.innerHTML = '';
+    $setmeta.innerHTML = '';
+
+    const parts = [];
+    const count = document.createElement('span');
+    count.textContent = (data.trackCount || 0) + ' track' + (data.trackCount === 1 ? '' : 's');
+    parts.push(count);
+    const src = document.createElement('a');
+    if (safeHref(src, data.tracklistUrl)) { src.textContent = '1001tracklists page ↗'; parts.push(src); }
+    if (data.setAppleLink) {
+      const al = document.createElement('a');
+      if (safeHref(al, data.setAppleLink)) { al.textContent = 'Apple Music (full set) ↗'; parts.push(al); }
+    }
+    parts.forEach((p) => $setmeta.appendChild(p));
+    $setmeta.hidden = false;
+
+    for (const t of (data.tracks || [])) {
+      const li = document.createElement('li');
+      li.className = 'track';
+
+      const num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = String((t.index ?? 0) + 1);
+      li.appendChild(num);
+
+      if (t.artworkUrl) {
+        const img = document.createElement('img');
+        img.className = 'art';
+        img.loading = 'lazy';
+        img.alt = '';
+        img.src = t.artworkUrl;
+        // Fall back to a neutral placeholder if the CDN 404s / hotlink-blocks.
+        img.addEventListener('error', () => { const ph = document.createElement('div'); ph.className = 'art ph'; img.replaceWith(ph); });
+        li.appendChild(img);
+      } else {
+        const ph = document.createElement('div');
+        ph.className = 'art ph';
+        li.appendChild(ph);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const title = document.createElement('div');
+      title.className = 'title';
+      const label = (t.artist ? t.artist + ' – ' : '') + (t.title || 'ID');
+      if (t.trackUrl) {
+        const a = document.createElement('a');
+        a.textContent = label;
+        if (!safeHref(a, t.trackUrl)) { title.textContent = label; } else { title.appendChild(a); }
+      } else {
+        title.textContent = label;
+      }
+      meta.appendChild(title);
+
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      if (t.startTime) { const cue = document.createElement('span'); cue.className = 'cue'; cue.textContent = t.startTime; sub.appendChild(cue); }
+      if (t.idStatus) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = t.idStatus; sub.appendChild(tag); }
+      else if (t.isUnidentified) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = 'ID'; sub.appendChild(tag); }
+      if (t.isMashupLinked) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = 'w/'; sub.appendChild(tag); }
+      meta.appendChild(sub);
+      li.appendChild(meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      if (t.youtubeLink) {
+        const a = document.createElement('a');
+        a.className = 'yt';
+        a.title = 'Play on YouTube';
+        a.setAttribute('aria-label', 'Play on YouTube');
+        if (safeHref(a, t.youtubeLink)) { a.innerHTML = YT_SVG; actions.appendChild(a); }
+      }
+      if (t.appleLink) {
+        const a = document.createElement('a');
+        a.className = 'apple';
+        a.title = 'Open in Apple Music';
+        const glyph = document.createElement('span'); glyph.style.display = 'inline-flex'; glyph.innerHTML = APPLE_SVG;
+        const txt = document.createElement('span'); txt.textContent = 'Apple Music';
+        if (safeHref(a, t.appleLink)) { a.appendChild(glyph); a.appendChild(txt); actions.appendChild(a); }
+      }
+      li.appendChild(actions);
+
+      $tracks.appendChild(li);
+    }
+    $empty.hidden = true;
+  }
+
+  async function load(url) {
+    $error.textContent = '';
+    $empty.hidden = true;
+    $btn.disabled = true;
+    const original = $btn.textContent;
+    $btn.textContent = 'Loading…';
+    try {
+      const r = await fetch('/subscriptions/api/tracklist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ url }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $tracks.innerHTML = '';
+        $setmeta.hidden = true;
+        $error.textContent = (data.message || data.error || ('failed (' + r.status + ')'));
+        return;
+      }
+      if (!data.tracks || data.tracks.length === 0) {
+        $tracks.innerHTML = '';
+        $setmeta.hidden = true;
+        $empty.textContent = 'No tracks found.';
+        $empty.hidden = false;
+        return;
+      }
+      render(data);
+    } catch (e) {
+      $error.textContent = 'request failed: ' + (e && e.message ? e.message : e);
+    } finally {
+      $btn.disabled = false;
+      $btn.textContent = original;
+    }
+  }
+
+  $form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const url = $url.value.trim();
+    if (!url) return;
+    // Reflect the loaded set in the address bar so it can be shared/bookmarked.
+    try { history.replaceState({}, '', location.pathname + '?url=' + encodeURIComponent(url)); } catch {}
+    load(url);
+  });
+
+  document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
+
+  // Deep-link support: /subscriptions/tracklist?url=... prefills and auto-loads.
+  const pre = new URLSearchParams(location.search).get('url');
+  if (pre) { $url.value = pre; load(pre); }
 })();
 </script>
 </body>
