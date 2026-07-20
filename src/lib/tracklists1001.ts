@@ -610,7 +610,13 @@ function decodeEntities(s: string): string {
 export type MediaLinks = {
   appleLink: string | null
   youtubeLink: string | null
+  /** SoundCloud widget-player URL (plays free w/ ads in a browser tab, and
+   *  yt-dlp can download it without cookies). null when 1001tl has no
+   *  SoundCloud source for the track. */
+  soundcloudLink: string | null
 }
+
+const NO_LINKS: MediaLinks = { appleLink: null, youtubeLink: null, soundcloudLink: null }
 
 type MedialinkResponse = {
   success: boolean
@@ -684,7 +690,7 @@ export async function fetchMediaLinks(
       racerCount: racers.length,
       errors: e instanceof AggregateError ? e.errors.map((er) => (er instanceof Error ? er.message : String(er))) : [String(e)],
     })
-    return { result: { appleLink: null, youtubeLink: null }, state: opts.state ?? { cookie: '' } }
+    return { result: { ...NO_LINKS }, state: opts.state ?? { cookie: '' } }
   }
 }
 
@@ -742,6 +748,7 @@ async function fetchMediaLinksViaUnlocker(
     mediaItemId,
     appleLink: result.appleLink,
     youtubeLink: result.youtubeLink,
+    soundcloudLink: result.soundcloudLink,
     ms: Date.now() - start,
   })
   return result
@@ -772,19 +779,43 @@ function parseAndLog(
     sourcesMore: (json.more ?? []).map((m) => m.source),
     appleLink: result.appleLink,
     youtubeLink: result.youtubeLink,
+    soundcloudLink: result.soundcloudLink,
     ms: Date.now() - start,
   })
   return result
 }
 
 export function parseMediaLinks(json: MedialinkResponse): MediaLinks {
-  if (!json.success) return { appleLink: null, youtubeLink: null }
+  if (!json.success) return { ...NO_LINKS }
   const apple = json.data?.find((d) => d.source === SOURCE.APPLE)
   const youtube = json.more?.find((m) => m.source === SOURCE.YOUTUBE)
+  const soundcloud = json.data?.find((d) => d.source === SOURCE.SOUNDCLOUD)
   return {
     appleLink: apple ? buildAppleLink(apple) : null,
     youtubeLink: youtube?.idLink ? `https://www.youtube.com/watch?v=${youtube.idLink}` : null,
+    soundcloudLink: soundcloud ? buildSoundcloudLink(soundcloud) : null,
   }
+}
+
+/**
+ * Build a SoundCloud link from a source-10 medialink entry. 1001tl embeds the
+ * SoundCloud widget, whose `playerId` is the numeric track id (and whose iframe
+ * src wraps `https://api.soundcloud.com/tracks/<id>`). We return the widget
+ * player URL: it plays free (with ads) as a standalone browser page, and
+ * yt-dlp's SoundcloudEmbedIE downloads it without cookies. Falls back to
+ * parsing the api URL out of the iframe when `playerId` isn't the bare id.
+ */
+function buildSoundcloudLink(entry: { playerId?: string; player?: string }): string | null {
+  let apiUrl: string | null = null
+  if (entry.playerId && /^\d+$/.test(entry.playerId)) {
+    apiUrl = `https://api.soundcloud.com/tracks/${entry.playerId}`
+  } else {
+    // The iframe src is `...player/?url=https://api.soundcloud.com/tracks/<id>&amp;...`
+    const m = (entry.player ?? '').match(/[?&]url=(https?:\/\/api\.soundcloud\.com\/tracks\/\d+)/)
+    if (m) apiUrl = m[1]!
+  }
+  if (!apiUrl) return null
+  return `https://w.soundcloud.com/player/?url=${encodeURIComponent(apiUrl)}`
 }
 
 function buildAppleLink(entry: { playerId: string; player?: string }): string | null {

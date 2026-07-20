@@ -73,6 +73,7 @@ export type TracklistTrackOut = {
   artworkUrl: string | null
   appleLink: string | null
   youtubeLink: string | null
+  soundcloudLink: string | null
   isUnidentified: boolean
   idStatus: string | null
   isMashupLinked: boolean
@@ -126,6 +127,7 @@ export async function resolveFullTracklist(
       artworkUrl: t.artworkUrl,
       appleLink: ml?.appleLink ?? null,
       youtubeLink: ml?.youtubeLink ?? null,
+      soundcloudLink: ml?.soundcloudLink ?? null,
       isUnidentified: t.isUnidentified,
       idStatus: t.idStatus,
       isMashupLinked: t.isMashupLinked,

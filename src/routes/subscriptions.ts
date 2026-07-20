@@ -1134,8 +1134,9 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
   li.track .actions { display: flex; align-items: center; gap: 0.5rem; flex: none; }
   a.yt { display: inline-flex; align-items: center; line-height: 0; border-radius: 4px; }
   a.yt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  a.apple { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.35rem 0.6rem; font-size: 0.78rem; font-weight: 600; text-decoration: none; color: var(--fg); background: transparent; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
-  a.apple:hover { border-color: var(--accent); color: var(--accent); }
+  a.pill { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.35rem 0.6rem; font-size: 0.78rem; font-weight: 600; text-decoration: none; color: var(--fg); background: transparent; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
+  a.pill:hover { border-color: var(--accent); color: var(--accent); }
+  a.pill.sc:hover { border-color: #ff5500; color: #ff5500; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
 </style>
@@ -1143,7 +1144,7 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
 <body>
 <main>
   <h1>Tracklist viewer</h1>
-  <p class="lead">Paste a 1001tracklists tracklist URL to see a clean per-song list with direct YouTube and Apple Music links. &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a></p>
+  <p class="lead">Paste a 1001tracklists tracklist URL to see a clean per-song list with direct YouTube, SoundCloud, and Apple Music links. &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a></p>
   <form id="load-form">
     <input id="url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" required autofocus />
     <button type="submit" class="load">Load</button>
@@ -1167,6 +1168,8 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
   // Static, data-free SVG for the YouTube glyph — safe to inject as innerHTML.
   const YT_SVG = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="#FF0000" d="M23 7.5a3 3 0 0 0-2.1-2.1C19 5 12 5 12 5s-7 0-8.9.4A3 3 0 0 0 1 7.5 31 31 0 0 0 .6 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1C5 19 12 19 12 19s7 0 8.9-.4a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.4 12 31 31 0 0 0 23 7.5Z"/><path fill="#fff" d="M9.8 15.5v-7l6 3.5-6 3.5Z"/></svg>';
   const APPLE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" fill="currentColor"><path d="M16.4 12.8c0-2.2 1.8-3.3 1.9-3.3-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.6.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.4 0-2.8.8-3.5 2.1-1.5 2.6-.4 6.5 1.1 8.6.7 1 1.5 2.2 2.6 2.2 1 0 1.4-.7 2.7-.7 1.2 0 1.6.7 2.7.6 1.1 0 1.8-1 2.5-2 .8-1.2 1.1-2.3 1.1-2.3s-2.1-.8-2.1-3.2ZM14.3 5.9c.6-.7 1-1.7.9-2.7-.9 0-1.9.6-2.5 1.3-.5.6-1 1.6-.9 2.6 1 .1 2-.5 2.5-1.2Z"/></svg>';
+  // SoundCloud — a simple cloud + waveform bars, brand orange.
+  const SC_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="#ff5500"><path d="M1.5 13.2c-.1 0-.2.1-.2.2l-.2 1.7.2 1.6c0 .1.1.2.2.2s.2-.1.2-.2l.2-1.6-.2-1.7c0-.1-.1-.2-.2-.2Zm1.6-1c-.1 0-.2.1-.2.2l-.3 2.7.3 2.6c0 .1.1.2.2.2s.2-.1.2-.2l.3-2.6-.3-2.7c0-.1-.1-.2-.2-.2Zm1.7-.4c-.1 0-.3.1-.3.3l-.2 3.1.2 3c0 .2.1.3.3.3.1 0 .3-.1.3-.3l.3-3-.3-3.1c0-.2-.2-.3-.3-.3Zm1.8-.3c-.2 0-.3.1-.3.3l-.2 3.4.2 3.2c0 .2.1.3.3.3s.3-.1.3-.3l.2-3.2-.2-3.4c0-.2-.1-.3-.3-.3ZM22 12.6a2.9 2.9 0 0 0-1.1.2c-.2-2.5-2.3-4.5-4.9-4.5-.6 0-1.2.1-1.8.4-.2.1-.3.2-.3.4v8.1c0 .2.2.4.4.4H22a2.5 2.5 0 0 0 0-5Zm-13.9-1c-.2 0-.3.2-.3.4l-.2 3.1.2 3c0 .2.2.3.3.3.2 0 .3-.1.3-.3l.2-3-.2-3.1c0-.2-.1-.4-.3-.4Zm1.9-.7c-.2 0-.4.2-.4.4l-.1 3.8.1 3c0 .2.2.4.4.4.2 0 .4-.2.4-.4l.2-3-.2-3.8c0-.2-.2-.4-.4-.4Z"/></svg>';
 
   // Untrusted third-party text (artist/title from 1001tracklists) — build every
   // node with textContent, and only ever set href to an http(s) URL, so a
@@ -1252,9 +1255,17 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
         a.setAttribute('aria-label', 'Play on YouTube');
         if (safeHref(a, t.youtubeLink)) { a.innerHTML = YT_SVG; actions.appendChild(a); }
       }
+      if (t.soundcloudLink) {
+        const a = document.createElement('a');
+        a.className = 'pill sc';
+        a.title = 'Play on SoundCloud (free, ad-supported)';
+        const glyph = document.createElement('span'); glyph.style.display = 'inline-flex'; glyph.innerHTML = SC_SVG;
+        const txt = document.createElement('span'); txt.textContent = 'SoundCloud';
+        if (safeHref(a, t.soundcloudLink)) { a.appendChild(glyph); a.appendChild(txt); actions.appendChild(a); }
+      }
       if (t.appleLink) {
         const a = document.createElement('a');
-        a.className = 'apple';
+        a.className = 'pill apple';
         a.title = 'Open in Apple Music';
         const glyph = document.createElement('span'); glyph.style.display = 'inline-flex'; glyph.innerHTML = APPLE_SVG;
         const txt = document.createElement('span'); txt.textContent = 'Apple Music';
