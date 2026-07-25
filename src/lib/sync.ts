@@ -36,6 +36,11 @@ import {
 } from './youtube-playlists'
 import { makeLogger, errorFields, type Logger } from './log'
 import { getJson, putJson, TTL } from './cache'
+import {
+  flushPlaylistAdditions,
+  type PlaylistAdditionRecord,
+  type PlaylistAdditionStatus,
+} from './playlist-audit'
 
 const STATE_PREFIX = 'subs:state:'
 const PLAYLIST_VIDEO_IDS_PREFIX = 'yt:plvids:'
@@ -73,6 +78,7 @@ async function cachePlaylistVideoIds(env: Env, playlistId: string, ids: Set<stri
   await putJson(env.CACHE, key, { videoIds: [...ids] }, TTL.PLAYLIST_VIDEO_IDS)
 }
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
+const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 const playlistDescription = (artistName: string) =>
   `Every set ${artistName} has a YouTube recording for on 1001tracklists.`
 // Per-set scrape via home proxy is ~250 ms; via BrightData ~3–4 s. 30 sets
@@ -146,6 +152,12 @@ export type SyncOpts = {
    * the BrightData/home-proxy round-trip + ~14 AJAX hops per sub.
    */
   skipDjCrawl?: boolean
+  /**
+   * What kicked off this run (`cron.daily`, `cron.pending`, `manual.all`,
+   * `manual.one`). Recorded on every playlist-addition audit row so the panel
+   * can tell a cron sweep's work apart from a button press.
+   */
+  trigger?: string
 }
 
 export type SyncOneResult = {
@@ -378,6 +390,36 @@ export async function syncOne(
   let setsAbandonedThisRun = 0
   const viaSeen = new Set<string>()
 
+  // One audit row per set we decide an outcome for, surfaced by the admin
+  // panel's "Recent playlist additions" view. Buffered here and flushed in a
+  // single batch after the loop — see lib/playlist-audit.ts for why.
+  const additions: PlaylistAdditionRecord[] = []
+  const auditSet = (
+    status: PlaylistAdditionStatus,
+    setUrl: string,
+    fields: Partial<PlaylistAdditionRecord> = {},
+  ) => {
+    additions.push({
+      t: new Date().toISOString(),
+      status,
+      slug: sub.slug,
+      artistName,
+      setUrl,
+      videoId: null,
+      videoUrl: null,
+      // Non-null by this point (step 2 resolved or created it), but the
+      // closure sees the declared `string | undefined`.
+      playlistId: playlistId ?? null,
+      playlistTitle,
+      via: null,
+      trigger: opts.trigger ?? null,
+      message: null,
+      failureCount: null,
+      meta: { ms: null },
+      ...fields,
+    })
+  }
+
   for (const setUrl of todo) {
     if (Date.now() >= deadline) {
       log.warn('sync.deadline_hit_during_set_loop', {
@@ -387,6 +429,7 @@ export async function syncOne(
       })
       break
     }
+    const tSet = Date.now()
     try {
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
@@ -418,8 +461,20 @@ export async function syncOne(
           existingVideoIds.add(videoId)
           videoIdsAdded += 1
           log.info('sync.added', { slug: sub.slug, setUrl, videoId, playlistId })
+          auditSet('added', setUrl, {
+            videoId,
+            videoUrl: watchUrl(videoId),
+            via: setFetched.via,
+            meta: { ms: Date.now() - tSet },
+          })
         } else {
           log.info('sync.already_in_playlist', { slug: sub.slug, setUrl, videoId })
+          auditSet('duplicate', setUrl, {
+            videoId,
+            videoUrl: watchUrl(videoId),
+            via: setFetched.via,
+            meta: { ms: Date.now() - tSet },
+          })
         }
       } else {
         // Diagnostic fingerprint so we can tell at a glance whether the page
@@ -429,6 +484,7 @@ export async function syncOne(
           setUrl,
           fingerprint: youtubeFingerprint(setFetched.html),
         })
+        auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet } })
       }
       processed.add(setUrl)
       delete failureCounts[setUrl]
@@ -441,6 +497,11 @@ export async function syncOne(
       const fc = (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
       const abandon = fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })
+      auditSet(abandon ? 'abandoned' : 'failed', setUrl, {
+        message: e instanceof Error ? e.message : String(e),
+        failureCount: fc,
+        meta: { ms: Date.now() - tSet },
+      })
       if (abandon) {
         abandoned.add(setUrl)
         delete failureCounts[setUrl]
@@ -477,6 +538,7 @@ export async function syncOne(
   if (videoIdsAdded > 0) {
     await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
   }
+  await flushPlaylistAdditions(env, additions, log)
 
   return {
     slug: sub.slug,

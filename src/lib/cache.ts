@@ -13,6 +13,12 @@ export const TTL = {
    *  the input (currentSeconds, videoDuration) and the selection durably
    *  inspectable via `wrangler kv key list --prefix np:`. */
   AUDIT: 60 * 60 * 24 * 90,
+  /** Durable audit record of one tracklist the sync processed, keyed
+   *  `pladd:<invertedTs>:<slug>:<i>`. Same 90-day horizon as AUDIT and for the
+   *  same reason: "why isn't this set in my playlist?" is usually asked long
+   *  after the run that decided it. Backs the panel's "Recent playlist
+   *  additions" view (see lib/playlist-audit.ts). */
+  PLAYLIST_AUDIT: 60 * 60 * 24 * 90,
   /** Snapshot of a YouTube playlist's videoId set, keyed by playlistId. The
    *  5-min sync cron would otherwise re-fetch this every tick per sub. We
    *  update the cache after every insert in-run, so the only reason it can
@@ -28,6 +34,16 @@ export async function getJson<T>(kv: KVNamespace, key: string): Promise<T | unde
 
 export async function putJson<T>(kv: KVNamespace, key: string, value: T, ttl: number): Promise<void> {
   await kv.put(key, JSON.stringify(value), { expirationTtl: ttl })
+}
+
+/**
+ * Zero-padded `10^13 − epochMs`, the key component that makes an audit prefix
+ * list newest-first: KV `list()` only returns keys in ascending order, so a
+ * forward-epoch key could only be paged from the oldest record. Used by both
+ * audit trails (`np:` in routes/now-playing.ts, `pladd:` in lib/playlist-audit.ts).
+ */
+export function invertedTs(epochMs: number): string {
+  return String(10_000_000_000_000 - epochMs).padStart(14, '0')
 }
 
 /** sha1 of a string, hex-encoded. Used for cache keys derived from free text. */
