@@ -63,7 +63,9 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
   ctx.waitUntil(
     (async () => {
       try {
-        const r = isDaily ? await syncAll(env, { log }) : await syncPendingOnly(env, { log })
+        const r = isDaily
+          ? await syncAll(env, { log, trigger: 'cron.daily' })
+          : await syncPendingOnly(env, { log, trigger: 'cron.pending' })
         log.info('cron.done', {
           subs: r.results.length,
           totalAdded: r.results.reduce((a, x) => a + x.stats.videoIdsAdded, 0),

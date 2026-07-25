@@ -44,20 +44,40 @@ import {
 } from '../src/lib/youtube-playlists'
 
 function fakeKV(): KVNamespace {
-  const store = new Map<string, string>()
+  const store = new Map<string, { value: string; metadata?: unknown }>()
   return {
     async get(key: string, type?: 'json' | 'text') {
       const v = store.get(key)
       if (v === undefined) return null
-      return type === 'json' ? JSON.parse(v) : v
+      return type === 'json' ? JSON.parse(v.value) : v.value
     },
-    async put(key: string, value: string) {
-      store.set(key, value)
+    async put(key: string, value: string, opts?: { metadata?: unknown }) {
+      store.set(key, { value, metadata: opts?.metadata })
     },
     async delete(key: string) {
       store.delete(key)
     },
+    // Ascending key order, like the real thing — the audit trails rely on it.
+    async list({ prefix = '' }: { prefix?: string } = {}) {
+      const keys = [...store.entries()]
+        .filter(([k]) => k.startsWith(prefix))
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([name, v]) => ({ name, metadata: v.metadata }))
+      return { keys, list_complete: true, cacheStatus: null }
+    },
   } as unknown as KVNamespace
+}
+
+/** The `pladd:` audit rows a run wrote, newest-first (KV list order). */
+async function playlistAdditions(env: Env) {
+  const listed = await env.CACHE.list<Record<string, unknown>>({ prefix: 'pladd:' })
+  return Promise.all(
+    listed.keys.map(async (k) => ({
+      key: k.name,
+      metadata: k.metadata,
+      record: (await env.CACHE.get(k.name, 'json')) as Record<string, unknown>,
+    })),
+  )
 }
 
 function makeEnv(): Env {
@@ -361,6 +381,102 @@ describe('syncOne', () => {
     expect(r.stats.tracklistsSeen).toBe(2)
     expect(r.stats.tracklistsProcessed).toBe(1) // only /b was pending
     expect(addVideoToPlaylist).toHaveBeenCalledWith('PLcached', 'vidB12345678', 'tok')
+  })
+
+  it('records one playlist-addition audit row per set, with the outcome of each', async () => {
+    const env = makeEnv()
+    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'], 'Lilly Palmer')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Lilly Palmer (1001tklists)' })
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set(['dupeVid1234']))
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce('newVid12345') // a → added
+      .mockReturnValueOnce('dupeVid1234') // b → already in the playlist
+      .mockReturnValueOnce(null) // c → set page has no YouTube recording
+
+    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
+
+    const rows = await playlistAdditions(env)
+    expect(rows.map((r) => [r.record.setUrl, r.record.status])).toEqual([
+      ['https://x/tracklist/c', 'no_youtube'],
+      ['https://x/tracklist/b', 'duplicate'],
+      ['https://x/tracklist/a', 'added'],
+    ])
+    expect(rows[2]!.record).toMatchObject({
+      slug: 'lillypalmer',
+      artistName: 'Lilly Palmer',
+      status: 'added',
+      videoId: 'newVid12345',
+      videoUrl: 'https://www.youtube.com/watch?v=newVid12345',
+      playlistId: 'PL',
+      playlistTitle: 'Lilly Palmer (1001tklists)',
+      via: 'direct',
+      trigger: 'manual.one',
+    })
+    // Summary duplicated into KV metadata so the panel lists rows without a get.
+    expect(rows[2]!.metadata).toMatchObject({
+      status: 'added',
+      slug: 'lillypalmer',
+      artist: 'Lilly Palmer',
+      set: 'https://x/tracklist/a',
+      vid: 'newVid12345',
+      trg: 'manual.one',
+    })
+    // Inverted timestamp + inverted batch index, so ascending KV order is
+    // newest-first even for sets that resolve inside the same millisecond.
+    expect(rows.every((r) => /^pladd:\d{14}:lillypalmer:\d{4}$/.test(r.key))).toBe(true)
+  })
+
+  it('records a failed row per set error, and an abandoned row once it gives up', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/bad'],
+      processedTracklistUrls: [],
+      // Two prior failures — this run's failure is the third and abandons it.
+      failureCounts: { 'https://x/tracklist/bad': 2 },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('ip_blocked (1.2.3.4)'))
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true, trigger: 'cron.pending' })
+
+    const rows = await playlistAdditions(env)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.record).toMatchObject({
+      status: 'abandoned',
+      setUrl: 'https://x/tracklist/bad',
+      message: 'ip_blocked (1.2.3.4)',
+      failureCount: 3,
+      videoId: null,
+      trigger: 'cron.pending',
+    })
+  })
+
+  it('writes no audit rows when a run processes nothing', async () => {
+    const env = makeEnv()
+    mockCrawl([], 'X')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
+
+    await syncOne(env, sub, 'tok')
+
+    expect(await playlistAdditions(env)).toEqual([])
+  })
+
+  it('keeps syncing when the audit write fails (diagnostics never break a run)', async () => {
+    const env = makeEnv()
+    mockCrawl(['https://x/tracklist/a'], 'X')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    const realPut = env.CACHE.put.bind(env.CACHE)
+    vi.spyOn(env.CACHE, 'put').mockImplementation(async (key: string, ...rest: unknown[]) => {
+      if (key.startsWith('pladd:')) throw new Error('KV write limit')
+      return (realPut as (...a: unknown[]) => Promise<void>)(key, ...rest)
+    })
+
+    const r = await syncOne(env, sub, 'tok')
+
+    expect(r.ok).toBe(true)
+    expect(r.stats.videoIdsAdded).toBe(1)
   })
 
   it('falls back to a prettified slug when no name is available anywhere', async () => {

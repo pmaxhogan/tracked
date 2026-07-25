@@ -6,7 +6,7 @@ import { searchByYouTubeUrl, searchByTitle } from '../lib/tracklists1001'
 import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
-import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
+import { TTL, getJson, invertedTs, putJson, sha1Hex } from '../lib/cache'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields, type Logger } from '../lib/log'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
@@ -124,11 +124,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       impossible: impossibleTimestamp,
       ms: record.meta.totalMs,
     }
-    // Inverted-timestamp key: KV list() only returns keys ascending, so we key
-    // by (2^43-ish − now) zero-padded, making ascending order == newest-first.
-    // This lets the panel fetch the most recent N in one page even past 1000
-    // total records (a forward-epoch key could only page from the oldest).
-    const invTs = String(10_000_000_000_000 - Date.now()).padStart(14, '0')
+    // Inverted-timestamp key (see lib/cache.ts): ascending KV order becomes
+    // newest-first, so the panel fetches the most recent N in one page even
+    // past 1000 total records.
+    const invTs = invertedTs(Date.now())
     const p = env.CACHE
       .put(`np:${invTs}:${reqId}`, JSON.stringify(record), { expirationTtl: TTL.AUDIT, metadata: summary })
       .catch((e) => log.warn('audit.write_failed', errorFields(e)))

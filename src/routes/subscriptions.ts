@@ -28,6 +28,7 @@ import { syncAll, syncOne, loadSubState } from '../lib/sync'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
+import { PLAYLIST_AUDIT_PREFIX } from '../lib/playlist-audit'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -167,7 +168,7 @@ subscriptionsApp.post('/api/sync', async (c) => {
     by: c.get('cfAccessEmail'),
   })
   try {
-    const result = await syncAll(c.env, { log })
+    const result = await syncAll(c.env, { log, trigger: 'manual.all' })
     return c.json(result)
   } catch (e) {
     if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
@@ -193,7 +194,7 @@ subscriptionsApp.post('/api/sync/:slug', async (c) => {
     // syncOne needs a fresh access token; the helper auto-refreshes near expiry.
     const tokenInfo = await getAccessToken(c.env)
     if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
-    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log })
+    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log, trigger: 'manual.one' })
     return c.json(result)
   } catch (e) {
     if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
@@ -384,6 +385,37 @@ subscriptionsApp.get('/api/audit-detail', async (c) => {
   return c.json({ record })
 })
 
+// ─── Audit trail (Recent playlist additions) ────────────────────────────────
+
+/**
+ * Newest-first page of the sync's per-set audit rows (`pladd:` keys written by
+ * lib/playlist-audit.ts). Same contract as /api/audit above — the summary lives
+ * in KV metadata, so one `list()` serves a whole page with no per-row get. This
+ * trail is newer than the `np:` one and has always carried metadata, so there's
+ * no legacy flat-record fallback to do here.
+ */
+subscriptionsApp.get('/api/playlist-additions', async (c) => {
+  const n = parseInt(c.req.query('limit') || '50', 10)
+  const limit = Math.min(Math.max(Number.isFinite(n) ? n : 50, 1), 200)
+  const cursor = c.req.query('cursor') || undefined
+  const res = await c.env.CACHE.list<Record<string, unknown>>({ prefix: PLAYLIST_AUDIT_PREFIX, limit, cursor })
+  const records = res.keys.map((k) => ({
+    key: k.name,
+    expiration: k.expiration ?? null,
+    ...(k.metadata ?? {}),
+  }))
+  return c.json({ records, cursor: res.list_complete ? null : res.cursor, listComplete: res.list_complete })
+})
+
+/** Full audit record for one processed set (the value behind a `pladd:` key). */
+subscriptionsApp.get('/api/playlist-addition-detail', async (c) => {
+  const key = c.req.query('key') || ''
+  if (!key.startsWith(PLAYLIST_AUDIT_PREFIX)) return c.json({ error: 'bad_key' }, 400)
+  const record = await c.env.CACHE.get(key, 'json')
+  if (!record) return c.json({ error: 'not_found' }, 404)
+  return c.json({ record })
+})
+
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
 
 subscriptionsApp.get('/api/youtube/status', async (c) => {
@@ -562,6 +594,14 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .badge.ok { background: rgba(63,185,80,0.18); color: #3fb950; }
   .badge.unidentified { background: rgba(210,153,34,0.18); color: #d29922; }
   .badge.no_video, .badge.no_tracklist, .badge.upstream_error { background: rgba(248,81,73,0.18); color: var(--danger); }
+  /* ── Recent playlist additions (sync audit trail) ── */
+  .badge.added { background: rgba(63,185,80,0.18); color: #3fb950; }
+  .badge.duplicate { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); }
+  .badge.no_youtube { background: rgba(210,153,34,0.18); color: #d29922; }
+  .badge.failed, .badge.abandoned { background: rgba(248,81,73,0.18); color: var(--danger); }
+  section#pladds { margin-top: 2.25rem; }
+  #pl-more { width: 100%; margin-top: 0.25rem; }
+  .arow .vid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
   .arow .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; }
   .arow .when { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
   .arow .pos { font-variant-numeric: tabular-nums; font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
@@ -617,6 +657,19 @@ const PAGE_HTML = /* html */ `<!doctype html>
     <div id="audit-list"></div>
     <div id="audit-empty" class="empty" hidden>No requests recorded yet.</div>
     <button id="audit-more" class="ghost" hidden>Load older</button>
+  </section>
+
+  <section id="pladds">
+    <div class="audit-head">
+      <h2>Recent playlist additions</h2>
+      <div class="audit-actions">
+        <label class="chk"><input type="checkbox" id="pl-errors-only" /> problems only</label>
+        <button id="pl-refresh" class="ghost">Refresh</button>
+      </div>
+    </div>
+    <div id="pl-list"></div>
+    <div id="pl-empty" class="empty" hidden>No playlist additions recorded yet.</div>
+    <button id="pl-more" class="ghost" hidden>Load older</button>
   </section>
 
   <footer>Signed in as <span id="who"></span></footer>
@@ -1068,6 +1121,121 @@ const PAGE_HTML = /* html */ `<!doctype html>
   $auditErrorsOnly.addEventListener('change', renderAudit);
   $auditMore.addEventListener('click', () => loadAudit(false));
 
+  // ── Recent playlist additions (sync audit trail) ────────────────────────
+  // Same shape as the requests view above (newest-first page + KV cursor,
+  // expandable per-row detail, "problems only" filter) over the \`pladd:\`
+  // trail the sync writes — one row per tracklist it decided an outcome for.
+  const $plList = document.getElementById('pl-list');
+  const $plEmpty = document.getElementById('pl-empty');
+  const $plMore = document.getElementById('pl-more');
+  const $plRefresh = document.getElementById('pl-refresh');
+  const $plErrorsOnly = document.getElementById('pl-errors-only');
+  let plCursor = null;
+  let plRecords = [];
+  // Statuses that mean the set didn't get resolved: 'no_youtube' is a normal
+  // outcome (the set simply has no recording), so it is NOT a problem.
+  const PL_PROBLEM = new Set(['failed', 'abandoned']);
+
+  // ".../tracklist/2mx9k/lilly-palmer-tomorrowland-2024.html" →
+  // "lilly palmer tomorrowland 2024". Untrusted input — only ever rendered
+  // through esc().
+  function setLabel(u) {
+    if (!u) return '(unknown set)';
+    try {
+      const seg = new URL(u).pathname.split('/').filter(Boolean).pop() || '';
+      const name = seg.replace(/\\.html?$/i, '').replace(/[-_]+/g, ' ').trim();
+      return name || u;
+    } catch { return u; }
+  }
+
+  function renderPlaylistAdds() {
+    const errOnly = $plErrorsOnly.checked;
+    const rows = plRecords.filter((r) => !errOnly || PL_PROBLEM.has(r.status));
+    $plList.innerHTML = '';
+    if (plRecords.length === 0) { $plEmpty.textContent = 'No playlist additions recorded yet.'; $plEmpty.hidden = false; }
+    else if (rows.length === 0) { $plEmpty.textContent = 'No problems in the loaded additions.'; $plEmpty.hidden = false; }
+    else { $plEmpty.hidden = true; }
+    for (const r of rows) {
+      const row = document.createElement('div');
+      row.className = 'arow' + (PL_PROBLEM.has(r.status) ? ' err' : '');
+      const head = document.createElement('div');
+      head.className = 'arow-head';
+      head.innerHTML =
+        '<span class="badge ' + esc(r.status || '') + '">' + esc(r.status || '?') + '</span>' +
+        '<span class="title">' + esc(setLabel(r.set)) + '</span>' +
+        (r.artist || r.slug ? '<span class="via">' + esc(r.artist || r.slug) + '</span>' : '') +
+        (r.vid ? '<span class="vid">' + esc(r.vid) + '</span>' : '') +
+        '<span class="when" title="' + esc(r.t) + '">' + esc(relTime(r.t)) + '</span>';
+      row.appendChild(head);
+      const detail = document.createElement('div');
+      detail.className = 'arow-detail';
+      detail.hidden = true;
+      row.appendChild(detail);
+      let loaded = false;
+      head.addEventListener('click', async () => {
+        detail.hidden = !detail.hidden;
+        if (detail.hidden || loaded) return;
+        loaded = true;
+        detail.innerHTML = '<span class="when">loading…</span>';
+        try {
+          const resp = await fetch('/subscriptions/api/playlist-addition-detail?key=' + encodeURIComponent(r.key), { credentials: 'same-origin' });
+          const data = await resp.json();
+          detail.innerHTML = data && data.record ? plDetailHtml(data.record) : '<span class="warn">detail not found</span>';
+        } catch { detail.innerHTML = '<span class="warn">failed to load detail</span>'; loaded = false; }
+      });
+      $plList.appendChild(row);
+    }
+  }
+
+  function plDetailHtml(r) {
+    const out = [];
+    out.push('<div class="grp">Set</div>');
+    out.push(dl([
+      ['tracklist', link(r.setUrl, setLabel(r.setUrl))],
+      ['DJ', esc(r.artistName || r.slug || '—') + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
+      ['scraped via', r.via ? esc(r.via) : '—'],
+    ]));
+
+    out.push('<div class="grp">Playlist</div>');
+    out.push(dl([
+      ['video', r.videoId
+        ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'open')
+        : '<span class="warn">no YouTube recording on the set page</span>'],
+      ['playlist', r.playlistId
+        ? link('https://www.youtube.com/playlist?list=' + encodeURIComponent(r.playlistId), r.playlistTitle || r.playlistId)
+        : '—'],
+    ]));
+
+    out.push('<div class="grp">Meta</div>');
+    out.push(dl([
+      ['status', esc(r.status) + (r.message ? ' — <span class="warn">' + esc(r.message) + '</span>' : '')],
+      r.failureCount != null ? ['failures so far', esc(r.failureCount)] : null,
+      ['trigger', r.trigger ? esc(r.trigger) : '—'],
+      ['when', esc(r.t)],
+      ['took', r.meta && r.meta.ms != null ? esc(r.meta.ms) + ' ms' : '—'],
+    ]));
+    return out.join('');
+  }
+
+  async function loadPlaylistAdds(reset) {
+    if (reset) { plCursor = null; plRecords = []; }
+    const params = new URLSearchParams({ limit: '50' });
+    if (plCursor) params.set('cursor', plCursor);
+    try {
+      const r = await fetch('/subscriptions/api/playlist-additions?' + params.toString(), { credentials: 'same-origin' });
+      if (!r.ok) return;
+      const data = await r.json();
+      plRecords = plRecords.concat(data.records || []);
+      plCursor = data.cursor || null;
+      $plMore.hidden = !plCursor;
+      renderPlaylistAdds();
+    } catch { /* leave prior state */ }
+  }
+
+  $plRefresh.addEventListener('click', () => loadPlaylistAdds(true));
+  $plErrorsOnly.addEventListener('change', renderPlaylistAdds);
+  $plMore.addEventListener('click', () => loadPlaylistAdds(false));
+
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
@@ -1075,6 +1243,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
   loadYouTubeStatus();
   loadProxyStatus();
   loadAudit(true);
+  loadPlaylistAdds(true);
   // Re-poll the home-proxy status so the banner reflects KV changes
   // initiated outside this tab (e.g. clearing via curl, or a sync run
   // tripping a fresh backoff in the background).
