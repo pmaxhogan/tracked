@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { Env } from '../src/types'
 import {
+  backfillCombined,
+  collectCombinedSources,
   loadSubState,
   prettifySlug,
   saveSubState,
@@ -101,13 +103,19 @@ function mockCrawl(tracklistUrls: string[], artistName: string | null = 'X') {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks()
+  // resetAllMocks, not clearAllMocks: `mockClear` leaves implementations (and
+  // queued `…Once` values) in place, so a mock configured by one test would
+  // otherwise answer calls in the next one.
+  vi.resetAllMocks()
   ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
     html: '<set/>',
     via: 'direct',
     state: { cookie: '' },
   })
-  ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set<string>())
+  // A fresh Set per call: the sync mutates the returned set in place, and one
+  // run now reads two playlists (the artist's and the combined one), so a
+  // single shared instance would leak inserts from one into the other.
+  ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set<string>())
 })
 
 describe('prettifySlug', () => {
@@ -162,6 +170,85 @@ describe('syncPendingOnly', () => {
   })
 })
 
+describe('combined playlist orchestration', () => {
+  /** Subscribe `slug` and give it a synced state row (or none). */
+  async function subscribe(env: Env, slug: string, state?: Partial<SubState>) {
+    const list = ((await env.SUBS.get('subs:list', 'json')) as string[] | null) ?? []
+    await env.SUBS.put('subs:list', JSON.stringify([...list, slug]))
+    await env.SUBS.put(
+      `subs:item:${slug}`,
+      JSON.stringify({ sourceUrl: `https://www.1001tracklists.com/dj/${slug}/`, addedAt: 0 }),
+    )
+    if (state) await saveSubState(env, slug, { processedTracklistUrls: [], ...state })
+  }
+
+  /** A stored OAuth token that `getAccessToken` accepts without refreshing. */
+  async function connectYouTube(env: Env) {
+    await env.SUBS.put(
+      'oauth:google',
+      JSON.stringify({
+        accessToken: 'tok',
+        refreshToken: 'refresh',
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        scope: 'https://www.googleapis.com/auth/youtube',
+        channelId: null,
+        channelTitle: null,
+        connectedAt: 0,
+      }),
+    )
+  }
+
+  it('collects one source per subscription that has been synced', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'synced', { playlistId: 'PLa', artistName: 'Synced' })
+    await subscribe(env, 'never-synced')
+
+    expect(await collectCombinedSources(env)).toEqual([
+      { slug: 'synced', artistName: 'Synced', playlistId: 'PLa' },
+    ])
+  })
+
+  it('skips the backfill when YouTube is not connected', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a', { playlistId: 'PLa' })
+
+    expect(await backfillCombined(env)).toEqual({ ok: false, reason: 'youtube_not_connected' })
+    expect(findPlaylistByTitle).not.toHaveBeenCalled()
+  })
+
+  it('skips the backfill (and creates no playlist) before anything has been synced', async () => {
+    const env = makeEnv()
+    await connectYouTube(env)
+    await subscribe(env, 'fresh')
+
+    expect(await backfillCombined(env)).toEqual({ ok: false, reason: 'no_sources' })
+    expect(createPlaylist).not.toHaveBeenCalled()
+  })
+
+  it('backfills the union of every artist playlist into the combined one', async () => {
+    const env = makeEnv()
+    await connectYouTube(env)
+    await subscribe(env, 'a', { playlistId: 'PLa', artistName: 'A' })
+    await subscribe(env, 'b', { playlistId: 'PLb', artistName: 'B' })
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
+    ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'PLcombined',
+      title: 'All tracked artists (1001tklists)',
+    })
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async (playlistId: string) =>
+      new Set(playlistId === 'PLa' ? ['aVid1234567'] : ['bVid1234567']),
+    )
+
+    const r = await backfillCombined(env, { trigger: 'manual.combined' })
+
+    expect(r).toMatchObject({ ok: true, playlistId: 'PLcombined', inserted: 2, pending: 0 })
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLcombined', 'aVid1234567'],
+      ['PLcombined', 'bVid1234567'],
+    ])
+  })
+})
+
 describe('syncOne', () => {
   it('creates a new playlist on first run, scrapes each set, adds non-duplicate videos, and writes state', async () => {
     const env = makeEnv()
@@ -177,19 +264,25 @@ describe('syncOne', () => {
 
     expect(r.ok).toBe(true)
     expect(r.playlistId).toBe('PLnew')
-    expect(createPlaylist).toHaveBeenCalledOnce()
+    // Two playlists get created on a virgin account: this artist's, and the
+    // combined all-artists one every video is mirrored into.
+    expect((createPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].title)).toEqual([
+      'Lilly Palmer (1001tklists)',
+      'All tracked artists (1001tklists)',
+    ])
     expect((createPlaylist as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
       title: 'Lilly Palmer (1001tklists)',
       privacyStatus: 'public',
       description: 'Every set Lilly Palmer has a YouTube recording for on 1001tracklists.',
     })
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(2)
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(4) // 2 videos × (artist + combined)
     expect(r.stats).toEqual({
       tracklistsSeen: 3,
       tracklistsProcessed: 3,
       videoIdsFound: 2,
       videoIdsAdded: 2,
       tracklistsPending: 0,
+      combinedVideoIdsAdded: 2,
     })
 
     // State persisted with all three URLs marked processed and the playlistId cached.
@@ -241,11 +334,19 @@ describe('syncOne', () => {
       processedTracklistUrls: ['https://x/tracklist/old'],
     })
     mockCrawl(['https://x/tracklist/old', 'https://x/tracklist/new'], 'Lilly Palmer')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'PLcombined',
+      title: 'All tracked artists (1001tklists)',
+    })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidNew11234')
 
     await syncOne(env, sub, 'tok')
 
-    expect(findPlaylistByTitle).not.toHaveBeenCalled()
+    // The artist playlist comes straight from state — the only title looked up
+    // is the combined playlist's, which has no cached id in this state row.
+    expect((findPlaylistByTitle as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
+      'All tracked artists (1001tklists)',
+    ])
     expect(createPlaylist).not.toHaveBeenCalled()
     // Only the *new* tracklist URL is fetched / processed.
     expect(parseSetYouTubeId).toHaveBeenCalledTimes(1)
@@ -477,6 +578,91 @@ describe('syncOne', () => {
 
     expect(r.ok).toBe(true)
     expect(r.stats.videoIdsAdded).toBe(1)
+  })
+
+  // ── Combined "all tracked artists" playlist mirror ────────────────────────
+
+  it('mirrors every new video into the combined playlist and records the outcome', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      processedTracklistUrls: [],
+    })
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'PLcombined',
+      title: 'All tracked artists (1001tklists)',
+    })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'vidA1234567'],
+      ['PLcombined', 'vidA1234567'],
+    ])
+    expect(r.combinedPlaylistId).toBe('PLcombined')
+    expect(r.stats.combinedVideoIdsAdded).toBe(1)
+    const rows = await playlistAdditions(env)
+    expect(rows[0]!.record).toMatchObject({ status: 'added', combinedStatus: 'added' })
+    expect(rows[0]!.metadata).toMatchObject({ cmb: 'added' })
+  })
+
+  it('mirrors a set already in the artist playlist but missing from the combined one', async () => {
+    // This is the shape of the backfill at the per-set level: the artist
+    // playlist has had this video since before the combined playlist existed.
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      processedTracklistUrls: [],
+    })
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'PLcombined',
+      title: 'All tracked artists (1001tklists)',
+    })
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async (playlistId: string) =>
+      new Set(playlistId === 'PLartist' ? ['oldVid12345'] : []),
+    )
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('oldVid12345')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLcombined', 'oldVid12345'],
+    ])
+    expect(r.stats.videoIdsAdded).toBe(0)
+    expect(r.stats.combinedVideoIdsAdded).toBe(1)
+    const rows = await playlistAdditions(env)
+    expect(rows[0]!.record).toMatchObject({ status: 'duplicate', combinedStatus: 'added' })
+  })
+
+  it('keeps syncing when the combined playlist cannot be opened', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
+      processedTracklistUrls: [],
+    })
+    // Only the combined playlist needs a title lookup here (the artist one is
+    // cached in state), so this fails exactly that resolution.
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('youtube playlists.list 403: quotaExceeded'),
+    )
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(r.ok).toBe(true)
+    expect(r.stats.tracklistsProcessed).toBe(2)
+    expect(r.stats.combinedVideoIdsAdded).toBe(0)
+    // Resolution is attempted once, not once per set.
+    expect(findPlaylistByTitle).toHaveBeenCalledTimes(1)
+    const rows = await playlistAdditions(env)
+    expect(rows.map((x) => x.record.combinedStatus)).toEqual(['unavailable', 'unavailable'])
   })
 
   it('falls back to a prettified slug when no name is available anywhere', async () => {

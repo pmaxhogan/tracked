@@ -2,6 +2,8 @@
  * Sync orchestrator: for each subscribed DJ, scrape their 1001tracklists DJ
  * page, discover sets that have a YouTube video, and add those videos to a
  * playlist named "<artist> (1001tklists)" on the connected YouTube account.
+ * Every video also gets mirrored into a single combined playlist holding all
+ * tracked artists (see lib/combined-playlist.ts).
  *
  * Runs from two triggers (both gated by Cloudflare Access at the route level):
  *   - Cron (`scheduled` worker handler) — daily sweep of every subscription.
@@ -27,15 +29,21 @@ import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { getAccessToken } from './google-oauth'
+import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
+import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds } from './playlist-cache'
 import {
-  addVideoToPlaylist,
-  createPlaylist,
-  findPlaylistByTitle,
-  listPlaylistVideoIds,
-  PlaylistNotFoundError,
-} from './youtube-playlists'
+  addToCombined,
+  flushCombined,
+  mergeIntoCombinedPlaylist,
+  openCombinedPlaylist,
+  readCombinedStatus,
+  type CombinedAdditionStatus,
+  type CombinedHandle,
+  type CombinedMergeResult,
+  type CombinedStatus,
+  type PlaylistSource,
+} from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
-import { getJson, putJson, TTL } from './cache'
 import {
   flushPlaylistAdditions,
   type PlaylistAdditionRecord,
@@ -43,40 +51,6 @@ import {
 } from './playlist-audit'
 
 const STATE_PREFIX = 'subs:state:'
-const PLAYLIST_VIDEO_IDS_PREFIX = 'yt:plvids:'
-
-/**
- * Cached wrapper around `listPlaylistVideoIds`. The 5-min drain-pending cron
- * calls this for every sub with pending work; without a cache it costs 1 YT
- * quota unit per playlist page per tick (~3 000 units/day for a few subs with
- * mid-sized playlists, all of it wasted because nothing changed since the
- * previous tick). The cache is invalidated by writing back the updated set
- * after every insert (see `cachePlaylistVideoIds`), so it only goes stale if
- * the user edits the playlist directly on YouTube — in which case the 6h TTL
- * reconciles eventually.
- */
-async function getCachedPlaylistVideoIds(
-  env: Env,
-  playlistId: string,
-  accessToken: string,
-  log: Logger,
-): Promise<Set<string>> {
-  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
-  const cached = await getJson<{ videoIds: string[] }>(env.CACHE, key)
-  if (cached) {
-    log.info('sync.playlist_video_ids.cache_hit', { playlistId, count: cached.videoIds.length })
-    return new Set(cached.videoIds)
-  }
-  log.info('sync.playlist_video_ids.cache_miss', { playlistId })
-  const ids = await listPlaylistVideoIds(playlistId, accessToken)
-  await cachePlaylistVideoIds(env, playlistId, ids)
-  return ids
-}
-
-async function cachePlaylistVideoIds(env: Env, playlistId: string, ids: Set<string>): Promise<void> {
-  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
-  await putJson(env.CACHE, key, { videoIds: [...ids] }, TTL.PLAYLIST_VIDEO_IDS)
-}
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 const playlistDescription = (artistName: string) =>
@@ -166,6 +140,8 @@ export type SyncOneResult = {
   error?: string
   artistName: string
   playlistId?: string
+  /** The combined all-artists playlist, when this run touched it. */
+  combinedPlaylistId?: string
   stats: {
     tracklistsSeen: number
     tracklistsProcessed: number
@@ -174,7 +150,18 @@ export type SyncOneResult = {
     /** Tracklists discovered on the DJ page but not yet processed (cap or
      *  per-set failure). Run sync again to chip away at them. */
     tracklistsPending: number
+    /** Videos this run mirrored into the combined all-artists playlist. */
+    combinedVideoIdsAdded: number
   }
+}
+
+const EMPTY_STATS: SyncOneResult['stats'] = {
+  tracklistsSeen: 0,
+  tracklistsProcessed: 0,
+  videoIdsFound: 0,
+  videoIdsAdded: 0,
+  tracklistsPending: 0,
+  combinedVideoIdsAdded: 0,
 }
 
 /**
@@ -203,7 +190,7 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
         ok: false,
         error: e instanceof Error ? e.message : String(e),
         artistName: sub.slug,
-        stats: { tracklistsSeen: 0, tracklistsProcessed: 0, videoIdsFound: 0, videoIdsAdded: 0, tracklistsPending: 0 },
+        stats: { ...EMPTY_STATS },
       })
     }
   }
@@ -261,6 +248,76 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
     totalStillPending: results.reduce((a, r) => a + r.stats.tracklistsPending, 0),
   })
   return { results }
+}
+
+// ─── Combined "all tracked artists" playlist ────────────────────────────────
+
+/**
+ * The artist playlists that feed the combined one: every subscription that has
+ * been synced at least once (an unsynced sub has no playlist yet, and nothing
+ * to contribute). Order follows the subscription list so a capped backfill
+ * makes deterministic progress.
+ */
+export async function collectCombinedSources(env: Env): Promise<PlaylistSource[]> {
+  const subs = await listSubscriptions(env)
+  const sources: PlaylistSource[] = []
+  for (const sub of subs) {
+    const state = await loadSubState(env, sub.slug)
+    if (!state?.playlistId) continue
+    sources.push({ slug: sub.slug, artistName: state.artistName ?? null, playlistId: state.playlistId })
+  }
+  return sources
+}
+
+export type CombinedBackfillResult =
+  | ({ ok: true } & CombinedMergeResult)
+  | { ok: false; reason: 'youtube_not_connected' | 'no_sources' }
+
+/**
+ * Reconcile the combined playlist against every artist playlist, inserting
+ * whatever it's missing (bounded — see lib/combined-playlist.ts). This is the
+ * path that backfills sets which predate the combined playlist and sets a
+ * newly added artist accumulates in their own playlist over several ticks.
+ *
+ * Skips rather than throws when there's nothing to work with, so the
+ * every-5-min cron can call it unconditionally.
+ */
+export async function backfillCombined(
+  env: Env,
+  opts: { log?: Logger; maxInsertsPerRun?: number; deadlineMs?: number; trigger?: string } = {},
+): Promise<CombinedBackfillResult> {
+  const log = opts.log ?? makeLogger({ task: 'sync.combined_backfill' })
+  const tokenInfo = await getAccessToken(env)
+  if (!tokenInfo) {
+    log.info('combined.skip_no_oauth')
+    return { ok: false, reason: 'youtube_not_connected' }
+  }
+  const sources = await collectCombinedSources(env)
+  if (sources.length === 0) {
+    // Nothing has been synced yet — don't create an empty playlist for it.
+    log.info('combined.skip_no_sources')
+    return { ok: false, reason: 'no_sources' }
+  }
+  const merged = await mergeIntoCombinedPlaylist(env, tokenInfo.accessToken, sources, {
+    log,
+    maxInsertsPerRun: opts.maxInsertsPerRun,
+    deadlineMs: opts.deadlineMs,
+    trigger: opts.trigger,
+  })
+  return { ok: true, ...merged }
+}
+
+/** Read-only combined-playlist summary for the admin panel. */
+export async function combinedPlaylistStatus(
+  env: Env,
+  opts: { log?: Logger } = {},
+): Promise<{ connected: false } | ({ connected: true } & CombinedStatus)> {
+  const log = opts.log ?? makeLogger({ task: 'sync.combined_status' })
+  const tokenInfo = await getAccessToken(env)
+  if (!tokenInfo) return { connected: false }
+  const sources = await collectCombinedSources(env)
+  const status = await readCombinedStatus(env, tokenInfo.accessToken, sources, log)
+  return { connected: true, ...status }
 }
 
 /**
@@ -330,7 +387,7 @@ export async function syncOne(
   // unnecessary — known-empty is the right baseline.
   let justCreated = false
   if (!playlistId) {
-    const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+    const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
     playlistId = r.id
     justCreated = r.justCreated
   }
@@ -351,7 +408,7 @@ export async function syncOne(
     } catch (e) {
       if (e instanceof PlaylistNotFoundError) {
         log.warn('sync.playlist_stale', { slug: sub.slug, stalePlaylistId: playlistId })
-        const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+        const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
         playlistId = r.id
         if (r.justCreated) {
           existingVideoIds = new Set()
@@ -390,6 +447,37 @@ export async function syncOne(
   let setsAbandonedThisRun = 0
   const viaSeen = new Set<string>()
 
+  // 4b. Live mirror into the combined "all tracked artists" playlist. Opened
+  // lazily on the first video we resolve, so a run that finds nothing new
+  // costs nothing here. Every failure degrades to a status on the audit row
+  // rather than failing the set: the set is already handled for the artist
+  // playlist, and the combined backfill re-derives whatever was dropped.
+  const combined: { handle: CombinedHandle | null; openFailed: boolean } = { handle: null, openFailed: false }
+  const openCombinedOnce = async (): Promise<CombinedHandle | null> => {
+    if (combined.handle || combined.openFailed) return combined.handle
+    try {
+      combined.handle = await openCombinedPlaylist(env, accessToken, log)
+    } catch (e) {
+      combined.openFailed = true
+      log.warn('sync.combined_open_failed', { slug: sub.slug, ...errorFields(e) })
+    }
+    return combined.handle
+  }
+  const mirrorToCombined = async (videoId: string): Promise<CombinedAdditionStatus> => {
+    const handle = await openCombinedOnce()
+    if (!handle) return 'unavailable'
+    try {
+      const status = await addToCombined(env, handle, videoId, accessToken, log)
+      if (status === 'added') {
+        log.info('sync.combined_added', { slug: sub.slug, videoId, playlistId: handle.playlistId })
+      }
+      return status
+    } catch (e) {
+      log.warn('sync.combined_add_failed', { slug: sub.slug, videoId, ...errorFields(e) })
+      return 'failed'
+    }
+  }
+
   // One audit row per set we decide an outcome for, surfaced by the admin
   // panel's "Recent playlist additions" view. Buffered here and flushed in a
   // single batch after the loop — see lib/playlist-audit.ts for why.
@@ -411,6 +499,7 @@ export async function syncOne(
       // closure sees the declared `string | undefined`.
       playlistId: playlistId ?? null,
       playlistTitle,
+      combinedStatus: null,
       via: null,
       trigger: opts.trigger ?? null,
       message: null,
@@ -444,7 +533,7 @@ export async function syncOne(
               // Playlist disappeared mid-run. Re-resolve once and retry the
               // insert; subsequent iterations of the loop pick up the new id.
               log.warn('sync.playlist_stale_midrun', { slug: sub.slug, stalePlaylistId: playlistId })
-              const r = await findOrCreatePlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
+              const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
               playlistId = r.id
               // Found existing same-titled → list to avoid dupes; freshly created → empty.
               if (r.justCreated) {
@@ -466,14 +555,19 @@ export async function syncOne(
             videoUrl: watchUrl(videoId),
             via: setFetched.via,
             meta: { ms: Date.now() - tSet },
+            combinedStatus: await mirrorToCombined(videoId),
           })
         } else {
           log.info('sync.already_in_playlist', { slug: sub.slug, setUrl, videoId })
+          // Already in the artist playlist, but possibly not in the combined
+          // one (it predates this feature, or a previous mirror failed) — so
+          // mirror duplicates too rather than leaning on the backfill.
           auditSet('duplicate', setUrl, {
             videoId,
             videoUrl: watchUrl(videoId),
             via: setFetched.via,
             meta: { ms: Date.now() - tSet },
+            combinedStatus: await mirrorToCombined(videoId),
           })
         }
       } else {
@@ -538,6 +632,7 @@ export async function syncOne(
   if (videoIdsAdded > 0) {
     await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
   }
+  if (combined.handle) await flushCombined(env, combined.handle, log)
   await flushPlaylistAdditions(env, additions, log)
 
   return {
@@ -545,6 +640,7 @@ export async function syncOne(
     ok: true,
     artistName,
     playlistId,
+    combinedPlaylistId: combined.handle?.playlistId,
     stats: {
       tracklistsSeen: discovered.size,
       tracklistsProcessed: setsProcessed,
@@ -552,34 +648,32 @@ export async function syncOne(
       videoIdsAdded,
       // Pending = discovered minus already-processed minus permanently-abandoned.
       tracklistsPending: Math.max(0, discovered.size - processed.size - abandoned.size),
+      combinedVideoIdsAdded: combined.handle?.inserted ?? 0,
     },
   }
 }
 
 /**
- * Resolve a playlist by title — find an existing one with that exact title
- * on the user's channel, or create a fresh public playlist. Used both on
- * first sync and as the recovery path when cached state references a
- * deleted playlist.
+ * Resolve this artist's playlist by title — find an existing one with that
+ * exact title on the user's channel, or create a fresh public one. Used both
+ * on first sync and as the recovery path when cached state references a
+ * deleted playlist. Never returns null (the shared helper only does so in
+ * lookup-only mode, which the sync never uses).
  */
-async function findOrCreatePlaylist(
+async function resolveArtistPlaylist(
   title: string,
   artistName: string,
   accessToken: string,
   log: Logger,
   slug: string,
 ): Promise<{ id: string; justCreated: boolean }> {
-  const existing = await findPlaylistByTitle(title, accessToken)
-  if (existing) {
-    log.info('sync.playlist_found', { slug, playlistId: existing.id, title })
-    return { id: existing.id, justCreated: false }
-  }
-  const created = await createPlaylist(
-    { title, description: playlistDescription(artistName), privacyStatus: 'public' },
+  const r = await findOrCreatePlaylist(
+    { title, description: playlistDescription(artistName), logCtx: { slug } },
     accessToken,
+    log,
   )
-  log.info('sync.playlist_created', { slug, playlistId: created.id, title })
-  return { id: created.id, justCreated: true }
+  if (!r) throw new Error(`playlist ${JSON.stringify(title)} could not be resolved`)
+  return r
 }
 
 /**

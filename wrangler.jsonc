@@ -13,6 +13,10 @@
   //                      processedTracklistUrls, this picks up where it
   //                      left off (skipping the discovery crawl) until the
   //                      backfill is done. No-op when nothing pending.
+  // Both then reconcile the combined "All tracked artists" playlist against
+  // the per-artist ones (bounded per run and per day — see
+  // lib/combined-playlist.ts), which is what backfills sets that predate the
+  // combined playlist and a newly added DJ's back catalogue.
   "triggers": { "crons": ["0 6 * * *", "*/5 * * * *"] },
   "kv_namespaces": [
     {

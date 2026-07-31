@@ -202,6 +202,31 @@ CSRF protection: the `/oauth/start` handler sets a single-use `yt_oauth_state` c
    echo $GOOGLE_OAUTH_CLIENT_SECRET | npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET
    ```
 
+### Auto-playlists
+
+With a YouTube account connected, the sync (`lib/sync.ts`) keeps playlists on that channel filled automatically. For each subscribed DJ it crawls their 1001tracklists index (JS infinite-scroll, driven through the same `/ajax/get_data.php` endpoint the browser uses), opens each set page, extracts the embedded YouTube video id, and inserts it into a public playlist named **`<artist> (1001tklists)`**.
+
+On top of those, one **combined playlist** — **`All tracked artists (1001tklists)`** — holds every video from every tracked artist, so there's a single thing to hit shuffle on. Two paths fill it (`lib/combined-playlist.ts`):
+
+- **Live mirror.** Whenever the sync resolves a set to a video, it inserts that video into the combined playlist in the same pass. This also runs for sets that are already in the artist playlist but not yet in the combined one, so an in-flight backlog closes from both ends.
+- **Backfill.** The combined playlist is defined as *the union of every artist playlist*, so each cron tick diffs it against those playlists and inserts whatever is missing. This is the only path that can cover sets the sync processed **before this feature existed** (it never revisits a tracklist it has already handled) and the deep back catalogue a **newly added artist** accumulates over many ticks. It also self-heals anything the live mirror dropped — which is why a failed mirror is recorded on the audit row but never fails a sync.
+
+Both playlists are created on demand (looked up by exact title first, so an existing playlist is adopted rather than duplicated) and their ids are cached in KV — `subs:state:<slug>` for artists, `subs:combined` for the combined one. Deleting a playlist on YouTube is recovered from automatically: the next run re-resolves by title and re-creates if needed. Removing a subscription leaves both playlists in place — nothing is ever deleted from a playlist, only added.
+
+**Pacing.** `playlistItems.insert` costs 50 units against a 10 000/day project quota — 200 inserts/day for the whole worker. The combined **backfill** therefore takes a bounded slice: ≤ 20 inserts per run, a 10 s wall-clock ceiling, and it stops once the day's combined-playlist inserts hit `COMBINED_DAILY_INSERT_CAP` (80, counted at `yt:combined:inserts:<date>` in `CACHE`). The **live mirror** isn't capped — new sets are few and getting them in immediately is the point — but its inserts count against the same daily total, so the backfill yields to them rather than competing. A first backfill of several hundred videos spreads over a few days of cron ticks instead of burning a day's quota in one sweep and starving the per-artist sync. Reads are the cheap half and are cached (`yt:plvids:<playlistId>`, 6 h, rewritten after every insert), so a no-op tick costs ~nothing.
+
+The admin panel's **Combined playlist** section shows the link, video count, how many are still to add, today's remaining insert budget, and a **Backfill now** button that runs one bounded pass immediately (same caps — clicking it repeatedly can't blow the quota). Per-set rows in **Recent playlist additions** carry a `combined` field: `added` / `duplicate` / `failed` / `unavailable`.
+
+```
+GET  /subscriptions/api/combined            → { connected, title, playlistId, playlistUrl, videoCount,
+                                                missingTotal, dailyInsertsUsed, dailyInsertCap,
+                                                lastBackfillAt, lastBackfillStats, sources: [...] }
+POST /subscriptions/api/combined/backfill   → { ok: true, inserted, pending, cappedBy, ... }
+                                              | { ok: false, reason: "no_sources" }
+```
+
+Both crons (`0 6 * * *` and `*/5 * * * *`) end with a backfill pass, in their own try/catch so a per-artist sync failure can't stop the combined playlist from catching up on everything that did land.
+
 ## Logs
 
 Worker observability is on (`observability.enabled: true` in `wrangler.jsonc`). Every request emits a stream of structured JSON log lines correlated by `reqId` (the Cloudflare `cf-ray` header). Each phase logs full input/output bodies and timing; every error path logs full error context (name, message, stack, upstream status/error code).
@@ -387,7 +412,7 @@ Browse this history in the **admin panel** at `/subscriptions` → **Recent requ
 
 ### Playlist-addition audit trail
 
-The sync writes the same kind of trail for its own work (`lib/playlist-audit.ts`): one record per tracklist it decided an outcome for, under `pladd:<invertedTs>:<slug>:<invertedIndex>` (90-day TTL, compact summary in KV metadata — same newest-first key trick, with the batch index inverted too so sets resolved inside one millisecond still list newest-first). Statuses are `added` (video inserted), `duplicate` (already in the playlist), `no_youtube` (the set page has no recording to add), `failed` (errored this run, will be retried) and `abandoned` (errored `ABANDON_AFTER_FAILURES` times; the cron gives up). Each record carries the set URL, DJ, video id/url, playlist id/title, which scrape path served the page, what triggered the run (`cron.daily`, `cron.pending`, `manual.all`, `manual.one`), the error message, and how long the set took. This answers "why isn't that set in my playlist?" — previously only answerable from Workers Logs, which age out in ~3 days.
+The sync writes the same kind of trail for its own work (`lib/playlist-audit.ts`): one record per tracklist it decided an outcome for, under `pladd:<invertedTs>:<slug>:<invertedIndex>` (90-day TTL, compact summary in KV metadata — same newest-first key trick, with the batch index inverted too so sets resolved inside one millisecond still list newest-first). Statuses are `added` (video inserted), `duplicate` (already in the playlist), `no_youtube` (the set page has no recording to add), `failed` (errored this run, will be retried) and `abandoned` (errored `ABANDON_AFTER_FAILURES` times; the cron gives up). Each record carries the set URL, DJ, video id/url, playlist id/title, the combined-playlist outcome for the same video (`combinedStatus`: `added` / `duplicate` / `failed` / `unavailable`), which scrape path served the page, what triggered the run (`cron.daily`, `cron.pending`, `manual.all`, `manual.one`, `manual.combined`), the error message, and how long the set took. This answers "why isn't that set in my playlist?" — previously only answerable from Workers Logs, which age out in ~3 days.
 
 Rows are buffered during a run and flushed in one parallel batch at the end: awaiting up to 30 sequential KV puts inside the set loop would eat a large slice of the 25 s sync deadline. A run killed mid-loop therefore loses its rows — deliberate, since this is diagnostics only; idempotency and progress live in the per-sub state. A KV failure here is logged and swallowed, never surfaced as a sync failure.
 
@@ -410,8 +435,14 @@ src/
     tracklists1001.ts       search, scrape, medialink, URL parsing (homeProxy → unlocker → direct)
     tracklist-resolve.ts    cached tracklist-page + per-track-link resolvers (shared by both API routes)
     subscriptions.ts        DJ slug parser + KV CRUD for the mini-app
+    sync.ts                 auto-playlist orchestrator (crawl → scrape → insert), per-sub KV state
+    dj-index.ts             DJ index crawl (infinite-scroll AJAX) + set-page video id extraction
+    combined-playlist.ts    the "All tracked artists" playlist: live mirror + bounded backfill
+    playlist-cache.ts       KV-cached playlist video-id sets + find-or-create (shared by both)
+    youtube-playlists.ts    YouTube Data API v3 playlist client (OAuth)
     playlist-audit.ts       per-set audit rows behind "Recent playlist additions"
     google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
+    log.ts                  structured JSON logger + per-request counters
     fetch.ts                challenge solver + cookie jar
     homeProxy.ts            residential-IP forwarder client (pairs with scripts/nas-fetch-proxy.mjs)
     unlocker.ts             Bright Data Web Unlocker client
@@ -425,6 +456,11 @@ test/
   timestamp.test.ts
   tracklists1001.test.ts
   subscriptions.test.ts
+  sync.test.ts
+  combined-playlist.test.ts
+  dj-index.test.ts
+  youtube-playlists.test.ts
+  youtube.test.ts
   cf-access.test.ts
   google-oauth.test.ts
 docs/tasker-setup.md

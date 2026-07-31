@@ -18,6 +18,7 @@
 
 import type { Env } from '../types'
 import { invertedTs, TTL } from './cache'
+import type { CombinedAdditionStatus } from './combined-playlist'
 import { errorFields, type Logger } from './log'
 
 export const PLAYLIST_AUDIT_PREFIX = 'pladd:'
@@ -47,6 +48,13 @@ export type PlaylistAdditionRecord = {
   videoUrl: string | null
   playlistId: string | null
   playlistTitle: string | null
+  /**
+   * What happened to the same video on its way into the combined all-artists
+   * playlist. `unavailable` means that playlist couldn't be opened at all this
+   * run — the combined backfill picks the video up later either way, which is
+   * why a combined miss never fails the set. null on rows with no video.
+   */
+  combinedStatus: CombinedAdditionStatus | null
   /** Which scrape path served the set page — `home-proxy` / `unlocker` / `direct`. */
   via: string | null
   /** What kicked off the run, e.g. `cron.daily`, `manual.one`. */
@@ -73,6 +81,8 @@ export type PlaylistAdditionSummary = {
   trg: string | null
   msg: string | null
   ms: number | null
+  /** Combined-playlist outcome — see PlaylistAdditionRecord.combinedStatus. */
+  cmb: CombinedAdditionStatus | null
 }
 
 export function playlistAdditionSummary(r: PlaylistAdditionRecord): PlaylistAdditionSummary {
@@ -87,6 +97,7 @@ export function playlistAdditionSummary(r: PlaylistAdditionRecord): PlaylistAddi
     trg: r.trigger,
     msg: r.message ? r.message.slice(0, 160) : null,
     ms: r.meta.ms,
+    cmb: r.combinedStatus,
   }
 }
 
