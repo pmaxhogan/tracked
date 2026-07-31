@@ -24,7 +24,7 @@ import {
 } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
-import { syncAll, syncOne, loadSubState } from '../lib/sync'
+import { syncAll, syncOne, loadSubState, backfillCombined, combinedPlaylistStatus } from '../lib/sync'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
@@ -203,6 +203,58 @@ subscriptionsApp.post('/api/sync/:slug', async (c) => {
     }
     log.error('subs.sync_one_throw', { slug, ...errorFields(e) })
     return c.json({ error: 'sync_failed', ...errorFields(e) }, 500)
+  }
+})
+
+// ─── Combined "all tracked artists" playlist ────────────────────────────────
+
+/**
+ * Read-only summary of the combined playlist: what's in it, how much of the
+ * artist playlists it's still missing, and how much of today's insert budget
+ * is left. Never creates the playlist — that's the backfill's job.
+ */
+subscriptionsApp.get('/api/combined', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.combined_status',
+    by: c.get('cfAccessEmail'),
+  })
+  try {
+    return c.json(await combinedPlaylistStatus(c.env, { log }))
+  } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
+    log.error('subs.combined_status_throw', errorFields(e))
+    return c.json({ error: 'combined_status_failed', ...errorFields(e) }, 500)
+  }
+})
+
+/**
+ * Run one bounded reconciliation pass now. Same work the crons do — the button
+ * exists so a fresh install (or a just-added DJ) doesn't have to wait for the
+ * next tick. Bounded by the same per-run and per-day insert caps, so clicking
+ * it repeatedly can't blow the YouTube quota.
+ */
+subscriptionsApp.post('/api/combined/backfill', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.combined_backfill',
+    by: c.get('cfAccessEmail'),
+  })
+  try {
+    const result = await backfillCombined(c.env, { log, trigger: 'manual.combined' })
+    if (!result.ok && result.reason === 'youtube_not_connected') {
+      return c.json({ error: 'youtube_not_connected' }, 412)
+    }
+    return c.json(result)
+  } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      log.warn('subs.combined_backfill_reauth', { status: e.status })
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
+    log.error('subs.combined_backfill_throw', errorFields(e))
+    return c.json({ error: 'backfill_failed', ...errorFields(e) }, 500)
   }
 })
 
@@ -578,6 +630,13 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .banner .info { flex: 1; min-width: 0; }
   .banner .info .title { font-weight: 600; color: var(--danger); }
   .banner .info .sub { color: var(--muted); font-size: 0.8rem; }
+  /* ── Combined playlist ── */
+  section#combined { margin-top: 2.25rem; }
+  #cmb-body { border: 1px solid var(--border); border-radius: 6px; background: var(--card); padding: 0.7rem 0.8rem; font-size: 0.88rem; line-height: 1.55; }
+  #cmb-body .headline { font-weight: 600; }
+  #cmb-body .counts { color: var(--muted); font-size: 0.82rem; }
+  #cmb-body .counts .warn { color: var(--danger); }
+  #cmb-body a { color: var(--accent); }
   /* ── Recent requests (audit trail) ── */
   section#audit { margin-top: 2.25rem; }
   .audit-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
@@ -645,6 +704,17 @@ const PAGE_HTML = /* html */ `<!doctype html>
   <div id="list-actions" hidden><button id="sync-all">Sync all</button></div>
   <ul id="list"></ul>
   <div id="empty" class="empty" hidden>No subscriptions yet.</div>
+
+  <section id="combined">
+    <div class="audit-head">
+      <h2>Combined playlist</h2>
+      <div class="audit-actions">
+        <button id="cmb-backfill" class="ghost">Backfill now</button>
+        <button id="cmb-refresh" class="ghost">Refresh</button>
+      </div>
+    </div>
+    <div id="cmb-body"><span class="counts">loading…</span></div>
+  </section>
 
   <section id="audit">
     <div class="audit-head">
@@ -777,11 +847,14 @@ const PAGE_HTML = /* html */ `<!doctype html>
       const stats = data.stats || {};
       const pending = stats.tracklistsPending || 0;
       const more = pending > 0 ? ' · ' + pending + ' more pending — auto-continuing every 5 min' : '';
+      const combined = stats.combinedVideoIdsAdded ? ' · ' + stats.combinedVideoIdsAdded + ' into the combined playlist' : '';
       showError(
         'synced ' + slug + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
         (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
-        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + more
+        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + combined + more
       );
+      // The run may have created the combined playlist or mirrored into it.
+      loadCombined();
     } finally {
       btn.disabled = false;
       btn.textContent = original;
@@ -1204,6 +1277,11 @@ const PAGE_HTML = /* html */ `<!doctype html>
       ['playlist', r.playlistId
         ? link('https://www.youtube.com/playlist?list=' + encodeURIComponent(r.playlistId), r.playlistTitle || r.playlistId)
         : '—'],
+      // How the same video fared in the combined all-artists playlist. A miss
+      // here isn't a set failure — the combined backfill re-derives it.
+      ['combined', r.combinedStatus
+        ? '<span class="' + (r.combinedStatus === 'failed' || r.combinedStatus === 'unavailable' ? 'warn' : '') + '">' + esc(r.combinedStatus) + '</span>'
+        : '—'],
     ]));
 
     out.push('<div class="grp">Meta</div>');
@@ -1236,12 +1314,89 @@ const PAGE_HTML = /* html */ `<!doctype html>
   $plErrorsOnly.addEventListener('change', renderPlaylistAdds);
   $plMore.addEventListener('click', () => loadPlaylistAdds(false));
 
+  // ── Combined "all tracked artists" playlist ────────────────────────────
+  // One playlist holding every video from every tracked DJ. The sync mirrors
+  // new videos into it as it goes; anything older (sets processed before this
+  // existed, or a new DJ's back catalogue) arrives via the backfill, which the
+  // crons run automatically — the button here just skips the wait.
+  const $cmbBody = document.getElementById('cmb-body');
+  const $cmbRefresh = document.getElementById('cmb-refresh');
+  const $cmbBackfill = document.getElementById('cmb-backfill');
+
+  function renderCombined(d) {
+    if (!d || d.connected === false) {
+      $cmbBody.innerHTML = '<span class="counts">Connect a YouTube account to build the combined playlist.</span>';
+      $cmbBackfill.disabled = true;
+      return;
+    }
+    $cmbBackfill.disabled = false;
+    const missing = d.missingTotal || 0;
+    const sources = d.sources || [];
+    const cap = d.dailyInsertCap || 0;
+    const left = Math.max(0, cap - (d.dailyInsertsUsed || 0));
+    const head = d.playlistId
+      ? link(d.playlistUrl, d.title) + ' <span class="counts">· ' + (d.videoCount || 0) + ' videos</span>'
+      : esc(d.title) + ' <span class="counts">· not created yet</span>';
+    const bits = [
+      missing > 0
+        ? '<span class="warn">' + missing + ' still to add</span>'
+        : 'up to date with every artist playlist',
+      sources.length + ' artist playlist' + (sources.length === 1 ? '' : 's'),
+      left + '/' + cap + ' inserts left today',
+    ];
+    if (d.lastBackfillAt) bits.push('last backfill ' + relTime(new Date(d.lastBackfillAt * 1000).toISOString()));
+    let html = '<div class="headline">' + head + '</div><div class="counts">' + bits.join(' · ') + '</div>';
+    if (missing > 0) {
+      html += '<div class="counts">Backfilling automatically on every cron tick, up to ' + cap +
+        ' videos/day (YouTube quota).</div>';
+    }
+    $cmbBody.innerHTML = html;
+  }
+
+  async function loadCombined() {
+    try {
+      const r = await fetch('/subscriptions/api/combined', { credentials: 'same-origin' });
+      if (!r.ok) { $cmbBody.innerHTML = '<span class="counts">status unavailable (' + r.status + ')</span>'; return; }
+      renderCombined(await r.json());
+    } catch { $cmbBody.innerHTML = '<span class="counts">status unavailable</span>'; }
+  }
+
+  $cmbRefresh.addEventListener('click', loadCombined);
+  $cmbBackfill.addEventListener('click', async () => {
+    showError('');
+    $cmbBackfill.disabled = true;
+    const original = $cmbBackfill.textContent;
+    $cmbBackfill.textContent = 'Backfilling…';
+    try {
+      const r = await fetch('/subscriptions/api/combined/backfill', { method: 'POST', credentials: 'same-origin' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (r.status === 412 && data.error === 'youtube_reauth_required') { showReauthError(); loadYouTubeStatus(); return; }
+        showError(data.errorMessage || data.message || data.error || ('backfill failed (' + r.status + ')'));
+        return;
+      }
+      if (data.ok === false) {
+        showError(data.reason === 'no_sources'
+          ? 'nothing to backfill yet — sync a DJ first'
+          : 'backfill skipped: ' + data.reason);
+      } else {
+        showError('combined playlist: added ' + (data.inserted || 0) + ' video' + (data.inserted === 1 ? '' : 's') +
+          (data.pending ? ' · ' + data.pending + ' still pending (' + (data.cappedBy || 'capped') + ')' : ''));
+      }
+      await loadCombined();
+    } finally {
+      $cmbBackfill.disabled = false;
+      $cmbBackfill.textContent = original;
+    }
+  });
+
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
   load();
   loadYouTubeStatus();
   loadProxyStatus();
+  loadCombined();
   loadAudit(true);
   loadPlaylistAdds(true);
   // Re-poll the home-proxy status so the banner reflects KV changes

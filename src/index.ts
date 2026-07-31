@@ -4,7 +4,7 @@ import { tracklistRoute, tracklistHandler } from './routes/tracklist'
 import { subscriptionsApp } from './routes/subscriptions'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
-import { syncAll, syncPendingOnly } from './lib/sync'
+import { backfillCombined, syncAll, syncPendingOnly } from './lib/sync'
 import { makeLogger, errorFields } from './lib/log'
 
 const app = new OpenAPIHono<{ Bindings: Env }>()
@@ -53,6 +53,13 @@ app.doc('/openapi.json', {
  * The frequent drain cron is what continues a backfill after the user
  * triggers a manual sync; they no longer have to keep clicking the button.
  *
+ * Both crons finish by reconciling the combined "all tracked artists"
+ * playlist. The per-artist sync mirrors each *new* video into it as it goes,
+ * but it never revisits a tracklist it already processed — so sets that landed
+ * in an artist playlist before the combined playlist existed, and the deep
+ * history a newly added artist accumulates over many ticks, can only get there
+ * through this reconciliation.
+ *
  * `ctx.waitUntil` keeps the worker alive past `scheduled` returning so the
  * sweep can finish even if it crosses CPU-time boundaries on individual subs.
  */
@@ -62,17 +69,27 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
   log.info('cron.start')
   ctx.waitUntil(
     (async () => {
+      const trigger = isDaily ? 'cron.daily' : 'cron.pending'
       try {
         const r = isDaily
-          ? await syncAll(env, { log, trigger: 'cron.daily' })
-          : await syncPendingOnly(env, { log, trigger: 'cron.pending' })
+          ? await syncAll(env, { log, trigger })
+          : await syncPendingOnly(env, { log, trigger })
         log.info('cron.done', {
           subs: r.results.length,
           totalAdded: r.results.reduce((a, x) => a + x.stats.videoIdsAdded, 0),
           totalStillPending: r.results.reduce((a, x) => a + x.stats.tracklistsPending, 0),
+          totalCombinedAdded: r.results.reduce((a, x) => a + x.stats.combinedVideoIdsAdded, 0),
         })
       } catch (e) {
         log.error('cron.threw', errorFields(e))
+      }
+      // Separate try/catch: a per-artist sync that blew up (or a YouTube
+      // hiccup mid-sweep) shouldn't stop the combined playlist from catching
+      // up on everything that *did* land.
+      try {
+        log.info('cron.combined_backfill', await backfillCombined(env, { log, trigger }))
+      } catch (e) {
+        log.error('cron.combined_backfill_threw', errorFields(e))
       }
     })(),
   )
