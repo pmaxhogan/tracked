@@ -3,6 +3,7 @@ import type { ParsedTrack } from '../types'
 import { fetchHtml, fetchWithTimeout, postForm, isIPBlocked, extractIPBlockedAddress, IPBlockedError, looksLikeCfShell, CloudflareChallengeError, type ChallengeState } from './fetch'
 import { fetchViaUnlocker } from './unlocker'
 import { fetchViaHomeProxy } from './homeProxy'
+import { parseSetYouTubeId } from './dj-index'
 import type { Logger } from './log'
 
 const ORIGIN = 'https://www.1001tracklists.com'
@@ -259,6 +260,10 @@ export type ScrapedTracklist = {
   slug: string
   /** Apple Music album/playlist link for the whole set, when 1001tl embeds one. null otherwise. */
   setAppleLink: string | null
+  /** YouTube watch URL for the set's primary recording, when 1001tl embeds one. null otherwise. */
+  setYoutubeLink: string | null
+  /** SoundCloud widget-player URL for the whole set's recording, when 1001tl embeds one. null otherwise. */
+  setSoundcloudLink: string | null
   tracks: ParsedTrack[]
 }
 
@@ -429,7 +434,38 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     if (t) tracks.push(t)
   }
 
-  return { slug, setAppleLink: extractSetAppleLink(html), tracks }
+  return {
+    slug,
+    setAppleLink: extractSetAppleLink(html),
+    setYoutubeLink: extractSetYouTubeLink(html),
+    setSoundcloudLink: extractSetSoundcloudLink(html),
+    tracks,
+  }
+}
+
+/**
+ * YouTube watch URL for the set's primary recording. Delegates to
+ * parseSetYouTubeId (dj-index.ts), which already knows every way 1001tl has
+ * embedded the player over time (embed iframe, og:video, data attributes,
+ * JS variables) and returns the first hit — the main media lives near the
+ * top of the page, above any incidental per-track references.
+ */
+export function extractSetYouTubeLink(html: string): string | null {
+  const id = parseSetYouTubeId(html)
+  return id ? `https://www.youtube.com/watch?v=${id}` : null
+}
+
+/**
+ * SoundCloud recording of the whole set. 1001tl embeds it in the media-tabs
+ * section as a widget iframe wrapping `api.soundcloud.com/tracks/<id>`.
+ * Per-track SoundCloud links never appear in the page HTML (they come from
+ * the medialink AJAX), so the first tracks/<id> reference is the set's own.
+ * Returned in the same widget-player form as MediaLinks.soundcloudLink.
+ */
+export function extractSetSoundcloudLink(html: string): string | null {
+  const m = html.match(/api\.soundcloud\.com\/tracks\/(\d+)/)
+  if (!m) return null
+  return `https://w.soundcloud.com/player/?url=${encodeURIComponent(`https://api.soundcloud.com/tracks/${m[1]}`)}`
 }
 
 /**

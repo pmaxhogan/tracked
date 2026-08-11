@@ -74,6 +74,8 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
     tracklistUrl,
     slug: full.slug,
     setAppleLink: full.setAppleLink,
+    setYoutubeLink: full.setYoutubeLink,
+    setSoundcloudLink: full.setSoundcloudLink,
     linksResolved: resolveLinks,
     trackCount: full.tracks.length,
     tracks: full.tracks,

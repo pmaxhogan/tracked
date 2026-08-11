@@ -123,6 +123,8 @@ export const TracklistResponse = z
     tracklistUrl: z.string().openapi({ description: 'The canonical tracklist URL that was scraped.' }),
     slug: z.string().openapi({ example: 'l3uw499', description: "1001tracklists' short id for the tracklist." }),
     setAppleLink: z.string().nullable().openapi({ description: 'Apple Music album link for the whole DJ set, when 1001tracklists embeds one. null otherwise.' }),
+    setYoutubeLink: z.string().nullable().openapi({ description: 'YouTube watch URL for the set’s primary recording, when 1001tracklists embeds one. null otherwise.' }),
+    setSoundcloudLink: z.string().nullable().openapi({ description: 'SoundCloud widget-player URL for the whole set’s recording, when 1001tracklists embeds one. null otherwise.' }),
     linksResolved: z.boolean().openapi({ description: 'Whether per-track Apple/YouTube links were resolved (echoes the request’s resolveLinks).' }),
     trackCount: z.number().int(),
     tracks: z.array(TracklistTrackSchema),

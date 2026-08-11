@@ -267,6 +267,11 @@ describe('parseTracklist (Matroda Space Miami)', () => {
     expect(mashup!.artist).toBe('Round Table Knights & Bauchamp')
   })
 
+  it('extracts the set-level YouTube recording; SoundCloud is null when the page has no set player', () => {
+    expect(parsed.setYoutubeLink).toBe('https://www.youtube.com/watch?v=79n8BaQAL2Q')
+    expect(parsed.setSoundcloudLink).toBeNull()
+  })
+
   it('flags fully unidentified rows (title is literal "ID")', () => {
     const ids = parsed.tracks.filter((t) => t.isUnidentified)
     expect(ids.length).toBeGreaterThanOrEqual(1)
@@ -368,6 +373,13 @@ describe('parseTracklist (Max Styler — has set-level Apple Music album)', () =
     const first = parsed.tracks[0]!
     expect(first.startSeconds).toBe(0)
     expect(first.startTime).toBe('0:00')
+  })
+
+  it('extracts the set-level YouTube recording and SoundCloud widget link', () => {
+    expect(parsed.setYoutubeLink).toBe('https://www.youtube.com/watch?v=N40pkDgwNfg')
+    expect(parsed.setSoundcloudLink).toBe(
+      'https://w.soundcloud.com/player/?url=' + encodeURIComponent('https://api.soundcloud.com/tracks/2099378310'),
+    )
   })
 })
 

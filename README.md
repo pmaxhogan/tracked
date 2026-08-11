@@ -115,6 +115,8 @@ The scheme and leading `www.` are optional and any query string / fragment is ig
   "tracklistUrl": "https://www.1001tracklists.com/tracklist/l3uw499/...html",
   "slug": "l3uw499",
   "setAppleLink": null,          // Apple Music album for the WHOLE set, when 1001tl has one
+  "setYoutubeLink": "https://www.youtube.com/watch?v=79n8BaQAL2Q",  // the set's primary recording, when embedded
+  "setSoundcloudLink": null,     // SoundCloud widget-player URL for the whole set, when embedded
   "linksResolved": true,         // echoes the request's resolveLinks
   "trackCount": 32,
   "tracks": [
@@ -172,6 +174,18 @@ POST /subscriptions/api/tracklist { url: "..." }  → { tracklistUrl, slug, setA
 ```
 
 Both `POST /tracklist` and `POST /subscriptions/api/tracklist` resolve through the same shared scrape + cache (`lib/tracklist-resolve.ts`), so a set opened in the viewer is warm for the API and vice-versa. The page accepts `?url=` to deep-link a specific tracklist (it prefills and auto-loads).
+
+### DJ profile pages
+
+Every DJ in the subscriptions list links to `GET /subscriptions/dj/<slug>` — a profile page showing **all of that DJ's tracklists as expandable cards**, newest first. Collapsed cards show the set title and date (derived from the tracklist URL slug — free); expanding a card fetches the full tracklist through the same Access-gated `/api/tracklist` endpoint and shows:
+
+- a **completeness badge** — `full tracklist` when every row resolves to a known track, `partial` otherwise (rows with an `idStatus` like "ID Remix" still count as known; only fully-anonymous `ID` rows count against completeness), plus `IDed / cued / partial-ID` counts,
+- **set-level links**: the 1001tracklists page, the set's primary **YouTube** recording, its **SoundCloud** player, and the **Apple Music** album, whenever 1001tracklists embeds them,
+- the **per-track list** with artwork, cue times, and per-track YouTube / SoundCloud / Apple Music links (same rendering as the tracklist viewer), and an "Open in viewer" deep link.
+
+Once loaded, the badge stays on the card head, so collapsed cards keep showing which sets are fully IDed. Per-set detail is fetched only on expand — never in bulk — so viewing a profile costs at most one index crawl, and re-expanding a set another page already resolved is a warm cache hit.
+
+The set list comes from `GET /subscriptions/api/dj/<slug>` (`?refresh=1` to force), which walks the DJ's 1001tracklists index with the same infinite-scroll crawl the sync uses (`lib/dj-sets.ts` → `crawlDjIndex`), merges in any URLs the sync state discovered that the index no longer surfaces, and caches the result in KV for 6 h (`djsets:v1:<slug>`). If the crawl is blocked upstream, the page degrades to the sync state's URL list rather than erroring; an empty result is never cached, so the next view retries.
 
 ### YouTube account connection
 
@@ -437,6 +451,7 @@ src/
     subscriptions.ts        DJ slug parser + KV CRUD for the mini-app
     sync.ts                 auto-playlist orchestrator (crawl → scrape → insert), per-sub KV state
     dj-index.ts             DJ index crawl (infinite-scroll AJAX) + set-page video id extraction
+    dj-sets.ts              cached per-DJ set list behind the /subscriptions/dj/<slug> profile page
     combined-playlist.ts    the "All tracked artists" playlist: live mirror + bounded backfill
     playlist-cache.ts       KV-cached playlist video-id sets + find-or-create (shared by both)
     youtube-playlists.ts    YouTube Data API v3 playlist client (OAuth)

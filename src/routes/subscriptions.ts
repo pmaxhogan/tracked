@@ -6,8 +6,10 @@ import {
   djUrlFor,
   InvalidSubscriptionInput,
   listSubscriptions,
+  parseDjSlug,
   removeSubscription,
 } from '../lib/subscriptions'
+import { getDjSets } from '../lib/dj-sets'
 import {
   buildAuthUrl,
   clearTokens,
@@ -71,6 +73,50 @@ subscriptionsApp.get('/tracklist', (c) => {
   return c.html(TRACKLIST_PAGE_HTML)
 })
 
+// DJ profile page: every tracklist we know about for one DJ, as expandable
+// cards. Linked from each row of the subscriptions list. The HTML is static —
+// the slug is parsed client-side from the path, so nothing user-controlled is
+// ever templated into the markup.
+subscriptionsApp.get('/dj/:slug', (c) => {
+  c.header('Cache-Control', 'no-store')
+  return c.html(DJ_PAGE_HTML)
+})
+
+/**
+ * Set list for one DJ (backs the profile page). Served from a 6 h KV cache of
+ * the DJ-index crawl merged with the sync state's discovered URLs; pass
+ * `?refresh=1` to force a fresh crawl (the page's Refresh button does).
+ */
+subscriptionsApp.get('/api/dj/:slug', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.dj_sets', by: c.get('cfAccessEmail') })
+  const slug = parseDjSlug(c.req.param('slug'))
+  if (!slug) return c.json({ error: 'invalid_slug' }, 400)
+  const refresh = c.req.query('refresh') === '1'
+  log.info('subs.dj_sets.start', { slug, refresh })
+  try {
+    const [sets, subs] = await Promise.all([getDjSets(c.env, slug, { refresh, log }), listSubscriptions(c.env)])
+    if (sets.sets.length === 0) {
+      // Nothing from the crawl OR the sync state — either a bad slug or an
+      // upstream block. 502 (not 404) so the UI says "retry", since we can't
+      // tell the two apart without a page fingerprint.
+      log.warn('subs.dj_sets.empty', { slug, stopReason: sets.stopReason })
+      return c.json({ error: 'upstream_error', message: `no sets found (crawl: ${sets.stopReason}) — unknown DJ, or 1001tracklists is blocking us; try again shortly` }, 502)
+    }
+    return c.json({ ...sets, subscribed: subs.some((s) => s.slug === slug), sourceUrl: djUrlFor(slug) })
+  } catch (e) {
+    if (e instanceof IPBlockedError) {
+      log.error('subs.dj_sets.ip_blocked', { slug, clientIp: e.clientIp })
+      return c.json({ error: 'upstream_error', message: `1001 crawl: ip_blocked (${e.clientIp ?? 'unknown'})` }, 502)
+    }
+    if (e instanceof CloudflareChallengeError) {
+      log.error('subs.dj_sets.cf_challenge', { slug, errorMessage: e.message })
+      return c.json({ error: 'upstream_error', message: `1001 crawl: cf_challenge — ${e.message}` }, 502)
+    }
+    log.error('subs.dj_sets.throw', { slug, ...errorFields(e) })
+    return c.json({ error: 'upstream_error', message: `1001 crawl: ${(e as Error).message}` }, 502)
+  }
+})
+
 subscriptionsApp.post('/api/tracklist', async (c) => {
   const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.tracklist', by: c.get('cfAccessEmail') })
   let body: unknown
@@ -93,7 +139,15 @@ subscriptionsApp.post('/api/tracklist', async (c) => {
       log.warn('subs.tracklist.empty', { tracklistUrl })
       return c.json({ error: 'upstream_error', message: 'parsed 0 tracks (likely a transient captcha) — try again shortly' }, 502)
     }
-    return c.json({ tracklistUrl, slug: full.slug, setAppleLink: full.setAppleLink, trackCount: full.tracks.length, tracks: full.tracks })
+    return c.json({
+      tracklistUrl,
+      slug: full.slug,
+      setAppleLink: full.setAppleLink,
+      setYoutubeLink: full.setYoutubeLink,
+      setSoundcloudLink: full.setSoundcloudLink,
+      trackCount: full.tracks.length,
+      tracks: full.tracks,
+    })
   } catch (e) {
     if (e instanceof IPBlockedError) {
       log.error('subs.tracklist.ip_blocked', { tracklistUrl, clientIp: e.clientIp })
@@ -612,6 +666,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
   li { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); margin-bottom: 0.5rem; }
   li .slug { font-weight: 600; }
   li a { color: var(--accent); text-decoration: none; font-size: 0.85rem; }
+  li a.slug { color: var(--fg); font-size: 1rem; }
+  li a.slug:hover { color: var(--accent); }
   li a:hover { text-decoration: underline; }
   li .meta { flex: 1; min-width: 0; }
   li .meta .added { color: var(--muted); font-size: 0.8rem; }
@@ -790,9 +846,12 @@ const PAGE_HTML = /* html */ `<!doctype html>
       const meta = document.createElement('div');
       meta.className = 'meta';
       const slug = document.createElement('div');
-      slug.innerHTML = '<span class="slug"></span> · <a target="_blank" rel="noreferrer noopener"></a>';
-      slug.querySelector('.slug').textContent = s.slug;
-      const link = slug.querySelector('a');
+      slug.innerHTML = '<a class="slug"></a> · <a target="_blank" rel="noreferrer noopener"></a>';
+      // The DJ profile page: all of this DJ's tracklists as expandable cards.
+      const prof = slug.querySelector('.slug');
+      prof.textContent = s.slug;
+      prof.href = '/subscriptions/dj/' + encodeURIComponent(s.slug);
+      const link = slug.querySelector('a:not(.slug)');
       link.href = s.sourceUrl;
       link.textContent = 'open';
       meta.appendChild(slug);
@@ -1652,6 +1711,328 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
   // Deep-link support: /subscriptions/tracklist?url=... prefills and auto-loads.
   const pre = new URLSearchParams(location.search).get('url');
   if (pre) { $url.value = pre; load(pre); }
+})();
+</script>
+</body>
+</html>`
+
+const DJ_PAGE_HTML = /* html */ `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>tracked — DJ profile</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0e1116; --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --danger: #f85149; --card: #161b22; --border: #30363d;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --accent: #0969da; --danger: #cf222e; --card: #f6f8fa; --border: #d0d7de; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; padding: 2rem 1rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0; }
+  .head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.25rem; }
+  .head .badge-sub { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.14rem 0.42rem; border-radius: 999px; background: rgba(63,185,80,0.18); color: #3fb950; }
+  p.lead { color: var(--muted); margin: 0 0 1.25rem; }
+  p.lead a { color: var(--accent); text-decoration: none; }
+  p.lead a:hover { text-decoration: underline; }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
+  .toolbar .counts { color: var(--muted); font-size: 0.85rem; }
+  button.ghost { padding: 0.35rem 0.7rem; font: inherit; font-size: 0.85rem; background: transparent; color: var(--accent); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+  button.ghost:disabled { opacity: 0.5; cursor: progress; }
+  .error { color: var(--danger); margin: 0.25rem 0 1rem; min-height: 1.2em; white-space: pre-wrap; }
+  .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
+  /* ── Set cards ── */
+  .set { border: 1px solid var(--border); border-radius: 8px; background: var(--card); margin-bottom: 0.45rem; overflow: hidden; }
+  .set-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.7rem; cursor: pointer; }
+  .set-head:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+  .set-head .chev { color: var(--muted); flex: none; width: 1em; transition: transform 0.15s; }
+  .set.open .set-head .chev { transform: rotate(90deg); }
+  .set-head .title { flex: 1; min-width: 0; font-weight: 600; font-size: 0.92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .set-head .date { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .badge { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.14rem 0.42rem; border-radius: 999px; white-space: nowrap; }
+  .badge.full { background: rgba(63,185,80,0.18); color: #3fb950; }
+  .badge.partial { background: rgba(210,153,34,0.18); color: #d29922; }
+  .set-body { border-top: 1px solid var(--border); padding: 0.7rem 0.8rem; }
+  .set-meta { color: var(--muted); font-size: 0.82rem; display: flex; flex-wrap: wrap; gap: 0.25rem 0.9rem; margin-bottom: 0.6rem; }
+  .set-links { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.75rem; }
+  a.pill { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.35rem 0.6rem; font-size: 0.78rem; font-weight: 600; text-decoration: none; color: var(--fg); background: transparent; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
+  a.pill:hover { border-color: var(--accent); color: var(--accent); }
+  a.pill.sc:hover { border-color: #ff5500; color: #ff5500; }
+  a.pill.ytp:hover { border-color: #FF0000; color: #FF0000; }
+  ul.tracks { list-style: none; padding: 0; margin: 0; }
+  li.track { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); margin-bottom: 0.4rem; }
+  li.track .num { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.8rem; width: 1.8rem; text-align: right; flex: none; }
+  li.track img.art { width: 36px; height: 36px; border-radius: 4px; object-fit: cover; flex: none; background: var(--border); }
+  li.track .art.ph { width: 36px; height: 36px; border-radius: 4px; flex: none; background: var(--border); }
+  li.track .meta { flex: 1; min-width: 0; }
+  li.track .ttl { font-weight: 600; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li.track .ttl a { color: inherit; text-decoration: none; }
+  li.track .ttl a:hover { text-decoration: underline; }
+  li.track .sub { color: var(--muted); font-size: 0.76rem; display: flex; align-items: center; gap: 0.5rem; margin-top: 0.1rem; }
+  li.track .cue { font-variant-numeric: tabular-nums; }
+  li.track .tag { font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.1rem 0.4rem; border-radius: 999px; background: rgba(210,153,34,0.18); color: #d29922; }
+  li.track .actions { display: flex; align-items: center; gap: 0.45rem; flex: none; }
+  a.yt { display: inline-flex; align-items: center; line-height: 0; border-radius: 4px; }
+  a.yt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .loading, .warn { font-size: 0.85rem; }
+  .loading { color: var(--muted); }
+  .warn { color: var(--danger); white-space: pre-wrap; }
+  .retry { margin-left: 0.5rem; }
+  footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<main>
+  <div class="head"><h1 id="dj-name">DJ</h1><span id="dj-sub" class="badge-sub" hidden>subscribed</span></div>
+  <p class="lead"><span id="dj-slug"></span> · <a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a> &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer</a></p>
+  <div class="toolbar">
+    <span id="counts" class="counts"></span>
+    <button id="refresh" class="ghost">Refresh from 1001tracklists</button>
+  </div>
+  <div id="error" class="error" role="alert"></div>
+  <div id="sets"></div>
+  <div id="empty" class="empty" hidden>Loading sets…</div>
+  <footer>Signed in as <span id="who"></span></footer>
+</main>
+<script>
+(() => {
+  // The slug comes from the path (/subscriptions/dj/<slug>); nothing
+  // user-controlled is templated into this page server-side.
+  const slug = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
+
+  const $name = document.getElementById('dj-name');
+  const $subBadge = document.getElementById('dj-sub');
+  const $slug = document.getElementById('dj-slug');
+  const $link1001 = document.getElementById('dj-1001');
+  const $counts = document.getElementById('counts');
+  const $refresh = document.getElementById('refresh');
+  const $error = document.getElementById('error');
+  const $sets = document.getElementById('sets');
+  const $empty = document.getElementById('empty');
+
+  // Same static, data-free SVGs as the tracklist viewer.
+  const YT_SVG = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="#FF0000" d="M23 7.5a3 3 0 0 0-2.1-2.1C19 5 12 5 12 5s-7 0-8.9.4A3 3 0 0 0 1 7.5 31 31 0 0 0 .6 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1C5 19 12 19 12 19s7 0 8.9-.4a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.4 12 31 31 0 0 0 23 7.5Z"/><path fill="#fff" d="M9.8 15.5v-7l6 3.5-6 3.5Z"/></svg>';
+  const APPLE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" fill="currentColor"><path d="M16.4 12.8c0-2.2 1.8-3.3 1.9-3.3-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.6.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.4 0-2.8.8-3.5 2.1-1.5 2.6-.4 6.5 1.1 8.6.7 1 1.5 2.2 2.6 2.2 1 0 1.4-.7 2.7-.7 1.2 0 1.6.7 2.7.6 1.1 0 1.8-1 2.5-2 .8-1.2 1.1-2.3 1.1-2.3s-2.1-.8-2.1-3.2ZM14.3 5.9c.6-.7 1-1.7.9-2.7-.9 0-1.9.6-2.5 1.3-.5.6-1 1.6-.9 2.6 1 .1 2-.5 2.5-1.2Z"/></svg>';
+  const SC_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="#ff5500"><path d="M1.5 13.2c-.1 0-.2.1-.2.2l-.2 1.7.2 1.6c0 .1.1.2.2.2s.2-.1.2-.2l.2-1.6-.2-1.7c0-.1-.1-.2-.2-.2Zm1.6-1c-.1 0-.2.1-.2.2l-.3 2.7.3 2.6c0 .1.1.2.2.2s.2-.1.2-.2l.3-2.6-.3-2.7c0-.1-.1-.2-.2-.2Zm1.7-.4c-.1 0-.3.1-.3.3l-.2 3.1.2 3c0 .2.1.3.3.3.1 0 .3-.1.3-.3l.3-3-.3-3.1c0-.2-.2-.3-.3-.3Zm1.8-.3c-.2 0-.3.1-.3.3l-.2 3.4.2 3.2c0 .2.1.3.3.3s.3-.1.3-.3l.2-3.2-.2-3.4c0-.2-.1-.3-.3-.3ZM22 12.6a2.9 2.9 0 0 0-1.1.2c-.2-2.5-2.3-4.5-4.9-4.5-.6 0-1.2.1-1.8.4-.2.1-.3.2-.3.4v8.1c0 .2.2.4.4.4H22a2.5 2.5 0 0 0 0-5Zm-13.9-1c-.2 0-.3.2-.3.4l-.2 3.1.2 3c0 .2.2.3.3.3.2 0 .3-.1.3-.3l.2-3-.2-3.1c0-.2-.1-.4-.3-.4Zm1.9-.7c-.2 0-.4.2-.4.4l-.1 3.8.1 3c0 .2.2.4.4.4.2 0 .4-.2.4-.4l.2-3-.2-3.8c0-.2-.2-.4-.4-.4Z"/></svg>';
+
+  // Untrusted third-party text throughout (titles from 1001tracklists) —
+  // everything is built with createElement/textContent, and hrefs only ever
+  // get http(s) URLs.
+  function safeHref(a, u) {
+    if (!u) return false;
+    const lo = String(u).toLowerCase();
+    if (!(lo.startsWith('http://') || lo.startsWith('https://'))) return false;
+    a.href = u; a.target = '_blank'; a.rel = 'noreferrer noopener';
+    return true;
+  }
+
+  function pill(url, label, cls, svg) {
+    const a = document.createElement('a');
+    a.className = 'pill' + (cls ? ' ' + cls : '');
+    if (!safeHref(a, url)) return null;
+    if (svg) { const g = document.createElement('span'); g.style.display = 'inline-flex'; g.innerHTML = svg; a.appendChild(g); }
+    const t = document.createElement('span'); t.textContent = label; a.appendChild(t);
+    return a;
+  }
+
+  function trackRow(t) {
+    const li = document.createElement('li');
+    li.className = 'track';
+    const num = document.createElement('div');
+    num.className = 'num';
+    num.textContent = String((t.index ?? 0) + 1);
+    li.appendChild(num);
+    if (t.artworkUrl) {
+      const img = document.createElement('img');
+      img.className = 'art'; img.loading = 'lazy'; img.alt = ''; img.src = t.artworkUrl;
+      img.addEventListener('error', () => { const ph = document.createElement('div'); ph.className = 'art ph'; img.replaceWith(ph); });
+      li.appendChild(img);
+    } else {
+      const ph = document.createElement('div'); ph.className = 'art ph'; li.appendChild(ph);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const ttl = document.createElement('div');
+    ttl.className = 'ttl';
+    const label = (t.artist ? t.artist + ' – ' : '') + (t.title || 'ID');
+    if (t.trackUrl) {
+      const a = document.createElement('a');
+      a.textContent = label;
+      if (!safeHref(a, t.trackUrl)) { ttl.textContent = label; } else { ttl.appendChild(a); }
+    } else { ttl.textContent = label; }
+    meta.appendChild(ttl);
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    if (t.startTime) { const cue = document.createElement('span'); cue.className = 'cue'; cue.textContent = t.startTime; sub.appendChild(cue); }
+    if (t.idStatus) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = t.idStatus; sub.appendChild(tag); }
+    else if (t.isUnidentified) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = 'ID'; sub.appendChild(tag); }
+    if (t.isMashupLinked) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = 'w/'; sub.appendChild(tag); }
+    meta.appendChild(sub);
+    li.appendChild(meta);
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    if (t.youtubeLink) {
+      const a = document.createElement('a');
+      a.className = 'yt'; a.title = 'Play on YouTube'; a.setAttribute('aria-label', 'Play on YouTube');
+      if (safeHref(a, t.youtubeLink)) { a.innerHTML = YT_SVG; actions.appendChild(a); }
+    }
+    const sc = pill(t.soundcloudLink, 'SoundCloud', 'sc', SC_SVG); if (sc) { sc.title = 'Play on SoundCloud (free, ad-supported)'; actions.appendChild(sc); }
+    const ap = pill(t.appleLink, 'Apple Music', 'apple', APPLE_SVG); if (ap) { ap.title = 'Open in Apple Music'; actions.appendChild(ap); }
+    li.appendChild(actions);
+    return li;
+  }
+
+  function renderSetBody(body, head, set, data) {
+    body.innerHTML = '';
+    const tracks = data.tracks || [];
+    // "Full tracklist" = every row resolves to a known track. Rows with an
+    // idStatus ("ID Remix" etc.) still point at a known base track, so only
+    // fully-anonymous rows count against completeness.
+    const total = tracks.length;
+    const ided = tracks.filter((t) => !t.isUnidentified).length;
+    const cued = tracks.filter((t) => t.startSeconds != null).length;
+    const partialIds = tracks.filter((t) => t.idStatus).length;
+    const full = total > 0 && ided === total;
+
+    // Hoist the completeness badge into the card head so it stays visible
+    // when the card is collapsed again.
+    const old = head.querySelector('.badge'); if (old) old.remove();
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + (full ? 'full' : 'partial');
+    badge.textContent = full ? 'full tracklist' : 'partial';
+    head.insertBefore(badge, head.querySelector('.date'));
+
+    const meta = document.createElement('div');
+    meta.className = 'set-meta';
+    const bits = [
+      total + ' track' + (total === 1 ? '' : 's'),
+      ided + '/' + total + ' IDed',
+      cued + ' cued',
+    ];
+    if (partialIds) bits.push(partialIds + ' partial ID' + (partialIds === 1 ? '' : 's'));
+    for (const b of bits) { const s = document.createElement('span'); s.textContent = b; meta.appendChild(s); }
+    body.appendChild(meta);
+
+    const links = document.createElement('div');
+    links.className = 'set-links';
+    const l1001 = pill(set.url, '1001tracklists ↗'); if (l1001) links.appendChild(l1001);
+    const lyt = pill(data.setYoutubeLink, 'YouTube', 'ytp', YT_SVG); if (lyt) { lyt.title = 'Watch the set on YouTube'; links.appendChild(lyt); }
+    const lsc = pill(data.setSoundcloudLink, 'SoundCloud', 'sc', SC_SVG); if (lsc) { lsc.title = 'Listen to the set on SoundCloud'; links.appendChild(lsc); }
+    const lap = pill(data.setAppleLink, 'Apple Music', 'apple', APPLE_SVG); if (lap) { lap.title = 'Full set on Apple Music'; links.appendChild(lap); }
+    const viewer = document.createElement('a');
+    viewer.className = 'pill';
+    viewer.href = '/subscriptions/tracklist?url=' + encodeURIComponent(set.url);
+    viewer.textContent = 'Open in viewer';
+    links.appendChild(viewer);
+    body.appendChild(links);
+
+    const ul = document.createElement('ul');
+    ul.className = 'tracks';
+    for (const t of tracks) ul.appendChild(trackRow(t));
+    body.appendChild(ul);
+  }
+
+  async function loadSetInto(body, head, set) {
+    body.innerHTML = '<span class="loading">loading tracklist…</span>';
+    try {
+      const r = await fetch('/subscriptions/api/tracklist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ url: set.url }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.message || data.error || ('failed (' + r.status + ')'));
+      renderSetBody(body, head, set, data);
+      return true;
+    } catch (e) {
+      body.innerHTML = '';
+      const w = document.createElement('span');
+      w.className = 'warn';
+      w.textContent = 'failed to load: ' + (e && e.message ? e.message : e);
+      body.appendChild(w);
+      const btn = document.createElement('button');
+      btn.className = 'ghost retry';
+      btn.textContent = 'Retry';
+      btn.addEventListener('click', () => loadSetInto(body, head, set).then((ok) => { if (ok) return; }));
+      body.appendChild(btn);
+      return false;
+    }
+  }
+
+  function renderSets(sets) {
+    $sets.innerHTML = '';
+    if (!sets.length) { $empty.textContent = 'No sets found for this DJ.'; $empty.hidden = false; return; }
+    $empty.hidden = true;
+    for (const set of sets) {
+      const card = document.createElement('div');
+      card.className = 'set';
+      const head = document.createElement('div');
+      head.className = 'set-head';
+      const chev = document.createElement('span'); chev.className = 'chev'; chev.textContent = '▸'; head.appendChild(chev);
+      const title = document.createElement('span'); title.className = 'title'; title.textContent = set.title; head.appendChild(title);
+      const date = document.createElement('span'); date.className = 'date'; date.textContent = set.date || ''; head.appendChild(date);
+      card.appendChild(head);
+      const body = document.createElement('div');
+      body.className = 'set-body';
+      body.hidden = true;
+      card.appendChild(body);
+      let loaded = false;
+      head.addEventListener('click', async () => {
+        body.hidden = !body.hidden;
+        card.classList.toggle('open', !body.hidden);
+        if (body.hidden || loaded) return;
+        loaded = await loadSetInto(body, head, set);
+      });
+      $sets.appendChild(card);
+    }
+  }
+
+  function fmtWhen(epoch) {
+    if (!epoch) return '';
+    try { return new Date(epoch * 1000).toLocaleString(); } catch { return ''; }
+  }
+
+  async function load(refresh) {
+    $error.textContent = '';
+    $refresh.disabled = true;
+    const original = $refresh.textContent;
+    if (refresh) $refresh.textContent = 'Refreshing…';
+    if (!$sets.children.length) { $empty.textContent = refresh ? 'Crawling 1001tracklists…' : 'Loading sets…'; $empty.hidden = false; }
+    try {
+      const r = await fetch('/subscriptions/api/dj/' + encodeURIComponent(slug) + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $error.textContent = data.message || data.error || ('failed (' + r.status + ')');
+        if (!$sets.children.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
+        return;
+      }
+      $name.textContent = data.artistName || slug;
+      document.title = 'tracked — ' + (data.artistName || slug);
+      $subBadge.hidden = !data.subscribed;
+      const src = data.source === 'state' ? 'from sync state (crawl unavailable)' : 'crawled ' + fmtWhen(data.crawledAt);
+      $counts.textContent = (data.sets || []).length + ' set' + (data.sets && data.sets.length === 1 ? '' : 's') + ' · ' + src;
+      renderSets(data.sets || []);
+    } catch (e) {
+      $error.textContent = 'request failed: ' + (e && e.message ? e.message : e);
+    } finally {
+      $refresh.disabled = false;
+      $refresh.textContent = original;
+    }
+  }
+
+  $slug.textContent = slug;
+  $link1001.href = 'https://www.1001tracklists.com/dj/' + encodeURIComponent(slug) + '/index.html';
+  $name.textContent = slug;
+  $refresh.addEventListener('click', () => load(true));
+  document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
+  load(false);
 })();
 </script>
 </body>

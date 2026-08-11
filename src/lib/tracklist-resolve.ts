@@ -15,11 +15,16 @@ import type { Logger } from './log'
  * keys — a bump in one place must invalidate for both callers.
  */
 export const TRACKLIST_CV = {
-  tracklist: 1, // parsed tracklist page → { tracks, setAppleLink }
+  tracklist: 2, // parsed tracklist page → { tracks, setAppleLink, setYoutubeLink, setSoundcloudLink }
   medialink: 1, // per-track Apple/YouTube links
 } as const
 
-export type CachedTracklist = { tracks: ParsedTrack[]; setAppleLink: string | null }
+export type CachedTracklist = {
+  tracks: ParsedTrack[]
+  setAppleLink: string | null
+  setYoutubeLink: string | null
+  setSoundcloudLink: string | null
+}
 
 /**
  * Scrape (or serve from cache) the full parsed tracklist for a 1001tracklists
@@ -31,14 +36,14 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
   const key = `tl:v${TRACKLIST_CV.tracklist}:${slug}`
   // Backwards compat: older cache entries were a bare ParsedTrack[]. If we
-  // hit one of those, normalize and ignore the (missing) setAppleLink — it'll
-  // be picked up on the next refresh after TTL expires.
+  // hit one of those, normalize and ignore the (missing) set-level links —
+  // they'll be picked up on the next refresh after TTL expires.
   const cached = await getJson<CachedTracklist | ParsedTrack[]>(env.CACHE, key)
   if (cached) {
     log.counters.cacheHits++
     if (Array.isArray(cached)) {
       log.info('cache.hit', { key, trackCount: cached.length, schema: 'legacy' })
-      return { tracks: cached, setAppleLink: null }
+      return { tracks: cached, setAppleLink: null, setYoutubeLink: null, setSoundcloudLink: null }
     }
     log.info('cache.hit', { key, trackCount: cached.tracks.length, setAppleLink: cached.setAppleLink })
     return cached
@@ -52,13 +57,18 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
     log,
   })
   if (result.tracks.length > 0) {
-    const value: CachedTracklist = { tracks: result.tracks, setAppleLink: result.setAppleLink }
+    const value: CachedTracklist = {
+      tracks: result.tracks,
+      setAppleLink: result.setAppleLink,
+      setYoutubeLink: result.setYoutubeLink,
+      setSoundcloudLink: result.setSoundcloudLink,
+    }
     await putJson(env.CACHE, key, value, TTL.TRACKLIST_PAGE)
     log.info('cache.put', { key, trackCount: result.tracks.length, setAppleLink: result.setAppleLink, ttlSeconds: TTL.TRACKLIST_PAGE })
     return value
   }
   log.warn('cache.skip_empty', { key, reason: 'parsed 0 tracks; likely a transient captcha — not caching' })
-  return { tracks: [], setAppleLink: result.setAppleLink }
+  return { tracks: [], setAppleLink: result.setAppleLink, setYoutubeLink: result.setYoutubeLink, setSoundcloudLink: result.setSoundcloudLink }
 }
 
 /** One track in the flattened, link-enriched output shape. */
@@ -82,6 +92,8 @@ export type TracklistTrackOut = {
 export type FullTracklist = {
   slug: string
   setAppleLink: string | null
+  setYoutubeLink: string | null
+  setSoundcloudLink: string | null
   tracks: TracklistTrackOut[]
 }
 
@@ -134,7 +146,13 @@ export async function resolveFullTracklist(
     }
   })
 
-  return { slug, setAppleLink: scraped.setAppleLink, tracks }
+  return {
+    slug,
+    setAppleLink: scraped.setAppleLink,
+    setYoutubeLink: scraped.setYoutubeLink,
+    setSoundcloudLink: scraped.setSoundcloudLink,
+    tracks,
+  }
 }
 
 /**
