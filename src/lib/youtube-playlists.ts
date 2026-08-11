@@ -43,13 +43,59 @@ export class PlaylistNotFoundError extends Error {
   }
 }
 
+/**
+ * Any non-OK YouTube Data API response that isn't the special-cased
+ * PlaylistNotFoundError. Carries the HTTP status and the API's error `reason`
+ * (e.g. "quotaExceeded", "videoNotFound") so callers can tell a transient
+ * failure from a permanent one instead of string-matching the message.
+ */
+export class YouTubeApiError extends Error {
+  constructor(
+    public readonly op: string,
+    public readonly status: number,
+    public readonly reason: string | null,
+    body: string,
+  ) {
+    super(`youtube ${op} ${status}: ${body.slice(0, 500)}`)
+    this.name = 'YouTubeApiError'
+  }
+}
+
+/** Out of quota (or per-minute rate limit) — retrying anything else this run is pointless. */
+export function isQuotaError(e: unknown): boolean {
+  return (
+    e instanceof YouTubeApiError &&
+    e.status === 403 &&
+    /^(quotaExceeded|dailyLimitExceeded|rateLimitExceeded|userRateLimitExceeded)$/.test(e.reason ?? '')
+  )
+}
+
+/**
+ * A playlistItems.insert failure that will never succeed on retry for this
+ * video: the video is deleted/private/otherwise uninsertable (404
+ * videoNotFound, 400 invalid resource) or forbidden for a non-quota reason.
+ * 5xx and network errors are NOT permanent — those retry.
+ */
+export function isPermanentInsertError(e: unknown): boolean {
+  if (!(e instanceof YouTubeApiError)) return false
+  if (isQuotaError(e)) return false
+  return e.status === 400 || e.status === 404 || e.status === 403
+}
+
 async function expectOk(res: Response, op: string, playlistIdHint?: string): Promise<void> {
   if (res.ok) return
   const body = await res.text().catch(() => '')
   if (res.status === 404 && /playlistNotFound/.test(body)) {
     throw new PlaylistNotFoundError(op, playlistIdHint)
   }
-  throw new Error(`youtube ${op} ${res.status}: ${body.slice(0, 500)}`)
+  let reason: string | null = null
+  try {
+    const parsed = JSON.parse(body) as { error?: { errors?: Array<{ reason?: string }> } }
+    reason = parsed.error?.errors?.[0]?.reason ?? null
+  } catch {
+    // Non-JSON body (proxy error page etc.) — status alone still classifies.
+  }
+  throw new YouTubeApiError(op, res.status, reason, body)
 }
 
 /**

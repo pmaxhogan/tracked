@@ -1403,6 +1403,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
       sources.length + ' artist playlist' + (sources.length === 1 ? '' : 's'),
       left + '/' + cap + ' inserts left today',
     ];
+    // Deleted/private videos that can never be inserted — skipped, not retried.
+    if (d.unavailableTotal) bits.push(d.unavailableTotal + ' unavailable skipped');
     if (d.lastBackfillAt) bits.push('last backfill ' + relTime(new Date(d.lastBackfillAt * 1000).toISOString()));
     let html = '<div class="headline">' + head + '</div><div class="counts">' + bits.join(' · ') + '</div>';
     if (missing > 0) {

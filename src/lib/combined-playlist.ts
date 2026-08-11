@@ -38,7 +38,7 @@
 
 import type { Env } from '../types'
 import { getCachedPlaylistVideoIds, cachePlaylistVideoIds, findOrCreatePlaylist } from './playlist-cache'
-import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
+import { addVideoToPlaylist, isPermanentInsertError, isQuotaError, PlaylistNotFoundError } from './youtube-playlists'
 import { errorFields, type Logger } from './log'
 
 export const COMBINED_PLAYLIST_TITLE = 'All tracked artists (1001tklists)'
@@ -77,10 +77,20 @@ export type CombinedState = {
     pending: number
     cappedBy: CappedBy
   }
+  /**
+   * Videos that permanently cannot be inserted into the combined playlist —
+   * typically deleted/privated after the sync added them to an artist playlist
+   * (playlistItems.list still returns them; playlistItems.insert 404s). The
+   * backfill excludes these from "missing" instead of retrying forever: each
+   * failed insert attempt still costs 50 quota units, and two such videos
+   * retried by the 5-min cron once burned the entire 10k/day project quota.
+   */
+  unavailableVideoIds?: string[]
 }
 
-/** Why a backfill stopped inserting. `null` = it drained everything it found. */
-export type CappedBy = 'run' | 'daily' | 'deadline' | null
+/** Why a backfill stopped inserting. `null` = it drained everything it found.
+ *  `quota` = YouTube said quotaExceeded mid-run — nothing else will succeed today. */
+export type CappedBy = 'run' | 'daily' | 'deadline' | 'quota' | null
 
 /** One artist playlist feeding the combined one. */
 export type PlaylistSource = {
@@ -98,8 +108,14 @@ export type PlaylistSource = {
 export type CombinedHandle = {
   playlistId: string
   videoIds: Set<string>
-  /** Inserts performed against this handle since it was opened. */
+  /** Successful inserts performed against this handle since it was opened. */
   inserted: number
+  /**
+   * playlistItems.insert calls actually made (successes AND failures). This is
+   * what quota accounting must count — YouTube charges 50 units for a failed
+   * insert too — so the run/daily caps bound attempts, not successes.
+   */
+  attempts: number
 }
 
 export async function loadCombinedState(env: Env): Promise<CombinedState> {
@@ -138,10 +154,10 @@ export async function openCombinedPlaylist(
     // Freshly created → known empty, and YouTube's read API can't see it yet.
     const videoIds = new Set<string>()
     await cachePlaylistVideoIds(env, playlistId, videoIds)
-    return { playlistId, videoIds, inserted: 0 }
+    return { playlistId, videoIds, inserted: 0, attempts: 0 }
   }
   try {
-    return { playlistId, videoIds: await getCachedPlaylistVideoIds(env, playlistId, accessToken, log), inserted: 0 }
+    return { playlistId, videoIds: await getCachedPlaylistVideoIds(env, playlistId, accessToken, log), inserted: 0, attempts: 0 }
   } catch (e) {
     if (!(e instanceof PlaylistNotFoundError)) throw e
     // The user deleted the playlist after we cached its id. Re-resolve.
@@ -151,7 +167,7 @@ export async function openCombinedPlaylist(
     await saveCombinedState(env, { ...state, playlistId: r.id })
     const videoIds = r.justCreated ? new Set<string>() : await getCachedPlaylistVideoIds(env, r.id, accessToken, log)
     if (r.justCreated) await cachePlaylistVideoIds(env, r.id, videoIds)
-    return { playlistId: r.id, videoIds, inserted: 0 }
+    return { playlistId: r.id, videoIds, inserted: 0, attempts: 0 }
   }
 }
 
@@ -185,6 +201,7 @@ export async function addToCombined(
 ): Promise<'added' | 'duplicate'> {
   if (handle.videoIds.has(videoId)) return 'duplicate'
   try {
+    handle.attempts += 1
     await addVideoToPlaylist(handle.playlistId, videoId, accessToken)
   } catch (e) {
     if (!(e instanceof PlaylistNotFoundError)) throw e
@@ -194,6 +211,7 @@ export async function addToCombined(
     handle.playlistId = fresh.playlistId
     handle.videoIds = fresh.videoIds
     if (handle.videoIds.has(videoId)) return 'duplicate'
+    handle.attempts += 1
     await addVideoToPlaylist(handle.playlistId, videoId, accessToken)
   }
   handle.videoIds.add(videoId)
@@ -202,20 +220,38 @@ export async function addToCombined(
 }
 
 /**
+ * Record permanently-uninsertable videos in state so collectMissing stops
+ * queueing them. Idempotent; keeps the list de-duped.
+ */
+export async function markVideosUnavailable(env: Env, videoIds: string[], log: Logger): Promise<void> {
+  if (videoIds.length === 0) return
+  const state = await loadCombinedState(env)
+  const merged = new Set(state.unavailableVideoIds ?? [])
+  const before = merged.size
+  for (const id of videoIds) merged.add(id)
+  if (merged.size === before) return
+  await saveCombinedState(env, { ...state, unavailableVideoIds: [...merged] })
+  log.warn('combined.marked_unavailable', { videoIds, totalUnavailable: merged.size })
+}
+
+/**
  * Persist a run's effect: write the post-insert video set back to the cache so
- * the next tick doesn't pay quota to re-list it, and charge the inserts
- * against today's budget. No-op when the run inserted nothing — a read-only
- * run shouldn't re-extend a TTL or move the counter.
+ * the next tick doesn't pay quota to re-list it, and charge the run's insert
+ * ATTEMPTS against today's budget — failed inserts cost the same 50 quota
+ * units as successful ones, so a failure-only run must still consume budget
+ * (otherwise a persistently-failing video could retry unmetered all day).
+ * No-op when the run made no insert calls at all.
  */
 export async function flushCombined(env: Env, handle: CombinedHandle, log: Logger): Promise<void> {
-  if (handle.inserted === 0) return
+  if (handle.attempts === 0) return
   try {
-    await cachePlaylistVideoIds(env, handle.playlistId, handle.videoIds)
-    await bumpDailyInserts(env, handle.inserted)
+    // Only successful inserts change the playlist contents.
+    if (handle.inserted > 0) await cachePlaylistVideoIds(env, handle.playlistId, handle.videoIds)
+    await bumpDailyInserts(env, handle.attempts)
   } catch (e) {
     // Losing the cache write costs one re-list; losing the counter bump costs
     // a slightly generous budget. Neither is worth failing a sync over.
-    log.warn('combined.flush_failed', { playlistId: handle.playlistId, inserted: handle.inserted, ...errorFields(e) })
+    log.warn('combined.flush_failed', { playlistId: handle.playlistId, inserted: handle.inserted, attempts: handle.attempts, ...errorFields(e) })
   }
 }
 
@@ -256,6 +292,8 @@ export type CombinedMergeResult = {
   /** Still missing after this run — the next tick picks these up. */
   pending: number
   cappedBy: CappedBy
+  /** Videos permanently skipped (deleted/private — insert can never succeed). */
+  unavailableTotal: number
   dailyInsertsUsed: number
   dailyInsertCap: number
 }
@@ -280,12 +318,14 @@ export async function mergeIntoCombinedPlaylist(
   // Unreachable — `create` defaults to true, so the resolver either finds or
   // creates. Typed as nullable only for the read-only status path.
   if (!handle) throw new Error('combined playlist could not be resolved')
+  const startState = await loadCombinedState(env)
+  const unavailable = new Set(startState.unavailableVideoIds ?? [])
   const used = await dailyInsertsUsed(env)
   const budget = Math.max(0, COMBINED_DAILY_INSERT_CAP - used)
   const perRun = opts.maxInsertsPerRun ?? MAX_INSERTS_PER_RUN
   const deadline = Date.now() + (opts.deadlineMs ?? BACKFILL_DEADLINE_MS)
 
-  const { missing, sourcesRead, sourcesFailed } = await collectMissing(env, handle, sources, accessToken, log)
+  const { missing, sourcesRead, sourcesFailed } = await collectMissing(env, handle, sources, accessToken, log, unavailable)
   log.info('combined.backfill.start', {
     trigger: opts.trigger ?? null,
     playlistId: handle.playlistId,
@@ -293,18 +333,22 @@ export async function mergeIntoCombinedPlaylist(
     sourcesRead,
     sourcesFailed,
     missingTotal: missing.length,
+    skippedUnavailable: unavailable.size,
     dailyInsertsUsed: used,
     budget,
   })
 
   let failed = 0
   let cappedBy: CappedBy = null
+  const newlyUnavailable: string[] = []
   for (const m of missing) {
-    if (handle.inserted >= perRun) {
+    // Attempts, not successes: a failed insert costs the same 50 quota units,
+    // so it must count against both the per-run and per-day bounds.
+    if (handle.attempts >= perRun) {
       cappedBy = 'run'
       break
     }
-    if (handle.inserted >= budget) {
+    if (handle.attempts >= budget) {
       cappedBy = 'daily'
       break
     }
@@ -318,6 +362,19 @@ export async function mergeIntoCombinedPlaylist(
     } catch (e) {
       failed += 1
       log.warn('combined.backfill.insert_failed', { videoId: m.videoId, fromSlug: m.slug, ...errorFields(e) })
+      if (isQuotaError(e)) {
+        // Out of quota — every further insert this run fails the same way,
+        // and each attempt would be pure log noise. Stop here.
+        cappedBy = 'quota'
+        break
+      }
+      if (isPermanentInsertError(e)) {
+        // Deleted/private video etc. — never retry it. Without this, a
+        // permanently-failing video stays "missing" and burns 50 units per
+        // cron tick forever.
+        unavailable.add(m.videoId)
+        newlyUnavailable.push(m.videoId)
+      }
     }
   }
   await flushCombined(env, handle, log)
@@ -331,13 +388,16 @@ export async function mergeIntoCombinedPlaylist(
     missingTotal: missing.length,
     inserted: handle.inserted,
     failed,
-    pending: Math.max(0, missing.length - handle.inserted),
+    // Newly-unavailable videos are NOT pending — no future tick retries them.
+    pending: Math.max(0, missing.length - handle.inserted - newlyUnavailable.length),
     cappedBy,
-    dailyInsertsUsed: used + handle.inserted,
+    unavailableTotal: unavailable.size,
+    dailyInsertsUsed: used + handle.attempts,
     dailyInsertCap: COMBINED_DAILY_INSERT_CAP,
   }
+  const endState = await loadCombinedState(env)
   await saveCombinedState(env, {
-    ...(await loadCombinedState(env)),
+    ...endState,
     playlistId: handle.playlistId,
     lastBackfillAt: Math.floor(Date.now() / 1000),
     lastBackfillStats: {
@@ -348,6 +408,9 @@ export async function mergeIntoCombinedPlaylist(
       pending: result.pending,
       cappedBy,
     },
+    ...(newlyUnavailable.length > 0
+      ? { unavailableVideoIds: [...new Set([...(endState.unavailableVideoIds ?? []), ...newlyUnavailable])] }
+      : {}),
   })
   log.info('combined.backfill.done', result as unknown as Record<string, unknown>)
   return result
@@ -360,6 +423,8 @@ export type CombinedStatus = {
   playlistUrl: string | null
   videoCount: number
   missingTotal: number
+  /** Videos permanently skipped (deleted/private — insert can never succeed). */
+  unavailableTotal: number
   lastBackfillAt: number | null
   lastBackfillStats: CombinedState['lastBackfillStats'] | null
   dailyInsertsUsed: number
@@ -389,10 +454,12 @@ export async function readCombinedStatus(
   }
   // With no playlist yet, everything in every artist playlist is "missing" —
   // that's the number the panel should show before the first backfill.
-  const probe: CombinedHandle = handle ?? { playlistId: '', videoIds: new Set(), inserted: 0 }
-  const { missing, perSource } = await collectMissing(env, probe, sources, accessToken, log)
+  const probe: CombinedHandle = handle ?? { playlistId: '', videoIds: new Set(), inserted: 0, attempts: 0 }
+  const unavailable = new Set(state.unavailableVideoIds ?? [])
+  const { missing, perSource } = await collectMissing(env, probe, sources, accessToken, log, unavailable)
   return {
     ...base,
+    unavailableTotal: unavailable.size,
     playlistId: handle?.playlistId ?? null,
     playlistUrl: handle ? playlistUrl(handle.playlistId) : null,
     videoCount: handle?.videoIds.size ?? 0,
@@ -425,6 +492,8 @@ async function collectMissing(
   sources: PlaylistSource[],
   accessToken: string,
   log: Logger,
+  /** Video ids known to be permanently uninsertable — excluded from "missing". */
+  skip: ReadonlySet<string> = new Set(),
 ): Promise<{
   missing: Array<{ videoId: string; slug: string }>
   sourcesRead: number
@@ -449,7 +518,7 @@ async function collectMissing(
     sourcesRead += 1
     perSource.set(src.slug, ids.size)
     for (const id of ids) {
-      if (handle.videoIds.has(id) || queued.has(id)) continue
+      if (handle.videoIds.has(id) || queued.has(id) || skip.has(id)) continue
       queued.add(id)
       missing.push({ videoId: id, slug: src.slug })
     }

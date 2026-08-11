@@ -229,12 +229,19 @@ Both playlists are created on demand (looked up by exact title first, so an exis
 
 **Pacing.** `playlistItems.insert` costs 50 units against a 10 000/day project quota — 200 inserts/day for the whole worker. The combined **backfill** therefore takes a bounded slice: ≤ 20 inserts per run, a 10 s wall-clock ceiling, and it stops once the day's combined-playlist inserts hit `COMBINED_DAILY_INSERT_CAP` (80, counted at `yt:combined:inserts:<date>` in `CACHE`). The **live mirror** isn't capped — new sets are few and getting them in immediately is the point — but its inserts count against the same daily total, so the backfill yields to them rather than competing. A first backfill of several hundred videos spreads over a few days of cron ticks instead of burning a day's quota in one sweep and starving the per-artist sync. Reads are the cheap half and are cached (`yt:plvids:<playlistId>`, 6 h, rewritten after every insert), so a no-op tick costs ~nothing.
 
-The admin panel's **Combined playlist** section shows the link, video count, how many are still to add, today's remaining insert budget, and a **Backfill now** button that runs one bounded pass immediately (same caps — clicking it repeatedly can't blow the quota). Per-set rows in **Recent playlist additions** carry a `combined` field: `added` / `duplicate` / `failed` / `unavailable`.
+**Failure accounting.** YouTube charges the full 50 units for a *failed* `playlistItems.insert` too, so the caps count **attempts**, not successes — a run of failures consumes budget exactly like a run of inserts (this once mattered: two uninsertable videos retried by the 5-minute cron burned the entire 10 000/day quota, every day). Three rules keep failures bounded:
+
+- A **permanent** insert error (404 `videoNotFound`, 400, non-quota 403 — typically a video deleted or privated *after* the sync added it to an artist playlist, which `playlistItems.list` still returns) marks the video **unavailable** in the combined state (`subs:combined` → `unavailableVideoIds`). It's excluded from "missing" from then on — never retried, by the backfill or the live mirror. The panel shows the skip count; deleting the stale entry from the artist playlist on YouTube is the manual cleanup if you want the count back to zero.
+- A **quota** error (`quotaExceeded` etc.) stops the run immediately (`cappedBy: "quota"`) — nothing else will succeed today, and each further attempt would be noise.
+- A **transient** error (5xx, network) stays pending and is retried next tick, but the attempt still counted against the daily budget, so even an unclassified repeat-failure can't loop unmetered.
+
+The admin panel's **Combined playlist** section shows the link, video count, how many are still to add, today's remaining insert budget, how many unavailable videos are being skipped, and a **Backfill now** button that runs one bounded pass immediately (same caps — clicking it repeatedly can't blow the quota). Per-set rows in **Recent playlist additions** carry a `combined` field: `added` / `duplicate` / `failed` / `unavailable`.
 
 ```
 GET  /subscriptions/api/combined            → { connected, title, playlistId, playlistUrl, videoCount,
-                                                missingTotal, dailyInsertsUsed, dailyInsertCap,
-                                                lastBackfillAt, lastBackfillStats, sources: [...] }
+                                                missingTotal, unavailableTotal, dailyInsertsUsed,
+                                                dailyInsertCap, lastBackfillAt, lastBackfillStats,
+                                                sources: [...] }
 POST /subscriptions/api/combined/backfill   → { ok: true, inserted, pending, cappedBy, ... }
                                               | { ok: false, reason: "no_sources" }
 ```

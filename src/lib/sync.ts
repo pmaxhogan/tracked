@@ -29,11 +29,12 @@ import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { getAccessToken } from './google-oauth'
-import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
+import { addVideoToPlaylist, isPermanentInsertError, PlaylistNotFoundError } from './youtube-playlists'
 import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds } from './playlist-cache'
 import {
   addToCombined,
   flushCombined,
+  markVideosUnavailable,
   mergeIntoCombinedPlaylist,
   openCombinedPlaylist,
   readCombinedStatus,
@@ -474,6 +475,13 @@ export async function syncOne(
       return status
     } catch (e) {
       log.warn('sync.combined_add_failed', { slug: sub.slug, videoId, ...errorFields(e) })
+      // A permanently-uninsertable video (deleted/private) must be recorded,
+      // or the combined backfill will retry it every cron tick — 50 quota
+      // units per failed attempt, forever.
+      if (isPermanentInsertError(e)) {
+        await markVideosUnavailable(env, [videoId], log).catch(() => {})
+        return 'unavailable'
+      }
       return 'failed'
     }
   }

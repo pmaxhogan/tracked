@@ -3,7 +3,10 @@ import {
   addVideoToPlaylist,
   createPlaylist,
   findPlaylistByTitle,
+  isPermanentInsertError,
+  isQuotaError,
   listPlaylistVideoIds,
+  YouTubeApiError,
 } from '../src/lib/youtube-playlists'
 
 function jsonResponse(body: unknown, init: ResponseInit = { status: 200 }): Response {
@@ -114,5 +117,49 @@ describe('addVideoToPlaylist', () => {
       new Response('videoNotFound', { status: 404 }),
     ) as unknown as typeof fetch
     await expect(addVideoToPlaylist('PLx', 'missingVid0', 'tok', fetcher)).rejects.toThrow(/playlistItems\.insert 404/)
+  })
+})
+
+describe('error classification (YouTubeApiError)', () => {
+  const apiError = (status: number, reason: string) =>
+    jsonResponse({ error: { code: status, message: 'x', errors: [{ reason, domain: 'youtube' }] } }, { status })
+
+  it('carries status + parsed reason on non-2xx responses', async () => {
+    const fetcher = vi.fn().mockResolvedValue(apiError(404, 'videoNotFound')) as unknown as typeof fetch
+    const err = await addVideoToPlaylist('PLx', 'goneVideo12', 'tok', fetcher).catch((e) => e)
+    expect(err).toBeInstanceOf(YouTubeApiError)
+    expect(err.status).toBe(404)
+    expect(err.reason).toBe('videoNotFound')
+  })
+
+  it('classifies quotaExceeded as a quota error, not a permanent one', async () => {
+    const fetcher = vi.fn().mockResolvedValue(apiError(403, 'quotaExceeded')) as unknown as typeof fetch
+    const err = await addVideoToPlaylist('PLx', 'anyVideo123', 'tok', fetcher).catch((e) => e)
+    expect(isQuotaError(err)).toBe(true)
+    expect(isPermanentInsertError(err)).toBe(false)
+  })
+
+  it('classifies 404 videoNotFound and 400 as permanent insert errors', async () => {
+    for (const [status, reason] of [[404, 'videoNotFound'], [400, 'invalidResourceId']] as const) {
+      const fetcher = vi.fn().mockResolvedValue(apiError(status, reason)) as unknown as typeof fetch
+      const err = await addVideoToPlaylist('PLx', 'deadVideo12', 'tok', fetcher).catch((e) => e)
+      expect(isPermanentInsertError(err)).toBe(true)
+      expect(isQuotaError(err)).toBe(false)
+    }
+  })
+
+  it('treats 5xx and plain Errors as transient (neither quota nor permanent)', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response('oops', { status: 503 })) as unknown as typeof fetch
+    const err = await addVideoToPlaylist('PLx', 'flakyVideo1', 'tok', fetcher).catch((e) => e)
+    expect(isPermanentInsertError(err)).toBe(false)
+    expect(isQuotaError(err)).toBe(false)
+    expect(isPermanentInsertError(new Error('network'))).toBe(false)
+  })
+
+  it('still classifies by status when the error body is not JSON', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response('<html>gateway</html>', { status: 404 })) as unknown as typeof fetch
+    const err = await addVideoToPlaylist('PLx', 'deadVideo12', 'tok', fetcher).catch((e) => e)
+    expect(err.reason).toBeNull()
+    expect(isPermanentInsertError(err)).toBe(true)
   })
 })

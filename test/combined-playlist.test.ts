@@ -33,6 +33,7 @@ import {
   findPlaylistByTitle,
   listPlaylistVideoIds,
   PlaylistNotFoundError,
+  YouTubeApiError,
 } from '../src/lib/youtube-playlists'
 
 function fakeKV(): KVNamespace {
@@ -240,6 +241,62 @@ describe('mergeIntoCombinedPlaylist', () => {
     expect(r).toMatchObject({ inserted: 1, failed: 1 })
     // The failed one stays missing, so the next run retries it.
     expect(r.pending).toBe(1)
+    // A transient failure is NOT marked unavailable.
+    expect((await loadCombinedState(env)).unavailableVideoIds ?? []).toEqual([])
+  })
+
+  it('marks a permanently-uninsertable video unavailable and never retries it', async () => {
+    const env = makeEnv()
+    await saveCombinedState(env, { playlistId: 'PLcombined' })
+    seedPlaylists({ PLcombined: [], PLa: ['deadVideo12', 'fine1234567'] })
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockImplementation(async (_pl: string, videoId: string) => {
+      if (videoId === 'deadVideo12') throw new YouTubeApiError('playlistItems.insert', 404, 'videoNotFound', '{}')
+    })
+
+    const r = await mergeIntoCombinedPlaylist(env, 'tok', [source('a', 'PLa')], { log })
+
+    expect(r).toMatchObject({ inserted: 1, failed: 1, unavailableTotal: 1 })
+    // Not pending — no future tick should pick it up.
+    expect(r.pending).toBe(0)
+    expect((await loadCombinedState(env)).unavailableVideoIds).toEqual(['deadVideo12'])
+
+    // The next run doesn't even attempt it: only the dead video is excluded.
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockClear()
+    const again = await mergeIntoCombinedPlaylist(env, 'tok', [source('a', 'PLa')], { log })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect(again).toMatchObject({ missingTotal: 0, unavailableTotal: 1 })
+  })
+
+  it('stops the run on quotaExceeded without marking the video unavailable', async () => {
+    const env = makeEnv()
+    await saveCombinedState(env, { playlistId: 'PLcombined' })
+    seedPlaylists({ PLcombined: [], PLa: ['first1234567'.slice(0, 11), 'second123456'.slice(0, 11), 'third1234567'.slice(0, 11)] })
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'),
+    )
+
+    const r = await mergeIntoCombinedPlaylist(env, 'tok', [source('a', 'PLa')], { log })
+
+    // One attempt, then stop — retrying the rest today is pointless.
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+    expect(r).toMatchObject({ inserted: 0, failed: 1, cappedBy: 'quota', pending: 3 })
+    // Quota exhaustion says nothing about the video itself.
+    expect((await loadCombinedState(env)).unavailableVideoIds ?? []).toEqual([])
+  })
+
+  it('charges failed attempts against the daily budget so failures cannot loop unmetered', async () => {
+    const env = makeEnv()
+    await saveCombinedState(env, { playlistId: 'PLcombined' })
+    seedPlaylists({ PLcombined: [], PLa: ['boom1234567'] })
+    // Transient failure (not permanent, not quota) → stays pending…
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('socket hang up'))
+
+    const r = await mergeIntoCombinedPlaylist(env, 'tok', [source('a', 'PLa')], { log })
+
+    expect(r).toMatchObject({ inserted: 0, failed: 1, pending: 1 })
+    // …but the attempt still consumed a unit of the daily insert budget.
+    expect(await dailyInsertsUsed(env)).toBe(1)
+    expect(r.dailyInsertsUsed).toBe(1)
   })
 
   it('never treats the combined playlist as one of its own sources', async () => {
