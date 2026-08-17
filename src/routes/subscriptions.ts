@@ -10,6 +10,7 @@ import {
   removeSubscription,
 } from '../lib/subscriptions'
 import { getDjSets } from '../lib/dj-sets'
+import { extractVideoId, fetchVideoDetails, YouTubeApiError } from '../lib/youtube'
 import {
   buildAuthUrl,
   clearTokens,
@@ -159,6 +160,42 @@ subscriptionsApp.post('/api/tracklist', async (c) => {
     }
     log.error('subs.tracklist.throw', { tracklistUrl, ...errorFields(e) })
     return c.json({ error: 'upstream_error', message: `1001 scrape: ${(e as Error).message}` }, 502)
+  }
+})
+
+/**
+ * Video inspector: paste any YouTube URL (or bare id), get the raw
+ * `videos.list` JSON back. Read-only and side-effect free — no tracklist
+ * lookup, no playlist writes, nothing cached. Uses the read-only
+ * YOUTUBE_API_KEY (1 quota unit per call), not the OAuth token.
+ */
+subscriptionsApp.get('/api/youtube/video', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.yt_video', by: c.get('cfAccessEmail') })
+  const input = (c.req.query('url') || '').trim()
+  if (!input) return c.json({ error: 'missing_url' }, 400)
+  const videoId = extractVideoId(input)
+  if (!videoId) {
+    log.warn('subs.yt_video.bad_url', { input })
+    return c.json({ error: 'invalid_url', message: 'not a YouTube video URL or 11-character video id' }, 400)
+  }
+  if (!c.env.YOUTUBE_API_KEY) {
+    log.error('subs.yt_video.no_api_key')
+    return c.json({ error: 'not_configured', message: 'YOUTUBE_API_KEY is not set' }, 500)
+  }
+  try {
+    const video = await fetchVideoDetails(videoId, c.env.YOUTUBE_API_KEY, log)
+    if (!video) {
+      return c.json({ error: 'not_found', videoId, message: 'no video with that id (deleted, private, or never existed)' }, 404)
+    }
+    return c.json({ videoId, watchUrl: `https://www.youtube.com/watch?v=${videoId}`, video })
+  } catch (e) {
+    if (e instanceof YouTubeApiError) {
+      log.error('subs.yt_video.api_error', { videoId, status: e.status, body: e.body.slice(0, 500) })
+      // 502: the failure is upstream (bad key, quota exhausted, …), not in this request.
+      return c.json({ error: 'upstream_error', videoId, status: e.status, message: e.body.slice(0, 2000) }, 502)
+    }
+    log.error('subs.yt_video.throw', { videoId, ...errorFields(e) })
+    return c.json({ error: 'upstream_error', videoId, message: (e as Error).message }, 502)
   }
 })
 
@@ -693,6 +730,20 @@ const PAGE_HTML = /* html */ `<!doctype html>
   #cmb-body .counts { color: var(--muted); font-size: 0.82rem; }
   #cmb-body .counts .warn { color: var(--danger); }
   #cmb-body a { color: var(--accent); }
+  /* ── YouTube video inspector ── */
+  section#ytjson { margin-top: 2.25rem; }
+  #ytjson-form { display: flex; gap: 0.5rem; margin: 0 0 0.5rem; }
+  /* type="text", not "url", so a bare 11-char video id is accepted too — hence
+     it doesn't pick up the input[type="url"] rule above. */
+  #ytjson-url { flex: 1; min-width: 0; padding: 0.6rem 0.75rem; font: inherit; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; }
+  #ytjson-url:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #ytjson-status { color: var(--muted); font-size: 0.82rem; min-height: 1.2em; margin-bottom: 0.4rem; }
+  #ytjson-status .warn { color: var(--danger); }
+  #ytjson-status .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #ytjson-status a { color: var(--accent); }
+  #ytjson-out { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; line-height: 1.45;
+    white-space: pre; overflow: auto; max-height: 28em; margin: 0; padding: 0.6rem 0.7rem;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--card); }
   /* ── Recent requests (audit trail) ── */
   section#audit { margin-top: 2.25rem; }
   .audit-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
@@ -770,6 +821,21 @@ const PAGE_HTML = /* html */ `<!doctype html>
       </div>
     </div>
     <div id="cmb-body"><span class="counts">loading…</span></div>
+  </section>
+
+  <section id="ytjson">
+    <div class="audit-head">
+      <h2>YouTube video JSON</h2>
+      <div class="audit-actions">
+        <button id="ytjson-copy" class="ghost" hidden>Copy</button>
+      </div>
+    </div>
+    <form id="ytjson-form">
+      <input id="ytjson-url" type="text" placeholder="https://www.youtube.com/watch?v=… (or a bare video id)" />
+      <button type="submit">Fetch</button>
+    </form>
+    <div id="ytjson-status"></div>
+    <pre id="ytjson-out" hidden></pre>
   </section>
 
   <section id="audit">
@@ -1072,6 +1138,71 @@ const PAGE_HTML = /* html */ `<!doctype html>
       $proxyClear.disabled = false;
       $proxyClear.textContent = original;
     }
+  });
+
+  // ── YouTube video JSON inspector ───────────────────────────────────────
+  // Paste any watch/youtu.be/shorts URL (or a bare id) and dump the raw
+  // videos.list payload. Read-only: it touches nothing else in the app.
+  const $yjForm = document.getElementById('ytjson-form');
+  const $yjUrl = document.getElementById('ytjson-url');
+  const $yjBtn = $yjForm.querySelector('button');
+  const $yjStatus = document.getElementById('ytjson-status');
+  const $yjOut = document.getElementById('ytjson-out');
+  const $yjCopy = document.getElementById('ytjson-copy');
+
+  function yjStatus(html) { $yjStatus.innerHTML = html || ''; }
+
+  async function fetchVideoJson(input) {
+    yjStatus('fetching…');
+    $yjBtn.disabled = true;
+    try {
+      const r = await fetch('/subscriptions/api/youtube/video?url=' + encodeURIComponent(input), {
+        credentials: 'same-origin',
+      });
+      const raw = await r.text();
+      let data = null;
+      try { data = raw ? JSON.parse(raw) : null; } catch { /* non-JSON body */ }
+      if (!r.ok) {
+        $yjOut.hidden = true;
+        $yjCopy.hidden = true;
+        const msg = (data && (data.message || data.error)) || raw || ('failed (' + r.status + ')');
+        yjStatus('<span class="warn">' + esc(msg) + '</span>');
+        return;
+      }
+      // Pretty-print the whole envelope (videoId + watchUrl + the API item).
+      // textContent, never innerHTML — the payload is third-party text.
+      $yjOut.textContent = JSON.stringify(data, null, 2);
+      $yjOut.hidden = false;
+      $yjCopy.hidden = false;
+      const sn = (data && data.video && data.video.snippet) || {};
+      yjStatus(
+        '<span class="mono">' + esc(data.videoId) + '</span> · ' +
+        link(data.watchUrl, 'open on YouTube') +
+        (sn.title ? ' · ' + esc(sn.title) : '')
+      );
+    } catch (e) {
+      $yjOut.hidden = true;
+      $yjCopy.hidden = true;
+      yjStatus('<span class="warn">' + esc(e && e.message ? e.message : String(e)) + '</span>');
+    } finally {
+      $yjBtn.disabled = false;
+    }
+  }
+
+  $yjForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const v = $yjUrl.value.trim();
+    if (!v) return;
+    fetchVideoJson(v);
+  });
+
+  $yjCopy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($yjOut.textContent);
+      const original = $yjCopy.textContent;
+      $yjCopy.textContent = 'Copied';
+      setTimeout(() => { $yjCopy.textContent = original; }, 1200);
+    } catch { yjStatus('<span class="warn">clipboard blocked — select the JSON and copy manually</span>'); }
   });
 
   // ── Recent requests (audit trail) ──────────────────────────────────────

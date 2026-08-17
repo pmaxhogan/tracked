@@ -187,6 +187,16 @@ Once loaded, the badge stays on the card head, so collapsed cards keep showing w
 
 The set list comes from `GET /subscriptions/api/dj/<slug>` (`?refresh=1` to force), which walks the DJ's 1001tracklists index with the same infinite-scroll crawl the sync uses (`lib/dj-sets.ts` → `crawlDjIndex`), merges in any URLs the sync state discovered that the index no longer surfaces, and caches the result in KV for 6 h (`djsets:v1:<slug>`). If the crawl is blocked upstream, the page degrades to the sync state's URL list rather than erroring; an empty result is never cached, so the next view retries.
 
+### YouTube video JSON
+
+`/subscriptions` also has a **YouTube video JSON** section: paste any video URL (`watch?v=`, `youtu.be/`, `/shorts/`, `/embed/`, `/live/`, a bare 11-character id — anything `extractVideoId` accepts) and it pretty-prints the raw YouTube Data API payload for that video. Purely a lookup — it doesn't scrape a tracklist, touch a playlist, or write anything.
+
+```
+GET /subscriptions/api/youtube/video?url=...   → { videoId, watchUrl, video: { ...videos.list item } }
+```
+
+The `video` field is Google's `videos.list` item verbatim, asking for every part a read-only key can fetch (`snippet`, `contentDetails`, `statistics`, `status`, `liveStreamingDetails`, `localizations`, `player`, `recordingDetails`, `topicDetails`). Uses `YOUTUBE_API_KEY` (1 quota unit per call), not the OAuth token, and isn't cached. `404` means the id resolved to no item (deleted, private, or never existed); `502` passes through an upstream failure (invalid key, quota exhausted) with Google's own error body so it's visible in the panel.
+
 ### YouTube account connection
 
 The same page has a "Sign in with YouTube" button that runs an OAuth 2.0 authorization-code flow against Google so the worker can create and modify playlists on the connected channel. The flow is implemented in `src/lib/google-oauth.ts` and wired up in `src/routes/subscriptions.ts`:

@@ -102,6 +102,60 @@ export async function resolveVideo(
   return { videoId: best.c.id, matchTitle: best.c.title }
 }
 
+/**
+ * Every `videos.list` part the read-only API key is allowed to fetch. The
+ * inspector shows whatever Google returns verbatim, so we ask for everything
+ * rather than curating — parts that need OAuth (fileDetails, processingDetails,
+ * suggestions) are deliberately absent, since a key-only call 403s on those.
+ *
+ * Cost: 1 quota unit regardless of how many parts are requested.
+ */
+export const VIDEO_DETAIL_PARTS = [
+  'snippet',
+  'contentDetails',
+  'statistics',
+  'status',
+  'liveStreamingDetails',
+  'localizations',
+  'player',
+  'recordingDetails',
+  'topicDetails',
+] as const
+
+/** A non-2xx from the YouTube Data API, with the status and body kept for display. */
+export class YouTubeApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: string,
+  ) {
+    super(`youtube ${status}: ${body}`)
+    this.name = 'YouTubeApiError'
+  }
+}
+
+/**
+ * Raw `videos.list` item for one video id — exactly what Google returns, with
+ * nothing reshaped. Returns null when the id resolves to no item (deleted,
+ * private, or simply not a real id): the API answers 200 with `items: []`.
+ * Throws YouTubeApiError on a non-2xx (bad key, quota exhausted, …).
+ */
+export async function fetchVideoDetails(
+  videoId: string,
+  apiKey: string,
+  log?: Logger,
+): Promise<Record<string, unknown> | null> {
+  log?.info('yt.video_details.start', { videoId })
+  const url =
+    `${API}/videos?part=${VIDEO_DETAIL_PARTS.join(',')}` +
+    `&id=${encodeURIComponent(videoId)}&key=${encodeURIComponent(apiKey)}`
+  const res = await fetchWithTimeout(url, { timeoutMs: 8000 })
+  if (!res.ok) throw new YouTubeApiError(res.status, await res.text())
+  const data = (await res.json()) as { items?: Array<Record<string, unknown>> }
+  const item = data.items?.[0] ?? null
+  log?.info('yt.video_details.done', { videoId, found: !!item })
+  return item
+}
+
 const ISO_RE = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/
 
 export function parseIso8601Duration(s: string): number | null {
