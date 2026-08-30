@@ -87,6 +87,8 @@ export type TracklistTrackOut = {
   isUnidentified: boolean
   idStatus: string | null
   isMashupLinked: boolean
+  /** Whether the connected YouTube account has liked youtubeLink (filled by the routes, null here). */
+  youtubeLiked: boolean | null
 }
 
 export type FullTracklist = {
@@ -143,6 +145,7 @@ export async function resolveFullTracklist(
       isUnidentified: t.isUnidentified,
       idStatus: t.idStatus,
       isMashupLinked: t.isMashupLinked,
+      youtubeLiked: null,
     }
   })
 

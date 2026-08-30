@@ -10,6 +10,7 @@ import { TTL, getJson, invertedTs, putJson, sha1Hex } from '../lib/cache'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields, type Logger } from '../lib/log'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
+import { attachYoutubeLiked } from '../lib/liked-status'
 
 export const nowPlayingRoute = createRoute({
   method: 'post',
@@ -326,8 +327,13 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     }),
   )
 
+  // Phase 6 — mark which tracks the connected YouTube account has already
+  // liked (drives the filled/outlined thumbs-up in the Tasker scene). Best
+  // effort: null everywhere when YouTube isn't connected or the lookup fails.
+  const tracks = await attachYoutubeLiked(env, enriched, log)
+
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
-  const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks: enriched } satisfies Res
+  const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks } satisfies Res
   log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
   bgAudit({ status })
   return c.json(payload, 200)

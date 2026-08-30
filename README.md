@@ -59,7 +59,8 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
       "appleLink": "https://music.apple.com/...",
       "youtubeLink": null,
       "trackUrl": "https://www.1001tracklists.com/track/1x9zgrpp/odd-mob-left-to-right-aidan-rudd-remix/index.html",
-      "artworkUrl": "https://geo-media.beatport.com/image_size/300x300/abc-def.jpg"
+      "artworkUrl": "https://geo-media.beatport.com/image_size/300x300/abc-def.jpg",
+      "youtubeLiked": false           // true/false = liked on the connected YouTube account; null = not connected / no youtubeLink / lookup failed
     }
   ]
 }
@@ -90,6 +91,8 @@ Mashup-linked siblings (1001tracklists `w/`) count as a single group, so a curre
 `artworkUrl` is the album art URL, normalized server-side to a square **300×300** for both supported CDNs (Beatport's `image_size/300x300/…` and SoundCloud's `t300x300`). `null` when only 1001tracklists' placeholder was embedded — clients should render their own no-art indicator. Unknown CDNs are passed through unchanged so something is always surfaced when the page has a non-placeholder image.
 
 `durationSeconds` / `durationTime` is the **length the track occupies in this set** (not the studio length): `nextGroupStart − thisGroupStart` for non-last groups, or `videoDurationSeconds − thisGroupStart` for the last group when the caller sent `videoDurationSeconds`. Mashup-linked siblings share the group's window. `null` (and `""` for `durationTime`) when neither input is known or the cue is missing.
+
+`youtubeLiked` (per-track) is whether the YouTube account connected via `/subscriptions` has liked the `youtubeLink` video — i.e. whether it is in YouTube Music's "Liked songs". Resolved with one `videos.getRating` call per request (1 quota unit per 50 ids). `null` when no account is connected, the track has no `youtubeLink`, or the lookup failed (a YouTube outage never fails `/now-playing`). Toggle it with `POST /likes` (below).
 
 When the upstream rate-limits us (1001tracklists per-IP captcha gate), the response is `status: "upstream_error"` with `message: "1001 search: ip_blocked (<ip>)"` (or `1001 scrape: …`) — both the home-IP direct-fetch path and the BrightData unlocker path detect the unblock-form page and surface it cleanly rather than silently degrading to `no_tracklist`.
 
@@ -133,13 +136,34 @@ The scheme and leading `www.` are optional and any query string / fragment is ig
       "youtubeLink": "https://www.youtube.com/watch?v=...",
       "isUnidentified": false,
       "idStatus": null,
-      "isMashupLinked": false
+      "isMashupLinked": false,
+      "youtubeLiked": null           // same semantics as /now-playing
     }
   ]
 }
 ```
 
 Per-track field semantics (`startSeconds`, `trackUrl`, `artworkUrl`, `idStatus`, `isUnidentified`, `isMashupLinked`) are identical to `/now-playing` — see the notes above. Unlike `/now-playing`, this endpoint uses **HTTP status codes** rather than a `status` field: `400` for a bad URL, `401` for a missing/invalid bearer token, and `502 upstream_error` when 1001tracklists rate-limits us (per-IP captcha gate) or the page parses to zero tracks (the fingerprint of a transient captcha that slipped past the block detectors — retry shortly).
+
+### Like / unlike a track
+
+`POST /likes` rates a YouTube video `like` or `none` on the account connected via `/subscriptions` — which is exactly what adds a song to / removes it from YouTube Music's "Liked songs". This backs the thumbs-up button in the Tasker scene: tap once to like the track that's playing, tap again to unlike.
+
+```
+POST /likes
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "videoUrl": "https://www.youtube.com/watch?v=79n8BaQAL2Q", "liked": true }
+```
+
+`videoUrl` accepts every shape `/now-playing` does (watch URL, `youtu.be`, `music.youtube.com`, or a bare 11-character id). `liked: true` → `videos.rate` with `rating=like`; `liked: false` → `rating=none`. Idempotent — re-liking a liked video is a no-op `200`.
+
+```jsonc
+{ "videoId": "79n8BaQAL2Q", "liked": true }
+```
+
+Errors use HTTP status codes: `400 invalid_url` when no video id parses, `401` for a bad bearer token, `503 youtube_not_connected` when no YouTube account is connected (or Google revoked the refresh token — reconnect from `/subscriptions`), and `502 upstream_error` when YouTube rejects the call (the message carries Google's `reason`, e.g. `videoNotFound`, `quotaExceeded`). `videos.rate` costs 50 quota units per call.
 
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 

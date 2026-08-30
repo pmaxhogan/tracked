@@ -60,6 +60,11 @@ export const ResponseTrackSchema = z
       example: 'https://geo-media.beatport.com/image_size/300x300/8702a65a-cfa7-4890-9476-4a346d36f169.jpg',
       description: 'Square 300×300 album art (normalized — Beatport via image_size/300x300, SoundCloud via t300x300). null when only the 1001tl placeholder was embedded; clients should show their own no-art indicator.',
     }),
+    youtubeLiked: z.boolean().nullable().openapi({
+      example: false,
+      description:
+        'Whether the connected YouTube account (see /subscriptions) has liked the youtubeLink video — i.e. it is in YouTube Music "Liked songs". null when no YouTube account is connected, the track has no youtubeLink, or the rating lookup failed. Toggle with POST /likes.',
+    }),
   })
   .openapi('ResponseTrack')
 
@@ -115,6 +120,7 @@ export const TracklistTrackSchema = z
     isUnidentified: z.boolean().openapi({ description: 'True only when the playing track is fully anonymous (e.g. "Cave Studio - ID"). Partial-ID variants set idStatus instead and keep their base-track fields.' }),
     idStatus: z.string().nullable().openapi({ example: 'ID Remix', description: 'Non-null when this row is a partial-ID variant of a known base track ("ID Remix", "ID Edit", ...). The artist/title/links describe the BASE track; the playing version may differ.' }),
     isMashupLinked: z.boolean().openapi({ description: 'True when this row is a "w/" mashup sibling of the previous row (shares its cue position).' }),
+    youtubeLiked: z.boolean().nullable().openapi({ description: 'Whether the connected YouTube account has liked the youtubeLink video. null when not connected, no youtubeLink, or the lookup failed.' }),
   })
   .openapi('TracklistTrack')
 
@@ -130,3 +136,25 @@ export const TracklistResponse = z
     tracks: z.array(TracklistTrackSchema),
   })
   .openapi('TracklistResponse')
+
+// ─── Like / unlike a video on the connected YouTube account ─────────────────
+
+export const LikesRequest = z
+  .object({
+    videoUrl: z.string().min(1).openapi({
+      example: 'https://www.youtube.com/watch?v=79n8BaQAL2Q',
+      description: 'YouTube URL or bare 11-character video id (same shapes /now-playing accepts for videoUrl).',
+    }),
+    liked: z.boolean().openapi({
+      example: true,
+      description: 'true → rate "like" (adds to YouTube Music "Liked songs"); false → rate "none" (removes the like). Idempotent.',
+    }),
+  })
+  .openapi('LikesRequest')
+
+export const LikesResponse = z
+  .object({
+    videoId: z.string().openapi({ example: '79n8BaQAL2Q' }),
+    liked: z.boolean().openapi({ description: 'Echoes the requested state after YouTube accepted it.' }),
+  })
+  .openapi('LikesResponse')

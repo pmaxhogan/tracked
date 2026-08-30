@@ -18,7 +18,7 @@ const API = 'https://www.googleapis.com/youtube/v3'
 
 export type Playlist = { id: string; title: string }
 
-async function authedFetch(
+export async function authedFetch(
   url: string,
   accessToken: string,
   init: RequestInit = {},
@@ -82,7 +82,7 @@ export function isPermanentInsertError(e: unknown): boolean {
   return e.status === 400 || e.status === 404 || e.status === 403
 }
 
-async function expectOk(res: Response, op: string, playlistIdHint?: string): Promise<void> {
+export async function expectOk(res: Response, op: string, playlistIdHint?: string): Promise<void> {
   if (res.ok) return
   const body = await res.text().catch(() => '')
   if (res.status === 404 && /playlistNotFound/.test(body)) {

@@ -6,6 +6,7 @@ import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields } from '../lib/log'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
+import { attachYoutubeLiked } from '../lib/liked-status'
 
 export const tracklistRoute = createRoute({
   method: 'post',
@@ -70,6 +71,11 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
     return c.json({ error: 'upstream_error', message: 'parsed 0 tracks (likely a transient captcha) — try again shortly' }, 502)
   }
 
+  // Best-effort per-track "already liked on YouTube" flag (null when not
+  // connected / no youtubeLink / lookup failed). Kept here rather than in
+  // resolveFullTracklist so the CF-Access tracklist viewer is unaffected.
+  const tracks = await attachYoutubeLiked(env, full.tracks, log)
+
   const payload = {
     tracklistUrl,
     slug: full.slug,
@@ -77,8 +83,8 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
     setYoutubeLink: full.setYoutubeLink,
     setSoundcloudLink: full.setSoundcloudLink,
     linksResolved: resolveLinks,
-    trackCount: full.tracks.length,
-    tracks: full.tracks,
+    trackCount: tracks.length,
+    tracks,
   }
   log.info('tracklist.done', {
     tracklistUrl,

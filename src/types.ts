@@ -73,4 +73,6 @@ export type ResponseTrack = {
   trackUrl: string | null
   /** Square 300×300 album-art URL. null when only a placeholder was available. */
   artworkUrl: string | null
+  /** Whether the connected YouTube account has liked youtubeLink. null when YouTube is not connected, the track has no youtubeLink, or the lookup failed. */
+  youtubeLiked: boolean | null
 }

@@ -11,3 +11,7 @@ logs/
 # Claude Code local config
 .claude/
 .gstack/
+
+# Tasker project exports — contain the live API bearer token; never commit.
+tasker/
+*.prj.xml

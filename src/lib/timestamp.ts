@@ -119,6 +119,7 @@ export function selectCurrent(
       youtubeLink: null,
       trackUrl: t.trackUrl,
       artworkUrl: t.artworkUrl,
+      youtubeLiked: null,
     }
   })
 
