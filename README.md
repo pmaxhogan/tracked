@@ -60,7 +60,7 @@ The response always returns `200` (errors live in `status` so the Tasker side ca
       "youtubeLink": null,
       "trackUrl": "https://www.1001tracklists.com/track/1x9zgrpp/odd-mob-left-to-right-aidan-rudd-remix/index.html",
       "artworkUrl": "https://geo-media.beatport.com/image_size/300x300/abc-def.jpg",
-      "youtubeLiked": false           // true/false = liked on the connected YouTube account; null = not connected / no youtubeLink / lookup failed
+      "youtubeLiked": null            // true/false = liked on the connected YouTube account; null = not connected / no youtubeLink (as here) / lookup failed
     }
   ]
 }
@@ -92,7 +92,7 @@ Mashup-linked siblings (1001tracklists `w/`) count as a single group, so a curre
 
 `durationSeconds` / `durationTime` is the **length the track occupies in this set** (not the studio length): `nextGroupStart − thisGroupStart` for non-last groups, or `videoDurationSeconds − thisGroupStart` for the last group when the caller sent `videoDurationSeconds`. Mashup-linked siblings share the group's window. `null` (and `""` for `durationTime`) when neither input is known or the cue is missing.
 
-`youtubeLiked` (per-track) is whether the YouTube account connected via `/subscriptions` has liked the `youtubeLink` video — i.e. whether it is in YouTube Music's "Liked songs". Resolved with one `videos.getRating` call per request (1 quota unit per 50 ids). `null` when no account is connected, the track has no `youtubeLink`, or the lookup failed (a YouTube outage never fails `/now-playing`). Toggle it with `POST /likes` (below).
+`youtubeLiked` (per-track) is whether the YouTube account connected via `/subscriptions` has liked the `youtubeLink` video — i.e. whether it is in YouTube Music's "Liked songs". Resolved with one `videos.getRating` call per request (1 quota unit per 50 ids; `/tracklist` on a 100-track set makes two), capped at 3 s. `null` when no account is connected, the track has no `youtubeLink`, or the lookup failed (a YouTube outage never fails `/now-playing`). Toggle it with `POST /likes` (below).
 
 When the upstream rate-limits us (1001tracklists per-IP captcha gate), the response is `status: "upstream_error"` with `message: "1001 search: ip_blocked (<ip>)"` (or `1001 scrape: …`) — both the home-IP direct-fetch path and the BrightData unlocker path detect the unblock-form page and surface it cleanly rather than silently degrading to `no_tracklist`.
 

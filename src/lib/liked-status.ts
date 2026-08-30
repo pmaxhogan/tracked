@@ -3,6 +3,12 @@ import { extractVideoId } from './youtube'
 import { getAccessToken } from './google-oauth'
 import { getRatings } from './youtube-likes'
 import { errorFields, type Logger } from './log'
+import { fetchWithTimeout } from './fetch'
+
+/** Google must never hold /now-playing hostage: a stalled connection is not a
+ *  rejection, so cap the token refresh + getRating round-trips hard. */
+const LIKED_TIMEOUT_MS = 3000
+const timedFetch: typeof fetch = (input, init) => fetchWithTimeout(input as RequestInfo, { ...(init ?? {}), timeoutMs: LIKED_TIMEOUT_MS })
 
 /**
  * Annotate each track with `youtubeLiked` — whether the connected YouTube
@@ -10,7 +16,8 @@ import { errorFields, type Logger } from './log'
  *
  *   - no OAuth connection / no youtubeLink / lookup failure → `null`
  *   - rating === 'like'                                     → `true`
- *   - any other rating the API reports                     → `false`
+ *   - rating 'unspecified' (YouTube can't tell)              → `null`
+ *   - any other rating ('none', 'dislike')                  → `false`
  *
  * Never throws and never blocks the response on a YouTube outage; the client
  * renders `null` as the outlined (unknown) thumbs-up. Costs one
@@ -20,7 +27,7 @@ export async function attachYoutubeLiked<T extends { youtubeLink: string | null 
   env: Env,
   tracks: T[],
   log: Logger,
-  fetcher: typeof fetch = fetch,
+  fetcher: typeof fetch = timedFetch,
 ): Promise<Array<T & { youtubeLiked: boolean | null }>> {
   const withNull = () => tracks.map((t) => ({ ...t, youtubeLiked: null }))
 
@@ -47,7 +54,7 @@ export async function attachYoutubeLiked<T extends { youtubeLink: string | null 
     return tracks.map((t) => {
       const id = idOf(t)
       const r = id ? ratings.get(id) : undefined
-      return { ...t, youtubeLiked: r === undefined ? null : r === 'like' }
+      return { ...t, youtubeLiked: r === undefined || r === 'unspecified' ? null : r === 'like' }
     })
   } catch (e) {
     log.warn('liked.lookup_failed', errorFields(e))

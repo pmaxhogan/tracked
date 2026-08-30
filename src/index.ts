@@ -8,7 +8,16 @@ import type { Env } from './types'
 import { backfillCombined, syncAll, syncPendingOnly } from './lib/sync'
 import { makeLogger, errorFields } from './lib/log'
 
-const app = new OpenAPIHono<{ Bindings: Env }>()
+// Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
+// which is not the `{ error, message }` shape every route documents. Normalise
+// so clients (the Tasker toasts in particular) can always read `.message`.
+const app = new OpenAPIHono<{ Bindings: Env }>({
+  defaultHook: (result, c) => {
+    if (result.success) return
+    const issues = result.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`)
+    return c.json({ error: 'invalid_request', message: issues.join('; ') }, 400)
+  },
+})
 
 app.openapi(nowPlayingRoute, nowPlayingHandler)
 app.openapi(tracklistRoute, tracklistHandler)

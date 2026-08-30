@@ -53,9 +53,19 @@ describe('POST /likes', () => {
     expect(res.status).toBe(401)
   })
 
-  it('400s on a body that fails validation', async () => {
+  it('400s on a body that fails validation, in the documented { error, message } shape', async () => {
     const res = await app.request(post({ videoUrl: 'https://youtu.be/79n8BaQAL2Q' }), undefined, env())
     expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string; message: string }
+    expect(body.error).toBe('invalid_request')
+    expect(body.message).toContain('liked')
+  })
+
+  it('500s misconfigured when the token is expired and the OAuth client secrets are missing', async () => {
+    const expired: StoredTokens = { ...validTokens, expiresAt: Math.floor(Date.now() / 1000) - 10 }
+    const res = await app.request(post({ videoUrl: '79n8BaQAL2Q', liked: true }), undefined, env({ 'oauth:google': JSON.stringify(expired) }))
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({ error: 'misconfigured' })
   })
 
   it('400s on an unparseable YouTube URL', async () => {

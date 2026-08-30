@@ -21,6 +21,7 @@ export const likesRoute = createRoute({
     400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Validation failure / unparseable YouTube URL' },
     401: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Missing/invalid bearer token' },
     502: { content: { 'application/json': { schema: ErrorResponse } }, description: 'YouTube API rejected the call (quota, video not found, ...)' },
+    500: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Server misconfiguration (GOOGLE_OAUTH_CLIENT_ID / SECRET missing)' },
     503: { content: { 'application/json': { schema: ErrorResponse } }, description: 'No YouTube account connected (or its refresh token was revoked)' },
   },
 })
@@ -59,6 +60,9 @@ export const likesHandler: RouteHandler<typeof likesRoute, { Bindings: Env }> = 
     log.error('likes.token_failed', { videoId, ...errorFields(e) })
     if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
       return c.json({ error: 'youtube_not_connected', message: 'YouTube refresh token was revoked; reconnect at /subscriptions' }, 503)
+    }
+    if (/not configured/.test((e as Error).message)) {
+      return c.json({ error: 'misconfigured', message: (e as Error).message }, 500)
     }
     return c.json({ error: 'upstream_error', message: `oauth: ${(e as Error).message}` }, 502)
   }

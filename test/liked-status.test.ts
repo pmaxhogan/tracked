@@ -58,19 +58,20 @@ describe('attachYoutubeLiked', () => {
 
   it('maps like → true, other ratings → false, unknown id → null, no link → null', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(
-      jsonResponse({ items: [{ videoId: 'aaaaaaaaaaa', rating: 'like' }, { videoId: 'bbbbbbbbbbb', rating: 'none' }] }),
+      jsonResponse({ items: [{ videoId: 'aaaaaaaaaaa', rating: 'like' }, { videoId: 'bbbbbbbbbbb', rating: 'none' }, { videoId: 'eeeeeeeeeee', rating: 'unspecified' }] }),
     ) as unknown as typeof fetch
     const r = await attachYoutubeLiked(
       env({ 'oauth:google': JSON.stringify(validTokens) }),
-      [...tracks, { title: 'D', youtubeLink: 'https://youtu.be/ddddddddddd' }],
+      [...tracks, { title: 'D', youtubeLink: 'https://youtu.be/ddddddddddd' }, { title: 'E', youtubeLink: 'https://youtu.be/eeeeeeeeeee' }],
       log(),
       fetcher,
     )
-    expect(r.map((t) => t.youtubeLiked)).toEqual([true, false, null, null])
+    // unspecified (YouTube can't tell) is "unknown", same as an id the API didn't echo.
+    expect(r.map((t) => t.youtubeLiked)).toEqual([true, false, null, null, null])
     // Original fields are preserved.
     expect(r[0]!.title).toBe('A')
     const url = new URL((fetcher as unknown as { mock: { calls: string[][] } }).mock.calls[0]![0]!)
-    expect(url.searchParams.get('id')).toBe('aaaaaaaaaaa,bbbbbbbbbbb,ddddddddddd')
+    expect(url.searchParams.get('id')).toBe('aaaaaaaaaaa,bbbbbbbbbbb,ddddddddddd,eeeeeeeeeee')
   })
 
   it('degrades to null (never throws) when the rating lookup fails', async () => {
