@@ -3,6 +3,8 @@ export type Env = {
   /** Durable list of DJ subscriptions for the /subscriptions mini-app. */
   SUBS: KVNamespace
   API_TOKEN: string
+  /** Dedicated bearer for GET /liked-songs (agents that only need the liked list). Never accepted by the Tasker routes. */
+  LIKED_SONGS_TOKEN?: string
   YOUTUBE_API_KEY: string
   /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
   BRIGHTDATA_API_KEY?: string

@@ -165,6 +165,39 @@ Content-Type: application/json
 
 Errors use HTTP status codes: `400 invalid_url` when no video id parses, `401` for a bad bearer token, `503 youtube_not_connected` when no YouTube account is connected (or Google revoked the refresh token — reconnect from `/subscriptions`), and `502 upstream_error` when YouTube rejects the call (the message carries Google's `reason`, e.g. `videoNotFound`, `quotaExceeded`). `videos.rate` costs 50 quota units per call.
 
+### List every liked song
+
+`GET /liked-songs` dumps the connected account's "Liked videos" playlist (YouTube's `LL`, which is exactly YouTube Music's "Liked songs") as JSON, newest-liked first. It is meant for agents/scripts, so it has its **own bearer token** — `LIKED_SONGS_TOKEN`, a separate secret from the Tasker `API_TOKEN`. Neither token opens the other's routes. Read-only.
+
+```
+GET /liked-songs?durations=1&maxPages=20&pageToken=...
+Authorization: Bearer <LIKED_SONGS_TOKEN>
+```
+
+```jsonc
+{
+  "playlistId": "LL",
+  "count": 1234,
+  "nextPageToken": null,          // non-null only when maxPages stopped the walk early — pass back as ?pageToken=
+  "quotaUnits": 50,               // YouTube Data API quota this call spent
+  "items": [
+    {
+      "videoId": "79n8BaQAL2Q",
+      "duration": "PT4M30S",      // ISO 8601, from videos.list; null with durations=0 or when unavailable
+      "durationSeconds": 270,
+      "unavailable": false,       // true = deleted/private (videos.list didn't return it, or the title is "Deleted video"/"Private video")
+      "item": { /* raw youtube#playlistItem: id, snippet, contentDetails, status — verbatim */ }
+    }
+  ]
+}
+```
+
+Quota: `playlistItems.list` costs 1 unit per page of 50 **regardless of which parts you ask for**, so every part is requested. But playlistItems never carries duration — that lives only in `videos.list` — so by default the collected ids are also batched through `videos.list?part=contentDetails` (another 1 unit per 50) and `durationSeconds` is attached to each item. That is what lets a client filter by length (e.g. "under 25 minutes") without any further calls. Pass `durations=0` to skip that second pass. Net: ~2 units per 50 liked songs, so a 2,500-song library is ~100 units of the 10,000/day quota.
+
+`maxPages` (1–200) caps how many playlist pages one call walks; the response's `nextPageToken` resumes from where it stopped. Omit it to get everything in one response. The reason to cap: a full walk with durations on makes `2 × ceil(N/50)` YouTube subrequests (plus a KV read and possibly a token refresh), and Workers allow 50 subrequests per invocation on the free plan (so a library over ~1,200 songs 502s without `maxPages`) or 1,000 on paid (~24,000 songs).
+
+Errors mirror `/likes`: `401` bad/missing `LIKED_SONGS_TOKEN`, `500` when that secret (or the OAuth client) is not configured, `503 youtube_not_connected`, `502 upstream_error` with Google's `reason`.
+
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 
 ## Subscriptions mini-app
@@ -357,6 +390,7 @@ npx wrangler kv namespace create SUBS --preview
 
 # 2. Set secrets
 echo $API_TOKEN                 | npx wrangler secret put API_TOKEN
+echo $LIKED_SONGS_TOKEN         | npx wrangler secret put LIKED_SONGS_TOKEN   # separate token for GET /liked-songs
 echo $YOUTUBE_API_KEY           | npx wrangler secret put YOUTUBE_API_KEY
 echo $BRIGHTDATA_API_KEY        | npx wrangler secret put BRIGHTDATA_API_KEY
 echo $GOOGLE_OAUTH_CLIENT_ID    | npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID

@@ -158,3 +158,45 @@ export const LikesResponse = z
     liked: z.boolean().openapi({ description: 'Echoes the requested state after YouTube accepted it.' }),
   })
   .openapi('LikesResponse')
+
+export const LikedSongsQuery = z
+  .object({
+    durations: z
+      .enum(['0', '1'])
+      .optional()
+      .openapi({
+        example: '1',
+        description:
+          'Default "1": batch every videoId through videos.list (1 quota unit per 50) and attach duration/durationSeconds. "0" skips that pass; playlistItems alone never carries duration.',
+      }),
+    pageToken: z.string().optional().openapi({ description: 'Resume from a nextPageToken returned by an earlier call that hit maxPages.' }),
+    maxPages: z.coerce.number().int().min(1).max(200).optional().openapi({
+      example: 20,
+      description: 'Cap on playlistItems pages (50 songs each) walked in one call. Omit to walk the whole playlist.',
+    }),
+  })
+  .openapi('LikedSongsQuery')
+
+export const LikedSongSchema = z
+  .object({
+    videoId: z.string().openapi({ example: '79n8BaQAL2Q' }),
+    duration: z.string().nullable().openapi({ example: 'PT4M30S', description: 'ISO 8601 as YouTube emits it; null when durations=0 or the video is unavailable.' }),
+    durationSeconds: z.number().nullable().openapi({ example: 270 }),
+    unavailable: z.boolean().openapi({
+      description: 'true when the video is deleted/private: videos.list did not return it, or the playlistItem title is "Deleted video"/"Private video".',
+    }),
+    item: z.record(z.string(), z.unknown()).openapi({
+      description: 'The raw youtube#playlistItem resource (parts id, snippet, contentDetails, status), verbatim.',
+    }),
+  })
+  .openapi('LikedSong')
+
+export const LikedSongsResponse = z
+  .object({
+    playlistId: z.literal('LL'),
+    count: z.number().int(),
+    nextPageToken: z.string().nullable().openapi({ description: 'Non-null only when maxPages stopped the walk early; pass back as ?pageToken= to continue.' }),
+    quotaUnits: z.number().int().openapi({ description: 'YouTube Data API quota this call spent (1 per playlistItems page + 1 per 50 videos when durations=1).' }),
+    items: z.array(LikedSongSchema),
+  })
+  .openapi('LikedSongsResponse')

@@ -197,3 +197,87 @@ export async function addVideoToPlaylist(
   )
   await expectOk(res, 'playlistItems.insert', playlistId)
 }
+
+/** YouTube's alias for the authenticated user's "Liked videos" playlist — what YouTube Music shows as "Liked songs". */
+export const LIKED_VIDEOS_PLAYLIST_ID = 'LL'
+
+/** A raw `youtube#playlistItem` resource, passed through untouched. */
+export type RawPlaylistItem = Record<string, unknown> & {
+  id?: string
+  snippet?: { resourceId?: { videoId?: string } }
+  contentDetails?: { videoId?: string }
+}
+
+/**
+ * Page through `playlistId` and return every playlistItem verbatim, asking for
+ * every part (`id,snippet,contentDetails,status`) — cost is 1 unit per page of
+ * 50 regardless of parts, so there is no reason to skimp. Newest-added first
+ * (YouTube's order). `maxPages` bounds subrequests; when the cap is hit the
+ * returned `nextPageToken` lets the caller resume. `pageToken` starts mid-walk.
+ */
+export async function listPlaylistItems(
+  playlistId: string,
+  accessToken: string,
+  opts: { pageToken?: string; maxPages?: number } = {},
+  fetcher: typeof fetch = fetch,
+): Promise<{ items: RawPlaylistItem[]; nextPageToken: string | null; pages: number }> {
+  const items: RawPlaylistItem[] = []
+  let pageToken = opts.pageToken
+  let pages = 0
+  for (;;) {
+    const params = new URLSearchParams({
+      part: 'id,snippet,contentDetails,status',
+      playlistId,
+      maxResults: '50',
+    })
+    if (pageToken) params.set('pageToken', pageToken)
+    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
+    await expectOk(res, 'playlistItems.list', playlistId)
+    const data = (await res.json()) as { items?: RawPlaylistItem[]; nextPageToken?: string }
+    items.push(...(data.items ?? []))
+    pages++
+    pageToken = data.nextPageToken
+    if (!pageToken) return { items, nextPageToken: null, pages }
+    if (opts.maxPages && pages >= opts.maxPages) return { items, nextPageToken: pageToken, pages }
+  }
+}
+
+/**
+ * Parse an ISO 8601 duration as YouTube emits it (`PT1H2M3S`, `PT25M`, `PT0S`,
+ * `P1DT2H`). Returns null for anything unparseable.
+ */
+export function parseIsoDuration(iso: string | undefined | null): number | null {
+  if (!iso) return null
+  const m = iso.match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/)
+  if (!m) return null
+  const [, d, h, mi, s] = m
+  if (d === undefined && h === undefined && mi === undefined && s === undefined) return null
+  return Number(d ?? 0) * 86400 + Number(h ?? 0) * 3600 + Number(mi ?? 0) * 60 + Number(s ?? 0)
+}
+
+/**
+ * videos.list?part=contentDetails for a batch of ids (1 unit per chunk of 50).
+ * playlistItems never carry duration, so this is the only way to get it. Ids
+ * the API doesn't echo back (deleted/private/region-blocked) are absent from
+ * the map.
+ */
+export async function getVideoDurations(
+  videoIds: string[],
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<Map<string, { duration: string; durationSeconds: number | null }>> {
+  const out = new Map<string, { duration: string; durationSeconds: number | null }>()
+  const ids = [...new Set(videoIds)]
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50)
+    const params = new URLSearchParams({ part: 'contentDetails', id: chunk.join(','), maxResults: '50' })
+    const res = await authedFetch(`${API}/videos?${params}`, accessToken, {}, fetcher)
+    await expectOk(res, 'videos.list')
+    const data = (await res.json()) as { items?: Array<{ id?: string; contentDetails?: { duration?: string } }> }
+    for (const it of data.items ?? []) {
+      const duration = it.contentDetails?.duration
+      if (it.id && duration) out.set(it.id, { duration, durationSeconds: parseIsoDuration(duration) })
+    }
+  }
+  return out
+}
