@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseSearchResults, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData, normalizeTracklistUrl } from '../src/lib/tracklists1001'
+import { parseSearchResult, parseSearchResults, parseSearchQueryEcho, parseUrlSearchResult, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData, normalizeTracklistUrl } from '../src/lib/tracklists1001'
 import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
 import { selectCurrent } from '../src/lib/timestamp'
 
@@ -110,6 +110,49 @@ describe('parseSearchResult', () => {
   it('returns null when there are no matches', () => {
     const r = parseSearchResult(fx('search-no-result.html'))
     expect(r.tracklistUrl).toBeNull()
+  })
+})
+
+describe('parseSearchQueryEcho', () => {
+  it('returns the query 1001tl echoes in the results header', () => {
+    expect(parseSearchQueryEcho(fx('search-result.html'))).toBe('https://www.youtube.com/watch?v=79n8BaQAL2Q')
+  })
+
+  it('is present even on an empty result page', () => {
+    expect(parseSearchQueryEcho(fx('search-no-result.html'))).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ')
+  })
+
+  it('returns null for a non-search page', () => {
+    expect(parseSearchQueryEcho(fx('tracklist-matroda.html'))).toBeNull()
+  })
+})
+
+describe('parseUrlSearchResult (YouTube-URL search)', () => {
+  it('returns the first row when 1001tl echoes the URL verbatim', () => {
+    const r = parseUrlSearchResult(fx('search-result.html'), 'https://www.youtube.com/watch?v=79n8BaQAL2Q')
+    expect(r.textFallback).toBe(false)
+    expect(r.result.tracklistUrl).toBe(
+      'https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html',
+    )
+  })
+
+  it('returns null (not the newest "youtube" tracklist) when 1001tl mangled a multi-hyphen id into a word search', () => {
+    // Live page for watch?v=-R-Lmvn7sVg (Adam Beyer & Mau P, DCR786): the site
+    // rewrote the id as " R Lmvn7sVg" and returned 30 unrelated tracklists whose
+    // titles merely contain "youtube"/"watch".
+    const html = fx('search-url-fallback.html')
+    expect(parseSearchResults(html).length).toBe(30)
+    expect(parseSearchResult(html).tracklistUrl).toContain('/tracklist/1tfxuq6t/')
+    const r = parseUrlSearchResult(html, 'https://www.youtube.com/watch?v=-R-Lmvn7sVg')
+    expect(r.echo).toBe('https://www.youtube.com/watch?v= R Lmvn7sVg')
+    expect(r.textFallback).toBe(true)
+    expect(r.result.tracklistUrl).toBeNull()
+  })
+
+  it('still returns null for an empty result set', () => {
+    const r = parseUrlSearchResult(fx('search-no-result.html'), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ')
+    expect(r.textFallback).toBe(false)
+    expect(r.result.tracklistUrl).toBeNull()
   })
 })
 

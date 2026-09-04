@@ -37,9 +37,50 @@ export async function searchByYouTubeUrl(
     },
     state,
   )
-  const result = parseSearchResult(html)
-  log?.info('1001search.done', { videoUrl, htmlBytes: html.length, tracklistUrl: result.tracklistUrl, ms: Date.now() - start })
+  const { result, echo, textFallback } = parseUrlSearchResult(html, videoUrl)
+  if (textFallback) {
+    log?.warn('1001search.text_fallback', { videoUrl, echo, htmlBytes: html.length, ms: Date.now() - start })
+  }
+  log?.info('1001search.done', { videoUrl, htmlBytes: html.length, tracklistUrl: result.tracklistUrl, textFallback, ms: Date.now() - start })
   return { result, state: s2 }
+}
+
+/**
+ * The query 1001tl actually ran, as echoed in the page `<title>`
+ * (`Tracklists search result for "…"`). Present on every results page, empty
+ * result sets included; null only if the page is not a search results page.
+ */
+export function parseSearchQueryEcho(html: string): string | null {
+  const m = html.match(/<title>\s*Tracklists search result for &quot;(.*?)&quot;\s*<\/title>/s)
+  return m ? decodeEntities(m[1]!) : null
+}
+
+/** Video id from a youtube.com/watch?v= or youtu.be/ URL; null if neither. */
+function youTubeIdFromUrl(url: string): string | null {
+  return url.match(/[?&]v=([A-Za-z0-9_-]{11})(?:[&#]|$)/)?.[1] ?? url.match(/youtu\.be\/([A-Za-z0-9_-]{11})(?:[?&#]|$)/)?.[1] ?? null
+}
+
+/**
+ * Parse a YouTube-URL search page, guarding against 1001tl's silent text
+ * fallback. A genuine media-link search returns only tracklists carrying that
+ * link and echoes the URL verbatim. But 1001tl sanitizes the query before
+ * matching it as a URL, replacing the hyphens of a video id that contains two
+ * or more of them with spaces (`watch?v=-R-Lmvn7sVg` → `watch?v= R Lmvn7sVg`).
+ * The mangled string no longer parses as a media link, so the site runs a
+ * plain word search on the URL's tokens ("youtube", "watch", …) ordered
+ * newest-first and returns a full page of unrelated tracklists. Detect that
+ * by checking the echoed query still contains the video id we sent; when it
+ * does not, report no match so the caller falls through to a title search.
+ */
+export function parseUrlSearchResult(
+  html: string,
+  videoUrl: string,
+): { result: SearchResult; echo: string | null; textFallback: boolean } {
+  const echo = parseSearchQueryEcho(html)
+  const videoId = youTubeIdFromUrl(videoUrl)
+  const textFallback = echo !== null && (videoId ? !echo.includes(videoId) : echo !== videoUrl)
+  if (textFallback) return { result: { tracklistUrl: null }, echo, textFallback }
+  return { result: parseSearchResult(html), echo, textFallback }
 }
 
 /** A single tracklist row on a `/search/result.php` results page. */
