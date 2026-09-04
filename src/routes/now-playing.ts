@@ -47,7 +47,7 @@ const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId
 const CV = {
   yt: 1, // YouTube resolve → { videoId, matchTitle }
   searchUrl: 2, // 1001tl search by YouTube URL — v2: rejects the site's text-search fallback (multi-hyphen video ids)
-  searchTitle: 2, // 1001tl search by title — v2: IDF-weighted ranking (v1 over-rejected valid matches)
+  searchTitle: 3, // 1001tl search by title — v3: dates/episode codes tokenized, query-coverage floor (v2 under-scored dated titles)
   apple: 1, // iTunes Apple-link fallback
   // NB: the `tracklist` (parsed page) and `medialink` (per-track links) cache
   // families moved to lib/tracklist-resolve.ts (TRACKLIST_CV) so /now-playing

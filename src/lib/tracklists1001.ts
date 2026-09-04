@@ -161,15 +161,60 @@ function normText(s: string): string {
 const NOISE_TOKENS = new Set([
   'the', 'a', 'an', 'set', 'live', 'liveset', 'dj', 'mix', 'full', 'fullset',
   'official', 'video', 'audio', 'hd', 'hq', '4k', '1080p', '720p',
+  'from', 'at',
 ])
 const DURATION_TOKEN = /^\d+(h|hr|hrs|hour|hours|min|mins|m)$/
+/**
+ * 1001tl appends the set date to many visible titles ("… Croatia 2025-07-13");
+ * YouTube titles almost never carry it. Dropped before tokenizing so a
+ * candidate isn't charged three unmatched tokens for being dated.
+ */
+const ISO_DATE = /\b\d{4}-\d{2}-\d{2}\b/g
+/**
+ * Episode codes fuse a show prefix and a number ("DCR786", "ABGT500",
+ * "ASOT1000") while 1001tl's title spells the number out ("Drumcode Radio
+ * 786"). Split into prefix + number so the number matches either way.
+ */
+const EPISODE_CODE = /^([a-z]{2,})(\d{2,})$/
+
+/**
+ * Episode/edition numbers in a title's significant tokens ("786" from
+ * "Drumcode Radio 786" or "DCR786", "500" from "ABGT500"). Two or more digits
+ * so part/day counters ("Part 2", "Day 1") don't count. ISO dates are already
+ * stripped by sigTokens, so a dated title contributes no numbers.
+ */
+function numberTokens(tokens: Set<string>): Set<string> {
+  const out = new Set<string>()
+  for (const t of tokens) if (/^\d{2,}$/.test(t)) out.add(t)
+  return out
+}
+
+/**
+ * True when both titles name an episode/edition number and share none of
+ * them: "Drumcode Radio 786" vs "Drumcode Radio 377" is a different show even
+ * though every other word matches. Titles with no number on either side never
+ * conflict.
+ */
+function numbersConflict(a: Set<string>, b: Set<string>): boolean {
+  const na = numberTokens(a)
+  const nb = numberTokens(b)
+  if (na.size === 0 || nb.size === 0) return false
+  for (const n of na) if (nb.has(n)) return false
+  return true
+}
 
 /** Significant (non-noise) tokens of a title, as a set. */
 function sigTokens(s: string): Set<string> {
   const out = new Set<string>()
-  for (const t of normText(s).split(' ')) {
+  for (const t of normText(s.replace(ISO_DATE, ' ')).split(' ')) {
     if (!t || NOISE_TOKENS.has(t) || DURATION_TOKEN.test(t)) continue
-    out.add(t)
+    const m = t.match(EPISODE_CODE)
+    if (m) {
+      out.add(m[1]!)
+      out.add(m[2]!)
+    } else {
+      out.add(t)
+    }
   }
   return out
 }
@@ -214,6 +259,19 @@ export function scoreTitleMatch(query: string, candidate: string): number {
  *
  * Score = IDF-weighted coverage of a candidate's tokens by the query, i.e. "how
  * much of this tracklist's distinctive identity does the query account for."
+ * Two guards sit in front of that score:
+ *  - Episode numbers must agree. A same-show sibling ("Adam Beyer @ Drumcode
+ *    Radio 377 (Resistance Stage, Ultra Brasil)") matches a DCR786 query on
+ *    every word but the number, and the number is the only thing that tells
+ *    the two apart — so a candidate whose numbers share nothing with the
+ *    query's is rejected outright (see numbersConflict).
+ *  - A short unrelated title ("Adam Beyer - Drumcode 153") can score well by
+ *    sharing only the artist and show name, so a candidate must also account
+ *    for a minimum share of the QUERY's identity: the IDF-weighted mass of
+ *    query tokens that appear somewhere in the result set. Query tokens absent
+ *    from every candidate (a date, "4hr set") carry no discriminating signal
+ *    within the set and are ignored there, so surplus YouTube-title cruft
+ *    cannot sink a real match.
  * Returns null when nothing clears the bar — better "not found" than a
  * confidently-wrong tracklist.
  */
@@ -223,10 +281,12 @@ export function pickBestTracklist(
 ): (TracklistCandidate & { score: number }) | null {
   if (candidates.length === 0) return null
   if (candidates.length === 1) {
-    const score = scoreTitleMatch(query, candidates[0]!.title)
+    const only = candidates[0]!
+    if (numbersConflict(sigTokens(query), sigTokens(only.title))) return null
+    const score = scoreTitleMatch(query, only.title)
     // A lone hit for a specific set query is almost always right; require only
     // that it shares some real token, to reject a totally unrelated single row.
-    return score > 0 ? { ...candidates[0]!, score } : null
+    return score > 0 ? { ...only, score } : null
   }
 
   const N = candidates.length
@@ -239,6 +299,10 @@ export function pickBestTracklist(
   const isCommon = (t: string) => (df.get(t) ?? 0) > N / 2
 
   const ACCEPT = 0.5
+  // Minimum share of the query's in-set token mass a candidate must cover.
+  const QUERY_FLOOR = 0.3
+  let queryMass = 0
+  for (const t of qt) if (df.has(t)) queryMass += idf(t)
   let best: (TracklistCandidate & { score: number }) | null = null
   for (let i = 0; i < N; i++) {
     const c = candidates[i]!
@@ -251,14 +315,15 @@ export function pickBestTracklist(
       const ct = cts[i]!
       const shared = [...ct].filter((t) => qt.has(t))
       const distinctive = shared.some((t) => !isCommon(t))
-      if (shared.length < 2 || !distinctive) {
+      let sharedMass = 0
+      for (const t of shared) sharedMass += idf(t)
+      const queryCoverage = queryMass > 0 ? sharedMass / queryMass : 0
+      if (shared.length < 2 || !distinctive || queryCoverage < QUERY_FLOOR || numbersConflict(qt, ct)) {
         score = 0
       } else {
-        let num = 0
-        for (const t of shared) num += idf(t)
         let den = 0
         for (const t of ct) den += idf(t)
-        score = den > 0 ? num / den : 0
+        score = den > 0 ? sharedMass / den : 0
       }
     }
     if (!best || score > best.score) best = { ...c, score }

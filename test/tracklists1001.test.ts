@@ -213,6 +213,77 @@ describe('pickBestTracklist (IDF-weighted, real Gorgon City search page)', () =>
   })
 })
 
+describe('pickBestTracklist (real Adam Beyer & Mau P DCR786 title search)', () => {
+  // Live 1001tl rows for the YouTube title of DCR786. The correct set is row 1
+  // but its 1001tl title carries a date and spells "786" where YouTube says
+  // "DCR786"; a short unrelated Adam Beyer set used to win on brevity.
+  const rows = parseSearchResults(fx('search-dcr786-title.html'))
+  const query = 'Adam Beyer & Mau P live from Resistance at Ultra Europe [Drumcode Radio Live/DCR786]'
+
+  it('has the tricky shape: correct row is dated and numbered differently, a shorter same-artist row exists', () => {
+    expect(rows[0]!.title).toContain('Drumcode Radio 786')
+    expect(rows[0]!.title).toMatch(/\d{4}-\d{2}-\d{2}/)
+    expect(rows.some((r) => r.title === 'Adam Beyer - Drumcode 153 (live from Awakefest)')).toBe(true)
+  })
+
+  it('picks the DCR786 set, not the shorter Drumcode 153 row', () => {
+    const best = pickBestTracklist(query, rows)
+    expect(best?.tracklistUrl).toContain('/tracklist/2dxjw8x9/adam-beyer-mau-p-drumcode-radio-786-')
+    expect(best!.score).toBeGreaterThanOrEqual(0.5)
+  })
+
+  it('never settles for a different Drumcode Radio episode when DCR786 is absent', () => {
+    // With row 1 gone the closest rows are "Drumcode Radio 377/720/800 (Resistance
+    // Stage, Ultra …)": same artist, show and stage brand, wrong episode.
+    const without = rows.filter((r) => !r.tracklistUrl.includes('drumcode-radio-786'))
+    const best = pickBestTracklist(query, without)
+    expect(best?.title ?? '').not.toMatch(/Drumcode(?: Radio)? \d+/)
+  })
+
+  it('rejects a lone candidate whose episode number disagrees', () => {
+    const sibling = rows.find((r) => r.title.includes('Drumcode Radio 377'))!
+    expect(pickBestTracklist(query, [sibling])).toBeNull()
+  })
+})
+
+describe('pickBestTracklist (episode-number agreement)', () => {
+  const rows = [
+    { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'Adam Beyer @ Drumcode Radio 377 (Resistance Stage, Ultra Brasil, Brazil 2018-04-14)' },
+    { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Adam Beyer @ Drumcode Radio 786 (Resistance Stage, Ultra Europe, Croatia 2025-07-13)' },
+    { tracklistUrl: 'https://x/tracklist/c/ccc.html', title: 'Fisher @ Coachella, United States' },
+  ]
+
+  it('walks past a same-show row with the wrong number to the row with the right one', () => {
+    const best = pickBestTracklist('Adam Beyer live from Resistance at Ultra Europe [Drumcode Radio Live/DCR786]', rows)
+    expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
+  })
+
+  it('does not treat a dated title as numbered (ISO date is stripped first)', () => {
+    const best = pickBestTracklist('Adam Beyer @ Drumcode Radio 786', [rows[1]!, rows[2]!])
+    expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
+  })
+
+  it('still matches when only one side carries a number', () => {
+    const best = pickBestTracklist('Gorgon City 4hr Set Space Miami, Dec 27 2025', [
+      { tracklistUrl: 'https://x/tracklist/g/ggg.html', title: 'Gorgon City @ Club Space Miami, United States' },
+      { tracklistUrl: 'https://x/tracklist/c/ccc.html', title: 'Fisher @ Coachella, United States' },
+    ])
+    expect(best?.tracklistUrl).toBe('https://x/tracklist/g/ggg.html')
+  })
+})
+
+describe('sigTokens behaviours (via scoreTitleMatch)', () => {
+  it('matches a fused episode code against the spelled-out number', () => {
+    expect(scoreTitleMatch('Drumcode Radio DCR786', 'Drumcode Radio 786')).toBeGreaterThanOrEqual(0.9)
+  })
+
+  it('ignores an ISO date appended to the 1001tl title', () => {
+    const dated = scoreTitleMatch('Matroda @ Club Space Miami', 'Matroda @ Club Space Miami, United States 2023-08-05')
+    const undated = scoreTitleMatch('Matroda @ Club Space Miami', 'Matroda @ Club Space Miami, United States')
+    expect(dated).toBe(undated)
+  })
+})
+
 describe('pickBestTracklist (synthetic edge cases)', () => {
   it('accepts the lone candidate for a specific query', () => {
     const rows = parseSearchResults(fx('search-result.html'))
