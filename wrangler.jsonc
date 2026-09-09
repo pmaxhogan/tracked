@@ -12,7 +12,10 @@
   //                      sync left ≥1 sub with discoveredTracklistUrls >
   //                      processedTracklistUrls, this picks up where it
   //                      left off (skipping the discovery crawl) until the
-  //                      backfill is done. No-op when nothing pending.
+  //                      backfill is done. Also re-fetches processed sets
+  //                      whose recorded video is >5 days old, to catch a
+  //                      recording swapped on 1001tracklists (lib/sync.ts,
+  //                      "Recheck contract"). No-op when nothing is due.
   // Both then reconcile the combined "All tracked artists" playlist against
   // the per-artist ones (bounded per run and per day — see
   // lib/combined-playlist.ts), which is what backfills sets that predate the

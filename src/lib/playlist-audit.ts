@@ -27,13 +27,18 @@ export const PLAYLIST_AUDIT_PREFIX = 'pladd:'
  * Outcome for one tracklist the sync looked at:
  *  - `added`      the set's video was inserted into the playlist
  *  - `duplicate`  the video was already in the playlist (nothing inserted)
+ *  - `replaced`   a recheck found the set's YouTube recording swapped on
+ *                 1001tracklists: the old video was removed and the new one
+ *                 inserted (`previousVideoId` names the old one)
  *  - `no_youtube` the set page has no YouTube recording to add
  *  - `failed`     the set errored this run (a later run retries it)
  *  - `abandoned`  errored too many times in a row; the cron gives up on it
  *
  * `failed` and `abandoned` are what the panel's "problems only" filter keeps.
+ * Rechecks that find nothing changed write no row at all — at one recheck per
+ * set every few days they would drown the rows that matter.
  */
-export type PlaylistAdditionStatus = 'added' | 'duplicate' | 'no_youtube' | 'failed' | 'abandoned'
+export type PlaylistAdditionStatus = 'added' | 'duplicate' | 'replaced' | 'no_youtube' | 'failed' | 'abandoned'
 
 export type PlaylistAdditionRecord = {
   /** ISO timestamp of the moment the outcome was decided. */
@@ -46,6 +51,8 @@ export type PlaylistAdditionRecord = {
   setUrl: string
   videoId: string | null
   videoUrl: string | null
+  /** On `replaced` rows: the video this set resolved to before, now removed. */
+  previousVideoId?: string | null
   playlistId: string | null
   playlistTitle: string | null
   /**
@@ -83,6 +90,8 @@ export type PlaylistAdditionSummary = {
   ms: number | null
   /** Combined-playlist outcome — see PlaylistAdditionRecord.combinedStatus. */
   cmb: CombinedAdditionStatus | null
+  /** Superseded video id on `replaced` rows. */
+  prev?: string | null
 }
 
 export function playlistAdditionSummary(r: PlaylistAdditionRecord): PlaylistAdditionSummary {
@@ -98,6 +107,7 @@ export function playlistAdditionSummary(r: PlaylistAdditionRecord): PlaylistAddi
     msg: r.message ? r.message.slice(0, 160) : null,
     ms: r.meta.ms,
     cmb: r.combinedStatus,
+    ...(r.previousVideoId ? { prev: r.previousVideoId } : {}),
   }
 }
 

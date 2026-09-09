@@ -198,6 +198,64 @@ export async function addVideoToPlaylist(
   await expectOk(res, 'playlistItems.insert', playlistId)
 }
 
+/**
+ * playlistItems.list filtered by `videoId` (1 unit): the playlistItem ids that
+ * hold `videoId` in `playlistId`. Usually zero or one, but YouTube allows the
+ * same video in a playlist more than once, so it's a list. Deleting needs the
+ * item id, not the video id — this is the lookup that bridges the two.
+ */
+export async function findPlaylistItemIds(
+  playlistId: string,
+  videoId: string,
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<string[]> {
+  const out: string[] = []
+  let pageToken: string | undefined
+  for (;;) {
+    const params = new URLSearchParams({ part: 'id', playlistId, videoId, maxResults: '50' })
+    if (pageToken) params.set('pageToken', pageToken)
+    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
+    await expectOk(res, 'playlistItems.list', playlistId)
+    const data = (await res.json()) as { items?: Array<{ id?: string }>; nextPageToken?: string }
+    for (const it of data.items ?? []) if (it.id) out.push(it.id)
+    if (!data.nextPageToken) return out
+    pageToken = data.nextPageToken
+  }
+}
+
+/**
+ * playlistItems.delete (50 units). A 404 is treated as success: the item is
+ * already gone (the user removed it by hand between our list and our delete),
+ * which is the outcome we wanted.
+ */
+export async function deletePlaylistItem(
+  playlistItemId: string,
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  const params = new URLSearchParams({ id: playlistItemId })
+  const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, { method: 'DELETE' }, fetcher)
+  if (res.status === 404) return
+  await expectOk(res, 'playlistItems.delete')
+}
+
+/**
+ * Remove every occurrence of `videoId` from `playlistId`. Returns how many
+ * items were deleted (0 when the video wasn't there). Costs 1 unit for the
+ * lookup plus 50 per item removed.
+ */
+export async function removeVideoFromPlaylist(
+  playlistId: string,
+  videoId: string,
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<number> {
+  const itemIds = await findPlaylistItemIds(playlistId, videoId, accessToken, fetcher)
+  for (const id of itemIds) await deletePlaylistItem(id, accessToken, fetcher)
+  return itemIds.length
+}
+
 /** YouTube's alias for the authenticated user's "Liked videos" playlist — what YouTube Music shows as "Liked songs". */
 export const LIKED_VIDEOS_PLAYLIST_ID = 'LL'
 

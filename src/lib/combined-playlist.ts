@@ -38,7 +38,13 @@
 
 import type { Env } from '../types'
 import { getCachedPlaylistVideoIds, cachePlaylistVideoIds, findOrCreatePlaylist } from './playlist-cache'
-import { addVideoToPlaylist, isPermanentInsertError, isQuotaError, PlaylistNotFoundError } from './youtube-playlists'
+import {
+  addVideoToPlaylist,
+  isPermanentInsertError,
+  isQuotaError,
+  PlaylistNotFoundError,
+  removeVideoFromPlaylist,
+} from './youtube-playlists'
 import { errorFields, type Logger } from './log'
 
 export const COMBINED_PLAYLIST_TITLE = 'All tracked artists (1001tklists)'
@@ -116,6 +122,8 @@ export type CombinedHandle = {
    * insert too — so the run/daily caps bound attempts, not successes.
    */
   attempts: number
+  /** Videos removed from the playlist via `removeFromCombined` since it was opened. */
+  removed: number
 }
 
 export async function loadCombinedState(env: Env): Promise<CombinedState> {
@@ -154,10 +162,10 @@ export async function openCombinedPlaylist(
     // Freshly created → known empty, and YouTube's read API can't see it yet.
     const videoIds = new Set<string>()
     await cachePlaylistVideoIds(env, playlistId, videoIds)
-    return { playlistId, videoIds, inserted: 0, attempts: 0 }
+    return { playlistId, videoIds, inserted: 0, attempts: 0, removed: 0 }
   }
   try {
-    return { playlistId, videoIds: await getCachedPlaylistVideoIds(env, playlistId, accessToken, log), inserted: 0, attempts: 0 }
+    return { playlistId, videoIds: await getCachedPlaylistVideoIds(env, playlistId, accessToken, log), inserted: 0, attempts: 0, removed: 0 }
   } catch (e) {
     if (!(e instanceof PlaylistNotFoundError)) throw e
     // The user deleted the playlist after we cached its id. Re-resolve.
@@ -167,7 +175,7 @@ export async function openCombinedPlaylist(
     await saveCombinedState(env, { ...state, playlistId: r.id })
     const videoIds = r.justCreated ? new Set<string>() : await getCachedPlaylistVideoIds(env, r.id, accessToken, log)
     if (r.justCreated) await cachePlaylistVideoIds(env, r.id, videoIds)
-    return { playlistId: r.id, videoIds, inserted: 0, attempts: 0 }
+    return { playlistId: r.id, videoIds, inserted: 0, attempts: 0, removed: 0 }
   }
 }
 
@@ -220,6 +228,28 @@ export async function addToCombined(
 }
 
 /**
+ * Remove one video from the combined playlist, if it's there. Used when a set's
+ * YouTube recording was swapped on 1001tracklists (see the recheck loop in
+ * lib/sync.ts): the superseded video comes out, the new one goes in via
+ * `addToCombined`. Returns how many playlist items were deleted. Deletes are
+ * not counted as insert attempts — they cost quota too, but the daily cap
+ * exists to bound backfill *inserts*, and a swap is rare.
+ */
+export async function removeFromCombined(
+  handle: CombinedHandle,
+  videoId: string,
+  accessToken: string,
+  log: Logger,
+): Promise<number> {
+  if (!handle.videoIds.has(videoId)) return 0
+  const removed = await removeVideoFromPlaylist(handle.playlistId, videoId, accessToken)
+  handle.videoIds.delete(videoId)
+  handle.removed += removed
+  log.info('combined.removed', { videoId, playlistId: handle.playlistId, removed })
+  return removed
+}
+
+/**
  * Record permanently-uninsertable videos in state so collectMissing stops
  * queueing them. Idempotent; keeps the list de-duped.
  */
@@ -243,11 +273,11 @@ export async function markVideosUnavailable(env: Env, videoIds: string[], log: L
  * No-op when the run made no insert calls at all.
  */
 export async function flushCombined(env: Env, handle: CombinedHandle, log: Logger): Promise<void> {
-  if (handle.attempts === 0) return
+  if (handle.attempts === 0 && handle.removed === 0) return
   try {
-    // Only successful inserts change the playlist contents.
-    if (handle.inserted > 0) await cachePlaylistVideoIds(env, handle.playlistId, handle.videoIds)
-    await bumpDailyInserts(env, handle.attempts)
+    // Only successful inserts and removals change the playlist contents.
+    if (handle.inserted > 0 || handle.removed > 0) await cachePlaylistVideoIds(env, handle.playlistId, handle.videoIds)
+    if (handle.attempts > 0) await bumpDailyInserts(env, handle.attempts)
   } catch (e) {
     // Losing the cache write costs one re-list; losing the counter bump costs
     // a slightly generous budget. Neither is worth failing a sync over.
@@ -454,7 +484,7 @@ export async function readCombinedStatus(
   }
   // With no playlist yet, everything in every artist playlist is "missing" —
   // that's the number the panel should show before the first backfill.
-  const probe: CombinedHandle = handle ?? { playlistId: '', videoIds: new Set(), inserted: 0, attempts: 0 }
+  const probe: CombinedHandle = handle ?? { playlistId: '', videoIds: new Set(), inserted: 0, attempts: 0, removed: 0 }
   const unavailable = new Set(state.unavailableVideoIds ?? [])
   const { missing, perSource } = await collectMissing(env, probe, sources, accessToken, log, unavailable)
   return {

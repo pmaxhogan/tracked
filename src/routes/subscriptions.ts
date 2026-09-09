@@ -27,7 +27,14 @@ import {
 } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
-import { syncAll, syncOne, loadSubState, backfillCombined, combinedPlaylistStatus } from '../lib/sync'
+import {
+  syncAll,
+  syncOne,
+  loadSubState,
+  backfillCombined,
+  combinedPlaylistStatus,
+  invalidateVideoCache,
+} from '../lib/sync'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
@@ -294,6 +301,40 @@ subscriptionsApp.post('/api/sync/:slug', async (c) => {
     }
     log.error('subs.sync_one_throw', { slug, ...errorFields(e) })
     return c.json({ error: 'sync_failed', ...errorFields(e) }, 500)
+  }
+})
+
+/**
+ * "Invalidate video cache & resync" for one DJ: mark every processed set due
+ * for an immediate recheck (its recorded video is kept, so a swapped recording
+ * is detected and the old one removed), drop the cached playlist membership so
+ * it's re-read from YouTube, then run one sync. The run is bounded like any
+ * other (new sets + a capped batch of rechecks); the 5-minute cron drains the
+ * rest. The "all artists" button in the panel calls this once per row.
+ */
+subscriptionsApp.post('/api/resync/:slug', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.resync_one',
+    by: c.get('cfAccessEmail'),
+  })
+  const slug = c.req.param('slug')
+  try {
+    const subs = await listSubscriptions(c.env)
+    const sub = subs.find((s) => s.slug === slug)
+    if (!sub) return c.json({ error: 'not_subscribed', slug }, 404)
+    const tokenInfo = await getAccessToken(c.env)
+    if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
+    const invalidated = await invalidateVideoCache(c.env, slug, log)
+    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log, trigger: 'manual.resync' })
+    return c.json({ ...result, invalidated })
+  } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      log.warn('subs.resync_one_reauth', { slug, status: e.status })
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
+    log.error('subs.resync_one_throw', { slug, ...errorFields(e) })
+    return c.json({ error: 'resync_failed', ...errorFields(e) }, 500)
   }
 })
 
@@ -708,8 +749,9 @@ const PAGE_HTML = /* html */ `<!doctype html>
   li a:hover { text-decoration: underline; }
   li .meta { flex: 1; min-width: 0; }
   li .meta .added { color: var(--muted); font-size: 0.8rem; }
-  #list-actions { display: flex; justify-content: flex-end; margin-bottom: 0.5rem; }
+  #list-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-bottom: 0.5rem; }
   #list-actions button { background: transparent; color: var(--accent); border: 1px solid var(--border); padding: 0.3rem 0.6rem; }
+  li button.resync-btn { color: var(--muted); }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   .error { color: var(--danger); margin: 0.5rem 0 1rem; min-height: 1.2em; }
   .error-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; color: var(--muted); white-space: pre-wrap; word-break: break-word; max-height: 16em; overflow: auto; margin: 0.4rem 0 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 4px; background: var(--card); }
@@ -763,6 +805,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
   /* ── Recent playlist additions (sync audit trail) ── */
   .badge.added { background: rgba(63,185,80,0.18); color: #3fb950; }
   .badge.duplicate { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); }
+  .badge.replaced { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.no_youtube { background: rgba(210,153,34,0.18); color: #d29922; }
   .badge.failed, .badge.abandoned { background: rgba(248,81,73,0.18); color: var(--danger); }
   section#pladds { margin-top: 2.25rem; }
@@ -808,7 +851,10 @@ const PAGE_HTML = /* html */ `<!doctype html>
     <button type="submit">Add</button>
   </form>
   <div id="error" class="error" role="alert"></div>
-  <div id="list-actions" hidden><button id="sync-all">Sync all</button></div>
+  <div id="list-actions" hidden>
+    <button id="resync-all" title="Forget what the sync trusts about every DJ's sets and re-fetch them all: swapped recordings get replaced. Drains over a few cron ticks.">Invalidate video cache &amp; resync all</button>
+    <button id="sync-all">Sync all</button>
+  </div>
   <ul id="list"></ul>
   <div id="empty" class="empty" hidden>No subscriptions yet.</div>
 
@@ -876,6 +922,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
   const $btn = $form.querySelector('button');
   const $listActions = document.getElementById('list-actions');
   const $syncAll = document.getElementById('sync-all');
+  const $resyncAll = document.getElementById('resync-all');
 
   function showError(msg, detail) {
     $error.textContent = msg ?? '';
@@ -932,6 +979,17 @@ const PAGE_HTML = /* html */ `<!doctype html>
       sync.dataset.slug = s.slug;
       sync.addEventListener('click', () => syncSlug(s.slug, sync));
       li.appendChild(sync);
+      // Re-fetch every one of this DJ's sets now (not just new ones), so a
+      // set whose recording was swapped on 1001tracklists gets the old
+      // video pulled and the new one added. Bounded per run; the cron
+      // continues it.
+      const resync = document.createElement('button');
+      resync.className = 'danger resync-btn';
+      resync.textContent = 'Invalidate & resync';
+      resync.title = 'Forget the cached video for every set and re-check them all';
+      resync.dataset.slug = s.slug;
+      resync.addEventListener('click', () => syncSlug(s.slug, resync, { resync: true }));
+      li.appendChild(resync);
       const rm = document.createElement('button');
       rm.className = 'danger';
       rm.textContent = 'Remove';
@@ -941,13 +999,14 @@ const PAGE_HTML = /* html */ `<!doctype html>
     }
   }
 
-  async function syncSlug(slug, btn) {
+  async function syncSlug(slug, btn, opts) {
+    const resync = !!(opts && opts.resync);
     showError('');
     btn.disabled = true;
     const original = btn.textContent;
-    btn.textContent = 'Syncing…';
+    btn.textContent = resync ? 'Resyncing…' : 'Syncing…';
     try {
-      const r = await fetch('/subscriptions/api/sync/' + encodeURIComponent(slug), {
+      const r = await fetch('/subscriptions/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {
         method: 'POST',
         credentials: 'same-origin',
       });
@@ -971,12 +1030,20 @@ const PAGE_HTML = /* html */ `<!doctype html>
       }
       const stats = data.stats || {};
       const pending = stats.tracklistsPending || 0;
-      const more = pending > 0 ? ' · ' + pending + ' more pending — auto-continuing every 5 min' : '';
+      const rechecksPending = stats.rechecksPending || 0;
+      const continuing = [];
+      if (pending > 0) continuing.push(pending + ' new pending');
+      if (rechecksPending > 0) continuing.push(rechecksPending + ' recheck' + (rechecksPending === 1 ? '' : 's') + ' pending');
+      const more = continuing.length ? ' · ' + continuing.join(', ') + ' — auto-continuing every 5 min' : '';
       const combined = stats.combinedVideoIdsAdded ? ' · ' + stats.combinedVideoIdsAdded + ' into the combined playlist' : '';
+      const rechecked = stats.tracklistsRechecked
+        ? ' · rechecked ' + stats.tracklistsRechecked + ', replaced ' + (stats.videosReplaced || 0)
+        : '';
+      const inv = data.invalidated ? ' (invalidated ' + (data.invalidated.tracklistsMarked || 0) + ' cached videos)' : '';
       showError(
-        'synced ' + slug + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
+        (resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
         (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
-        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + combined + more
+        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + rechecked + combined + more
       );
       // The run may have created the combined playlist or mirrored into it.
       loadCombined();
@@ -1047,6 +1114,21 @@ const PAGE_HTML = /* html */ `<!doctype html>
     } finally {
       $syncAll.disabled = false;
       $syncAll.textContent = original;
+    }
+  });
+
+  $resyncAll.addEventListener('click', async () => {
+    const btns = Array.from($list.querySelectorAll('button.resync-btn'));
+    if (!btns.length) return;
+    if (!confirm('Re-fetch every set of every DJ? Swapped recordings get replaced in the playlists. This drains over the next few cron ticks.')) return;
+    $resyncAll.disabled = true;
+    const original = $resyncAll.textContent;
+    $resyncAll.textContent = 'Resyncing all…';
+    try {
+      for (const b of btns) await syncSlug(b.dataset.slug, b, { resync: true });
+    } finally {
+      $resyncAll.disabled = false;
+      $resyncAll.textContent = original;
     }
   });
 
@@ -1427,7 +1509,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
         '<span class="badge ' + esc(r.status || '') + '">' + esc(r.status || '?') + '</span>' +
         '<span class="title">' + esc(setLabel(r.set)) + '</span>' +
         (r.artist || r.slug ? '<span class="via">' + esc(r.artist || r.slug) + '</span>' : '') +
-        (r.vid ? '<span class="vid">' + esc(r.vid) + '</span>' : '') +
+        (r.vid ? '<span class="vid">' + (r.prev ? esc(r.prev) + ' → ' : '') + esc(r.vid) + '</span>' : '') +
         '<span class="when" title="' + esc(r.t) + '">' + esc(relTime(r.t)) + '</span>';
       row.appendChild(head);
       const detail = document.createElement('div');
@@ -1464,6 +1546,11 @@ const PAGE_HTML = /* html */ `<!doctype html>
       ['video', r.videoId
         ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'open')
         : '<span class="warn">no YouTube recording on the set page</span>'],
+      // A recheck found the set's recording swapped on 1001tracklists: this
+      // is the one that came out of the playlists.
+      r.previousVideoId
+        ? ['replaced', '<span class="mono">' + esc(r.previousVideoId) + '</span> ' + link('https://youtu.be/' + r.previousVideoId, 'open')]
+        : null,
       ['playlist', r.playlistId
         ? link('https://www.youtube.com/playlist?list=' + encodeURIComponent(r.playlistId), r.playlistTitle || r.playlistId)
         : '—'],

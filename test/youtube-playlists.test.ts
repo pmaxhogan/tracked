@@ -2,10 +2,14 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   addVideoToPlaylist,
   createPlaylist,
+  deletePlaylistItem,
   findPlaylistByTitle,
+  findPlaylistItemIds,
   isPermanentInsertError,
   isQuotaError,
   listPlaylistVideoIds,
+  PlaylistNotFoundError,
+  removeVideoFromPlaylist,
   YouTubeApiError,
 } from '../src/lib/youtube-playlists'
 
@@ -161,5 +165,74 @@ describe('error classification (YouTubeApiError)', () => {
     const err = await addVideoToPlaylist('PLx', 'deadVideo12', 'tok', fetcher).catch((e) => e)
     expect(err.reason).toBeNull()
     expect(isPermanentInsertError(err)).toBe(true)
+  })
+})
+
+describe('findPlaylistItemIds', () => {
+  it('filters playlistItems.list by videoId and returns the item ids across pages', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'item1' }], nextPageToken: 'p2' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'item2' }] })) as unknown as typeof fetch
+    const ids = await findPlaylistItemIds('PL', 'vidA1234567', 'tok', fetcher)
+    expect(ids).toEqual(['item1', 'item2'])
+    const url1 = (fetcher as unknown as { mock: { calls: string[][] } }).mock.calls[0]![0]!
+    expect(url1).toContain('playlistId=PL')
+    expect(url1).toContain('videoId=vidA1234567')
+    expect(url1).toContain('part=id')
+  })
+
+  it('returns an empty list when the video is not in the playlist', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch
+    expect(await findPlaylistItemIds('PL', 'vidA1234567', 'tok', fetcher)).toEqual([])
+  })
+
+  it('surfaces playlistNotFound as PlaylistNotFoundError', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(new Response('{"error":{"errors":[{"reason":"playlistNotFound"}]}}', { status: 404 })) as unknown as typeof fetch
+    await expect(findPlaylistItemIds('PLgone', 'vidA1234567', 'tok', fetcher)).rejects.toBeInstanceOf(PlaylistNotFoundError)
+  })
+})
+
+describe('deletePlaylistItem', () => {
+  it('DELETEs by playlistItem id', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 204 })) as unknown as typeof fetch
+    await deletePlaylistItem('item1', 'tok', fetcher)
+    const [url, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!
+    expect(url).toContain('/playlistItems?id=item1')
+    expect(init!.method).toBe('DELETE')
+    expect(new Headers(init!.headers).get('Authorization')).toBe('Bearer tok')
+  })
+
+  it('treats a 404 (already gone) as success', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response('playlistItemNotFound', { status: 404 })) as unknown as typeof fetch
+    await expect(deletePlaylistItem('item1', 'tok', fetcher)).resolves.toBeUndefined()
+  })
+
+  it('throws on any other non-2xx', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response('forbidden', { status: 403 })) as unknown as typeof fetch
+    await expect(deletePlaylistItem('item1', 'tok', fetcher)).rejects.toThrow(/playlistItems\.delete 403/)
+  })
+})
+
+describe('removeVideoFromPlaylist', () => {
+  it('looks the item up by videoId, deletes every occurrence, and reports the count', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'item1' }, { id: 'item1dupe' }] }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 })) as unknown as typeof fetch
+    expect(await removeVideoFromPlaylist('PL', 'vidA1234567', 'tok', fetcher)).toBe(2)
+    const calls = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls
+    expect(calls).toHaveLength(3)
+    expect(calls[1]![0]).toContain('id=item1')
+    expect(calls[2]![0]).toContain('id=item1dupe')
+  })
+
+  it('makes no delete call when the video is not in the playlist', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch
+    expect(await removeVideoFromPlaylist('PL', 'vidA1234567', 'tok', fetcher)).toBe(0)
+    expect(fetcher).toHaveBeenCalledTimes(1)
   })
 })

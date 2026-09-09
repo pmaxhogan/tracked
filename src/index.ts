@@ -63,8 +63,10 @@ app.doc('/openapi.json', {
  * Cron trigger handler. Configured in wrangler.jsonc → `triggers.crons` with
  * two expressions:
  *   - `0 6 * * *`     daily — full discovery + processing (`syncAll`)
- *   - `*\/5 * * * *`  every 5 min — drain pending only (`syncPendingOnly`),
- *                     fast-skips when nothing to do
+ *   - `*\/5 * * * *`  every 5 min — drain pending only (`syncPendingOnly`):
+ *                     unprocessed sets plus rechecks of processed sets whose
+ *                     recorded video is >5 days old; fast-skips when nothing
+ *                     to do
  *
  * The frequent drain cron is what continues a backfill after the user
  * triggers a manual sync; they no longer have to keep clicking the button.
