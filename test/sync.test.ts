@@ -3,14 +3,19 @@ import type { Env } from '../src/types'
 import {
   backfillCombined,
   collectCombinedSources,
+  dueRechecks,
+  invalidateVideoCache,
   loadSubState,
   prettifySlug,
+  RECHECK_INTERVAL_SECONDS,
   saveSubState,
+  seedTracklistVideosFromAudit,
   syncOne,
   syncPendingOnly,
   type SubState,
 } from '../src/lib/sync'
-import { PlaylistNotFoundError } from '../src/lib/youtube-playlists'
+import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
+import { makeLogger } from '../src/lib/log'
 
 // Stub the network-touching primitives so syncOne becomes a deterministic
 // orchestrator test. This is the most important behavior to lock down: state
@@ -34,6 +39,7 @@ vi.mock('../src/lib/youtube-playlists', async () => {
     createPlaylist: vi.fn(),
     listPlaylistVideoIds: vi.fn(),
     addVideoToPlaylist: vi.fn(),
+    removeVideoFromPlaylist: vi.fn(),
   }
 })
 
@@ -43,7 +49,14 @@ import {
   createPlaylist,
   findPlaylistByTitle,
   listPlaylistVideoIds,
+  removeVideoFromPlaylist,
 } from '../src/lib/youtube-playlists'
+
+const NOW = Math.floor(Date.now() / 1000)
+/** A tracklistVideos entry checked just now — not due for another 5 days. */
+const fresh = (videoId: string | null) => ({ videoId, checkedAt: NOW })
+/** A tracklistVideos entry older than the recheck interval — due now. */
+const stale = (videoId: string | null) => ({ videoId, checkedAt: NOW - RECHECK_INTERVAL_SECONDS - 60 })
 
 function fakeKV(): KVNamespace {
   const store = new Map<string, { value: string; metadata?: unknown }>()
@@ -60,7 +73,7 @@ function fakeKV(): KVNamespace {
       store.delete(key)
     },
     // Ascending key order, like the real thing — the audit trails rely on it.
-    async list({ prefix = '' }: { prefix?: string } = {}) {
+    async list({ prefix = '' }: { prefix?: string; cursor?: string; limit?: number } = {}) {
       const keys = [...store.entries()]
         .filter(([k]) => k.startsWith(prefix))
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -116,6 +129,7 @@ beforeEach(() => {
   // run now reads two playlists (the artist's and the combined one), so a
   // single shared instance would leak inserts from one into the other.
   ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set<string>())
+  ;(removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue(1)
 })
 
 describe('prettifySlug', () => {
@@ -146,6 +160,7 @@ describe('syncPendingOnly', () => {
         artistName: 'Lilly Palmer',
         discoveredTracklistUrls: ['https://x/tracklist/a'],
         processedTracklistUrls: ['https://x/tracklist/a'],
+        tracklistVideos: { 'https://x/tracklist/a': fresh('vidA1234567') },
       }),
     )
 
@@ -155,6 +170,24 @@ describe('syncPendingOnly', () => {
     expect(crawlDjIndex).not.toHaveBeenCalled()
     expect(findPlaylistByTitle).not.toHaveBeenCalled()
     expect(addVideoToPlaylist).not.toHaveBeenCalled()
+  })
+
+  it('treats a sub with nothing pending but a stale recheck as work to do', async () => {
+    const env = makeEnv()
+    await env.SUBS.put('subs:list', JSON.stringify(['lillypalmer']))
+    await env.SUBS.put(
+      'subs:item:lillypalmer',
+      JSON.stringify({ sourceUrl: 'https://www.1001tracklists.com/dj/lillypalmer/', addedAt: 0 }),
+    )
+    await saveSubState(env, 'lillypalmer', {
+      playlistId: 'PL',
+      artistName: 'Lilly Palmer',
+      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      processedTracklistUrls: ['https://x/tracklist/a'],
+      tracklistVideos: { 'https://x/tracklist/a': stale('vidA1234567') },
+    })
+    // No YouTube connection: the only way past the candidate scan is to throw here.
+    await expect(syncPendingOnly(env)).rejects.toThrow(/not connected/)
   })
 
   it('returns empty for subs that have never been synced (no state row)', async () => {
@@ -283,6 +316,9 @@ describe('syncOne', () => {
       videoIdsAdded: 2,
       tracklistsPending: 0,
       combinedVideoIdsAdded: 2,
+      tracklistsRechecked: 0,
+      videosReplaced: 0,
+      rechecksPending: 0,
     })
 
     // State persisted with all three URLs marked processed and the playlistId cached.
@@ -294,6 +330,14 @@ describe('syncOne', () => {
       'https://x/tracklist/b',
       'https://x/tracklist/c',
     ])
+    // …and what each set resolved to, stamped now, so the recheck loop knows
+    // both what to compare against and when to look again.
+    expect(state?.tracklistVideos).toEqual({
+      'https://x/tracklist/a': { videoId: 'vidA1234567', checkedAt: expect.any(Number) },
+      'https://x/tracklist/b': { videoId: null, checkedAt: expect.any(Number) },
+      'https://x/tracklist/c': { videoId: 'vidC1234567', checkedAt: expect.any(Number) },
+    })
+    expect(dueRechecks(state!)).toEqual([])
   })
 
   it('skips listPlaylistVideoIds after creating a fresh playlist (eventual-consistency 404 avoidance)', async () => {
@@ -332,6 +376,7 @@ describe('syncOne', () => {
       playlistId: 'PLcached',
       artistName: 'Lilly Palmer',
       processedTracklistUrls: ['https://x/tracklist/old'],
+      tracklistVideos: { 'https://x/tracklist/old': fresh('vidOld12345') },
     })
     mockCrawl(['https://x/tracklist/old', 'https://x/tracklist/new'], 'Lilly Palmer')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -677,4 +722,419 @@ describe('syncOne', () => {
       title: 'Lillypalmer (1001tklists)',
     })
   })
+  // ── Rechecks: re-fetch processed sets to catch a swapped recording ────────
+
+  /** A synced sub with one processed set, ready for the recheck loop. */
+  async function seedProcessed(env: Env, tracklistVideos: SubState['tracklistVideos'], extra: Partial<SubState> = {}) {
+    const urls = Object.keys(tracklistVideos ?? {})
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: urls,
+      processedTracklistUrls: urls,
+      tracklistVideos,
+      ...extra,
+    })
+  }
+
+  function combinedExists(videoIds: string[] = []) {
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'PLcombined',
+      title: 'All tracked artists (1001tklists)',
+    })
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set(videoIds))
+  }
+
+  it('leaves a set alone until its record is older than the recheck interval', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': fresh('vidA1234567') })
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(fetch1001Html).not.toHaveBeenCalled()
+    expect(r.stats.tracklistsRechecked).toBe(0)
+    expect(r.stats.rechecksPending).toBe(0)
+  })
+
+  it('rechecks a stale set and, when nothing changed, touches neither YouTube nor the audit trail', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') })
+    combinedExists(['vidA1234567'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(fetch1001Html).toHaveBeenCalledWith('https://x/tracklist/a', expect.anything())
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 1, videosReplaced: 0, rechecksPending: 0 })
+    expect(await playlistAdditions(env)).toEqual([])
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('vidA1234567')
+    expect(state.tracklistVideos!['https://x/tracklist/a']!.checkedAt).toBeGreaterThanOrEqual(NOW)
+  })
+
+  it('replaces a swapped recording: old out of both playlists, new into both', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('phoneVid123') })
+    combinedExists(['phoneVid123'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, trigger: 'cron.pending' })
+
+    expect((removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'phoneVid123'],
+      ['PLcombined', 'phoneVid123'],
+    ])
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'officialV12'],
+      ['PLcombined', 'officialV12'],
+    ])
+    expect(r.stats).toMatchObject({ videoIdsAdded: 1, tracklistsRechecked: 1, videosReplaced: 1, combinedVideoIdsAdded: 1 })
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('officialV12')
+    // Both membership caches reflect the swap, so the next tick doesn't re-list.
+    expect(await env.CACHE.get('yt:plvids:PLartist', 'json')).toEqual({ videoIds: ['officialV12'] })
+    expect(await env.CACHE.get('yt:plvids:PLcombined', 'json')).toEqual({ videoIds: ['officialV12'] })
+    const rows = await playlistAdditions(env)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.record).toMatchObject({
+      status: 'replaced',
+      videoId: 'officialV12',
+      previousVideoId: 'phoneVid123',
+      combinedStatus: 'added',
+      trigger: 'cron.pending',
+    })
+    expect(rows[0]!.metadata).toMatchObject({ status: 'replaced', vid: 'officialV12', prev: 'phoneVid123' })
+  })
+
+  it('still swaps when the old video was already removed by hand', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('phoneVid123') })
+    combinedExists([]) // neither playlist has the phone recording any more
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'officialV12'],
+      ['PLcombined', 'officialV12'],
+    ])
+    expect(r.stats.videosReplaced).toBe(1)
+  })
+
+  it('never re-adds an unchanged video the user removed from the playlist', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('phoneVid123') })
+    combinedExists([]) // user pruned it from both playlists
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('phoneVid123')
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+  })
+
+  it('keeps the existing video when the set page no longer has one', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') })
+    combinedExists(['vidA1234567'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect(r.stats.videosReplaced).toBe(0)
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.tracklistVideos!['https://x/tracklist/a']).toEqual({ videoId: 'vidA1234567', checkedAt: expect.any(Number) })
+    expect(dueRechecks(state)).toEqual([])
+  })
+
+  it('adds the video when a set that had none gains one', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale(null) })
+    combinedExists([])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('newVid12345')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'newVid12345'],
+      ['PLcombined', 'newVid12345'],
+    ])
+    expect(r.stats).toMatchObject({ videoIdsAdded: 1, videosReplaced: 0, tracklistsRechecked: 1 })
+    const rows = await playlistAdditions(env)
+    expect(rows[0]!.record).toMatchObject({ status: 'added', videoId: 'newVid12345', combinedStatus: 'added' })
+  })
+
+  it('only records a baseline for a set processed before rechecks existed (no audit row to seed from)', async () => {
+    const env = makeEnv()
+    // Legacy state: processed, but no tracklistVideos at all.
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      processedTracklistUrls: ['https://x/tracklist/a'],
+    })
+    combinedExists([]) // whatever it once had is gone — we can't tell "never added" from "removed by hand"
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('someVid1234')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 1, videosReplaced: 0, videoIdsAdded: 0 })
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.tracklistVideos).toEqual({ 'https://x/tracklist/a': { videoId: 'someVid1234', checkedAt: expect.any(Number) } })
+    // Next time it's a real comparison.
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('betterVid12')
+    await invalidateVideoCache(env, sub.slug, makeLogger({ task: 'test' }))
+    const r2 = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    expect(r2.stats.videosReplaced).toBe(1)
+    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLartist', 'betterVid12', 'tok')
+  })
+
+  it('seeds the baseline from the audit trail on the first run after upgrade, so an old swap is caught', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'],
+      processedTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'],
+    })
+    // Audit rows from an earlier run: /a was added with the phone recording,
+    // /b had no video, /c has no surviving row.
+    const t = new Date(Date.now() - 6 * 86400 * 1000).toISOString()
+    await env.CACHE.put('pladd:00000000000001:lillypalmer:9999', '{}', {
+      metadata: { t, status: 'added', slug: 'lillypalmer', set: 'https://x/tracklist/a', vid: 'phoneVid123' },
+    })
+    await env.CACHE.put('pladd:00000000000001:lillypalmer:9998', '{}', {
+      metadata: { t, status: 'no_youtube', slug: 'lillypalmer', set: 'https://x/tracklist/b', vid: null },
+    })
+    // A row for another DJ's set with the same URL shape must not bleed in.
+    await env.CACHE.put('pladd:00000000000002:other:9999', '{}', {
+      metadata: { t, status: 'added', slug: 'other', set: 'https://x/tracklist/c', vid: 'otherVid123' },
+    })
+    combinedExists(['phoneVid123'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockImplementation(() => 'officialV12')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    // All three are stale (6 days / never), so all three get rechecked; only
+    // /a has a baseline that differs, /b gains a video, /c just records.
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 3, videosReplaced: 1 })
+    expect((removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'phoneVid123'],
+      ['PLcombined', 'phoneVid123'],
+    ])
+    // Skip the planted seed rows (their bodies are empty) — only this run's rows matter.
+    // /b's row is `duplicate`: every page here resolves to the same video, and
+    // /a's swap had already inserted it by the time /b was rechecked.
+    const rows = (await playlistAdditions(env)).filter((x) => x.record.status)
+    expect(rows.map((x) => [x.record.setUrl, x.record.status])).toEqual([
+      ['https://x/tracklist/b', 'duplicate'],
+      ['https://x/tracklist/a', 'replaced'],
+    ])
+  })
+
+  it('keeps the old video when another set of the same DJ still resolves to it', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, {
+      'https://x/tracklist/a': stale('sharedVid12'),
+      'https://x/tracklist/b': fresh('sharedVid12'),
+    })
+    combinedExists(['sharedVid12'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLartist', 'officialV12', 'tok')
+    expect(r.stats.videosReplaced).toBe(1)
+  })
+
+  it("keeps the old video in the combined playlist when another DJ's set still resolves to it", async () => {
+    const env = makeEnv()
+    await env.SUBS.put('subs:list', JSON.stringify(['lillypalmer', 'b2bpartner']))
+    await env.SUBS.put('subs:item:lillypalmer', JSON.stringify({ sourceUrl: 'x', addedAt: 0 }))
+    await env.SUBS.put('subs:item:b2bpartner', JSON.stringify({ sourceUrl: 'x', addedAt: 0 }))
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('b2bVid12345') })
+    await saveSubState(env, 'b2bpartner', {
+      playlistId: 'PLpartner',
+      processedTracklistUrls: ['https://x/tracklist/same-set'],
+      tracklistVideos: { 'https://x/tracklist/same-set': fresh('b2bVid12345') },
+    })
+    combinedExists(['b2bVid12345'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    // Removed from this DJ's playlist only — the combined one still needs it.
+    expect((removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'b2bVid12345'],
+    ])
+  })
+
+  it('caps rechecks per run and reports the rest as pending', async () => {
+    const env = makeEnv()
+    const map: NonNullable<SubState['tracklistVideos']> = {}
+    for (let i = 0; i < 7; i++) map[`https://x/tracklist/${i}`] = stale(`vid${i}12345678`.slice(0, 11))
+    await seedProcessed(env, map)
+    combinedExists([])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockImplementation(() => null)
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, maxRechecksPerRun: 3 })
+
+    expect(fetch1001Html).toHaveBeenCalledTimes(3)
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 3, rechecksPending: 4 })
+  })
+
+  it('processes new sets before rechecks, so a backfill is never starved', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/old', 'https://x/tracklist/new'],
+      processedTracklistUrls: ['https://x/tracklist/old'],
+      tracklistVideos: { 'https://x/tracklist/old': stale('oldVid12345') },
+    })
+    combinedExists(['oldVid12345'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValueOnce('newVid12345').mockReturnValueOnce('oldVid12345')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
+      'https://x/tracklist/new',
+      'https://x/tracklist/old',
+    ])
+    expect(r.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 1, tracklistsRechecked: 1, videosReplaced: 0 })
+  })
+
+  it('defers a set whose recheck keeps failing instead of abandoning it', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') }, {
+      failureCounts: { 'https://x/tracklist/a': 2 },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cf shell'))
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(r.stats.tracklistsRechecked).toBe(0)
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.abandonedTracklistUrls).toEqual([])
+    expect(state.failureCounts).toEqual({})
+    // Video kept, timestamp bumped: due again next interval, not next tick.
+    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('vidA1234567')
+    expect(dueRechecks(state)).toEqual([])
+    const rows = await playlistAdditions(env)
+    expect(rows[0]!.record).toMatchObject({ status: 'failed', videoId: 'vidA1234567', failureCount: 3 })
+  })
+
+  it('stops rechecking on a quota error and leaves the swap due, uncharged', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, {
+      'https://x/tracklist/a': stale('phoneVid123'),
+      'https://x/tracklist/b': stale('vidB1234567'),
+    })
+    combinedExists(['phoneVid123', 'vidB1234567'])
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'),
+    )
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    // /a's swap got as far as the removals, then the insert hit quota; /b was never fetched.
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 0, videosReplaced: 0, rechecksPending: 2 })
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.failureCounts).toEqual({})
+    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('phoneVid123')
+    expect(await playlistAdditions(env)).toEqual([])
+  })
+
+  it('leaves a transiently failing recheck due for the next tick', async () => {
+    const env = makeEnv()
+    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('transient'))
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(r.stats.rechecksPending).toBe(1)
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 1 })
+    expect(dueRechecks(state)).toEqual(['https://x/tracklist/a'])
+  })
 })
+
+describe('seedTracklistVideosFromAudit', () => {
+  it('takes the newest row per set, only for this slug and only for processed URLs', async () => {
+    const env = makeEnv()
+    const put = (key: string, m: Record<string, unknown>) => env.CACHE.put(key, '{}', { metadata: m })
+    // Keys ascend = newest first, like the real inverted-timestamp layout.
+    await put('pladd:1:s:9999', { t: '2026-09-01T00:00:00Z', status: 'replaced', slug: 's', set: 'u1', vid: 'newVid12345' })
+    await put('pladd:2:s:9999', { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'u1', vid: 'oldVid12345' })
+    await put('pladd:3:s:9999', { t: '2026-08-01T00:00:00Z', status: 'no_youtube', slug: 's', set: 'u2', vid: null })
+    await put('pladd:4:s:9999', { t: '2026-08-01T00:00:00Z', status: 'failed', slug: 's', set: 'u3', vid: null })
+    await put('pladd:5:s:9999', { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'unprocessed', vid: 'x1234567890' })
+    await put('pladd:6:t:9999', { t: '2026-08-01T00:00:00Z', status: 'added', slug: 't', set: 'u3', vid: 'otherVid123' })
+
+    const seeded = await seedTracklistVideosFromAudit(env, 's', new Set(['u1', 'u2', 'u3']), makeLogger({ task: 'test' }))
+
+    expect(seeded).toEqual({
+      u1: { videoId: 'newVid12345', checkedAt: Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1000) },
+      u2: { videoId: null, checkedAt: Math.floor(Date.parse('2026-08-01T00:00:00Z') / 1000) },
+    })
+  })
+
+  it('returns what it has when the list call throws', async () => {
+    const env = makeEnv()
+    vi.spyOn(env.CACHE, 'list').mockRejectedValue(new Error('kv down'))
+    expect(await seedTracklistVideosFromAudit(env, 's', new Set(['u1']), makeLogger({ task: 'test' }))).toEqual({})
+  })
+})
+
+describe('invalidateVideoCache', () => {
+  it('marks every processed set due, keeps its recorded video, clears abandons, and drops both membership caches', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/dead'],
+      processedTracklistUrls: ['https://x/tracklist/a'],
+      abandonedTracklistUrls: ['https://x/tracklist/dead'],
+      failureCounts: { 'https://x/tracklist/dead': 3 },
+      tracklistVideos: { 'https://x/tracklist/a': fresh('vidA1234567') },
+    })
+    await env.SUBS.put('subs:combined', JSON.stringify({ playlistId: 'PLcombined' }))
+    await env.CACHE.put('yt:plvids:PLartist', JSON.stringify({ videoIds: ['vidA1234567'] }))
+    await env.CACHE.put('yt:plvids:PLcombined', JSON.stringify({ videoIds: ['vidA1234567'] }))
+
+    const r = await invalidateVideoCache(env, sub.slug, makeLogger({ task: 'test' }))
+
+    expect(r).toEqual({ slug: sub.slug, tracklistsMarked: 1, abandonedCleared: 1 })
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.tracklistVideos).toEqual({ 'https://x/tracklist/a': { videoId: 'vidA1234567', checkedAt: 0 } })
+    expect(state.abandonedTracklistUrls).toEqual([])
+    expect(state.failureCounts).toEqual({})
+    expect(dueRechecks(state)).toEqual(['https://x/tracklist/a'])
+    expect(await env.CACHE.get('yt:plvids:PLartist')).toBeNull()
+    expect(await env.CACHE.get('yt:plvids:PLcombined')).toBeNull()
+    // The formerly-abandoned set is pending again.
+    expect(state.discoveredTracklistUrls!.filter((u) => !state.processedTracklistUrls.includes(u))).toEqual([
+      'https://x/tracklist/dead',
+    ])
+  })
+
+  it('is a no-op for a sub that was never synced', async () => {
+    const env = makeEnv()
+    expect(await invalidateVideoCache(env, 'nobody', makeLogger({ task: 'test' }))).toEqual({
+      slug: 'nobody',
+      tracklistsMarked: 0,
+      abandonedCleared: 0,
+    })
+  })
+})
+

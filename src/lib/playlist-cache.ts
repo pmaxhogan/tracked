@@ -88,3 +88,13 @@ export async function findOrCreatePlaylist(
   log.info('sync.playlist_created', { ...ctx, playlistId: created.id, title: opts.title })
   return { id: created.id, justCreated: true }
 }
+
+/**
+ * Drop the cached snapshot so the next read re-lists the playlist from
+ * YouTube. Used by "invalidate video cache & resync" — the one place where
+ * trusting a stale set (say, after the user pruned the playlist by hand) is
+ * worse than paying a page of quota.
+ */
+export async function invalidatePlaylistVideoIds(env: Env, playlistId: string): Promise<void> {
+  await env.CACHE.delete(`${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`)
+}
