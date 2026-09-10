@@ -59,14 +59,26 @@
  *   PROBE_URL                tracklist URL fetched by POST /probe; default a
  *                            known set page (the homepage is NOT gated when
  *                            blocked, so it is useless as a probe)
- *   UPSTREAM_1001TL_EMAIL    optional; enables logged-in mode for 1001tl
- *   UPSTREAM_1001TL_PASSWORD optional; enables logged-in mode for 1001tl
- *   COOKIE_FILE              default /data/1001tl-cookies.json
+ *   UPSTREAM_1001TL_EMAIL_<n> / UPSTREAM_1001TL_PASSWORD_<n>
+ *                            n = 1, 2, 3, … (any positive integer, no upper
+ *                            bound; the set is discovered by listing the env).
+ *                            Each pair is one 1001tl account with its own
+ *                            session; requests are spread across the healthy
+ *                            ones least-recently-used first, a blocked account
+ *                            is parked for BLOCK_COOLDOWN_MS. None configured
+ *                            = anonymous mode. (The old unsuffixed pair is
+ *                            still read as account 0, with a warning.)
+ *   RELOGIN_COOLDOWN_MS      min gap between block-driven re-logins per
+ *                            account, default 600000 (10 min)
+ *   COOKIE_DIR               where per-account session files live, default
+ *                            /data (files: 1001tl-cookies-<email>.json)
+ *   COOKIE_FILE              legacy single-account session file; adopted for
+ *                            the first account on first start if present
  */
 
 import { createServer } from 'node:http'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import {
   classifyUpstream,
@@ -76,9 +88,12 @@ import {
   DEFAULT_COOLDOWN_MS,
   DEFAULT_ERROR_COOLDOWN_MS,
   DEFAULT_MAX_POOL_ATTEMPTS,
+  AccountPool,
+  parseAccountsFromEnv,
+  accountFileKey,
 } from './nas-fetch-proxy-lib.mjs'
 
-const VERSION = '0.3.2'
+const VERSION = '0.4.0'
 const PORT = Number(process.env.PORT ?? 8088)
 const BIND = process.env.BIND ?? '0.0.0.0'
 const TOKEN = process.env.PROXY_TOKEN
@@ -121,9 +136,17 @@ try {
 
 const TL_HOST = '1001tracklists.com'
 const TL_LOGIN_URL = 'https://www.1001tracklists.com/action/login.html'
-const TL_EMAIL = process.env.UPSTREAM_1001TL_EMAIL ?? ''
-const TL_PASSWORD = process.env.UPSTREAM_1001TL_PASSWORD ?? ''
-const COOKIE_FILE = process.env.COOKIE_FILE ?? '/data/1001tl-cookies.json'
+const COOKIE_DIR = process.env.COOKIE_DIR ?? '/data'
+const LEGACY_COOKIE_FILE = process.env.COOKIE_FILE ?? '/data/1001tl-cookies.json'
+let ACCOUNTS
+try {
+  ACCOUNTS = parseAccountsFromEnv(process.env)
+} catch (e) {
+  console.error(String(e?.message ?? e))
+  process.exit(1)
+}
+/** Logged-in mode is on when at least one account is configured. */
+const HAVE_ACCOUNTS = ACCOUNTS.length > 0
 
 // Browser UA used both for the in-process login and the override below.
 // 1001tl rejects curl/<Y> shaped agents on tracklist pages even with valid
@@ -169,18 +192,18 @@ const dispatchers = new Map(
   POOL.map((m) => [m.url, new ProxyAgent({ uri: m.url, connect: { timeout: POOL_CONNECT_TIMEOUT_MS } })]),
 )
 
-let session = { cookies: '', savedAt: 0 }
-let loginPromise = null
-/** Block-driven re-login bookkeeping (see RELOGIN_COOLDOWN_MS). */
-const relogin = { lastAt: 0, attempts: 0, recovered: 0, stillBlocked: 0, failed: 0, lastVia: null, lastOutcome: null }
+const accounts = new AccountPool({ accounts: ACCOUNTS, blockCooldownMs: COOLDOWN_MS, errorCooldownMs: ERROR_COOLDOWN_MS, reloginCooldownMs: RELOGIN_COOLDOWN_MS })
+/** account.index → { cookies, savedAt } */
+const sessions = new Map()
+/** account.index → in-flight login promise (dedupes concurrent logins) */
+const loginPromises = new Map()
+/** Request-level counters across accounts. */
+const sessionStats = { reissued: 0, failovers: 0 }
+/** Whether the last block-driven re-login anywhere found even a fresh session blocked. */
+let lastReloginOutcome = null
 
-function reloginStatus() {
-  return {
-    ...relogin,
-    lastAt: relogin.lastAt ? new Date(relogin.lastAt).toISOString() : null,
-    cooldownMs: RELOGIN_COOLDOWN_MS,
-    available: Date.now() - relogin.lastAt >= RELOGIN_COOLDOWN_MS,
-  }
+function cookieFileFor(account) {
+  return join(COOKIE_DIR, `1001tl-cookies-${accountFileKey(account.email)}.json`)
 }
 
 /**
@@ -190,36 +213,36 @@ function reloginStatus() {
  * Returns the retried result when the fresh session got through, null when the
  * re-login was skipped (cooldown), failed, or was blocked too.
  */
-async function reloginAndRetry(route, target, method, reqHeaders, body, tlDefaults, cookieFor = (s) => s.cookies) {
-  if (Date.now() - relogin.lastAt < RELOGIN_COOLDOWN_MS) {
-    log('session.relogin_skipped', { route: routeLabel(route), url: target, nextAt: new Date(relogin.lastAt + RELOGIN_COOLDOWN_MS).toISOString() })
-    return null
+async function reloginAndRetry(account, route, target, method, reqHeaders, body, tlDefaults, cookieFor = (s) => s.cookies) {
+  if (!accounts.canRelogin(account)) {
+    log('session.relogin_skipped', { account: account.label, route: routeLabel(route), url: target, nextAt: new Date(account.reloginLastAt + RELOGIN_COOLDOWN_MS).toISOString() })
+    return { outcome: 'skipped' }
   }
-  relogin.lastAt = Date.now()
-  relogin.attempts += 1
+  accounts.noteReloginAttempt(account)
   const candidates = planner.healthyMembers().filter((m) => !(route.kind === 'pool' && m.url === route.member.url))
   const via = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : null
-  relogin.lastVia = via ? via.label : 'direct'
+  const viaLabel = via ? via.label : 'direct'
   try {
-    const s = await ensureSession({ forceRefresh: true, dispatcher: via ? dispatchers.get(via.url) : null })
-    log('session.reissued', { via: relogin.lastVia, url: target, route: routeLabel(route) })
+    const s = await ensureSession(account, { forceRefresh: true, dispatcher: via ? dispatchers.get(via.url) : null })
+    log('session.reissued', { account: account.label, via: viaLabel, url: target, route: routeLabel(route) })
     const r = await fetchVia(route, target, method, reqHeaders, body, { ...tlDefaults, cookie: cookieFor(s) })
     const kind = classifyUpstream(r.upstream.status, r.text)
     if (kind === 'ip_blocked') {
-      relogin.stillBlocked += 1
-      relogin.lastOutcome = 'still_blocked'
-      log('session.still_blocked', { via: relogin.lastVia, route: routeLabel(route), url: target, status: r.upstream.status })
-      return null
+      account.reloginStillBlocked += 1
+      lastReloginOutcome = 'still_blocked'
+      log('session.still_blocked', { account: account.label, via: viaLabel, route: routeLabel(route), url: target, status: r.upstream.status })
+      return { outcome: 'still_blocked' }
     }
-    relogin.recovered += 1
-    relogin.lastOutcome = 'recovered'
-    log('session.recovered', { via: relogin.lastVia, route: routeLabel(route), url: target, status: r.upstream.status, kind })
-    return { r, kind }
+    account.reloginRecovered += 1
+    sessionStats.reissued += 1
+    lastReloginOutcome = 'recovered'
+    log('session.recovered', { account: account.label, via: viaLabel, route: routeLabel(route), url: target, status: r.upstream.status, kind })
+    return { outcome: 'recovered', r, kind }
   } catch (e) {
-    relogin.failed += 1
-    relogin.lastOutcome = 'failed'
-    log('session.relogin_failed', { via: relogin.lastVia, route: routeLabel(route), error: String(e?.message ?? e) })
-    return null
+    account.reloginFailed += 1
+    lastReloginOutcome = 'failed'
+    log('session.relogin_failed', { account: account.label, via: viaLabel, route: routeLabel(route), error: String(e?.message ?? e) })
+    return { outcome: 'failed' }
   }
 }
 
@@ -254,25 +277,42 @@ function cookieJarToHeader(jar) {
     .join('; ')
 }
 
-async function loadCookiesFromDisk() {
+async function readSessionFile(file) {
   try {
-    const txt = await readFile(COOKIE_FILE, 'utf8')
-    const obj = JSON.parse(txt)
+    const obj = JSON.parse(await readFile(file, 'utf8'))
     if (obj && typeof obj.cookies === 'string' && obj.cookies.length) {
-      return { cookies: obj.cookies, savedAt: obj.savedAt ?? 0 }
+      return { cookies: obj.cookies, savedAt: obj.savedAt ?? 0, email: obj.email ?? null }
     }
   } catch (e) {
-    if (e.code !== 'ENOENT') log('cookies.load_error', { error: String(e?.message ?? e) })
+    if (e.code !== 'ENOENT') log('cookies.load_error', { file, error: String(e?.message ?? e) })
   }
   return null
 }
 
-async function saveCookiesToDisk(state) {
+async function loadCookiesFromDisk(account) {
+  const own = await readSessionFile(cookieFileFor(account))
+  if (own) return own
+  // First start after the single-account era: the legacy file holds the one
+  // session there was, which belonged to the first configured account.
+  if (account === accounts.members[0]) {
+    const legacy = await readSessionFile(LEGACY_COOKIE_FILE)
+    if (legacy && (!legacy.email || legacy.email.toLowerCase() === account.email.toLowerCase())) {
+      await saveCookiesToDisk(account, legacy)
+      await rename(LEGACY_COOKIE_FILE, LEGACY_COOKIE_FILE + '.migrated').catch(() => {})
+      log('cookies.migrated_legacy', { account: account.label, from: LEGACY_COOKIE_FILE })
+      return legacy
+    }
+  }
+  return null
+}
+
+async function saveCookiesToDisk(account, state) {
+  const file = cookieFileFor(account)
   try {
-    await mkdir(dirname(COOKIE_FILE), { recursive: true })
-    await writeFile(COOKIE_FILE, JSON.stringify(state, null, 2))
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({ ...state, email: account.email }, null, 2))
   } catch (e) {
-    log('cookies.save_error', { error: String(e?.message ?? e) })
+    log('cookies.save_error', { account: account.label, error: String(e?.message ?? e) })
   }
 }
 
@@ -280,10 +320,7 @@ async function saveCookiesToDisk(state) {
  * Log in to 1001tl. Uses the same route the triggering request is on, so a
  * login forced by a gate on a pool member happens from that member's IP.
  */
-async function doLogin(dispatcher) {
-  if (!TL_EMAIL || !TL_PASSWORD) {
-    throw new Error('UPSTREAM_1001TL_EMAIL/PASSWORD not configured')
-  }
+async function doLogin(account, dispatcher) {
   const init = (extra) => ({ ...extra, ...(dispatcher ? { dispatcher } : {}) })
   // 1) seed guid by visiting homepage
   const homepageRes = await undiciFetch(
@@ -295,8 +332,8 @@ async function doLogin(dispatcher) {
 
   // 2) POST login form
   const body = new URLSearchParams({
-    email: TL_EMAIL,
-    password: TL_PASSWORD,
+    email: account.email,
+    password: account.password,
     referer: 'https://www.1001tracklists.com/',
   }).toString()
   const loginRes = await undiciFetch(
@@ -326,35 +363,36 @@ async function doLogin(dispatcher) {
 
   const cookies = cookieJarToHeader(loginJar)
   const state = { cookies, savedAt: Date.now() }
-  session = state
-  await saveCookiesToDisk(state)
-  log('login.ok', { status: loginRes.status, cookieNames: Object.keys(loginJar).join(',') })
+  sessions.set(account.index, state)
+  await saveCookiesToDisk(account, state)
+  log('login.ok', { account: account.label, status: loginRes.status, cookieNames: Object.keys(loginJar).join(',') })
   return state
 }
 
-async function ensureSession({ forceRefresh = false, dispatcher = null } = {}) {
-  if (forceRefresh) {
-    session = { cookies: '', savedAt: 0 }
-  }
-  if (session.cookies) return session
-  if (loginPromise) return loginPromise
+async function ensureSession(account, { forceRefresh = false, dispatcher = null } = {}) {
+  if (forceRefresh) sessions.delete(account.index)
+  const have = sessions.get(account.index)
+  if (have?.cookies) return have
+  const inflight = loginPromises.get(account.index)
+  if (inflight) return inflight
 
   if (!forceRefresh) {
-    const fromDisk = await loadCookiesFromDisk()
+    const fromDisk = await loadCookiesFromDisk(account)
     if (fromDisk) {
-      session = fromDisk
-      log('cookies.loaded', { savedAt: fromDisk.savedAt })
-      return session
+      sessions.set(account.index, fromDisk)
+      log('cookies.loaded', { account: account.label, savedAt: fromDisk.savedAt })
+      return fromDisk
     }
   }
 
-  loginPromise = doLogin(dispatcher).finally(() => {
-    loginPromise = null
+  const p = doLogin(account, dispatcher).finally(() => {
+    loginPromises.delete(account.index)
   })
+  loginPromises.set(account.index, p)
   try {
-    return await loginPromise
+    return await p
   } catch (e) {
-    log('login.error', { error: String(e?.message ?? e) })
+    log('login.error', { account: account.label, error: String(e?.message ?? e) })
     throw e
   }
 }
@@ -416,6 +454,8 @@ function directHeaders(res) {
   }
   res.setHeader('x-proxy-pool-healthy', String(s.poolHealthy))
   res.setHeader('x-proxy-pool-total', String(s.poolTotal))
+  res.setHeader('x-proxy-accounts-healthy', String(accounts.healthyMembers().length))
+  res.setHeader('x-proxy-accounts-total', String(accounts.size))
 }
 
 function sendJson(res, status, obj) {
@@ -429,7 +469,7 @@ function sendJson(res, status, obj) {
  * access log.
  */
 async function handleProxy(req, res, target, parsed, force) {
-  const useSession = isTracklistsHost(parsed.hostname) && TL_EMAIL && TL_PASSWORD
+  const useSession = isTracklistsHost(parsed.hostname) && HAVE_ACCOUNTS
   const method = req.method ?? 'GET'
   const body = method === 'GET' || method === 'HEAD' ? undefined : await readBody(req)
 
@@ -454,6 +494,10 @@ async function handleProxy(req, res, target, parsed, force) {
   let lastBlocked = null
   let directRecovered = false
   let sessionReissued = false
+  let servedBy = null
+  // Accounts already tried for THIS request (blocked or failed to log in): the
+  // next attempt on any route uses a different one. Cleared per request only.
+  const triedAccounts = new Set()
 
   if (routes.length === 0) {
     planner.noteAllBlocked()
@@ -465,18 +509,31 @@ async function handleProxy(req, res, target, parsed, force) {
     return { route: 'none', kind: 'all_blocked', status: 503, bytes: 0, attempts: ['none:all_in_cooldown'] }
   }
 
-  for (const route of routes) {
+  routeLoop: for (const route of routes) {
     const dispatcher = route.kind === 'pool' ? dispatchers.get(route.member.url) : null
+    // One route may be tried with several accounts: a blocked account is
+    // parked and the SAME route is retried with the next one (that is the
+    // failover that keeps throughput up while one account cools off).
+    for (let accountAttempt = 0; accountAttempt < Math.max(1, accounts.size); accountAttempt++) {
     let cookieHeader = callerCookie
+    let account = null
     if (useSession) {
+      account = accounts.pick(triedAccounts)
+      if (!account) {
+        attempts.push(`${routeLabel(route)}:no_account`)
+        log('account.none_available', { route: routeLabel(route), url: target, tried: [...triedAccounts].map((a) => a.label) })
+        break
+      }
       try {
-        cookieHeader = withSession(await ensureSession({ dispatcher }))
+        cookieHeader = withSession(await ensureSession(account, { dispatcher }))
       } catch (e) {
-        res.statusCode = 502
-        res.end(`session unavailable: ${e?.message ?? e}`)
-        return { route: routeLabel(route), kind: 'session_error', status: 502, bytes: 0, attempts, error: String(e?.message ?? e) }
+        for (const ev of accounts.report(account, 'login_failed', { error: String(e?.message ?? e) })) log(ev.event, ev)
+        triedAccounts.add(account)
+        attempts.push(`${routeLabel(route)}/${account.label}:login_failed`)
+        continue
       }
     }
+    const acctLabel = account ? `/${account.label}` : ''
 
     let r
     try {
@@ -497,7 +554,7 @@ async function handleProxy(req, res, target, parsed, force) {
       }
       for (const ev of planner.report(route, 'error')) log(`route.${ev.event}`, ev)
       log('route.member_error', { label: route.member.label, error: msg })
-      continue
+      continue routeLoop
     }
 
     if (route.kind === 'pool' && isProxyErrorPage(r.upstream)) {
@@ -507,26 +564,28 @@ async function handleProxy(req, res, target, parsed, force) {
       attempts.push(`${routeLabel(route)}:error`)
       for (const ev of planner.report(route, 'error')) log(`route.${ev.event}`, ev)
       log('route.member_error', { label: route.member.label, error: `proxy error page ${r.upstream.status}`, body: r.text.slice(0, 120) })
-      continue
+      continue routeLoop
     }
 
     let kind = classifyUpstream(r.upstream.status, r.text)
-    if (kind === 'gated' && useSession) {
-      log('upstream.gate_detected', { url: target, route: routeLabel(route), status: r.upstream.status })
+    if (kind === 'gated' && account) {
+      log('upstream.gate_detected', { url: target, route: routeLabel(route), account: account.label, status: r.upstream.status })
       try {
-        const s = await ensureSession({ forceRefresh: true, dispatcher })
+        const s = await ensureSession(account, { forceRefresh: true, dispatcher })
         r = await fetchVia(route, target, method, req.headers, body, { ...tlDefaults, cookie: withSession(s) })
         kind = classifyUpstream(r.upstream.status, r.text)
-        log('upstream.gate_retry', { url: target, route: routeLabel(route), status: r.upstream.status, kind, bytes: r.buf.length })
+        log('upstream.gate_retry', { url: target, route: routeLabel(route), account: account.label, status: r.upstream.status, kind, bytes: r.buf.length })
       } catch (e) {
-        log('upstream.gate_retry_failed', { route: routeLabel(route), error: String(e?.message ?? e) })
+        log('upstream.gate_retry_failed', { route: routeLabel(route), account: account.label, error: String(e?.message ?? e) })
       }
     }
 
-    if (kind === 'ip_blocked' && useSession) {
-      const again = await reloginAndRetry(route, target, method, req.headers, body, tlDefaults, withSession)
-      if (again) {
-        attempts.push(`${routeLabel(route)}:session_blocked`, `${routeLabel(route)}:relogin_${again.kind}`)
+    let reloginOutcome = null
+    if (kind === 'ip_blocked' && account) {
+      const again = await reloginAndRetry(account, route, target, method, req.headers, body, tlDefaults, withSession)
+      reloginOutcome = again.outcome
+      if (again.outcome === 'recovered') {
+        attempts.push(`${routeLabel(route)}${acctLabel}:session_blocked`, `${routeLabel(route)}${acctLabel}:relogin_${again.kind}`)
         r = again.r
         kind = again.kind
         sessionReissued = true
@@ -534,17 +593,37 @@ async function handleProxy(req, res, target, parsed, force) {
     }
     if (kind === 'ip_blocked') {
       const ip = extractBlockedIp(r.text)
-      attempts.push(`${routeLabel(route)}:ip_blocked`)
+      attempts.push(`${routeLabel(route)}${acctLabel}:ip_blocked`)
       lastBlocked = { route, r, ip }
+      if (account) {
+        // Park this account and fail over to the next one on the same route.
+        for (const ev of accounts.report(account, 'ip_blocked', { ip, route: routeLabel(route), relogin: reloginOutcome })) log(ev.event, { ...ev, url: target })
+        triedAccounts.add(account)
+        // Only a still-blocked FRESH session says anything about the route
+        // (or a site-wide limit); a parked session says nothing about the IP.
+        if (reloginOutcome === 'still_blocked') {
+          for (const ev of planner.report(route, 'ip_blocked', { ip })) log(`route.${ev.event}`, { ...ev, url: target })
+        }
+        if (accounts.healthyMembers().length > 0) {
+          sessionStats.failovers += 1
+          log('account.failover', { from: account.label, route: routeLabel(route), url: target, healthyLeft: accounts.healthyMembers().length })
+          continue
+        }
+        continue routeLoop
+      }
       for (const ev of planner.report(route, 'ip_blocked', { ip })) log(`route.${ev.event}`, { ...ev, url: target })
-      continue
+      continue routeLoop
     }
 
     for (const ev of planner.report(route, kind)) {
       log(`route.${ev.event}`, ev)
       if (ev.event === 'direct.recovered') directRecovered = true
     }
-    attempts.push(`${routeLabel(route)}:${kind}`)
+    if (account) {
+      for (const ev of accounts.report(account, 'ok')) log(ev.event, ev)
+      servedBy = account.label
+    }
+    attempts.push(`${routeLabel(route)}${acctLabel}:${kind}`)
 
     res.statusCode = r.upstream.status
     r.upstream.headers.forEach((value, key) => {
@@ -561,16 +640,19 @@ async function handleProxy(req, res, target, parsed, force) {
       res.setHeader('x-proxy-session-reissued', '1')
       res.setHeader('x-proxy-block-scope', 'session')
     }
+    if (servedBy) res.setHeader('x-proxy-account', servedBy)
     res.end(r.buf)
-    return { route: routeLabel(route), kind, status: r.upstream.status, bytes: r.buf.length, attempts, sessionReissued }
+    return { route: routeLabel(route), kind, status: r.upstream.status, bytes: r.buf.length, attempts, sessionReissued, account: servedBy }
+    } // account attempts
   }
 
-  // Every route we tried came back blocked (or errored, for pool members).
+  // Every route we tried came back blocked (or errored, for pool members), or
+  // every account is parked.
   planner.noteAllBlocked()
   directHeaders(res)
   res.setHeader('x-proxy-route', 'none')
   res.setHeader('x-proxy-all-blocked', '1')
-  res.setHeader('x-proxy-block-scope', relogin.lastOutcome === 'still_blocked' ? 'account' : 'routes')
+  res.setHeader('x-proxy-block-scope', useSession && accounts.healthyMembers().length === 0 ? 'accounts' : lastReloginOutcome === 'still_blocked' ? 'account' : 'routes')
   res.setHeader('x-proxy-attempts', attempts.join(','))
   if (lastBlocked) {
     // Hand the block page back (as a 503, never the upstream 403) so the
@@ -596,13 +678,18 @@ async function handleProbe(req, res, url) {
     'accept-language': 'en-US,en;q=0.9',
     referer: 'https://www.1001tracklists.com/',
   }
-  const useSession = isTracklistsHost(parsed.hostname) && TL_EMAIL && TL_PASSWORD
+  const useSession = isTracklistsHost(parsed.hostname) && HAVE_ACCOUNTS
   let cookie = ''
-  if (useSession) {
+  // Probe with the least-recently-used account; if every account is parked,
+  // still probe with one of them — a probe exists to learn whether the block
+  // has lifted, and the re-login path below can clear it.
+  const account = useSession ? (accounts.pick() ?? accounts.pickAny()) : null
+  if (account) {
     try {
-      cookie = (await ensureSession()).cookies
+      cookie = (await ensureSession(account)).cookies
     } catch (e) {
-      return sendJson(res, 502, { error: `session unavailable: ${e?.message ?? e}` })
+      for (const ev of accounts.report(account, 'login_failed', { error: String(e?.message ?? e) })) log(ev.event, ev)
+      return sendJson(res, 502, { error: `session unavailable for ${account.label}: ${e?.message ?? e}` })
     }
   }
   const start = Date.now()
@@ -610,25 +697,32 @@ async function handleProbe(req, res, url) {
     let r = await fetchVia({ kind: 'direct' }, url, 'GET', {}, undefined, { ...tlDefaults, cookie })
     let kind = classifyUpstream(r.upstream.status, r.text)
     let sessionReissued = false
-    if (kind === 'ip_blocked' && useSession) {
+    let reloginOutcome = null
+    if (kind === 'ip_blocked' && account) {
       // Same self-heal as the request path: a clean session from a pool egress.
-      const again = await reloginAndRetry({ kind: 'direct' }, url, 'GET', {}, undefined, tlDefaults)
-      if (again) {
+      const again = await reloginAndRetry(account, { kind: 'direct' }, url, 'GET', {}, undefined, tlDefaults)
+      reloginOutcome = again.outcome
+      if (again.outcome === 'recovered') {
         r = again.r
         kind = again.kind
         sessionReissued = true
       }
     }
     const ip = kind === 'ip_blocked' ? extractBlockedIp(r.text) : null
-    const events = planner.report({ kind: 'direct' }, kind, { ip })
+    if (account) {
+      if (kind === 'ip_blocked') for (const ev of accounts.report(account, 'ip_blocked', { ip, route: 'direct', relogin: reloginOutcome, via: 'probe' })) log(ev.event, ev)
+      else for (const ev of accounts.report(account, 'ok')) log(ev.event, ev)
+    }
+    // As in the request path, the route is only blamed when a fresh session was blocked too (or no account is involved).
+    const events = !account || kind !== 'ip_blocked' || reloginOutcome === 'still_blocked' ? planner.report({ kind: 'direct' }, kind, { ip }) : []
     for (const ev of events) log(`route.${ev.event}`, { ...ev, url, via: 'probe' })
-    const out = { probe: kind, status: r.upstream.status, bytes: r.buf.length, ms: Date.now() - start, wasBlocked, blockedIp: ip, sessionReissued, relogin: reloginStatus(), ...planner.status() }
-    log('probe', { url, kind, status: r.upstream.status, wasBlocked, nowBlocked: planner.isDirectBlocked(), sessionReissued, ms: out.ms })
+    const out = { probe: kind, status: r.upstream.status, bytes: r.buf.length, ms: Date.now() - start, wasBlocked, blockedIp: ip, sessionReissued, account: account?.label ?? null, ...accounts.status(), sessionStats, ...planner.status() }
+    log('probe', { url, kind, status: r.upstream.status, wasBlocked, nowBlocked: planner.isDirectBlocked(), account: account?.label ?? null, sessionReissued, ms: out.ms })
     return sendJson(res, 200, out)
   } catch (e) {
     const msg = String(e?.message ?? e)
     log('probe.error', { url, error: msg, ms: Date.now() - start })
-    return sendJson(res, 200, { probe: 'error', error: msg, wasBlocked, ...planner.status() })
+    return sendJson(res, 200, { probe: 'error', error: msg, wasBlocked, ...accounts.status(), ...planner.status() })
   }
 }
 
@@ -641,7 +735,9 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true,
         version: VERSION,
-        hasSession: Boolean(session.cookies),
+        hasSession: [...sessions.values()].some((s) => s?.cookies),
+        accountsHealthy: accounts.healthyMembers().length,
+        accountsTotal: accounts.size,
         directBlocked: planner.isDirectBlocked(),
         poolHealthy: planner.healthyMembers().length,
         poolTotal: POOL.length,
@@ -654,7 +750,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (reqUrl.pathname === '/status') {
-      return sendJson(res, 200, { version: VERSION, probeUrl: PROBE_URL, hasSession: Boolean(session.cookies), relogin: reloginStatus(), ...planner.status() })
+      return sendJson(res, 200, { version: VERSION, probeUrl: PROBE_URL, hasSession: [...sessions.values()].some((s) => s?.cookies), ...accounts.status(), sessionStats, ...planner.status() })
     }
 
     if (reqUrl.pathname === '/probe') {
@@ -722,7 +818,9 @@ server.listen(PORT, BIND, () => {
     bind: BIND,
     port: PORT,
     allowedHosts: [...ALLOWED_HOSTS],
-    hasCreds: Boolean(TL_EMAIL && TL_PASSWORD),
+    accounts: ACCOUNTS.map((a) => `acct${a.index}:${a.email}${a.legacy ? ' (LEGACY unsuffixed vars — migrate to _1)' : ''}`),
+    reloginCooldownMs: RELOGIN_COOLDOWN_MS,
+    cookieDir: COOKIE_DIR,
     pool: POOL.map((m) => m.label),
     cooldownMs: COOLDOWN_MS,
     errorCooldownMs: ERROR_COOLDOWN_MS,

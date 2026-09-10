@@ -64,6 +64,11 @@ export type HomeProxyResult = {
    * failure rather than paying for a BrightData fallback.
    */
   upstreamTransport: boolean
+  /** Which 1001tl account served this request (x-proxy-account, e.g. "acct2"); null when anonymous / not served. */
+  account: string | null
+  /** Forwarder's account pool health at the time of the response (x-proxy-accounts-healthy/-total). */
+  accountsHealthy: number | null
+  accountsTotal: number | null
   /** The forwarder found its 1001tl session blocked, re-logged in through a pool egress and retried (x-proxy-session-reissued). */
   sessionReissued: boolean
   /** Forwarder's reading of what was blocked: 'session' (healed by re-login), 'routes', or 'account' (a fresh session was blocked too). */
@@ -143,6 +148,9 @@ export async function fetchViaHomeProxy(
       directBlocked: null,
       directRecovered: false,
       upstreamTransport: false,
+      account: null,
+      accountsHealthy: null,
+      accountsTotal: null,
       sessionReissued: false,
       blockScope: null,
       poolHealthy: null,
@@ -168,7 +176,10 @@ export async function fetchViaHomeProxy(
     attempts: h.get('x-proxy-attempts'),
     directBlocked,
     directRecovered: h.get('x-proxy-direct-recovered') === '1',
-    upstreamTransport: res.status === 502 && route === 'direct' && /(^|,)direct:error$/.test(h.get('x-proxy-attempts') ?? ''),
+    upstreamTransport: res.status === 502 && route === 'direct' && /(^|,)direct(\/acct\d+)?:error$/.test(h.get('x-proxy-attempts') ?? ''),
+    account: h.get('x-proxy-account'),
+    accountsHealthy: num(h.get('x-proxy-accounts-healthy')),
+    accountsTotal: num(h.get('x-proxy-accounts-total')),
     sessionReissued: h.get('x-proxy-session-reissued') === '1',
     blockScope: (['session', 'routes', 'account'].includes(h.get('x-proxy-block-scope') ?? '') ? h.get('x-proxy-block-scope') : null) as HomeProxyResult['blockScope'],
     poolHealthy: num(h.get('x-proxy-pool-healthy')),
@@ -184,7 +195,7 @@ export async function fetchViaHomeProxy(
   const base = { status: res.status, html, ...meta }
   if (kind === 'ok') {
     if (meta.sessionReissued) log?.warn('homeproxy.session_reissued', { url, route, egress: meta.egress, attempts: meta.attempts })
-    log?.info('homeproxy.ok', { url, status: res.status, htmlBytes: html.length, ms, route, egress: meta.egress, attempts: meta.attempts, directBlocked: directBlocked?.until ?? null, sessionReissued: meta.sessionReissued })
+    log?.info('homeproxy.ok', { url, status: res.status, htmlBytes: html.length, ms, route, egress: meta.egress, account: meta.account, accountsHealthy: meta.accountsHealthy, attempts: meta.attempts, directBlocked: directBlocked?.until ?? null, sessionReissued: meta.sessionReissued })
     return { ...base, errorMessage: null, kind }
   }
   const errorMessage =
@@ -217,6 +228,11 @@ export type HomeProxyStatus = {
   poolHealthy?: number
   poolTotal?: number
   counters?: Record<string, number>
+  /** Forwarder ≥0.4.0: the 1001tl account pool. */
+  accounts?: Array<{ label: string; email: string; healthy: boolean; blocked: boolean; blockedUntil: string | null; okCount: number; blockedCount: number; errorCount: number; lastUsedAt: string | null }>
+  accountsHealthy?: number
+  accountsTotal?: number
+  sessionStats?: { reissued: number; failovers: number }
 }
 
 /** GET /status on the forwarder. Throws on transport/auth failure. */

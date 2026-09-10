@@ -14,7 +14,7 @@ export type Env = {
   HOME_PROXY_TOKEN?: string
   /** Optional. Max BrightData Web Unlocker calls per UTC day across all paths (default 333 ≈ $15/mo at $1.50 per 1k). */
   BRIGHTDATA_DAILY_CAP?: string
-  /** Max 1001tracklists page fetches per cron tick across all subs (default 25). Paces the account under 1001tl's rate limit. */
+  /** 1001tracklists page fetches per cron tick PER HEALTHY FORWARDER ACCOUNT (default 20); the tick budget is this × the accounts the forwarder reports healthy. */
   TL_FETCHES_PER_TICK?: string
   /** Web Push (VAPID) identity for the admin page's IP-ban alerts. Generate with `node scripts/gen-vapid-keys.mjs`. */
   VAPID_PUBLIC_KEY?: string

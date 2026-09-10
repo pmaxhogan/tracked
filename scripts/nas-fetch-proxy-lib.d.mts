@@ -91,3 +91,69 @@ export class RoutePlanner {
   noteAllBlocked(): void
   status(): PlannerStatus
 }
+
+// ─── accounts ────────────────────────────────────────────────────────────────
+export type AccountConfig = { index: number; email: string; password: string; legacy?: boolean }
+export function parseAccountsFromEnv(env: Record<string, string | undefined>): AccountConfig[]
+export function accountFileKey(email: string): string
+
+export type AccountMember = {
+  index: number
+  email: string
+  password: string
+  label: string
+  legacy: boolean
+  blockedUntil: number
+  unhealthyUntil: number
+  lastUsedAt: number
+  lastOkAt: number
+  lastBlockAt: number
+  lastErrorAt: number
+  okCount: number
+  blockedCount: number
+  errorCount: number
+  loginFailures: number
+  reloginLastAt: number
+  reloginAttempts: number
+  reloginRecovered: number
+  reloginStillBlocked: number
+  reloginFailed: number
+  order: number
+}
+export type AccountOutcome = 'ok' | 'ip_blocked' | 'login_failed' | 'error'
+export type AccountStatus = {
+  accounts: Array<{
+    label: string
+    email: string
+    legacy: boolean
+    healthy: boolean
+    blocked: boolean
+    blockedUntil: string | null
+    unhealthy: boolean
+    unhealthyUntil: string | null
+    lastUsedAt: string | null
+    lastOkAt: string | null
+    lastBlockAt: string | null
+    okCount: number
+    blockedCount: number
+    errorCount: number
+    loginFailures: number
+    relogin: { lastAt: string | null; attempts: number; recovered: number; stillBlocked: number; failed: number; available: boolean }
+  }>
+  accountsHealthy: number
+  accountsTotal: number
+  reloginCooldownMs: number
+}
+export class AccountPool {
+  constructor(opts?: { accounts?: AccountConfig[]; blockCooldownMs?: number; errorCooldownMs?: number; reloginCooldownMs?: number; now?: () => number })
+  members: AccountMember[]
+  readonly size: number
+  isHealthy(m: AccountMember, now?: number): boolean
+  healthyMembers(now?: number): AccountMember[]
+  pick(exclude?: Set<AccountMember>, now?: number): AccountMember | null
+  pickAny(now?: number): AccountMember | null
+  canRelogin(m: AccountMember, now?: number): boolean
+  noteReloginAttempt(m: AccountMember, now?: number): void
+  report(m: AccountMember, outcome: AccountOutcome, extra?: Record<string, unknown>): PlannerEvent[]
+  status(): AccountStatus
+}

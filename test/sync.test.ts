@@ -1362,15 +1362,51 @@ describe('per-tick 1001tl fetch budget (account rate-limit pacing)', () => {
     expect(beta.lastError).toBeUndefined()
   })
 
-  it('carries leftover budget into the next sub and defaults to 25 when the var is unset', async () => {
+  it('carries leftover budget into the next sub and defaults to 20 per account when the var is unset', async () => {
     const env = makeEnv()
     await twoSubs(env, 2, [100, 200])
     const r = await syncPendingOnly(env)
     expect(r.results.map((x) => x.slug)).toEqual(['alpha', 'beta'])
     expect(fetch1001Html).toHaveBeenCalledTimes(4)
-    expect(newFetchBudget(env)).toEqual({ remaining: 25, limit: 25, spent: 0 })
-    expect(newFetchBudget({ ...env, TL_FETCHES_PER_TICK: 'nope' } as Env).limit).toBe(25)
+    expect(newFetchBudget(env)).toEqual({ remaining: 20, limit: 20, spent: 0, perAccount: 20, accounts: 1 })
+    expect(newFetchBudget({ ...env, TL_FETCHES_PER_TICK: 'nope' } as Env).limit).toBe(20)
     expect(newFetchBudget({ ...env, TL_FETCHES_PER_TICK: '7' } as Env).limit).toBe(7)
+    // The budget scales with the accounts the forwarder reports healthy — and never below one account.
+    expect(newFetchBudget({ ...env, TL_FETCHES_PER_TICK: '7' } as Env, 3)).toMatchObject({ limit: 21, perAccount: 7, accounts: 3 })
+    expect(newFetchBudget(env, 0).limit).toBe(20)
+  })
+
+  it('reads the healthy-account count from the forwarder once per tick, and falls back to one account when it cannot', async () => {
+    const env = { ...makeEnv(), HOME_PROXY_URL: 'https://proxy.example', HOME_PROXY_TOKEN: 'tok', TL_FETCHES_PER_TICK: '2' } as Env
+    // 3 healthy accounts → budget 6: two subs × 3 sets all fit in one tick.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).endsWith('/status')) return new Response(JSON.stringify({ version: '0.4.0', accountsHealthy: 3, accountsTotal: 3, poolHealthy: 18 }), { status: 200 })
+        return new Response('unexpected', { status: 599 })
+      }),
+    )
+    try {
+      await twoSubs(env, 3, [100, 200])
+      const r = await syncPendingOnly(env)
+      expect(r.results.map((x) => x.slug).sort()).toEqual(['alpha', 'beta'])
+      expect(fetch1001Html).toHaveBeenCalledTimes(6)
+      expect((await loadSubState(env, 'alpha'))!.processedTracklistUrls).toHaveLength(3)
+      expect((await loadSubState(env, 'beta'))!.processedTracklistUrls).toHaveLength(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    // Forwarder unreachable → 1 account → budget 2: only two of the remaining sets go.
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed') }))
+    try {
+      ;(fetch1001Html as ReturnType<typeof vi.fn>).mockClear()
+      const env2 = { ...makeEnv(), HOME_PROXY_URL: 'https://proxy.example', HOME_PROXY_TOKEN: 'tok', TL_FETCHES_PER_TICK: '2' } as Env
+      await twoSubs(env2, 3, [100, 200])
+      await syncPendingOnly(env2)
+      expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('also caps rechecks', async () => {

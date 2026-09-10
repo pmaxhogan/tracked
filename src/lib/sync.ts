@@ -48,6 +48,7 @@ import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUnavailableError } from './upstream1001'
 import { flushBanTally, isPaused } from './ban-state'
+import { fetchHomeProxyStatus } from './homeProxy'
 
 import { getAccessToken } from './google-oauth'
 import {
@@ -279,15 +280,41 @@ export type SyncOpts = {
   fetchBudget?: FetchBudget
 }
 
-export type FetchBudget = { remaining: number; limit: number; spent: number }
+export type FetchBudget = { remaining: number; limit: number; spent: number; perAccount: number; accounts: number }
 
-export const DEFAULT_TL_FETCHES_PER_TICK = 25
+export const DEFAULT_TL_FETCHES_PER_TICK = 20
 
-/** One tick's worth of 1001tl page fetches, from `TL_FETCHES_PER_TICK` (default 25). */
-export function newFetchBudget(env: Env): FetchBudget {
+/**
+ * One tick's worth of 1001tl page fetches: `TL_FETCHES_PER_TICK` (default 20)
+ * *per healthy account* on the forwarder. Three healthy accounts → 60 a tick;
+ * one parked → 40, automatically. 1001tl's limit is per account, so this keeps
+ * each account at the same rate no matter how many there are.
+ */
+export function newFetchBudget(env: Env, healthyAccounts = 1): FetchBudget {
   const raw = Number(env.TL_FETCHES_PER_TICK)
-  const limit = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_TL_FETCHES_PER_TICK
-  return { remaining: limit, limit, spent: 0 }
+  const perAccount = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_TL_FETCHES_PER_TICK
+  const accounts = Math.max(1, Math.floor(healthyAccounts) || 1)
+  const limit = perAccount * accounts
+  return { remaining: limit, limit, spent: 0, perAccount, accounts }
+}
+
+/**
+ * How many 1001tl accounts the forwarder can serve from right now, read from
+ * its /status once per tick. Anything short of a clear answer — no forwarder
+ * configured, unreachable, old forwarder without accounts — is treated as 1
+ * (the pre-multi-account throughput), never more.
+ */
+export async function healthyAccountCount(env: Env, log: Logger): Promise<number> {
+  if (!env.HOME_PROXY_URL || !env.HOME_PROXY_TOKEN) return 1
+  try {
+    const st = await fetchHomeProxyStatus(env.HOME_PROXY_URL, env.HOME_PROXY_TOKEN)
+    const n = typeof st.accountsHealthy === 'number' ? st.accountsHealthy : 1
+    log.info('sync.forwarder_accounts', { accountsHealthy: st.accountsHealthy ?? null, accountsTotal: st.accountsTotal ?? null, poolHealthy: st.poolHealthy ?? null })
+    return Math.max(1, n)
+  } catch (e) {
+    log.warn('sync.forwarder_status_unavailable', { ...errorFields(e) })
+    return 1
+  }
 }
 
 /** Take one fetch from the budget; false when it is spent. */
@@ -359,8 +386,8 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
   const states = new Map<string, SubState | null>()
   for (const sub of allSubs) states.set(sub.slug, await loadSubState(env, sub.slug))
   const subs = orderByLastRun(allSubs, states)
-  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env)
-  log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit })
+  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env, await healthyAccountCount(env, log))
+  log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit, perAccount: fetchBudget.perAccount, accounts: fetchBudget.accounts })
   const results: SyncOneResult[] = []
   if (await pausedForRun(env, log, 'sync')) return { results, paused: true }
   for (const sub of subs) {
@@ -422,8 +449,8 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
     log.info('sync.pending.nothing_to_do', { totalSubs: subs.length })
     return { results: [] }
   }
-  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env)
-  log.info('sync.pending.start', { totalSubs: subs.length, candidatesWithPending: candidates.length, fetchBudget: fetchBudget.limit })
+  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env, await healthyAccountCount(env, log))
+  log.info('sync.pending.start', { totalSubs: subs.length, candidatesWithPending: candidates.length, fetchBudget: fetchBudget.limit, perAccount: fetchBudget.perAccount, accounts: fetchBudget.accounts })
   const tokenInfo = await getAccessToken(env)
   if (!tokenInfo) {
     log.error('sync.pending.no_oauth_tokens')

@@ -11,15 +11,21 @@
 services:
   tracked-fetch-proxy:
     build: /mnt/alpha/apps/tracked-fetch-proxy/tracked-fetch-proxy/
-    image: tracked-fetch-proxy:0.3.2
+    image: tracked-fetch-proxy:0.4.0
     container_name: tracked-fetch-proxy
     restart: unless-stopped
     environment:
       - PORT=8088
       - PROXY_TOKEN=<long-random, same as the Worker's HOME_PROXY_TOKEN>
-      - UPSTREAM_1001TL_EMAIL=<1001tl account email>
-      - UPSTREAM_1001TL_PASSWORD=<1001tl account password>
-      - COOKIE_FILE=/data/1001tl-cookies.json
+      # One 1001tl account per numbered pair, any count (the forwarder lists the env).
+      # Real values: .1001tl-accounts.env in the repo root (gitignored).
+      - UPSTREAM_1001TL_EMAIL_1=<account 1 email>
+      - UPSTREAM_1001TL_PASSWORD_1=<account 1 password>
+      - UPSTREAM_1001TL_EMAIL_2=<account 2 email>
+      - UPSTREAM_1001TL_PASSWORD_2=<account 2 password>
+      - UPSTREAM_1001TL_EMAIL_3=<account 3 email>
+      - UPSTREAM_1001TL_PASSWORD_3=<account 3 password>
+      - COOKIE_DIR=/data
       - BLOCK_COOLDOWN_MS=3600000
       - MAX_POOL_ATTEMPTS=2
       - RELOGIN_COOLDOWN_MS=600000

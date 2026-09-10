@@ -259,3 +259,225 @@ export class RoutePlanner {
     }
   }
 }
+
+// ─── 1001tracklists accounts ─────────────────────────────────────────────────
+//
+// 1001tl's block follows the *login session*, not the IP (verified 2026-09-10),
+// and what trips it is per-account request rate. So the forwarder keeps N
+// accounts, each with its own session, and spreads requests across them:
+// N accounts ≈ N× the safe throughput, and a blocked account is simply skipped
+// while the others keep serving (reliability). Accounts come from the env as
+// numbered pairs — UPSTREAM_1001TL_EMAIL_1 / UPSTREAM_1001TL_PASSWORD_1,
+// UPSTREAM_1001TL_EMAIL_2 / … — with no upper bound; the set is discovered by
+// listing the env.
+
+const ACCOUNT_ENV_RE = /^UPSTREAM_1001TL_(EMAIL|PASSWORD)_(\d+)$/
+
+/**
+ * Discover the configured accounts. Returns `[{ index, email, password }]`
+ * sorted by index. Throws when a pair is missing its other half. The old
+ * unsuffixed pair (UPSTREAM_1001TL_EMAIL / _PASSWORD) is still accepted, as
+ * index 0 with `legacy: true`, so a half-migrated deploy degrades to one
+ * account instead of to anonymous mode.
+ */
+export function parseAccountsFromEnv(env) {
+  const byIndex = new Map()
+  for (const [key, value] of Object.entries(env)) {
+    const m = ACCOUNT_ENV_RE.exec(key)
+    if (!m) continue
+    const index = Number(m[2])
+    const entry = byIndex.get(index) ?? { index, email: '', password: '' }
+    if (m[1] === 'EMAIL') entry.email = String(value ?? '').trim()
+    else entry.password = String(value ?? '')
+    byIndex.set(index, entry)
+  }
+  const accounts = [...byIndex.values()].sort((a, b) => a.index - b.index)
+  for (const a of accounts) {
+    if (!a.email || !a.password) {
+      throw new Error(`account ${a.index}: UPSTREAM_1001TL_EMAIL_${a.index} and UPSTREAM_1001TL_PASSWORD_${a.index} must both be set`)
+    }
+  }
+  const seen = new Set()
+  for (const a of accounts) {
+    const k = a.email.toLowerCase()
+    if (seen.has(k)) throw new Error(`account ${a.index}: ${a.email} is configured twice`)
+    seen.add(k)
+  }
+  if (accounts.length === 0 && env.UPSTREAM_1001TL_EMAIL && env.UPSTREAM_1001TL_PASSWORD) {
+    return [{ index: 0, email: String(env.UPSTREAM_1001TL_EMAIL).trim(), password: String(env.UPSTREAM_1001TL_PASSWORD), legacy: true }]
+  }
+  return accounts
+}
+
+/** Stable, filesystem-safe name for an account's cookie file. */
+export function accountFileKey(email) {
+  return email.toLowerCase().replace(/@/g, '_at_').replace(/[^a-z0-9._+-]/g, '_')
+}
+
+/**
+ * Which account serves the next request, and how each one is doing.
+ *
+ * Selection is least-recently-used among healthy accounts (ties → lowest
+ * index), i.e. round-robin that self-corrects when an account drops out: load
+ * stays even, so every account sees ~1/N of the traffic. An account that was
+ * blocked sits out `blockCooldownMs` (its fresh session is what the forwarder
+ * tries first — see the proxy's re-login — and only a *still*-blocked fresh
+ * session parks it); one whose login failed or errored sits out
+ * `errorCooldownMs`. Re-logins are rate-limited per account.
+ */
+export class AccountPool {
+  constructor({ accounts = [], blockCooldownMs = DEFAULT_COOLDOWN_MS, errorCooldownMs = DEFAULT_ERROR_COOLDOWN_MS, reloginCooldownMs = 10 * 60 * 1000, now = () => Date.now() } = {}) {
+    this.blockCooldownMs = blockCooldownMs
+    this.errorCooldownMs = errorCooldownMs
+    this.reloginCooldownMs = reloginCooldownMs
+    this.now = now
+    this.members = accounts.map((a, i) => ({
+      index: a.index,
+      email: a.email,
+      password: a.password,
+      label: `acct${a.index}`,
+      legacy: !!a.legacy,
+      blockedUntil: 0,
+      unhealthyUntil: 0,
+      lastUsedAt: 0,
+      lastOkAt: 0,
+      lastBlockAt: 0,
+      lastErrorAt: 0,
+      okCount: 0,
+      blockedCount: 0,
+      errorCount: 0,
+      loginFailures: 0,
+      reloginLastAt: 0,
+      reloginAttempts: 0,
+      reloginRecovered: 0,
+      reloginStillBlocked: 0,
+      reloginFailed: 0,
+      // Stable tiebreak so the very first requests go 1, 2, 3, … not all to 1.
+      order: i,
+    }))
+  }
+
+  get size() {
+    return this.members.length
+  }
+
+  isHealthy(m, now = this.now()) {
+    return m.blockedUntil <= now && m.unhealthyUntil <= now
+  }
+
+  healthyMembers(now = this.now()) {
+    return this.members.filter((m) => this.isHealthy(m, now))
+  }
+
+  /**
+   * Least-recently-used healthy account not in `exclude` (accounts already
+   * tried for this request). Marks it used. Null when none is available.
+   */
+  pick(exclude = new Set(), now = this.now()) {
+    const candidates = this.healthyMembers(now).filter((m) => !exclude.has(m))
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => a.lastUsedAt - b.lastUsedAt || a.order - b.order)
+    const m = candidates[0]
+    m.lastUsedAt = now
+    return m
+  }
+
+  /** Any account at all (for a probe when everything is parked): healthy first, then least recently used. */
+  pickAny(now = this.now()) {
+    if (this.members.length === 0) return null
+    const sorted = [...this.members].sort(
+      (a, b) => (this.isHealthy(b, now) ? 1 : 0) - (this.isHealthy(a, now) ? 1 : 0) || a.lastUsedAt - b.lastUsedAt || a.order - b.order,
+    )
+    const m = sorted[0]
+    m.lastUsedAt = now
+    return m
+  }
+
+  canRelogin(m, now = this.now()) {
+    return now - m.reloginLastAt >= this.reloginCooldownMs
+  }
+
+  noteReloginAttempt(m, now = this.now()) {
+    m.reloginLastAt = now
+    m.reloginAttempts += 1
+  }
+
+  /**
+   * Record an outcome for `m`. Returns the events to log.
+   *   ok            — clears any block/unhealthy state
+   *   ip_blocked    — parks the account for blockCooldownMs (the proxy calls
+   *                   this after a fresh session was blocked too, or when no
+   *                   re-login was possible)
+   *   login_failed  — wrong password / login page unreachable: errorCooldownMs
+   *   error         — transport trouble attributable to this account's session
+   */
+  report(m, outcome, extra = {}) {
+    const now = this.now()
+    const events = []
+    if (outcome === 'ok') {
+      m.okCount += 1
+      m.lastOkAt = now
+      if (m.blockedUntil > now || m.unhealthyUntil > now) {
+        events.push({ event: 'account.recovered', label: m.label, email: m.email })
+      }
+      m.blockedUntil = 0
+      m.unhealthyUntil = 0
+      return events
+    }
+    if (outcome === 'ip_blocked') {
+      m.blockedCount += 1
+      m.lastBlockAt = now
+      m.blockedUntil = now + this.blockCooldownMs
+      events.push({ event: 'account.blocked', label: m.label, email: m.email, blockedUntil: m.blockedUntil, ...extra })
+      return events
+    }
+    if (outcome === 'login_failed') {
+      m.loginFailures += 1
+      m.errorCount += 1
+      m.lastErrorAt = now
+      m.unhealthyUntil = now + this.errorCooldownMs
+      events.push({ event: 'account.login_failed', label: m.label, email: m.email, unhealthyUntil: m.unhealthyUntil, ...extra })
+      return events
+    }
+    m.errorCount += 1
+    m.lastErrorAt = now
+    m.unhealthyUntil = now + this.errorCooldownMs
+    events.push({ event: 'account.unhealthy', label: m.label, email: m.email, unhealthyUntil: m.unhealthyUntil, ...extra })
+    return events
+  }
+
+  status() {
+    const now = this.now()
+    const iso = (ms) => (ms ? new Date(ms).toISOString() : null)
+    return {
+      accounts: this.members.map((m) => ({
+        label: m.label,
+        email: m.email,
+        legacy: m.legacy,
+        healthy: this.isHealthy(m, now),
+        blocked: m.blockedUntil > now,
+        blockedUntil: iso(m.blockedUntil),
+        unhealthy: m.unhealthyUntil > now,
+        unhealthyUntil: iso(m.unhealthyUntil),
+        lastUsedAt: iso(m.lastUsedAt),
+        lastOkAt: iso(m.lastOkAt),
+        lastBlockAt: iso(m.lastBlockAt),
+        okCount: m.okCount,
+        blockedCount: m.blockedCount,
+        errorCount: m.errorCount,
+        loginFailures: m.loginFailures,
+        relogin: {
+          lastAt: iso(m.reloginLastAt),
+          attempts: m.reloginAttempts,
+          recovered: m.reloginRecovered,
+          stillBlocked: m.reloginStillBlocked,
+          failed: m.reloginFailed,
+          available: this.canRelogin(m, now),
+        },
+      })),
+      accountsHealthy: this.healthyMembers(now).length,
+      accountsTotal: this.members.length,
+      reloginCooldownMs: this.reloginCooldownMs,
+    }
+  }
+}

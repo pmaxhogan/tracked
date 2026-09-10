@@ -18,3 +18,6 @@ tasker/
 
 # Web Push VAPID key backup — private key, never commit.
 .vapid-prod.env
+
+# 1001tracklists account credentials for the NAS forwarder — never commit.
+.1001tl-accounts.env
