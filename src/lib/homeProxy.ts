@@ -57,6 +57,13 @@ export type HomeProxyResult = {
   directBlocked: HomeProxyDirectBlocked | null
   /** True when this very request found the residential IP working again after a block. */
   directRecovered: boolean
+  /**
+   * The forwarder could not reach 1001tracklists at all on the direct route
+   * (its 502 with attempts `direct:error`): a network blip on the home link,
+   * not an answer from 1001tl. The cascade treats it as a plain retryable
+   * failure rather than paying for a BrightData fallback.
+   */
+  upstreamTransport: boolean
   /** The forwarder found its 1001tl session blocked, re-logged in through a pool egress and retried (x-proxy-session-reissued). */
   sessionReissued: boolean
   /** Forwarder's reading of what was blocked: 'session' (healed by re-login), 'routes', or 'account' (a fresh session was blocked too). */
@@ -135,6 +142,7 @@ export async function fetchViaHomeProxy(
       attempts: null,
       directBlocked: null,
       directRecovered: false,
+      upstreamTransport: false,
       sessionReissued: false,
       blockScope: null,
       poolHealthy: null,
@@ -160,6 +168,7 @@ export async function fetchViaHomeProxy(
     attempts: h.get('x-proxy-attempts'),
     directBlocked,
     directRecovered: h.get('x-proxy-direct-recovered') === '1',
+    upstreamTransport: res.status === 502 && route === 'direct' && /(^|,)direct:error$/.test(h.get('x-proxy-attempts') ?? ''),
     sessionReissued: h.get('x-proxy-session-reissued') === '1',
     blockScope: (['session', 'routes', 'account'].includes(h.get('x-proxy-block-scope') ?? '') ? h.get('x-proxy-block-scope') : null) as HomeProxyResult['blockScope'],
     poolHealthy: num(h.get('x-proxy-pool-healthy')),

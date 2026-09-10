@@ -784,10 +784,16 @@ export async function syncOne(
       break
     }
     const tSet = Date.now()
+    // Remembered outside the try so a failure *after* the page was parsed
+    // (typically YouTube rejecting the insert) can still name the video.
+    let foundVideoId: string | null = null
+    let foundVia: string | null = null
     try {
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
+      foundVia = setFetched.via
       const videoId = parseSetYouTubeId(setFetched.html)
+      foundVideoId = videoId
       if (videoId) {
         videoIdsFound += 1
         if (!existingVideoIds.has(videoId)) {
@@ -850,6 +856,8 @@ export async function syncOne(
       auditSet(abandon ? 'abandoned' : 'failed', setUrl, {
         message: e instanceof Error ? e.message : String(e),
         failureCount: fc,
+        ...(foundVideoId ? { videoId: foundVideoId, videoUrl: watchUrl(foundVideoId) } : {}),
+        ...(foundVia ? { via: foundVia } : {}),
         meta: { ms: Date.now() - tSet },
       })
       if (abandon) {

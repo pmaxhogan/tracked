@@ -1600,7 +1600,9 @@ ${BAN_HISTORY_HTML}
     out.push(dl([
       ['video', r.videoId
         ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'open')
-        : '<span class="warn">no YouTube recording on the set page</span>'],
+        : (r.status === 'failed' || r.status === 'abandoned')
+          ? '<span class="warn">unknown — the set failed before a video was recorded</span>'
+          : '<span class="warn">no YouTube recording on the set page</span>'],
       // A recheck found the set's recording swapped on 1001tracklists: this
       // is the one that came out of the playlists.
       r.previousVideoId

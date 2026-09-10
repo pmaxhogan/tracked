@@ -80,6 +80,22 @@ export class UpstreamHttpError extends Error {
   }
 }
 
+/**
+ * The forwarder reached for 1001tracklists on the home link and the connection
+ * failed (its 502 + `direct:error`). A blip, not a verdict: the caller counts
+ * one ordinary failure and the next tick simply tries again. BrightData is
+ * deliberately not consulted — it has been answering tracklist pages with
+ * Cloudflare shells for money, and a retry in five minutes is free.
+ */
+export class UpstreamTransportError extends Error {
+  readonly url: string
+  constructor(url: string, detail: string) {
+    super(`forwarder could not reach 1001tracklists for ${url} (${detail})`)
+    this.name = 'UpstreamTransportError'
+    this.url = url
+  }
+}
+
 export function isStopTheBatchError(e: unknown): boolean {
   return e instanceof UpstreamPausedError || e instanceof UpstreamUnavailableError || e instanceof IPBlockedError
 }
@@ -201,6 +217,9 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
     } else if (proxy.kind === 'all_blocked') {
       blockedIp = extractIPBlockedAddress(proxy.html) ?? proxy.directBlocked?.ip ?? null
       log?.error('fetch1001.homeproxy_all_routes_blocked', { url, attempts: proxy.attempts, blockedIp, fallback: opts.brightdataApiKey ? 'brightdata' : 'pause' })
+    } else if (proxy.kind === 'upstream_error' && proxy.upstreamTransport) {
+      log?.warn('fetch1001.homeproxy_transport_blip', { url, attempts: proxy.attempts, errorMessage: proxy.errorMessage?.slice(0, 160) })
+      throw new UpstreamTransportError(url, (proxy.errorMessage ?? 'upstream error').slice(0, 120))
     } else if (proxy.kind === 'upstream_error' && FINAL_UPSTREAM_STATUSES.has(proxy.status)) {
       // A real 404/410 from 1001tl through a working route. BrightData would
       // only tell us the same thing for money; the URL is simply gone.

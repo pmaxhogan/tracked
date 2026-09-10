@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
-import { fetch1001, fetchOptsFromEnv, UpstreamPausedError, UpstreamUnavailableError, UpstreamHttpError } from '../src/lib/upstream1001'
+import { fetch1001, fetchOptsFromEnv, UpstreamPausedError, UpstreamUnavailableError, UpstreamHttpError, UpstreamTransportError } from '../src/lib/upstream1001'
 import { fetchTracklist, searchByYouTubeUrl } from '../src/lib/tracklists1001'
 import { fetch1001Html } from '../src/lib/dj-index'
 import { _resetTallyForTests, getBanStatus, getHomeBan, getPause, setPause } from '../src/lib/ban-state'
@@ -186,6 +186,19 @@ describe('fetch1001 cascade', () => {
     expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
     expect((await getBanStatus(env)).brightdata.used).toBe(0)
     expect(await getHomeBan(env)).toBeNull()
+  })
+
+  it("the forwarder's own direct transport blip (502 + direct:error) is a plain retryable failure: no BrightData, no ban state", async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const calls = routeFetch({
+      proxy: () => new Response('upstream error: fetch failed', { status: 502, headers: { 'x-proxy-route': 'direct', 'x-proxy-attempts': 'direct:error', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' } }),
+      brightdata: () => bdOk(TRACKLIST_HTML),
+    })
+    const err = await fetch1001(TL, fetchOptsFromEnv(env)).catch((e) => e)
+    expect(err).toBeInstanceOf(UpstreamTransportError)
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
+    expect(await getHomeBan(env)).toBeNull()
+    expect(await getPause(env)).toBeNull()
   })
 
   it('a 5xx from 1001tl through the forwarder still falls through to BrightData', async () => {
