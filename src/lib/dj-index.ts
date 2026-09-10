@@ -17,18 +17,8 @@
  */
 
 import { parse } from 'node-html-parser'
-import {
-  fetchHtml,
-  fetchWithTimeout,
-  isIPBlocked,
-  extractIPBlockedAddress,
-  IPBlockedError,
-  looksLikeCfShell,
-  CloudflareChallengeError,
-  type ChallengeState,
-} from './fetch'
-import { fetchViaUnlocker } from './unlocker'
-import { fetchViaHomeProxy } from './homeProxy'
+import { fetchWithTimeout, type ChallengeState } from './fetch'
+import { fetch1001, type Fetch1001Opts as CascadeOpts, type Via } from './upstream1001'
 import type { Logger } from './log'
 
 const ORIGIN = 'https://www.1001tracklists.com'
@@ -383,121 +373,24 @@ async function fetchInfiniteScrollChunk(
   return { ok: true, end: !!json.end, dataHtml: json.data ?? '' }
 }
 
-/**
- * KV key + TTL for the home-proxy IP-block backoff. When the home proxy
- * returns 1001tracklists' "your IP is blocked" page (status 200 but ~60 KB
- * captcha shell), we set this key with a 6 h TTL and skip the home proxy
- * for that window — otherwise our every-5-min cron keeps re-triggering
- * the block from the same residential IP and never lets it cool off.
- */
-const HOME_PROXY_BLOCK_KEY = 'cf:home_proxy_blocked_until'
-const HOME_PROXY_BLOCK_TTL_SECONDS = 6 * 60 * 60
-
-export type Fetch1001Opts = {
-  brightdataApiKey?: string
-  homeProxyUrl?: string
-  homeProxyToken?: string
-  /**
-   * Optional CACHE KV binding. When provided, fetch1001Html persists a
-   * 6 h backoff flag after a home-proxy IP-block response and honors it
-   * on subsequent calls — stops us from re-DDOSing the residential IP
-   * once 1001tracklists has blocked it.
-   */
-  cacheKv?: KVNamespace
-  state?: ChallengeState
-  log?: Logger
-}
-
-export async function isHomeProxyBlocked(cacheKv: KVNamespace): Promise<{ blocked: boolean; until: number | null }> {
-  const v = await cacheKv.get(HOME_PROXY_BLOCK_KEY)
-  if (!v) return { blocked: false, until: null }
-  const until = Number.parseInt(v, 10)
-  if (!Number.isFinite(until)) return { blocked: false, until: null }
-  if (until <= Math.floor(Date.now() / 1000)) return { blocked: false, until: null }
-  return { blocked: true, until }
-}
-
-async function markHomeProxyBlocked(cacheKv: KVNamespace): Promise<number> {
-  const until = Math.floor(Date.now() / 1000) + HOME_PROXY_BLOCK_TTL_SECONDS
-  await cacheKv.put(HOME_PROXY_BLOCK_KEY, String(until), {
-    expirationTtl: HOME_PROXY_BLOCK_TTL_SECONDS,
-  })
-  return until
-}
-
-export async function clearHomeProxyBlocked(cacheKv: KVNamespace): Promise<void> {
-  await cacheKv.delete(HOME_PROXY_BLOCK_KEY)
-}
+/** Options for the shared 1001tracklists fetch cascade — see lib/upstream1001.ts. */
+export type Fetch1001Opts = Omit<CascadeOpts, 'method' | 'form' | 'accept' | 'unlockerAttempts'>
 
 /**
- * Fetch a 1001tracklists page using the same residential-IP-forwarder →
- * BrightData Web Unlocker → direct cascade as `fetchTracklist`, but returning
- * the raw HTML so the caller can apply whatever parser fits.
+ * Fetch a 1001tracklists page through the shared cascade (home forwarder →
+ * BrightData within budget → direct) and return the raw HTML so the caller
+ * can apply whatever parser fits. One BrightData attempt only — DJ index
+ * pages are less captcha-prone than tracklist pages, and a retry loop here
+ * would compound BrightData spend across many pages per cron run.
  *
- * Any of the failure modes that already cause us to fall through (CF shell,
- * IP block, transport error) are mirrored here. We do NOT retry the
- * BrightData attempt — DJ index pages are less captcha-prone than tracklist
- * pages, and a retry loop here would compound BrightData spend across many
- * pages per cron run.
+ * Throws `UpstreamPausedError` when fetching is deliberately paused (every
+ * route blocked) and `IPBlockedError` when the last route was itself blocked;
+ * see lib/upstream1001.ts. Callers running a batch should stop on either.
  */
 export async function fetch1001Html(
   url: string,
   opts: Fetch1001Opts = {},
-): Promise<{ html: string; via: 'home-proxy' | 'unlocker' | 'direct'; state: ChallengeState }> {
-  const log = opts.log
-  const haveHomeProxy = !!(opts.homeProxyUrl && opts.homeProxyToken)
-
-  // Skip the home proxy entirely if we recently observed an IP-block from
-  // it. Without this, every cron tick re-hammers the residential IP and
-  // 1001tracklists keeps the block fresh — solving the captcha in the
-  // browser only buys minutes before we re-trigger.
-  let homeProxyInBackoff = false
-  if (haveHomeProxy && opts.cacheKv) {
-    const blk = await isHomeProxyBlocked(opts.cacheKv)
-    homeProxyInBackoff = blk.blocked
-    if (blk.blocked) {
-      log?.info('fetch1001.homeproxy_in_backoff', { url, until: blk.until })
-    }
-  }
-  log?.info('fetch1001.start', { url, viaHomeProxy: haveHomeProxy && !homeProxyInBackoff, viaUnlocker: !!opts.brightdataApiKey })
-
-  if (haveHomeProxy && !homeProxyInBackoff) {
-    const r = await fetchViaHomeProxy(url, opts.homeProxyUrl!, opts.homeProxyToken!, log)
-    if (r.html && !isIPBlocked(r.html) && !looksLikeCfShell(r.html)) {
-      return { html: r.html, via: 'home-proxy', state: opts.state ?? { cookie: '' } }
-    }
-    const reason = !r.html ? 'no_body' : isIPBlocked(r.html) ? 'ip_blocked' : 'cf_shell'
-    if (reason === 'ip_blocked' && opts.cacheKv) {
-      const until = await markHomeProxyBlocked(opts.cacheKv)
-      log?.warn('fetch1001.homeproxy_ip_blocked_set_backoff', {
-        url,
-        backoffUntil: until,
-        backoffHours: HOME_PROXY_BLOCK_TTL_SECONDS / 3600,
-      })
-    }
-    log?.warn('fetch1001.homeproxy_unusable', {
-      url,
-      status: r.status,
-      htmlBytes: r.html?.length ?? 0,
-      reason,
-    })
-  }
-
-  if (opts.brightdataApiKey) {
-    const r = await fetchViaUnlocker(url, opts.brightdataApiKey, log)
-    if (!r.html) {
-      const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
-      throw new Error(`unlocker fetch failed for ${url} — ${detail}`)
-    }
-    if (isIPBlocked(r.html)) {
-      throw new IPBlockedError(extractIPBlockedAddress(r.html))
-    }
-    if (looksLikeCfShell(r.html)) {
-      throw new CloudflareChallengeError(`unlocker fetched a CF shell for ${url} (${r.html.length} bytes)`)
-    }
-    return { html: r.html, via: 'unlocker', state: opts.state ?? { cookie: '' } }
-  }
-
-  const { html, state } = await fetchHtml(url, opts.state)
-  return { html, via: 'direct', state }
+): Promise<{ html: string; via: Via; state: ChallengeState }> {
+  const r = await fetch1001(url, { ...opts, unlockerAttempts: 1 })
+  return { html: r.html, via: r.via, state: r.state }
 }

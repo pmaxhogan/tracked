@@ -1,5 +1,6 @@
 import type { Env } from '../types'
 import { crawlDjIndex } from './dj-index'
+import { fetchOptsFromEnv } from './upstream1001'
 import { loadSubState } from './sync'
 import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
@@ -100,11 +101,7 @@ export async function getDjSets(
   }
 
   const crawl = await crawlDjIndex(slug, {
-    brightdataApiKey: env.BRIGHTDATA_API_KEY,
-    homeProxyUrl: env.HOME_PROXY_URL,
-    homeProxyToken: env.HOME_PROXY_TOKEN,
-    cacheKv: env.CACHE,
-    log,
+    ...fetchOptsFromEnv(env, log),
     // The profile page is interactive — stay well inside the fetch budget.
     deadlineMs: Date.now() + 20_000,
     maxPages: 100,

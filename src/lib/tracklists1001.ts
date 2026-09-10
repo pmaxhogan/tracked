@@ -1,8 +1,9 @@
 import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
-import { fetchHtml, fetchWithTimeout, postForm, isIPBlocked, extractIPBlockedAddress, IPBlockedError, looksLikeCfShell, CloudflareChallengeError, type ChallengeState } from './fetch'
+import { fetchWithTimeout, type ChallengeState } from './fetch'
 import { fetchViaUnlocker } from './unlocker'
-import { fetchViaHomeProxy } from './homeProxy'
+import { fetch1001, type Fetch1001Opts as CascadeOpts } from './upstream1001'
+import { tryConsumeBrightdata } from './ban-state'
 import { parseSetYouTubeId } from './dj-index'
 import type { Logger } from './log'
 
@@ -20,28 +21,48 @@ const SOURCE = {
 
 export type SearchResult = { tracklistUrl: string } | { tracklistUrl: null }
 
+/**
+ * Route options for the two search POSTs. Same cascade as tracklist pages
+ * (home forwarder → BrightData within budget → direct from the Worker); the
+ * direct leg stays enabled because search worked from Worker IPs before the
+ * forwarder existed and still does when nothing is blocked.
+ */
+export type SearchOpts = Omit<CascadeOpts, 'method' | 'form' | 'accept' | 'unlockerAttempts' | 'allowDirect'>
+
+async function search1001(form: Record<string, string>, opts: SearchOpts): Promise<{ html: string; state: ChallengeState; via: string }> {
+  const r = await fetch1001(`${ORIGIN}/search/result.php`, {
+    ...opts,
+    method: 'POST',
+    form,
+    headers: { Referer: `${ORIGIN}/search/result.php`, ...(opts.headers ?? {}) },
+    unlockerAttempts: 1,
+  })
+  return { html: r.html, state: r.state, via: r.via }
+}
+
 export async function searchByYouTubeUrl(
   videoUrl: string,
-  state?: ChallengeState,
-  log?: Logger,
+  stateOrOpts?: ChallengeState | SearchOpts,
+  maybeLog?: Logger,
 ): Promise<{ result: SearchResult; state: ChallengeState }> {
+  const opts: SearchOpts = stateOrOpts && 'cookie' in stateOrOpts ? { state: stateOrOpts, log: maybeLog } : { ...(stateOrOpts ?? {}), log: (stateOrOpts as SearchOpts | undefined)?.log ?? maybeLog }
+  const log = opts.log
   log?.info('1001search.start', { videoUrl })
   const start = Date.now()
-  const { html, state: s2 } = await postForm(
-    `${ORIGIN}/search/result.php`,
+  const { html, state: s2, via } = await search1001(
     {
       main_search: videoUrl,
       search_selection: '9',
       orderby: 'added',
       'MediaSource[13]': '13',
     },
-    state,
+    opts,
   )
   const { result, echo, textFallback } = parseUrlSearchResult(html, videoUrl)
   if (textFallback) {
     log?.warn('1001search.text_fallback', { videoUrl, echo, htmlBytes: html.length, ms: Date.now() - start })
   }
-  log?.info('1001search.done', { videoUrl, htmlBytes: html.length, tracklistUrl: result.tracklistUrl, textFallback, ms: Date.now() - start })
+  log?.info('1001search.done', { videoUrl, via, htmlBytes: html.length, tracklistUrl: result.tracklistUrl, textFallback, ms: Date.now() - start })
   return { result, state: s2 }
 }
 
@@ -121,20 +142,22 @@ export function parseSearchResult(html: string): SearchResult {
  */
 export async function searchByTitle(
   title: string,
-  state?: ChallengeState,
-  log?: Logger,
+  stateOrOpts?: ChallengeState | SearchOpts,
+  maybeLog?: Logger,
 ): Promise<{ result: SearchResult; state: ChallengeState }> {
+  const opts: SearchOpts = stateOrOpts && 'cookie' in stateOrOpts ? { state: stateOrOpts, log: maybeLog } : { ...(stateOrOpts ?? {}), log: (stateOrOpts as SearchOpts | undefined)?.log ?? maybeLog }
+  const log = opts.log
   log?.info('1001titlesearch.start', { title })
   const start = Date.now()
-  const { html, state: s2 } = await postForm(
-    `${ORIGIN}/search/result.php`,
+  const { html, state: s2, via } = await search1001(
     { main_search: title, search_selection: '9', orderby: 'added' },
-    state,
+    opts,
   )
   const candidates = parseSearchResults(html)
   const best = pickBestTracklist(title, candidates)
   log?.info('1001titlesearch.done', {
     title,
+    via,
     htmlBytes: html.length,
     candidateCount: candidates.length,
     candidates: candidates.slice(0, 8).map((c) => ({ title: c.title, url: c.tracklistUrl })),
@@ -373,132 +396,49 @@ export type ScrapedTracklist = {
   tracks: ParsedTrack[]
 }
 
-export type FetchTracklistOpts = {
-  /** When set, route through Bright Data Web Unlocker (handles the captcha gate
-   *  1001tracklists serves to Cloudflare Worker IPs). When absent, fetch directly
-   *  — fine from a residential IP, fails on Workers. */
-  brightdataApiKey?: string
-  /** When both are set, try the residential-IP forwarder FIRST. On any failure
-   *  (transport error, CF shell, IP block, zero-track parse) we fall through
-   *  to BrightData if its key is set, else direct. Free + same residential-IP
-   *  characteristics that already work in dev. */
-  homeProxyUrl?: string
-  homeProxyToken?: string
-  state?: ChallengeState
-  log?: Logger
-}
+export type FetchTracklistOpts = Omit<CascadeOpts, 'method' | 'form' | 'accept' | 'unlockerAttempts'>
 
+/**
+ * Scrape a tracklist page through the shared cascade (lib/upstream1001.ts):
+ * home forwarder (residential IP, then its tailnet pool) → BrightData within
+ * the daily budget (two attempts, because its exit IP rotates and a CF shell
+ * on the first often clears on the second) → direct from the Worker.
+ *
+ * A forwarder response that parses to zero tracks falls through to the next
+ * route; a BrightData/direct result is returned as-is (with diagnostics) so
+ * the caller can decide. Throws `UpstreamPausedError` while fetching is
+ * paused after every route was blocked, `IPBlockedError` / 
+ * `CloudflareChallengeError` when the last route itself failed that way.
+ */
 export async function fetchTracklist(
   tracklistUrl: string,
   opts: FetchTracklistOpts = {},
-): Promise<{ result: ScrapedTracklist; state: ChallengeState }> {
+): Promise<{ result: ScrapedTracklist; state: ChallengeState; via: string }> {
   const log = opts.log
-  const haveHomeProxy = !!(opts.homeProxyUrl && opts.homeProxyToken)
   log?.info('1001scrape.start', {
     tracklistUrl,
-    viaHomeProxy: haveHomeProxy,
+    viaHomeProxy: !!(opts.homeProxyUrl && opts.homeProxyToken),
     viaUnlocker: !!opts.brightdataApiKey,
   })
   const start = Date.now()
-
-  // Attempt 0: residential-IP forwarder. Cheap (free) and uses the same kind
-  // of IP that already works in dev. On any failure mode that the BrightData
-  // path also handles (CF shell, IP block, transport, zero-track parse) we
-  // fall through to BrightData rather than surfacing the error — the home
-  // proxy is the preferred path, not the only path.
-  if (haveHomeProxy) {
-    const r = await fetchViaHomeProxy(tracklistUrl, opts.homeProxyUrl!, opts.homeProxyToken!, log)
-    if (r.html) {
-      if (isIPBlocked(r.html)) {
-        const clientIp = extractIPBlockedAddress(r.html)
-        log?.warn('1001scrape.homeproxy_ip_blocked_falling_back', { tracklistUrl, clientIp, htmlBytes: r.html.length, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
-      } else if (looksLikeCfShell(r.html)) {
-        log?.warn('1001scrape.homeproxy_cf_shell_falling_back', { tracklistUrl, htmlBytes: r.html.length, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
-      } else {
-        const result = parseTracklist(tracklistUrl, r.html)
-        if (result.tracks.length > 0) {
-          log?.info('1001scrape.parsed_homeproxy', {
-            tracklistUrl,
-            htmlBytes: r.html.length,
-            trackCount: result.tracks.length,
-            unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
-            mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
-            ms: Date.now() - start,
-          })
-          return { result, state: opts.state ?? { cookie: '' } }
-        }
-        log?.warn('1001scrape.homeproxy_zero_tracks_falling_back', { tracklistUrl, htmlBytes: r.html.length, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
-        logEmptyParseDiagnostics(r.html, tracklistUrl, log)
-      }
-    } else {
-      log?.warn('1001scrape.homeproxy_unusable_falling_back', { tracklistUrl, status: r.status, errorMessage: r.errorMessage, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
-    }
-  }
-
-  if (opts.brightdataApiKey) {
-    // Up to 2 attempts: BrightData rotates exit IP between calls, so a CF
-    // shell on attempt 1 (residential IP without fresh CF clearance) often
-    // clears on attempt 2.
-    const MAX_ATTEMPTS = 2
-    let lastShellBytes = 0
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      // NOTE: tried passing `expectElement: 'div.tlpItem'` (BrightData's
-      // x-unblock-expect header) here. Documented as the right primitive
-      // for "wait for the tracklist to actually render before returning,"
-      // but on the /request REST endpoint it made things strictly worse —
-      // every probe came back as a CF shell where without the header the
-      // same URL succeeded. Best guess: when Unlocker's expect-loop times
-      // out it returns a best-effort shell instead of erroring, masking the
-      // success path that previously fired immediately. Keeping the
-      // expectElement plumbing in unlocker.ts so we can opt back in if
-      // BrightData fixes / clarifies the REST behavior, but not using it
-      // by default. Country=us pin alone is what's actually working.
-      const r = await fetchViaUnlocker(tracklistUrl, opts.brightdataApiKey, log)
-      if (!r.html) {
-        const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
-        log?.error('1001scrape.unlocker_failed', { tracklistUrl, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt })
-        throw new Error(`unlocker tracklist fetch failed — ${detail}`)
-      }
-      if (isIPBlocked(r.html)) {
-        const clientIp = extractIPBlockedAddress(r.html)
-        log?.error('1001scrape.unlocker_ip_blocked', { tracklistUrl, clientIp, htmlBytes: r.html.length, attempt })
-        throw new IPBlockedError(clientIp)
-      }
-      if (looksLikeCfShell(r.html)) {
-        lastShellBytes = r.html.length
-        if (attempt < MAX_ATTEMPTS) {
-          log?.warn('1001scrape.unlocker_cf_shell_retry', { tracklistUrl, htmlBytes: r.html.length, attempt })
-          continue
-        }
-        log?.error('1001scrape.unlocker_cf_shell', { tracklistUrl, htmlBytes: r.html.length, attempt, attempts: MAX_ATTEMPTS })
-        throw new CloudflareChallengeError(`unlocker fetched a CF shell page for ${tracklistUrl} after ${MAX_ATTEMPTS} attempts (last ${lastShellBytes} bytes)`)
-      }
-      const result = parseTracklist(tracklistUrl, r.html)
-      log?.info('1001scrape.parsed', {
-        tracklistUrl,
-        htmlBytes: r.html.length,
-        trackCount: result.tracks.length,
-        unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
-        mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
-        ms: Date.now() - start,
-        attempt,
-      })
-      if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
-      return { result, state: opts.state ?? { cookie: '' } }
-    }
-    // Unreachable — loop either returns or throws.
-    throw new Error('unlocker retry loop exited unexpectedly')
-  }
-  const { html, state: s2 } = await fetchHtml(tracklistUrl, opts.state)
-  const result = parseTracklist(tracklistUrl, html)
-  log?.info('1001scrape.parsed_direct', {
+  const r = await fetch1001(tracklistUrl, {
+    ...opts,
+    unlockerAttempts: 2,
+    accept: (html) => parseTracklist(tracklistUrl, html).tracks.length > 0,
+  })
+  const result = parseTracklist(tracklistUrl, r.html)
+  log?.info('1001scrape.parsed', {
     tracklistUrl,
-    htmlBytes: html.length,
+    via: r.via,
+    egress: r.proxy?.egress ?? null,
+    htmlBytes: r.html.length,
     trackCount: result.tracks.length,
+    unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
+    mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
     ms: Date.now() - start,
   })
-  if (result.tracks.length === 0) logEmptyParseDiagnostics(html, tracklistUrl, log)
-  return { result, state: s2 }
+  if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
+  return { result, state: r.state, via: r.via }
 }
 
 /**
@@ -774,6 +714,9 @@ export type FetchMediaLinksOpts = {
    *  call (different IP, no captcha needed for the JSON endpoint — it just
    *  works from non-CF IPs). */
   brightdataApiKey?: string
+  /** CACHE KV — charges each BrightData call against the daily budget (lib/ban-state.ts). */
+  cacheKv?: KVNamespace
+  brightdataDailyCap?: string
 }
 
 /**
@@ -820,7 +763,11 @@ export async function fetchMediaLinks(
     fetchMediaLinksDirect(mediaItemId, url, opts.state, 8000, log, 'direct.retry'),
   ]
   if (opts.brightdataApiKey) {
-    racers.push(fetchMediaLinksViaUnlocker(mediaItemId, url, opts.brightdataApiKey, log))
+    const budget = opts.cacheKv
+      ? await tryConsumeBrightdata({ CACHE: opts.cacheKv, SUBS: opts.cacheKv, BRIGHTDATA_DAILY_CAP: opts.brightdataDailyCap }, log)
+      : { ok: true }
+    if (budget.ok) racers.push(fetchMediaLinksViaUnlocker(mediaItemId, url, opts.brightdataApiKey, log))
+    else log?.warn('medialink.brightdata_over_budget', { mediaItemId })
   }
   try {
     const result = await Promise.any(racers)

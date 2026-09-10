@@ -7,6 +7,7 @@ import { subscriptionsApp } from './routes/subscriptions'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 import { backfillCombined, syncAll, syncPendingOnly } from './lib/sync'
+import { maintainBanState } from './lib/ban-state'
 import { makeLogger, errorFields } from './lib/log'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
@@ -88,11 +89,16 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
   ctx.waitUntil(
     (async () => {
       const trigger = isDaily ? 'cron.daily' : 'cron.pending'
+      // Keep the IP-ban state honest even when nothing is being fetched: if
+      // the forwarder's cooldown lapsed, probe it so a lifted ban clears the
+      // banner and fires the all-clear push without waiting for traffic.
+      await maintainBanState(env, log)
       try {
         const r = isDaily
           ? await syncAll(env, { log, trigger })
           : await syncPendingOnly(env, { log, trigger })
         log.info('cron.done', {
+          paused: r.paused ?? false,
           subs: r.results.length,
           totalAdded: r.results.reduce((a, x) => a + x.stats.videoIdsAdded, 0),
           totalStillPending: r.results.reduce((a, x) => a + x.stats.tracklistsPending, 0),

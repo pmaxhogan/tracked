@@ -1,0 +1,53 @@
+# Reference compose for the TrueNAS SCALE "Custom App" that runs the forwarder.
+# The authoritative copy lives in the TrueNAS middleware (`sudo midclt call
+# app.config tracked-fetch-proxy`), NOT on disk — edit it there (GUI or
+# `midclt call app.update`). This file documents the expected shape.
+#
+# FALLBACK_PROXIES lists the tailnet tinyproxy buckets, one distinct IPv4
+# egress each (see ../bgp/discord-proxies.txt for the inventory). Labels are
+# free text and show up in logs, X-Proxy-Egress and the admin page.
+services:
+  tracked-fetch-proxy:
+    build: /mnt/alpha/apps/tracked-fetch-proxy/tracked-fetch-proxy/
+    image: tracked-fetch-proxy:0.3.0
+    container_name: tracked-fetch-proxy
+    restart: unless-stopped
+    environment:
+      - PORT=8088
+      - PROXY_TOKEN=<long-random, same as the Worker's HOME_PROXY_TOKEN>
+      - UPSTREAM_1001TL_EMAIL=<1001tl account email>
+      - UPSTREAM_1001TL_PASSWORD=<1001tl account password>
+      - COOKIE_FILE=/data/1001tl-cookies.json
+      - BLOCK_COOLDOWN_MS=3600000
+      - MAX_POOL_ATTEMPTS=2
+      - REQUEST_TIMEOUT_MS=15000
+      - >-
+        FALLBACK_PROXIES=
+        bgp1:18180=http://100.82.201.37:18180,
+        bgp1:18181=http://100.82.201.37:18181,
+        bgp1:18182=http://100.82.201.37:18182,
+        bgp1:18183=http://100.82.201.37:18183,
+        bgp1:18184=http://100.82.201.37:18184,
+        bgp1:18185=http://100.82.201.37:18185,
+        bgp1:18186=http://100.82.201.37:18186,
+        bgp1:18187=http://100.82.201.37:18187,
+        bgp1:18188=http://100.82.201.37:18188,
+        bgp1:18189=http://100.82.201.37:18189,
+        bgp1:18190=http://100.82.201.37:18190,
+        vm1:18180=http://100.123.204.114:18180,
+        vm1:18181=http://100.123.204.114:18181,
+        vm2:18180=http://100.126.198.39:18180,
+        vm2:18181=http://100.126.198.39:18181,
+        vm3:18180=http://100.118.191.53:18180,
+        vm3:18181=http://100.118.191.53:18181,
+        vm4:18180=http://100.94.155.2:18180,
+        vm4:18181=http://100.94.155.2:18181
+    volumes:
+      - tracked-fetch-proxy-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8088/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  tracked-fetch-proxy-data:

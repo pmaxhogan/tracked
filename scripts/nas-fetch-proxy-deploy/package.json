@@ -1,0 +1,14 @@
+{
+  "name": "tracked-fetch-proxy",
+  "version": "0.3.0",
+  "description": "Bearer-gated HTTP forwarder used by the tracked Worker: residential IP first, tailnet tinyproxy pool when 1001tracklists blocks it",
+  "main": "index.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "undici": "^7.29.1"
+  },
+  "license": "ISC"
+}

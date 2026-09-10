@@ -39,6 +39,20 @@ import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { PLAYLIST_AUDIT_PREFIX } from '../lib/playlist-audit'
+import { requeueBanVictims } from '../lib/sync'
+import { fetchOptsFromEnv } from '../lib/upstream1001'
+import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
+import { getBanStatus, manualClear, recordProbe, simulateBan } from '../lib/ban-state'
+import {
+  deletePushSubscription,
+  isPushSubscription,
+  listPushSubscriptions,
+  pushConfigured,
+  savePushSubscription,
+  sendPushToAll,
+  testPayload,
+} from '../lib/web-push'
+import { ALERTS_ROW_HTML, BAN_BANNER_HTML, BAN_CSS, BAN_HISTORY_HTML, BAN_JS, SW_JS } from './ban-ui'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -396,25 +410,116 @@ subscriptionsApp.get('/api/state/:slug', async (c) => {
   return c.json({ slug, state })
 })
 
+// ─── IP-ban state, Web Push, service worker ──────────────────────────────────
+
 /**
- * Returns whether the home proxy is currently in IP-block backoff and
- * until when. The UI surfaces this so the user knows to solve the
- * 1001tracklists captcha from their home network when the flag is set.
+ * Everything the banner + history section need in one call: KV ban state
+ * (lib/ban-state.ts), BrightData budget, push subscriptions, and — with
+ * `?live=1` — the forwarder's own /status (direct cooldown, pool health).
  */
-subscriptionsApp.get('/api/home-proxy-status', async (c) => {
-  const { isHomeProxyBlocked } = await import('../lib/dj-index')
-  const blk = await isHomeProxyBlocked(c.env.CACHE)
-  return c.json(blk)
+subscriptionsApp.get('/api/ban/status', async (c) => {
+  const live = c.req.query('live') === '1'
+  const status = await getBanStatus(c.env)
+  const homeProxyConfigured = !!(c.env.HOME_PROXY_URL && c.env.HOME_PROXY_TOKEN)
+  let proxy: HomeProxyStatus | null = null
+  let proxyError: string | null = null
+  if (live && homeProxyConfigured) {
+    try {
+      proxy = await fetchHomeProxyStatus(c.env.HOME_PROXY_URL!, c.env.HOME_PROXY_TOKEN!, 6000)
+    } catch (e) {
+      proxyError = e instanceof Error ? e.message : String(e)
+    }
+  }
+  const pushSubscriptions = live
+    ? (await listPushSubscriptions(c.env)).map((p) => ({ id: p.id, ua: p.ua, createdAt: p.createdAt, lastOkAt: p.lastOkAt, lastError: p.lastError }))
+    : undefined
+  return c.json({ ...status, homeProxyConfigured, proxy, proxyError, pushSubscriptions })
 })
 
-/** Manual override: clears the home-proxy IP-block backoff. Use after
- *  solving the captcha at https://www.1001tracklists.com from the home
- *  network so the next sync tries the home proxy again immediately. */
-subscriptionsApp.post('/api/home-proxy-status/clear', async (c) => {
-  const { clearHomeProxyBlocked } = await import('../lib/dj-index')
-  await clearHomeProxyBlocked(c.env.CACHE)
-  return c.json({ cleared: true })
+/**
+ * "I solved the captcha — re-probe now": one forced direct fetch on the
+ * forwarder. Success closes the episode (and fires the all-clear push);
+ * still-blocked refreshes the cooldown shown on the banner.
+ */
+subscriptionsApp.post('/api/ban/probe', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.ban_probe', by: c.get('cfAccessEmail') })
+  if (!c.env.HOME_PROXY_URL || !c.env.HOME_PROXY_TOKEN) return c.json({ error: 'home_proxy_not_configured' }, 412)
+  try {
+    const probe = await probeHomeProxy(c.env.HOME_PROXY_URL, c.env.HOME_PROXY_TOKEN)
+    const r = await recordProbe(c.env, probe, 'manual', log)
+    log.info('subs.ban_probe', { probe: probe.probe, status: probe.status, cleared: r.cleared, blockedIp: probe.blockedIp ?? null })
+    return c.json({ probe: probe.probe, status: probe.status ?? null, blockedIp: probe.blockedIp ?? null, error: probe.error ?? null, cleared: r.cleared, home: r.home })
+  } catch (e) {
+    log.error('subs.ban_probe_throw', errorFields(e))
+    return c.json({ error: 'probe_failed', ...errorFields(e) }, 502)
+  }
 })
+
+/** Manual dismiss: ends the open episode (real or simulated) and lifts any pause. */
+subscriptionsApp.post('/api/ban/clear', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.ban_clear', by: c.get('cfAccessEmail') })
+  const ep = await manualClear(c.env, log)
+  return c.json({ cleared: !!ep, episode: ep })
+})
+
+/** Test hook: open a simulated episode so the banner + push path can be seen end to end. */
+subscriptionsApp.post('/api/ban/simulate', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.ban_simulate', by: c.get('cfAccessEmail') })
+  const home = await simulateBan(c.env, log)
+  return c.json({ home })
+})
+
+/**
+ * One-time repair after a ban: re-queue sets that were abandoned only because
+ * every fetch route was blocked. `?days=N` (default 14), `?dry=1` to preview.
+ */
+subscriptionsApp.post('/api/ban/requeue-victims', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.requeue_victims', by: c.get('cfAccessEmail') })
+  const days = Number(c.req.query('days') ?? 14)
+  const dryRun = c.req.query('dry') === '1'
+  const r = await requeueBanVictims(c.env, { days: Number.isFinite(days) && days > 0 ? days : 14, dryRun, log })
+  return c.json(r)
+})
+
+subscriptionsApp.get('/api/push/config', async (c) => {
+  return c.json({ configured: pushConfigured(c.env), publicKey: c.env.VAPID_PUBLIC_KEY ?? null })
+})
+
+subscriptionsApp.post('/api/push/subscribe', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.push_subscribe', by: c.get('cfAccessEmail') })
+  const body = (await c.req.json().catch(() => null)) as { subscription?: unknown; ua?: unknown } | null
+  if (!body || !isPushSubscription(body.subscription)) return c.json({ error: 'invalid_subscription' }, 400)
+  const ua = typeof body.ua === 'string' ? body.ua.slice(0, 300) : (c.req.header('user-agent') ?? null)
+  const saved = await savePushSubscription(c.env, body.subscription, ua)
+  log.info('subs.push_subscribed', { id: saved.id, ua })
+  return c.json({ id: saved.id, createdAt: saved.createdAt })
+})
+
+subscriptionsApp.post('/api/push/unsubscribe', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { endpoint?: unknown; id?: unknown } | null
+  const key = typeof body?.endpoint === 'string' ? body.endpoint : typeof body?.id === 'string' ? body.id : null
+  if (!key) return c.json({ error: 'missing_endpoint' }, 400)
+  return c.json({ removed: await deletePushSubscription(c.env, key) })
+})
+
+/** Fire a test push to every subscribed device so delivery can be checked without a real ban. */
+subscriptionsApp.post('/api/push/test', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.push_test', by: c.get('cfAccessEmail') })
+  if (!pushConfigured(c.env)) return c.json({ error: 'push_not_configured' }, 412)
+  const r = await sendPushToAll(c.env, testPayload(), log)
+  return c.json(r)
+})
+
+/**
+ * The service worker behind the Notifications API. Same-origin and inside the
+ * /subscriptions/ scope, so it rides on the CF Access cookie like the pages.
+ */
+subscriptionsApp.get('/sw.js', (c) => {
+  c.header('Content-Type', 'application/javascript; charset=utf-8')
+  c.header('Cache-Control', 'no-cache')
+  return c.body(SW_JS)
+})
+
 
 /**
  * Diagnostic: probe several pagination URL formats for the DJ page and
@@ -429,12 +534,7 @@ subscriptionsApp.get('/api/debug/dj-pagination/:slug', async (c) => {
     route: 'subs.debug_pagination',
   })
   const slug = c.req.param('slug')
-  const fetchOpts = {
-    brightdataApiKey: c.env.BRIGHTDATA_API_KEY,
-    homeProxyUrl: c.env.HOME_PROXY_URL,
-    homeProxyToken: c.env.HOME_PROXY_TOKEN,
-    log,
-  }
+  const fetchOpts = fetchOptsFromEnv(c.env, log)
   const { fetch1001Html, parseDjIndex } = await import('../lib/dj-index')
 
   const candidates = [
@@ -727,8 +827,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
     :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --accent: #0969da; --danger: #cf222e; --card: #f6f8fa; --border: #d0d7de; }
   }
   * { box-sizing: border-box; }
-  /* HTML hidden attribute uses display:none, but our explicit .yt/.banner
-     display:flex rules override that. Force [hidden] back to none. */
+  /* HTML hidden attribute uses display:none, but our explicit .yt
+     display:flex rule overrides that. Force [hidden] back to none. */
   [hidden] { display: none !important; }
   body { margin: 0; padding: 2rem 1rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--fg); }
   main { max-width: 640px; margin: 0 auto; }
@@ -761,10 +861,6 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .yt .info .title { font-weight: 600; }
   .yt .info .sub { color: var(--muted); font-size: 0.8rem; }
   .yt button.connect { background: #c4302b; }
-  .banner { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--danger); border-radius: 6px; background: var(--card); margin-bottom: 1rem; font-size: 0.9rem; }
-  .banner .info { flex: 1; min-width: 0; }
-  .banner .info .title { font-weight: 600; color: var(--danger); }
-  .banner .info .sub { color: var(--muted); font-size: 0.8rem; }
   /* ── Combined playlist ── */
   section#combined { margin-top: 2.25rem; }
   #cmb-body { border: 1px solid var(--border); border-radius: 6px; background: var(--card); padding: 0.7rem 0.8rem; font-size: 0.88rem; line-height: 1.55; }
@@ -826,19 +922,15 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .arow-detail .warn { color: var(--danger); }
   .arow-detail ol { margin: 0.15rem 0 0; padding-left: 1.1rem; }
   .arow-detail .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
+${BAN_CSS}
 </style>
 </head>
-<body>
+<body data-ban-page="main">
 <main>
+${BAN_BANNER_HTML}
   <h1>DJ subscriptions</h1>
   <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>. &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer →</a></p>
-  <div id="proxy-banner" class="banner" hidden>
-    <div class="info">
-      <div class="title">Home proxy IP-blocked at 1001tracklists</div>
-      <div class="sub" id="proxy-banner-sub"></div>
-    </div>
-    <button id="proxy-clear">Clear backoff</button>
-  </div>
+${ALERTS_ROW_HTML}
   <div id="yt" class="yt" hidden>
     <div class="info">
       <div class="title" id="yt-title">YouTube</div>
@@ -910,6 +1002,7 @@ const PAGE_HTML = /* html */ `<!doctype html>
     <button id="pl-more" class="ghost" hidden>Load older</button>
   </section>
 
+${BAN_HISTORY_HTML}
   <footer>Signed in as <span id="who"></span></footer>
 </main>
 <script>
@@ -1183,44 +1276,6 @@ const PAGE_HTML = /* html */ `<!doctype html>
   if (params.get('yt') || params.get('yt_error')) {
     history.replaceState({}, '', location.pathname);
   }
-
-  // ── Home-proxy IP-block backoff banner ─────────────────────────────────
-  const $proxyBanner = document.getElementById('proxy-banner');
-  const $proxyBannerSub = document.getElementById('proxy-banner-sub');
-  const $proxyClear = document.getElementById('proxy-clear');
-
-  async function loadProxyStatus() {
-    try {
-      const r = await fetch('/subscriptions/api/home-proxy-status', { credentials: 'same-origin' });
-      if (!r.ok) { $proxyBanner.hidden = true; return; }
-      const data = await r.json();
-      if (data.blocked && data.until) {
-        const untilDate = new Date(data.until * 1000);
-        $proxyBannerSub.textContent =
-          'Skipping home proxy until ' + untilDate.toLocaleTimeString() +
-          '. Solve the captcha at 1001tracklists.com from your home network, then click Clear.';
-        $proxyBanner.hidden = false;
-      } else {
-        $proxyBanner.hidden = true;
-      }
-    } catch { $proxyBanner.hidden = true; }
-  }
-
-  $proxyClear.addEventListener('click', async () => {
-    $proxyClear.disabled = true;
-    const original = $proxyClear.textContent;
-    $proxyClear.textContent = 'Clearing…';
-    try {
-      const r = await fetch('/subscriptions/api/home-proxy-status/clear', {
-        method: 'POST', credentials: 'same-origin',
-      });
-      if (!r.ok) { showError('clear failed (' + r.status + ')'); return; }
-      await loadProxyStatus();
-    } finally {
-      $proxyClear.disabled = false;
-      $proxyClear.textContent = original;
-    }
-  });
 
   // ── YouTube video JSON inspector ───────────────────────────────────────
   // Paste any watch/youtu.be/shorts URL (or a bare id) and dump the raw
@@ -1674,19 +1729,12 @@ const PAGE_HTML = /* html */ `<!doctype html>
 
   load();
   loadYouTubeStatus();
-  loadProxyStatus();
   loadCombined();
   loadAudit(true);
   loadPlaylistAdds(true);
-  // Re-poll the home-proxy status so the banner reflects KV changes
-  // initiated outside this tab (e.g. clearing via curl, or a sync run
-  // tripping a fresh backoff in the background).
-  setInterval(loadProxyStatus, 15_000);
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) loadProxyStatus();
-  });
 })();
 </script>
+<script>${BAN_JS}</script>
 </body>
 </html>`
 
@@ -1742,10 +1790,12 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
   a.pill.sc:hover { border-color: #ff5500; color: #ff5500; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
+${BAN_CSS}
 </style>
 </head>
-<body>
+<body data-ban-page="tracklist">
 <main>
+${BAN_BANNER_HTML}
   <h1>Tracklist viewer</h1>
   <p class="lead">Paste a 1001tracklists tracklist URL to see a clean per-song list with direct YouTube, SoundCloud, and Apple Music links. &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a></p>
   <form id="load-form">
@@ -1933,6 +1983,7 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
   if (pre) { $url.value = pre; load(pre); }
 })();
 </script>
+<script>${BAN_JS}</script>
 </body>
 </html>`
 
@@ -2005,10 +2056,12 @@ const DJ_PAGE_HTML = /* html */ `<!doctype html>
   .warn { color: var(--danger); white-space: pre-wrap; }
   .retry { margin-left: 0.5rem; }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
+${BAN_CSS}
 </style>
 </head>
-<body>
+<body data-ban-page="dj">
 <main>
+${BAN_BANNER_HTML}
   <div class="head"><h1 id="dj-name">DJ</h1><span id="dj-sub" class="badge-sub" hidden>subscribed</span></div>
   <p class="lead"><span id="dj-slug"></span> · <a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a> &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer</a></p>
   <div class="toolbar">
@@ -2255,5 +2308,6 @@ const DJ_PAGE_HTML = /* html */ `<!doctype html>
   load(false);
 })();
 </script>
+<script>${BAN_JS}</script>
 </body>
 </html>`

@@ -9,6 +9,7 @@ import {
   prettifySlug,
   RECHECK_INTERVAL_SECONDS,
   saveSubState,
+  requeueBanVictims,
   seedTracklistVideosFromAudit,
   syncOne,
   syncPendingOnly,
@@ -16,6 +17,9 @@ import {
 } from '../src/lib/sync'
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
 import { makeLogger } from '../src/lib/log'
+import { UpstreamPausedError } from '../src/lib/upstream1001'
+import { IPBlockedError } from '../src/lib/fetch'
+import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
 
 // Stub the network-touching primitives so syncOne becomes a deterministic
 // orchestrator test. This is the most important behavior to lock down: state
@@ -1138,3 +1142,136 @@ describe('invalidateVideoCache', () => {
   })
 })
 
+
+
+describe('block handling (2026-09 IP-ban resilience)', () => {
+  beforeEach(() => _resetTallyForTests())
+
+  it('stops the set loop on UpstreamPausedError without charging any set a failure', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'],
+      processedTracklistUrls: [],
+      failureCounts: { 'https://x/tracklist/a': 2 },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new UpstreamPausedError('every forwarder route blocked', '2026-09-10T16:00:00.000Z'))
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, trigger: 'cron.pending' })
+
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(r.stats.tracklistsProcessed).toBe(0)
+    expect(r.stats.tracklistsPending).toBe(3)
+    const state = (await loadSubState(env, sub.slug))!
+    // No failure charged, nothing abandoned, the run's stop reason is recorded.
+    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 2 })
+    expect(state.abandonedTracklistUrls).toEqual([])
+    expect(state.lastError).toMatch(/^paused: /)
+    expect(await playlistAdditions(env)).toEqual([])
+  })
+
+  it('stops on IPBlockedError too, and skips the recheck window for that run', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/new', 'https://x/tracklist/old'],
+      processedTracklistUrls: ['https://x/tracklist/old'],
+      tracklistVideos: { 'https://x/tracklist/old': stale('vidOLD00000') },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new IPBlockedError('1.2.3.4'))
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(r.stats.tracklistsRechecked).toBe(0)
+    expect(r.stats.rechecksPending).toBe(1)
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.failureCounts).toEqual({})
+    expect(state.lastError).toMatch(/^ip_blocked: /)
+  })
+
+  it('a block during the recheck window stops it without deferring the set', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/old1', 'https://x/tracklist/old2'],
+      processedTracklistUrls: ['https://x/tracklist/old1', 'https://x/tracklist/old2'],
+      tracklistVideos: { 'https://x/tracklist/old1': stale('vidOLD00001'), 'https://x/tracklist/old2': stale('vidOLD00002') },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new UpstreamPausedError('paused', null))
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    const state = (await loadSubState(env, sub.slug))!
+    // checkedAt untouched → both still due next tick.
+    expect(dueRechecks(state)).toEqual(['https://x/tracklist/old1', 'https://x/tracklist/old2'])
+    expect(state.failureCounts).toEqual({})
+  })
+
+  it('syncPendingOnly stands down entirely while the pause is active', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      processedTracklistUrls: [],
+    })
+    await env.SUBS.put('subs:list', JSON.stringify([sub]))
+    await setPause(env, 'all_routes_blocked', '1.2.3.4')
+
+    const pending = await syncPendingOnly(env)
+    expect(pending).toEqual({ results: [], paused: true })
+    expect(fetch1001Html).not.toHaveBeenCalled()
+    expect(crawlDjIndex).not.toHaveBeenCalled()
+  })
+})
+
+describe('requeueBanVictims', () => {
+  const log = makeLogger({ task: 'test' })
+
+  async function seedAudit(env: Env, rows: Array<{ t: string; status: string; slug: string; set: string; msg: string | null }>) {
+    for (const [i, r] of rows.entries()) {
+      const inv = String(10_000_000_000_000 - Date.parse(r.t)).padStart(14, '0')
+      await env.CACHE.put(`pladd:${inv}:${r.slug}:${String(9999 - i).padStart(4, '0')}`, JSON.stringify(r), {
+        metadata: { t: r.t, status: r.status, slug: r.slug, artist: null, set: r.set, vid: null, via: null, trg: 'cron.pending', msg: r.msg, ms: null, cmb: null },
+      })
+    }
+  }
+
+  it('re-queues sets abandoned with block-shaped errors inside the window, leaves everything else alone', async () => {
+    const env = makeEnv()
+    const now = Date.now()
+    const iso = (agoDays: number) => new Date(now - agoDays * 86_400_000).toISOString()
+    await saveSubState(env, 'lillypalmer', {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/ban1', 'https://x/tracklist/ban2', 'https://x/tracklist/broken', 'https://x/tracklist/ancient', 'https://x/tracklist/counting'],
+      processedTracklistUrls: [],
+      abandonedTracklistUrls: ['https://x/tracklist/ban1', 'https://x/tracklist/ban2', 'https://x/tracklist/broken', 'https://x/tracklist/ancient'],
+      failureCounts: { 'https://x/tracklist/counting': 2 },
+    })
+    await seedAudit(env, [
+      { t: iso(1), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/ban1', msg: 'unlocker fetched a CF shell for https://x/tracklist/ban1 (59211 bytes)' },
+      { t: iso(2), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/ban2', msg: '1001tracklists rate-limited IP 68.1.2.3' },
+      { t: iso(2), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/broken', msg: 'youtube videos.list 404: not found' },
+      { t: iso(40), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/ancient', msg: 'home proxy 403: blocked' },
+      { t: iso(1), status: 'failed', slug: 'lillypalmer', set: 'https://x/tracklist/counting', msg: 'unlocker fetch failed for https://x/tracklist/counting — reject_block: ' },
+      { t: iso(1), status: 'abandoned', slug: 'nobody', set: 'https://x/tracklist/orphan', msg: 'ip_blocked' },
+    ])
+
+    const dry = await requeueBanVictims(env, { days: 14, dryRun: true, log })
+    expect(dry.requeuedCount).toBe(3)
+    expect((await loadSubState(env, 'lillypalmer'))!.abandonedTracklistUrls).toHaveLength(4)
+
+    const r = await requeueBanVictims(env, { days: 14, log })
+    expect(r.requeued).toEqual({ lillypalmer: ['https://x/tracklist/ban1', 'https://x/tracklist/ban2', 'https://x/tracklist/counting'] })
+    const state = (await loadSubState(env, 'lillypalmer'))!
+    expect(state.abandonedTracklistUrls).toEqual(['https://x/tracklist/broken', 'https://x/tracklist/ancient'])
+    expect(state.failureCounts).toEqual({})
+    expect(r.candidates.nobody).toEqual(['https://x/tracklist/orphan'])
+  })
+})

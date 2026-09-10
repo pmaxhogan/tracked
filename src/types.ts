@@ -12,6 +12,13 @@ export type Env = {
    *  (e.g. cloudflared → Node script on a NAS) before falling back to BrightData. */
   HOME_PROXY_URL?: string
   HOME_PROXY_TOKEN?: string
+  /** Optional. Max BrightData Web Unlocker calls per UTC day across all paths (default 333 ≈ $15/mo at $1.50 per 1k). */
+  BRIGHTDATA_DAILY_CAP?: string
+  /** Web Push (VAPID) identity for the admin page's IP-ban alerts. Generate with `node scripts/gen-vapid-keys.mjs`. */
+  VAPID_PUBLIC_KEY?: string
+  VAPID_PRIVATE_KEY?: string
+  /** `mailto:` contact required by push services, e.g. mailto:you@example.com */
+  VAPID_SUBJECT?: string
   /** Cloudflare Access team domain, e.g. "yourteam.cloudflareaccess.com". */
   CF_ACCESS_TEAM_DOMAIN?: string
   /** Cloudflare Access application AUD tag (from the Access app config). */

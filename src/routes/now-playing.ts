@@ -3,6 +3,7 @@ import { NowPlayingRequest, NowPlayingResponse, ErrorResponse } from '../schemas
 import type { Env, ParsedTrack, ResponseTrack, Status } from '../types'
 import { resolveVideo, extractVideoId } from '../lib/youtube'
 import { searchByYouTubeUrl, searchByTitle } from '../lib/tracklists1001'
+import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
@@ -372,7 +373,7 @@ async function resolveTracklistByUrl(env: Env, videoId: string, videoUrl: string
   }
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
-  const { result } = await searchByYouTubeUrl(videoUrl, undefined, log)
+  const { result } = await searchByYouTubeUrl(videoUrl, fetchOptsFromEnv(env, log))
   await putJson(env.CACHE, key, { tracklistUrl: result.tracklistUrl }, TTL.TRACKLIST_SEARCH)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.TRACKLIST_SEARCH })
   return result.tracklistUrl
@@ -389,7 +390,7 @@ async function resolveTracklistByTitle(env: Env, title: string, log: Logger): Pr
   }
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
-  const { result } = await searchByTitle(title, undefined, log)
+  const { result } = await searchByTitle(title, fetchOptsFromEnv(env, log))
   await putJson(env.CACHE, key, { tracklistUrl: result.tracklistUrl }, TTL.TRACKLIST_SEARCH)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.TRACKLIST_SEARCH })
   return result.tracklistUrl

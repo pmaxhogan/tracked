@@ -46,6 +46,8 @@
 import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
+import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError } from './upstream1001'
+import { flushBanTally, isPaused } from './ban-state'
 import { getAccessToken } from './google-oauth'
 import {
   addVideoToPlaylist,
@@ -160,7 +162,7 @@ export type SubState = {
     videoIdsAdded: number
     tracklistsRechecked?: number
     videosReplaced?: number
-    via: 'home-proxy' | 'unlocker' | 'direct' | 'mixed'
+    via: 'home-proxy' | 'home-proxy-pool' | 'unlocker' | 'direct' | 'mixed'
   }
 }
 
@@ -217,6 +219,18 @@ export function dueRechecks(state: SubState, now = nowSeconds()): string[] {
 }
 
 const ABANDON_AFTER_FAILURES = 3
+
+/**
+ * Whether the whole run should stand down before touching 1001tracklists:
+ * every route was blocked within the last hour. Logged once per run; the
+ * per-set loop never even starts, so nothing gets charged a failure.
+ */
+async function pausedForRun(env: Env, log: Logger, task: string): Promise<boolean> {
+  const pause = await isPaused(env)
+  if (!pause) return false
+  log.warn(`${task}.paused`, { until: pause.until, reason: pause.reason, since: pause.since })
+  return true
+}
 
 export async function loadSubState(env: Env, slug: string): Promise<SubState | null> {
   return ((await env.SUBS.get(`${STATE_PREFIX}${slug}`, 'json')) as SubState | null) ?? null
@@ -292,7 +306,7 @@ const EMPTY_STATS: SyncOneResult['stats'] = {
  * the result, but don't kill the rest of the sweep). A missing OAuth
  * connection or missing CACHE/SUBS bindings is a global failure.
  */
-export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results: SyncOneResult[] }> {
+export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results: SyncOneResult[]; paused?: boolean }> {
   const log = opts.log ?? makeLogger({ task: 'sync.all' })
   const tokenInfo = await getAccessToken(env)
   if (!tokenInfo) {
@@ -302,6 +316,7 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
   const subs = await listSubscriptions(env)
   log.info('sync.start', { subCount: subs.length })
   const results: SyncOneResult[] = []
+  if (await pausedForRun(env, log, 'sync')) return { results, paused: true }
   for (const sub of subs) {
     try {
       const r = await syncOne(env, sub, tokenInfo.accessToken, opts)
@@ -322,6 +337,7 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
     okCount: results.filter((r) => r.ok).length,
     totalNewVideos: results.reduce((a, r) => a + r.stats.videoIdsAdded, 0),
   })
+  await flushBanTally(env, true)
   return { results }
 }
 
@@ -337,8 +353,9 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
  * Subs with nothing pending, nothing due, or no prior discovery state are
  * skipped; the daily 06:00 UTC sync handles initial discovery for them.
  */
-export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ results: SyncOneResult[] }> {
+export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ results: SyncOneResult[]; paused?: boolean }> {
   const log = opts.log ?? makeLogger({ task: 'sync.pending' })
+  if (await pausedForRun(env, log, 'sync.pending')) return { results: [], paused: true }
   const subs = await listSubscriptions(env)
   const candidates: Subscription[] = []
   for (const sub of subs) {
@@ -373,6 +390,7 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
     totalReplaced: results.reduce((a, r) => a + r.stats.videosReplaced, 0),
     totalRechecksPending: results.reduce((a, r) => a + r.stats.rechecksPending, 0),
   })
+  await flushBanTally(env, true)
   return { results }
 }
 
@@ -469,13 +487,7 @@ export async function syncOne(
     (state.processedTracklistUrls.length > 0
       ? await seedTracklistVideosFromAudit(env, sub.slug, new Set(state.processedTracklistUrls), log)
       : {})
-  const fetchOpts = {
-    brightdataApiKey: env.BRIGHTDATA_API_KEY,
-    homeProxyUrl: env.HOME_PROXY_URL,
-    homeProxyToken: env.HOME_PROXY_TOKEN,
-    cacheKv: env.CACHE,
-    log,
-  }
+  const fetchOpts = fetchOptsFromEnv(env, log)
 
   // 1. Discover tracklists. Either crawl the DJ index (the fresh-discovery
   // path, used by the daily cron + initial manual syncs) OR skip the crawl
@@ -582,6 +594,8 @@ export async function syncOne(
   let videoIdsAdded = 0
   let setsProcessed = 0
   let setsAbandonedThisRun = 0
+  /** Set when a block/pause stopped the run early; recorded as lastError and skips the recheck window. */
+  let stopReason: string | null = null
   let setsRechecked = 0
   let videosReplaced = 0
   // Artist-playlist membership changed (insert or removal) → write the
@@ -747,10 +761,19 @@ export async function syncOne(
       delete failureCounts[setUrl]
       setsProcessed += 1
     } catch (e) {
+      if (isStopTheBatchError(e)) {
+        // A block is not the set's fault: every remaining set would fail the
+        // same way, and each attempt from a banned IP keeps the ban fresh.
+        // Stop the run here, charge nothing, and let the next tick (after the
+        // cooldown) pick up exactly where we left off.
+        stopReason = e instanceof UpstreamPausedError ? `paused: ${e.message}` : `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
+        log.error('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
+        break
+      }
       // Bump per-URL failure count. After ABANDON_AFTER_FAILURES, give up
       // and mark the URL processed so the cron stops re-attempting it
-      // every tick (which is what kept re-triggering the home-proxy IP
-      // block). The user can manually clear state if they want a retry.
+      // every tick. Blocks never reach this branch (see above), so a URL is
+      // only abandoned for failures that are actually about that URL.
       const fc = (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
       const abandon = fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })
@@ -771,7 +794,7 @@ export async function syncOne(
   // module doc for the contract). Runs after the new-set window so a backfill
   // is never starved by rechecks; the deadline guards both.
   const rechecksDue = dueRecheckUrls(processed, abandoned, tracklistVideos)
-  const rechecks = rechecksDue.slice(0, maxRechecks)
+  const rechecks = stopReason ? [] : rechecksDue.slice(0, maxRechecks)
   if (rechecksDue.length > 0) {
     log.info('sync.recheck_window', {
       slug: sub.slug,
@@ -878,6 +901,11 @@ export async function syncOne(
       delete failureCounts[setUrl]
       setsRechecked += 1
     } catch (e) {
+      if (isStopTheBatchError(e)) {
+        stopReason = e instanceof UpstreamPausedError ? `paused: ${e.message}` : `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
+        log.error('sync.recheck_batch_stopped_blocked', { slug: sub.slug, setUrl, setsRechecked, ...errorFields(e) })
+        break
+      }
       if (isQuotaError(e)) {
         // Out of YouTube quota mid-swap. Nothing else will succeed today and
         // the set is still due, so stop here without charging it a failure —
@@ -916,6 +944,7 @@ export async function syncOne(
     failureCounts,
     tracklistVideos,
     lastRunAt: Math.floor(Date.now() / 1000),
+    ...(stopReason ? { lastError: stopReason } : {}),
     lastRunStats: {
       tracklistsSeen: discovered.size,
       tracklistsProcessed: setsProcessed,
@@ -927,7 +956,7 @@ export async function syncOne(
         viaSeen.size === 0
           ? 'direct'
           : viaSeen.size === 1
-            ? ([...viaSeen][0] as 'home-proxy' | 'unlocker' | 'direct')
+            ? ([...viaSeen][0] as 'home-proxy' | 'home-proxy-pool' | 'unlocker' | 'direct')
             : 'mixed',
     },
   }
@@ -1052,6 +1081,93 @@ export type InvalidateResult = {
  * dropped so the next run re-reads both from YouTube. Follow with `syncOne`;
  * the 5-minute cron drains whatever one run doesn't reach.
  */
+/**
+ * Failure messages that mean "the fetch route was blocked", not "this set is
+ * broken": the block page itself, the forwarder being unusable, BrightData
+ * answering with a Cloudflare shell (what every set got during the 2026-09
+ * ban once the home proxy was blocked), or a deliberate pause.
+ */
+export const BLOCK_SHAPED_FAILURE = /ip.?block|rate-limited|blocked|home proxy|unlocker|cf shell|cloudflare|challenge|paused|403|no_body|unusable/i
+
+export type RequeueResult = {
+  days: number
+  dryRun: boolean
+  auditRowsScanned: number
+  /** Sets whose failure/abandon rows in the window all look block-shaped, per slug. */
+  candidates: Record<string, string[]>
+  /** Sets actually removed from a sub's abandoned list (or whose failure count was reset). */
+  requeued: Record<string, string[]>
+  requeuedCount: number
+}
+
+/**
+ * One-time repair after a ban episode: sets that were abandoned (3 failures)
+ * because every fetch route was blocked are valid URLs that deserve another
+ * go. Scans the playlist-addition audit for `failed`/`abandoned` rows in the
+ * last `days` with a block-shaped message, and for each such set drops it from
+ * the sub's abandoned list and resets its failure count so the next cron tick
+ * processes it again. Blocks no longer count as failures going forward (see
+ * the set loop), so this should not be needed twice.
+ */
+export async function requeueBanVictims(env: Env, opts: { days?: number; dryRun?: boolean; log: Logger }): Promise<RequeueResult> {
+  const days = opts.days ?? 14
+  const dryRun = opts.dryRun ?? false
+  const log = opts.log
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+  const candidates = new Map<string, Set<string>>()
+  let scanned = 0
+  let cursor: string | undefined
+  let pages = 0
+  outer: do {
+    const page = await env.CACHE.list({ prefix: PLAYLIST_AUDIT_PREFIX, cursor, limit: 1000 })
+    pages++
+    for (const k of page.keys) {
+      const m = k.metadata as PlaylistAdditionSummary | undefined
+      if (!m) continue
+      scanned++
+      if (Date.parse(m.t) < cutoff) break outer
+      if ((m.status === 'abandoned' || m.status === 'failed') && m.msg && BLOCK_SHAPED_FAILURE.test(m.msg)) {
+        if (!candidates.has(m.slug)) candidates.set(m.slug, new Set())
+        candidates.get(m.slug)!.add(m.set)
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor
+  } while (cursor && pages < AUDIT_SEED_MAX_PAGES)
+
+  const requeued: Record<string, string[]> = {}
+  for (const [slug, urls] of candidates) {
+    const state = await loadSubState(env, slug)
+    if (!state) continue
+    const abandoned = new Set(state.abandonedTracklistUrls ?? [])
+    const failureCounts = { ...(state.failureCounts ?? {}) }
+    const hit: string[] = []
+    for (const u of urls) {
+      let touched = false
+      if (abandoned.delete(u)) touched = true
+      if (u in failureCounts) {
+        delete failureCounts[u]
+        touched = true
+      }
+      if (touched) hit.push(u)
+    }
+    if (hit.length === 0) continue
+    requeued[slug] = hit.sort()
+    if (!dryRun) {
+      await saveSubState(env, slug, { ...state, abandonedTracklistUrls: [...abandoned], failureCounts })
+    }
+  }
+  const requeuedCount = Object.values(requeued).reduce((a, x) => a + x.length, 0)
+  log.info('sync.requeue_ban_victims', { days, dryRun, auditRowsScanned: scanned, requeuedCount, perSlug: Object.fromEntries(Object.entries(requeued).map(([k, v]) => [k, v.length])) })
+  return {
+    days,
+    dryRun,
+    auditRowsScanned: scanned,
+    candidates: Object.fromEntries([...candidates].map(([k, v]) => [k, [...v].sort()])),
+    requeued,
+    requeuedCount,
+  }
+}
+
 export async function invalidateVideoCache(env: Env, slug: string, log: Logger): Promise<InvalidateResult> {
   const state = await loadSubState(env, slug)
   if (!state) {

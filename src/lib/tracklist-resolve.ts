@@ -2,6 +2,7 @@ import type { Env, ParsedTrack } from '../types'
 import { fetchTracklist, fetchMediaLinks, type MediaLinks } from './tracklists1001'
 import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
+import { fetchOptsFromEnv } from './upstream1001'
 
 /**
  * Cache-key versions for the shared 1001tracklists resolve helpers. Every
@@ -50,12 +51,7 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   }
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
-  const { result } = await fetchTracklist(tracklistUrl, {
-    brightdataApiKey: env.BRIGHTDATA_API_KEY,
-    homeProxyUrl: env.HOME_PROXY_URL,
-    homeProxyToken: env.HOME_PROXY_TOKEN,
-    log,
-  })
+  const { result } = await fetchTracklist(tracklistUrl, fetchOptsFromEnv(env, log))
   if (result.tracks.length > 0) {
     const value: CachedTracklist = {
       tracks: result.tracks,
@@ -174,7 +170,7 @@ export async function resolveTrackMediaLinks(env: Env, trackId: string, log: Log
   log.info('cache.miss', { key })
   // medialink primary path is direct fetch; brightdata is only the timeout
   // fallback. Counter is bumped on the actual unlocker call (see lib).
-  const { result } = await fetchMediaLinks(trackId, { log, brightdataApiKey: env.BRIGHTDATA_API_KEY })
+  const { result } = await fetchMediaLinks(trackId, { log, brightdataApiKey: env.BRIGHTDATA_API_KEY, cacheKv: env.CACHE, brightdataDailyCap: env.BRIGHTDATA_DAILY_CAP })
   await putJson(env.CACHE, key, result, TTL.MEDIALINK)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
   return result
