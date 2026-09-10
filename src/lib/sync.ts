@@ -49,12 +49,6 @@ import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } fr
 import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUnavailableError } from './upstream1001'
 import { flushBanTally, isPaused } from './ban-state'
 
-/** Human label for why a batch stopped early (surfaces as the sub's lastError). */
-function stopReasonFor(e: unknown): string {
-  if (e instanceof UpstreamPausedError) return `paused: ${e.message}`
-  if (e instanceof UpstreamUnavailableError) return `unavailable: ${e.message}`
-  return `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
-}
 import { getAccessToken } from './google-oauth'
 import {
   addVideoToPlaylist,
@@ -92,6 +86,13 @@ import {
   type PlaylistAdditionStatus,
   type PlaylistAdditionSummary,
 } from './playlist-audit'
+
+/** Human label for why a batch stopped early (surfaces as the sub's lastError). */
+function stopReasonFor(e: unknown): string {
+  if (e instanceof UpstreamPausedError) return `paused: ${e.message}`
+  if (e instanceof UpstreamUnavailableError) return `unavailable: ${e.message}`
+  return `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
+}
 
 const STATE_PREFIX = 'subs:state:'
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
@@ -267,6 +268,40 @@ export type SyncOpts = {
    * row so the panel can tell a cron sweep's work apart from a button press.
    */
   trigger?: string
+  /**
+   * Shared, mutable budget of 1001tracklists page fetches for this whole run
+   * (all subs). Each set fetch / recheck decrements it; when it hits zero the
+   * loops stop and the remaining work waits for the next tick. This is the
+   * pacing that keeps the account under 1001tl's rate limit — the 2026-09-10
+   * resync drove ~360 fetches in 11 minutes and got the account banned.
+   * `syncAll`/`syncPendingOnly` create one from `TL_FETCHES_PER_TICK`.
+   */
+  fetchBudget?: FetchBudget
+}
+
+export type FetchBudget = { remaining: number; limit: number; spent: number }
+
+export const DEFAULT_TL_FETCHES_PER_TICK = 25
+
+/** One tick's worth of 1001tl page fetches, from `TL_FETCHES_PER_TICK` (default 25). */
+export function newFetchBudget(env: Env): FetchBudget {
+  const raw = Number(env.TL_FETCHES_PER_TICK)
+  const limit = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_TL_FETCHES_PER_TICK
+  return { remaining: limit, limit, spent: 0 }
+}
+
+/** Take one fetch from the budget; false when it is spent. */
+function takeFetch(budget: FetchBudget | undefined): boolean {
+  if (!budget) return true
+  if (budget.remaining <= 0) return false
+  budget.remaining -= 1
+  budget.spent += 1
+  return true
+}
+
+/** Oldest-synced first, so a budget that runs out mid-tick starves nobody. */
+export function orderByLastRun<T extends { slug: string }>(subs: T[], states: Map<string, SubState | null>): T[] {
+  return [...subs].sort((a, b) => (states.get(a.slug)?.lastRunAt ?? 0) - (states.get(b.slug)?.lastRunAt ?? 0))
 }
 
 export type SyncOneResult = {
@@ -320,13 +355,21 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
     log.error('sync.no_oauth_tokens')
     throw new Error('YouTube account not connected — visit /subscriptions/oauth/start first')
   }
-  const subs = await listSubscriptions(env)
-  log.info('sync.start', { subCount: subs.length })
+  const allSubs = await listSubscriptions(env)
+  const states = new Map<string, SubState | null>()
+  for (const sub of allSubs) states.set(sub.slug, await loadSubState(env, sub.slug))
+  const subs = orderByLastRun(allSubs, states)
+  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env)
+  log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit })
   const results: SyncOneResult[] = []
   if (await pausedForRun(env, log, 'sync')) return { results, paused: true }
   for (const sub of subs) {
+    if (fetchBudget.remaining <= 0) {
+      log.info('sync.fetch_budget_exhausted', { slug: sub.slug, spent: fetchBudget.spent, limit: fetchBudget.limit, subsLeft: subs.length - results.length })
+      break
+    }
     try {
-      const r = await syncOne(env, sub, tokenInfo.accessToken, opts)
+      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, fetchBudget })
       results.push(r)
     } catch (e) {
       log.error('sync.sub_threw', { slug: sub.slug, ...errorFields(e) })
@@ -343,6 +386,8 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
     subCount: subs.length,
     okCount: results.filter((r) => r.ok).length,
     totalNewVideos: results.reduce((a, r) => a + r.stats.videoIdsAdded, 0),
+    fetchesSpent: fetchBudget.spent,
+    fetchBudget: fetchBudget.limit,
   })
   await flushBanTally(env, true)
   return { results }
@@ -364,17 +409,21 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
   const log = opts.log ?? makeLogger({ task: 'sync.pending' })
   if (await pausedForRun(env, log, 'sync.pending')) return { results: [], paused: true }
   const subs = await listSubscriptions(env)
-  const candidates: Subscription[] = []
+  const states = new Map<string, SubState | null>()
+  const unordered: Subscription[] = []
   for (const sub of subs) {
     const state = await loadSubState(env, sub.slug)
+    states.set(sub.slug, state)
     if (!state || !state.discoveredTracklistUrls) continue
-    if (pendingTracklistUrls(state).length > 0 || dueRechecks(state).length > 0) candidates.push(sub)
+    if (pendingTracklistUrls(state).length > 0 || dueRechecks(state).length > 0) unordered.push(sub)
   }
+  const candidates = orderByLastRun(unordered, states)
   if (candidates.length === 0) {
     log.info('sync.pending.nothing_to_do', { totalSubs: subs.length })
     return { results: [] }
   }
-  log.info('sync.pending.start', { totalSubs: subs.length, candidatesWithPending: candidates.length })
+  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env)
+  log.info('sync.pending.start', { totalSubs: subs.length, candidatesWithPending: candidates.length, fetchBudget: fetchBudget.limit })
   const tokenInfo = await getAccessToken(env)
   if (!tokenInfo) {
     log.error('sync.pending.no_oauth_tokens')
@@ -382,8 +431,12 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
   }
   const results: SyncOneResult[] = []
   for (const sub of candidates) {
+    if (fetchBudget.remaining <= 0) {
+      log.info('sync.fetch_budget_exhausted', { slug: sub.slug, spent: fetchBudget.spent, limit: fetchBudget.limit, candidatesLeft: candidates.length - results.length })
+      break
+    }
     try {
-      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, skipDjCrawl: true })
+      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, skipDjCrawl: true, fetchBudget })
       results.push(r)
     } catch (e) {
       log.error('sync.pending.sub_threw', { slug: sub.slug, ...errorFields(e) })
@@ -391,6 +444,9 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
   }
   log.info('sync.pending.done', {
     candidatesProcessed: results.length,
+    candidatesWithPending: candidates.length,
+    fetchesSpent: fetchBudget.spent,
+    fetchBudget: fetchBudget.limit,
     totalAdded: results.reduce((a, r) => a + r.stats.videoIdsAdded, 0),
     totalStillPending: results.reduce((a, r) => a + r.stats.tracklistsPending, 0),
     totalRechecked: results.reduce((a, r) => a + r.stats.tracklistsRechecked, 0),
@@ -723,6 +779,10 @@ export async function syncOne(
       })
       break
     }
+    if (!takeFetch(opts.fetchBudget)) {
+      log.info('sync.set_budget_exhausted', { slug: sub.slug, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed })
+      break
+    }
     const tSet = Date.now()
     try {
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
@@ -819,6 +879,10 @@ export async function syncOne(
         setsRechecked,
         setsRemainingInWindow: rechecks.length - setsRechecked,
       })
+      break
+    }
+    if (!takeFetch(opts.fetchBudget)) {
+      log.info('sync.recheck_budget_exhausted', { slug: sub.slug, setsRechecked, setsRemainingInWindow: rechecks.length - setsRechecked })
       break
     }
     const tSet = Date.now()

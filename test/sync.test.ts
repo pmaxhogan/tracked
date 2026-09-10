@@ -11,6 +11,7 @@ import {
   saveSubState,
   requeueBanVictims,
   seedTracklistVideosFromAudit,
+  newFetchBudget,
   syncOne,
   syncPendingOnly,
   type SubState,
@@ -1319,5 +1320,78 @@ describe('route faults are not the set\'s fault', () => {
     expect(state.abandonedTracklistUrls).toEqual(['https://x/tracklist/a'])
     const rows = await playlistAdditions(env)
     expect(rows.map((x) => x.record.status)).toEqual(['abandoned'])
+  })
+})
+
+describe('per-tick 1001tl fetch budget (account rate-limit pacing)', () => {
+  beforeEach(() => _resetTallyForTests())
+  /** Two subscribed DJs, each with N unprocessed sets, YouTube connected. */
+  async function twoSubs(env: Env, perSub: number, lastRunAt: [number, number]) {
+    await env.SUBS.put('subs:list', JSON.stringify(['alpha', 'beta']))
+    for (const [i, slug] of (['alpha', 'beta'] as const).entries()) {
+      await env.SUBS.put('subs:item:' + slug, JSON.stringify({ sourceUrl: 'https://www.1001tracklists.com/dj/' + slug + '/', addedAt: 0 }))
+      await saveSubState(env, slug, {
+        playlistId: 'PL' + slug,
+        artistName: slug,
+        discoveredTracklistUrls: Array.from({ length: perSub }, (_, k) => 'https://x/tracklist/' + slug + k),
+        processedTracklistUrls: [],
+        tracklistVideos: {},
+        lastRunAt: lastRunAt[i],
+      })
+    }
+    await env.SUBS.put(
+      'oauth:google',
+      JSON.stringify({ accessToken: 'tok', refreshToken: 'refresh', expiresAt: Math.floor(Date.now() / 1000) + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }),
+    )
+  }
+
+  it('stops fetching 1001tl pages once TL_FETCHES_PER_TICK is spent, and picks the least-recently-run sub first', async () => {
+    const env = { ...makeEnv(), TL_FETCHES_PER_TICK: '3' } as Env
+    // beta ran longer ago than alpha → beta goes first.
+    await twoSubs(env, 5, [200, 100])
+    const r = await syncPendingOnly(env)
+    // 3 fetches total: all spent on beta (the older one); alpha never starts.
+    expect(fetch1001Html).toHaveBeenCalledTimes(3)
+    expect(r.results.map((x) => x.slug)).toEqual(['beta'])
+    const beta = (await loadSubState(env, 'beta'))!
+    const alpha = (await loadSubState(env, 'alpha'))!
+    expect(beta.processedTracklistUrls).toHaveLength(3)
+    expect(alpha.processedTracklistUrls).toHaveLength(0)
+    // Nothing was charged as a failure: the budget is pacing, not an error.
+    expect(beta.failureCounts ?? {}).toEqual({})
+    expect(beta.lastError).toBeUndefined()
+  })
+
+  it('carries leftover budget into the next sub and defaults to 25 when the var is unset', async () => {
+    const env = makeEnv()
+    await twoSubs(env, 2, [100, 200])
+    const r = await syncPendingOnly(env)
+    expect(r.results.map((x) => x.slug)).toEqual(['alpha', 'beta'])
+    expect(fetch1001Html).toHaveBeenCalledTimes(4)
+    expect(newFetchBudget(env)).toEqual({ remaining: 25, limit: 25, spent: 0 })
+    expect(newFetchBudget({ ...env, TL_FETCHES_PER_TICK: 'nope' } as Env).limit).toBe(25)
+    expect(newFetchBudget({ ...env, TL_FETCHES_PER_TICK: '7' } as Env).limit).toBe(7)
+  })
+
+  it('also caps rechecks', async () => {
+    const env = { ...makeEnv(), TL_FETCHES_PER_TICK: '2' } as Env
+    await env.SUBS.put('subs:list', JSON.stringify(['alpha']))
+    await env.SUBS.put('subs:item:alpha', JSON.stringify({ sourceUrl: 'https://www.1001tracklists.com/dj/alpha/', addedAt: 0 }))
+    const urls = ['https://x/tracklist/r1', 'https://x/tracklist/r2', 'https://x/tracklist/r3', 'https://x/tracklist/r4']
+    await saveSubState(env, 'alpha', {
+      playlistId: 'PLalpha',
+      artistName: 'alpha',
+      discoveredTracklistUrls: urls,
+      processedTracklistUrls: urls,
+      tracklistVideos: Object.fromEntries(urls.map((u) => [u, stale('vidA1234567')])),
+    })
+    await env.SUBS.put(
+      'oauth:google',
+      JSON.stringify({ accessToken: 'tok', refreshToken: 'refresh', expiresAt: Math.floor(Date.now() / 1000) + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }),
+    )
+    const r = await syncPendingOnly(env)
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(r.results[0]!.stats.tracklistsRechecked).toBe(2)
+    expect(r.results[0]!.stats.rechecksPending).toBe(2)
   })
 })

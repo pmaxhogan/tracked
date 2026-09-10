@@ -55,7 +55,8 @@
     "CF_ACCESS_ALLOWED_EMAILS": "pmaxhogan@gmail.com",
     // Max Bright Data Web Unlocker calls per UTC day across every 1001tl path
     // (lib/ban-state.ts). 333 ≈ $15/month at $1.50 per 1k. Not a secret.
-    "BRIGHTDATA_DAILY_CAP": "333"
+    "BRIGHTDATA_DAILY_CAP": "333",
+    "TL_FETCHES_PER_TICK": "25"
   }
   // Secrets (set via `wrangler secret put`):
   //   API_TOKEN                  bearer token Tasker uses

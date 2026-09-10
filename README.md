@@ -452,6 +452,8 @@ Connecting an **existing** Worker leaves its secrets, KV bindings, crons, and `v
 2. **Bright Data Web Unlocker** (~$1.50/1k) — tried when the forwarder isn't configured, is unreachable, returns a CF shell / unparseable body, or has every route blocked. Capped at `BRIGHTDATA_DAILY_CAP` calls per UTC day (default 333 ≈ $15/month) across tracklist, DJ, search and medialink calls. Requires `BRIGHTDATA_API_KEY`.
 3. **Direct `fetch()`** — from the Worker's own egress. Works for search, almost never for tracklist pages. Skipped while paused.
 
+**Pacing.** 1001tracklists rate-limits the *account* (not just the IP — see "IP-ban alerting"). Every sync run shares one budget of `TL_FETCHES_PER_TICK` tracklist-page fetches (default 25) across all subscriptions; subs are visited least-recently-run first, and when the budget is spent the rest wait for the next tick. At 25 per 5-minute tick a full "invalidate & resync all" (~1,900 sets) drains in about six hours; the unpaced version fetched ~360 pages in 11 minutes and got the account banned on 2026-09-10.
+
 Which failures count against a set (three strikes → abandoned) and which stop the whole run:
 
 - **Route faults stop the batch, charge nothing.** Every forwarder route blocked → `UpstreamPausedError`. Forwarder unreachable (or answering with its own error) while Bright Data is over budget, failing, or serving Cloudflare shells → `UpstreamUnavailableError`. In both cases the sync stops right there and the next tick (after the cooldown) resumes where it left off — blocks and outages are never a set's fault.
