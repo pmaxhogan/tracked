@@ -11,7 +11,7 @@
 services:
   tracked-fetch-proxy:
     build: /mnt/alpha/apps/tracked-fetch-proxy/tracked-fetch-proxy/
-    image: tracked-fetch-proxy:0.3.1
+    image: tracked-fetch-proxy:0.3.2
     container_name: tracked-fetch-proxy
     restart: unless-stopped
     environment:
@@ -22,6 +22,7 @@ services:
       - COOKIE_FILE=/data/1001tl-cookies.json
       - BLOCK_COOLDOWN_MS=3600000
       - MAX_POOL_ATTEMPTS=2
+      - RELOGIN_COOLDOWN_MS=600000
       - REQUEST_TIMEOUT_MS=15000
       - >-
         FALLBACK_PROXIES=

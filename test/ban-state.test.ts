@@ -36,6 +36,8 @@ const okDirect: HomeProxyResult = {
   attempts: 'direct:ok',
   directBlocked: null,
   directRecovered: false,
+  sessionReissued: false,
+  blockScope: null,
   poolHealthy: 19,
   poolTotal: 19,
 }

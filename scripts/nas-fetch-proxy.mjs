@@ -35,6 +35,8 @@
  *   GET  /status                route state: direct cooldown, pool health,
  *                               counters
  *   POST /probe[?url=]          force one direct fetch of PROBE_URL (or ?url);
+ *                               a blocked session is re-issued through a pool
+ *                               egress first (see RELOGIN_COOLDOWN_MS);
  *                               responds { probe: ok|ip_blocked|gated|error, … }
  *                               plus the same snapshot as /status
  * Request header `X-Proxy-Force-Route: direct|pool` (bearer-gated like the
@@ -76,7 +78,7 @@ import {
   DEFAULT_MAX_POOL_ATTEMPTS,
 } from './nas-fetch-proxy-lib.mjs'
 
-const VERSION = '0.3.1'
+const VERSION = '0.3.2'
 const PORT = Number(process.env.PORT ?? 8088)
 const BIND = process.env.BIND ?? '0.0.0.0'
 const TOKEN = process.env.PROXY_TOKEN
@@ -91,6 +93,14 @@ const COOLDOWN_MS = Number(process.env.BLOCK_COOLDOWN_MS ?? DEFAULT_COOLDOWN_MS)
 const ERROR_COOLDOWN_MS = Number(process.env.ERROR_COOLDOWN_MS ?? DEFAULT_ERROR_COOLDOWN_MS)
 // A dead bucket must not hold a request for the full upstream timeout.
 const POOL_CONNECT_TIMEOUT_MS = Number(process.env.POOL_CONNECT_TIMEOUT_MS ?? 5000)
+// 1001tracklists' block follows the *session*, not the IP (verified 2026-09-10:
+// the old session was blocked from every egress; a fresh login made through a
+// clean pool egress worked from everywhere, including the home IP; a fresh
+// login made from the flagged home IP was born blocked). So on a block we
+// re-login through a healthy pool member and retry once. At most one re-login
+// per RELOGIN_COOLDOWN_MS: if the new session is blocked again that fast, the
+// account is genuinely rate-limited and we back off instead of churning logins.
+const RELOGIN_COOLDOWN_MS = Number(process.env.RELOGIN_COOLDOWN_MS ?? 10 * 60_000)
 const MAX_POOL_ATTEMPTS = Number(process.env.MAX_POOL_ATTEMPTS ?? DEFAULT_MAX_POOL_ATTEMPTS)
 const PROBE_URL =
   process.env.PROBE_URL ??
@@ -161,6 +171,57 @@ const dispatchers = new Map(
 
 let session = { cookies: '', savedAt: 0 }
 let loginPromise = null
+/** Block-driven re-login bookkeeping (see RELOGIN_COOLDOWN_MS). */
+const relogin = { lastAt: 0, attempts: 0, recovered: 0, stillBlocked: 0, failed: 0, lastVia: null, lastOutcome: null }
+
+function reloginStatus() {
+  return {
+    ...relogin,
+    lastAt: relogin.lastAt ? new Date(relogin.lastAt).toISOString() : null,
+    cooldownMs: RELOGIN_COOLDOWN_MS,
+    available: Date.now() - relogin.lastAt >= RELOGIN_COOLDOWN_MS,
+  }
+}
+
+/**
+ * The block came back on `route` with the current session. Re-login through a
+ * healthy pool member (a clean egress issues a clean session; the flagged home
+ * IP issues a pre-blocked one), then retry the same request on the same route.
+ * Returns the retried result when the fresh session got through, null when the
+ * re-login was skipped (cooldown), failed, or was blocked too.
+ */
+async function reloginAndRetry(route, target, method, reqHeaders, body, tlDefaults, cookieFor = (s) => s.cookies) {
+  if (Date.now() - relogin.lastAt < RELOGIN_COOLDOWN_MS) {
+    log('session.relogin_skipped', { route: routeLabel(route), url: target, nextAt: new Date(relogin.lastAt + RELOGIN_COOLDOWN_MS).toISOString() })
+    return null
+  }
+  relogin.lastAt = Date.now()
+  relogin.attempts += 1
+  const candidates = planner.healthyMembers().filter((m) => !(route.kind === 'pool' && m.url === route.member.url))
+  const via = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : null
+  relogin.lastVia = via ? via.label : 'direct'
+  try {
+    const s = await ensureSession({ forceRefresh: true, dispatcher: via ? dispatchers.get(via.url) : null })
+    log('session.reissued', { via: relogin.lastVia, url: target, route: routeLabel(route) })
+    const r = await fetchVia(route, target, method, reqHeaders, body, { ...tlDefaults, cookie: cookieFor(s) })
+    const kind = classifyUpstream(r.upstream.status, r.text)
+    if (kind === 'ip_blocked') {
+      relogin.stillBlocked += 1
+      relogin.lastOutcome = 'still_blocked'
+      log('session.still_blocked', { via: relogin.lastVia, route: routeLabel(route), url: target, status: r.upstream.status })
+      return null
+    }
+    relogin.recovered += 1
+    relogin.lastOutcome = 'recovered'
+    log('session.recovered', { via: relogin.lastVia, route: routeLabel(route), url: target, status: r.upstream.status, kind })
+    return { r, kind }
+  } catch (e) {
+    relogin.failed += 1
+    relogin.lastOutcome = 'failed'
+    log('session.relogin_failed', { via: relogin.lastVia, route: routeLabel(route), error: String(e?.message ?? e) })
+    return null
+  }
+}
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ event, t: new Date().toISOString(), ...fields }))
@@ -392,6 +453,7 @@ async function handleProxy(req, res, target, parsed, force) {
   const attempts = []
   let lastBlocked = null
   let directRecovered = false
+  let sessionReissued = false
 
   if (routes.length === 0) {
     planner.noteAllBlocked()
@@ -461,6 +523,15 @@ async function handleProxy(req, res, target, parsed, force) {
       }
     }
 
+    if (kind === 'ip_blocked' && useSession) {
+      const again = await reloginAndRetry(route, target, method, req.headers, body, tlDefaults, withSession)
+      if (again) {
+        attempts.push(`${routeLabel(route)}:session_blocked`, `${routeLabel(route)}:relogin_${again.kind}`)
+        r = again.r
+        kind = again.kind
+        sessionReissued = true
+      }
+    }
     if (kind === 'ip_blocked') {
       const ip = extractBlockedIp(r.text)
       attempts.push(`${routeLabel(route)}:ip_blocked`)
@@ -486,8 +557,12 @@ async function handleProxy(req, res, target, parsed, force) {
     res.setHeader('x-proxy-upstream-status', String(r.upstream.status))
     res.setHeader('x-proxy-attempts', attempts.join(','))
     if (directRecovered) res.setHeader('x-proxy-direct-recovered', '1')
+    if (sessionReissued) {
+      res.setHeader('x-proxy-session-reissued', '1')
+      res.setHeader('x-proxy-block-scope', 'session')
+    }
     res.end(r.buf)
-    return { route: routeLabel(route), kind, status: r.upstream.status, bytes: r.buf.length, attempts }
+    return { route: routeLabel(route), kind, status: r.upstream.status, bytes: r.buf.length, attempts, sessionReissued }
   }
 
   // Every route we tried came back blocked (or errored, for pool members).
@@ -495,6 +570,7 @@ async function handleProxy(req, res, target, parsed, force) {
   directHeaders(res)
   res.setHeader('x-proxy-route', 'none')
   res.setHeader('x-proxy-all-blocked', '1')
+  res.setHeader('x-proxy-block-scope', relogin.lastOutcome === 'still_blocked' ? 'account' : 'routes')
   res.setHeader('x-proxy-attempts', attempts.join(','))
   if (lastBlocked) {
     // Hand the block page back (as a 503, never the upstream 403) so the
@@ -531,13 +607,23 @@ async function handleProbe(req, res, url) {
   }
   const start = Date.now()
   try {
-    const r = await fetchVia({ kind: 'direct' }, url, 'GET', {}, undefined, { ...tlDefaults, cookie })
-    const kind = classifyUpstream(r.upstream.status, r.text)
+    let r = await fetchVia({ kind: 'direct' }, url, 'GET', {}, undefined, { ...tlDefaults, cookie })
+    let kind = classifyUpstream(r.upstream.status, r.text)
+    let sessionReissued = false
+    if (kind === 'ip_blocked' && useSession) {
+      // Same self-heal as the request path: a clean session from a pool egress.
+      const again = await reloginAndRetry({ kind: 'direct' }, url, 'GET', {}, undefined, tlDefaults)
+      if (again) {
+        r = again.r
+        kind = again.kind
+        sessionReissued = true
+      }
+    }
     const ip = kind === 'ip_blocked' ? extractBlockedIp(r.text) : null
     const events = planner.report({ kind: 'direct' }, kind, { ip })
     for (const ev of events) log(`route.${ev.event}`, { ...ev, url, via: 'probe' })
-    const out = { probe: kind, status: r.upstream.status, bytes: r.buf.length, ms: Date.now() - start, wasBlocked, blockedIp: ip, ...planner.status() }
-    log('probe', { url, kind, status: r.upstream.status, wasBlocked, nowBlocked: planner.isDirectBlocked(), ms: out.ms })
+    const out = { probe: kind, status: r.upstream.status, bytes: r.buf.length, ms: Date.now() - start, wasBlocked, blockedIp: ip, sessionReissued, relogin: reloginStatus(), ...planner.status() }
+    log('probe', { url, kind, status: r.upstream.status, wasBlocked, nowBlocked: planner.isDirectBlocked(), sessionReissued, ms: out.ms })
     return sendJson(res, 200, out)
   } catch (e) {
     const msg = String(e?.message ?? e)
@@ -568,7 +654,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (reqUrl.pathname === '/status') {
-      return sendJson(res, 200, { version: VERSION, probeUrl: PROBE_URL, hasSession: Boolean(session.cookies), ...planner.status() })
+      return sendJson(res, 200, { version: VERSION, probeUrl: PROBE_URL, hasSession: Boolean(session.cookies), relogin: reloginStatus(), ...planner.status() })
     }
 
     if (reqUrl.pathname === '/probe') {

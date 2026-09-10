@@ -14,9 +14,11 @@ const here = dirname(fileURLToPath(import.meta.url))
 const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
 
 describe('classifyUpstream', () => {
-  it('treats HTTP 403 as an IP block regardless of body', () => {
+  it('treats HTTP 403 and 429 as a block regardless of body', () => {
     expect(classifyUpstream(403, '<html>whatever</html>')).toBe('ip_blocked')
     expect(classifyUpstream(403, '')).toBe('ip_blocked')
+    // 2026-09-10: the block page came back as 429 Too Many Requests.
+    expect(classifyUpstream(429, '')).toBe('ip_blocked')
   })
 
   it('detects the unblock_ip form on a 200', () => {

@@ -41,7 +41,9 @@ const IP_BLOCK_IP_RE = /Your IP is ((?:\d{1,3}\.){3}\d{1,3})/
  */
 export function classifyUpstream(status, bodyText) {
   const body = typeof bodyText === 'string' ? bodyText : ''
-  if (status === 403 || IP_BLOCK_FORM_RE.test(body)) return 'ip_blocked'
+  // 403 was the 2026-09-09 shape; the 2026-09-10 block arrived as a 429 with
+  // the same unblock_ip form. Either status, or the form itself, is a block.
+  if (status === 403 || status === 429 || IP_BLOCK_FORM_RE.test(body)) return 'ip_blocked'
   if (body.includes('turnstile-container') && body.includes('Please wait, you will be forwarded')) return 'gated'
   return 'ok'
 }
