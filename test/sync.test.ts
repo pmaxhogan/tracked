@@ -18,7 +18,7 @@ import {
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
 import { makeLogger } from '../src/lib/log'
 import { UpstreamPausedError } from '../src/lib/upstream1001'
-import { IPBlockedError } from '../src/lib/fetch'
+import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
 import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
 
 // Stub the network-touching primitives so syncOne becomes a deterministic
@@ -1273,5 +1273,29 @@ describe('requeueBanVictims', () => {
     expect(state.abandonedTracklistUrls).toEqual(['https://x/tracklist/broken', 'https://x/tracklist/ancient'])
     expect(state.failureCounts).toEqual({})
     expect(r.candidates.nobody).toEqual(['https://x/tracklist/orphan'])
+  })
+})
+
+describe('Cloudflare shells are not the set\'s fault', () => {
+  it('logs a failed row but charges no failure credit, and keeps walking the window', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
+      processedTracklistUrls: [],
+      failureCounts: { 'https://x/tracklist/a': 2 },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new CloudflareChallengeError('unlocker fetched a CF shell page'))
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(r.stats.tracklistsPending).toBe(2)
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 2 })
+    expect(state.abandonedTracklistUrls).toEqual([])
+    const rows = await playlistAdditions(env)
+    expect(rows.map((x) => x.record.status)).toEqual(['failed', 'failed'])
   })
 })

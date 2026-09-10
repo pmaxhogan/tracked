@@ -47,6 +47,7 @@ import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError } from './upstream1001'
+import { CloudflareChallengeError } from './fetch'
 import { flushBanTally, isPaused } from './ban-state'
 import { getAccessToken } from './google-oauth'
 import {
@@ -770,6 +771,14 @@ export async function syncOne(
         log.error('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
         break
       }
+      if (e instanceof CloudflareChallengeError) {
+        // A Cloudflare shell is the route's problem (cold exit IP), not the
+        // URL's — during the 2026-09 ban every set was abandoned this way.
+        // Record it, charge nothing, move on to the next set.
+        log.warn('sync.set_cf_shell_not_charged', { slug: sub.slug, setUrl, ...errorFields(e) })
+        auditSet('failed', setUrl, { message: e.message, failureCount: failureCounts[setUrl] ?? 0, meta: { ms: Date.now() - tSet } })
+        continue
+      }
       // Bump per-URL failure count. After ABANDON_AFTER_FAILURES, give up
       // and mark the URL processed so the cron stops re-attempting it
       // every tick. Blocks never reach this branch (see above), so a URL is
@@ -905,6 +914,19 @@ export async function syncOne(
         stopReason = e instanceof UpstreamPausedError ? `paused: ${e.message}` : `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
         log.error('sync.recheck_batch_stopped_blocked', { slug: sub.slug, setUrl, setsRechecked, ...errorFields(e) })
         break
+      }
+      if (e instanceof CloudflareChallengeError) {
+        // Route problem, not the set's: log a failed row, leave its failure
+        // count and checkedAt alone so it is simply due again next tick.
+        log.warn('sync.recheck_cf_shell_not_charged', { slug: sub.slug, setUrl, ...errorFields(e) })
+        auditSet('failed', setUrl, {
+          videoId: prev?.videoId ?? null,
+          videoUrl: prev?.videoId ? watchUrl(prev.videoId) : null,
+          message: `recheck: ${e.message}`,
+          failureCount: failureCounts[setUrl] ?? 0,
+          meta: { ms: Date.now() - tSet },
+        })
+        continue
       }
       if (isQuotaError(e)) {
         // Out of YouTube quota mid-swap. Nothing else will succeed today and
