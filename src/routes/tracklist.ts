@@ -6,6 +6,7 @@ import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields } from '../lib/log'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
+import { UpstreamHttpError } from '../lib/upstream1001'
 import { attachYoutubeLiked } from '../lib/liked-status'
 
 export const tracklistRoute = createRoute({
@@ -20,6 +21,7 @@ export const tracklistRoute = createRoute({
     200: { content: { 'application/json': { schema: TracklistResponse } }, description: 'Parsed tracklist (every track)' },
     400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not a valid 1001tracklists tracklist URL' },
     401: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Missing/invalid bearer token' },
+    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Tracklist does not exist on 1001tracklists (real 404/410)' },
     502: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Upstream 1001tracklists fetch/parse failure' },
   },
 })
@@ -54,6 +56,12 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
     if (e instanceof IPBlockedError) {
       log.error('tracklist.ip_blocked', { tracklistUrl, clientIp: e.clientIp })
       return c.json({ error: 'upstream_error', message: `1001 scrape: ip_blocked (${e.clientIp ?? 'unknown'})` }, 502)
+    }
+    if (e instanceof UpstreamHttpError) {
+      // A real 404/410 from 1001tl via a healthy route: the URL is gone, tell
+      // the caller so instead of dressing it up as an upstream fault.
+      log.warn('tracklist.upstream_gone', { tracklistUrl, status: e.status })
+      return c.json({ error: 'not_found', message: e.message }, 404)
     }
     if (e instanceof CloudflareChallengeError) {
       log.error('tracklist.cf_challenge', { tracklistUrl, errorMessage: e.message })

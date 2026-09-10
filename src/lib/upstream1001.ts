@@ -47,9 +47,45 @@ export class UpstreamPausedError extends Error {
   }
 }
 
-export function isStopTheBatchError(e: unknown): boolean {
-  return e instanceof UpstreamPausedError || e instanceof IPBlockedError
+/**
+ * Thrown when the *route* to 1001tracklists is broken rather than the URL:
+ * the forwarder is unreachable (or answered with its own error) and the paid
+ * fallback is over budget, failing, or serving Cloudflare challenge shells.
+ * Nothing about the next URL would go differently, so callers stop the batch
+ * and charge the URL nothing.
+ */
+export class UpstreamUnavailableError extends Error {
+  readonly reason: string
+  constructor(reason: string) {
+    super(`1001tracklists unreachable (${reason})`)
+    this.name = 'UpstreamUnavailableError'
+    this.reason = reason
+  }
 }
+
+/**
+ * 1001tracklists answered a definitive 4xx (404/410) through a healthy
+ * forwarder route. That IS the answer — no other route will change it — so
+ * the cascade stops here and the caller treats it as a plain failure of that
+ * URL (it burns an abandon credit, unlike blocks).
+ */
+export class UpstreamHttpError extends Error {
+  readonly status: number
+  readonly url: string
+  constructor(status: number, url: string) {
+    super(`1001tracklists answered ${status} for ${url}`)
+    this.name = 'UpstreamHttpError'
+    this.status = status
+    this.url = url
+  }
+}
+
+export function isStopTheBatchError(e: unknown): boolean {
+  return e instanceof UpstreamPausedError || e instanceof UpstreamUnavailableError || e instanceof IPBlockedError
+}
+
+/** Definitive upstream answers that no fallback route would change. */
+const FINAL_UPSTREAM_STATUSES = new Set([404, 410])
 
 export type Fetch1001Opts = {
   brightdataApiKey?: string
@@ -165,6 +201,11 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
     } else if (proxy.kind === 'all_blocked') {
       blockedIp = extractIPBlockedAddress(proxy.html) ?? proxy.directBlocked?.ip ?? null
       log?.error('fetch1001.homeproxy_all_routes_blocked', { url, attempts: proxy.attempts, blockedIp, fallback: opts.brightdataApiKey ? 'brightdata' : 'pause' })
+    } else if (proxy.kind === 'upstream_error' && FINAL_UPSTREAM_STATUSES.has(proxy.status)) {
+      // A real 404/410 from 1001tl through a working route. BrightData would
+      // only tell us the same thing for money; the URL is simply gone.
+      log?.warn('fetch1001.upstream_final_status', { url, status: proxy.status, route: proxy.route, egress: proxy.egress })
+      throw new UpstreamHttpError(proxy.status, url)
     } else {
       log?.warn('fetch1001.homeproxy_unusable_falling_back', { url, kind: proxy.kind, status: proxy.status, errorMessage: proxy.errorMessage, fallback: opts.brightdataApiKey ? 'brightdata' : 'direct' })
     }
@@ -172,13 +213,20 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
 
   // Are we here because of a block (as opposed to a transport blip / parse miss)?
   const blockedPath = !!pause || proxy?.kind === 'all_blocked' || blockedIp !== null
+  // ...or because the forwarder itself is broken? Either way the URL is not at
+  // fault, and a failing paid fallback must not turn that into abandon credits.
+  const forwarderDown = proxy?.kind === 'transport' || proxy?.kind === 'proxy_error'
+  const routeFault = blockedPath || forwarderDown
+  const routeFaultReason = blockedPath ? (pause ? pause.reason : 'every forwarder route blocked') : `forwarder ${proxy?.kind}: ${proxy?.errorMessage ?? proxy?.status ?? ''}`.trim()
+  const stopError = (detail: string) =>
+    blockedPath ? new UpstreamPausedError(`${routeFaultReason}; ${detail}`, pause?.until ?? proxy?.directBlocked?.until ?? null) : new UpstreamUnavailableError(`${routeFaultReason}; ${detail}`)
 
   // ── 2. BrightData Web Unlocker, budgeted ────────────────────────────────
   if (opts.brightdataApiKey) {
     const budget = env ? await tryConsumeBrightdata(env, log) : { ok: true, usage: null }
     if (!budget.ok) {
       log?.warn('fetch1001.brightdata_over_budget', { url, usage: budget.usage })
-      if (blockedPath) throw new UpstreamPausedError('every route blocked and BrightData budget spent', pause?.until ?? null)
+      if (routeFault) throw stopError('BrightData budget spent')
     } else {
       const attempts = Math.max(1, opts.unlockerAttempts ?? 1)
       let lastShellBytes = 0
@@ -190,7 +238,8 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
         const r = await fetchViaUnlocker(url, opts.brightdataApiKey, log)
         if (!r.html) {
           const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
-          log?.error('fetch1001.unlocker_failed', { url, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt })
+          log?.error('fetch1001.unlocker_failed', { url, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt, routeFault })
+          if (routeFault) throw stopError(`BrightData failed (${detail})`)
           throw new Error(`unlocker fetch failed for ${url} — ${detail}`)
         }
         if (isIPBlocked(r.html)) {
@@ -204,11 +253,16 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
             log?.warn('fetch1001.unlocker_cf_shell_retry', { url, htmlBytes: r.html.length, attempt })
             continue
           }
-          log?.error('fetch1001.unlocker_cf_shell', { url, htmlBytes: r.html.length, attempt, attempts })
+          log?.error('fetch1001.unlocker_cf_shell', { url, htmlBytes: r.html.length, attempt, attempts, routeFault })
+          // Behind a route fault this is "nothing works right now" → stop the
+          // batch. Behind a healthy forwarder that merely disliked the page it
+          // is a plain failure of this URL.
+          if (routeFault) throw stopError(`BrightData returned Cloudflare challenge pages (${attempts} attempts)`)
           throw new CloudflareChallengeError(`unlocker fetched a CF shell page for ${url} after ${attempts} attempts (last ${lastShellBytes} bytes)`)
         }
         return { html: r.html, via: 'unlocker', state, proxy, pause }
       }
+      if (routeFault) throw stopError('BrightData returned Cloudflare challenge pages and the budget ran out mid-retry')
       throw new CloudflareChallengeError(`unlocker fetched a CF shell page for ${url} (last ${lastShellBytes} bytes)`)
     }
   }
@@ -221,10 +275,17 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
   if (opts.allowDirect === false) {
     throw new Error(`no usable route for ${url} (home proxy ${proxy?.kind ?? 'unconfigured'}, no BrightData)`)
   }
-  if (method === 'POST') {
-    const { html, state: s2 } = await postForm(url, opts.form ?? {}, state)
+  try {
+    if (method === 'POST') {
+      const { html, state: s2 } = await postForm(url, opts.form ?? {}, state)
+      return { html, via: 'direct', state: s2, proxy, pause }
+    }
+    const { html, state: s2 } = await fetchHtml(url, state)
     return { html, via: 'direct', state: s2, proxy, pause }
+  } catch (e) {
+    // Forwarder down *and* the Worker's own egress is challenged: still not
+    // this URL's fault. Stop the batch instead of charging it.
+    if (forwarderDown && e instanceof CloudflareChallengeError) throw stopError(`Worker egress challenged: ${e.message}`)
+    throw e
   }
-  const { html, state: s2 } = await fetchHtml(url, state)
-  return { html, via: 'direct', state: s2, proxy, pause }
 }

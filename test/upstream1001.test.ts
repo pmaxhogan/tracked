@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
-import { fetch1001, fetchOptsFromEnv, UpstreamPausedError } from '../src/lib/upstream1001'
+import { fetch1001, fetchOptsFromEnv, UpstreamPausedError, UpstreamUnavailableError, UpstreamHttpError } from '../src/lib/upstream1001'
 import { fetchTracklist, searchByYouTubeUrl } from '../src/lib/tracklists1001'
 import { fetch1001Html } from '../src/lib/dj-index'
 import { _resetTallyForTests, getBanStatus, getHomeBan, getPause, setPause } from '../src/lib/ban-state'
@@ -164,10 +164,79 @@ describe('fetch1001 cascade', () => {
     vi.unstubAllGlobals()
     const shell = '<html><div id="turnstile-container"></div><script src="challenge-platform"></script></html>'
     const calls = routeFetch({ proxy: () => proxyAllBlocked(), brightdata: () => bdOk(shell) })
-    await expect(fetch1001(TL, { ...fetchOptsFromEnv(env), unlockerAttempts: 2 })).rejects.toBeInstanceOf(CloudflareChallengeError)
+    // Every forwarder route is blocked AND the paid fallback only serves shells:
+    // that is a route fault, so the batch stops (UpstreamPausedError) instead of
+    // this URL being charged a failure.
+    await expect(fetch1001(TL, { ...fetchOptsFromEnv(env), unlockerAttempts: 2 })).rejects.toBeInstanceOf(UpstreamPausedError)
     expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(2)
     // Both attempts were charged to today's budget (1 from the first test run above + 2 here).
     expect((await getBanStatus(env)).brightdata.used).toBe(3)
+  })
+
+  const SHELL = '<html><div id="turnstile-container"></div><script src="challenge-platform"></script></html>'
+  const proxyUpstream = (status: number, html = '<html>1001tl says ' + status + '</html>') =>
+    new Response(html, { status, headers: { 'x-proxy-route': 'direct', 'x-proxy-egress': 'direct', 'x-proxy-upstream-status': String(status), 'x-proxy-attempts': 'direct:ok', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' } })
+
+  it('a real 404 through a healthy forwarder is final: no BrightData, UpstreamHttpError', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const calls = routeFetch({ proxy: () => proxyUpstream(404), brightdata: () => bdOk(TRACKLIST_HTML) })
+    const err = await fetch1001(TL, fetchOptsFromEnv(env)).catch((e) => e)
+    expect(err).toBeInstanceOf(UpstreamHttpError)
+    expect((err as UpstreamHttpError).status).toBe(404)
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
+    expect((await getBanStatus(env)).brightdata.used).toBe(0)
+    expect(await getHomeBan(env)).toBeNull()
+  })
+
+  it('a 5xx from 1001tl through the forwarder still falls through to BrightData', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    routeFetch({ proxy: () => proxyUpstream(503), brightdata: () => bdOk(TRACKLIST_HTML) })
+    const r = await fetch1001(TL, fetchOptsFromEnv(env))
+    expect(r.via).toBe('unlocker')
+  })
+
+  it('forwarder down + BrightData serving CF shells → UpstreamUnavailableError (stop the batch, charge nothing)', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const calls = routeFetch({
+      proxy: () => {
+        throw new TypeError('fetch failed')
+      },
+      brightdata: () => bdOk(SHELL),
+    })
+    const err = await fetch1001(TL, { ...fetchOptsFromEnv(env), unlockerAttempts: 2 }).catch((e) => e)
+    expect(err).toBeInstanceOf(UpstreamUnavailableError)
+    expect(String(err.message)).toMatch(/forwarder transport/)
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(2)
+    expect(await getPause(env)).toBeNull()
+  })
+
+  it('forwarder answering with its own error (bad token) counts as a route fault too', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    routeFetch({ proxy: () => new Response('unauthorized', { status: 401 }), brightdata: () => bdOk(SHELL) })
+    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamUnavailableError)
+  })
+
+  it('forwarder down + BrightData over budget → UpstreamUnavailableError rather than hammering direct', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd', BRIGHTDATA_DAILY_CAP: '1' })
+    const calls = routeFetch({
+      proxy: () => {
+        throw new TypeError('fetch failed')
+      },
+      brightdata: () => bdOk(SHELL),
+      direct: () => new Response(TRACKLIST_HTML, { status: 200 }),
+    })
+    // First call spends the single budgeted attempt on a shell → unavailable.
+    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamUnavailableError)
+    // Second call: over budget with the forwarder still down → unavailable, no direct hit.
+    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamUnavailableError)
+    // Proxy calls carry the target in their query string; only count the Worker's own egress.
+    expect(calls.filter((c) => c.url.startsWith('https://www.1001tracklists.com')).length).toBe(0)
+  })
+
+  it('a CF shell from BrightData behind a HEALTHY forwarder that merely disliked the page is a plain URL failure', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    routeFetch({ proxy: () => proxyOk('<html>no tracks here</html>'), brightdata: () => bdOk(SHELL) })
+    await expect(fetch1001(TL, { ...fetchOptsFromEnv(env), accept: (html) => html.includes('tlpItem') })).rejects.toBeInstanceOf(CloudflareChallengeError)
   })
 
   it('POSTs form fields through the forwarder', async () => {
@@ -211,7 +280,8 @@ describe('wrappers', () => {
     const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
     const shell = '<html><div id="turnstile-container"></div><script src="challenge-platform"></script></html>'
     const calls = routeFetch({ proxy: () => proxyAllBlocked(), brightdata: () => bdOk(shell) })
-    await expect(fetch1001Html(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(CloudflareChallengeError)
+    // All forwarder routes blocked + shell from BrightData = route fault → the batch-stopping error.
+    await expect(fetch1001Html(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamPausedError)
     expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(1)
   })
 

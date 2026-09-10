@@ -452,7 +452,11 @@ Connecting an **existing** Worker leaves its secrets, KV bindings, crons, and `v
 2. **Bright Data Web Unlocker** (~$1.50/1k) — tried when the forwarder isn't configured, is unreachable, returns a CF shell / unparseable body, or has every route blocked. Capped at `BRIGHTDATA_DAILY_CAP` calls per UTC day (default 333 ≈ $15/month) across tracklist, DJ, search and medialink calls. Requires `BRIGHTDATA_API_KEY`.
 3. **Direct `fetch()`** — from the Worker's own egress. Works for search, almost never for tracklist pages. Skipped while paused.
 
-When the forwarder reports every route blocked and Bright Data is unavailable or over budget, the cascade throws `UpstreamPausedError`; the sync stops the whole run right there (no set is charged a failure — blocks are never a set's fault) and the next cron tick after the cooldown resumes where it left off.
+Which failures count against a set (three strikes → abandoned) and which stop the whole run:
+
+- **Route faults stop the batch, charge nothing.** Every forwarder route blocked → `UpstreamPausedError`. Forwarder unreachable (or answering with its own error) while Bright Data is over budget, failing, or serving Cloudflare shells → `UpstreamUnavailableError`. In both cases the sync stops right there and the next tick (after the cooldown) resumes where it left off — blocks and outages are never a set's fault.
+- **Definitive answers are final.** A real 404/410 from 1001tracklists through a working forwarder route throws `UpstreamHttpError` without touching Bright Data; the set is charged a failure like any other dead link, and `POST /tracklist` returns 404.
+- **Everything else is the set's problem.** A page that parses to zero tracks, or a Cloudflare shell from Bright Data *while the forwarder itself was healthy*, is a plain failure of that URL.
 
 | upstream                              | how we fetch it                                                                |
 | ------------------------------------- | ------------------------------------------------------------------------------ |

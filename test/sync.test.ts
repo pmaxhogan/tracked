@@ -17,7 +17,7 @@ import {
 } from '../src/lib/sync'
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
 import { makeLogger } from '../src/lib/log'
-import { UpstreamPausedError } from '../src/lib/upstream1001'
+import { UpstreamPausedError, UpstreamUnavailableError } from '../src/lib/upstream1001'
 import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
 import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
 
@@ -1276,8 +1276,8 @@ describe('requeueBanVictims', () => {
   })
 })
 
-describe('Cloudflare shells are not the set\'s fault', () => {
-  it('logs a failed row but charges no failure credit, and keeps walking the window', async () => {
+describe('route faults are not the set\'s fault', () => {
+  it('forwarder down + paid fallback serving Cloudflare shells stops the batch without charging any set', async () => {
     const env = makeEnv()
     await saveSubState(env, sub.slug, {
       playlistId: 'PL',
@@ -1286,16 +1286,38 @@ describe('Cloudflare shells are not the set\'s fault', () => {
       processedTracklistUrls: [],
       failureCounts: { 'https://x/tracklist/a': 2 },
     })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new CloudflareChallengeError('unlocker fetched a CF shell page'))
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new UpstreamUnavailableError('forwarder transport: fetch failed; BrightData returned Cloudflare challenge pages (2 attempts)'),
+    )
 
     const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
 
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    // Stopped after the first set: the second one is never attempted.
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
     expect(r.stats.tracklistsPending).toBe(2)
     const state = (await loadSubState(env, sub.slug))!
+    expect(state.lastError).toMatch(/^unavailable: 1001tracklists unreachable/)
     expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 2 })
     expect(state.abandonedTracklistUrls).toEqual([])
+    expect(await playlistAdditions(env)).toEqual([])
+  })
+
+  it('a Cloudflare shell behind a healthy forwarder IS charged like any other fetch failure', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      processedTracklistUrls: [],
+      failureCounts: { 'https://x/tracklist/a': 2 },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new CloudflareChallengeError('unlocker fetched a CF shell page'))
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.abandonedTracklistUrls).toEqual(['https://x/tracklist/a'])
     const rows = await playlistAdditions(env)
-    expect(rows.map((x) => x.record.status)).toEqual(['failed', 'failed'])
+    expect(rows.map((x) => x.record.status)).toEqual(['abandoned'])
   })
 })
