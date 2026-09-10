@@ -834,6 +834,28 @@ export async function syncOne(
       delete failureCounts[setUrl]
       setsProcessed += 1
     } catch (e) {
+      if (foundVideoId && isPermanentInsertError(e)) {
+        // YouTube itself says this recording cannot be added (deleted, private,
+        // region-blocked: 400/403/404 that is not a quota error). No number of
+        // retries changes that, so the set is settled now — like a set whose
+        // page has no usable recording — instead of costing three ticks. Its
+        // dead video id is remembered so the 5-day recheck still notices if
+        // 1001tracklists attaches a replacement recording later.
+        log.warn('sync.set_video_unavailable', { slug: sub.slug, setUrl, videoId: foundVideoId, ...errorFields(e) })
+        auditSet('no_youtube', setUrl, {
+          videoId: foundVideoId,
+          videoUrl: watchUrl(foundVideoId),
+          message: `YouTube rejected ${foundVideoId} as unavailable: ${(e instanceof Error ? e.message : String(e)).split('\n')[0]}`,
+          ...(foundVia ? { via: foundVia } : {}),
+          meta: { ms: Date.now() - tSet },
+        })
+        await markVideosUnavailable(env, [foundVideoId], log).catch(() => {})
+        processed.add(setUrl)
+        tracklistVideos[setUrl] = { videoId: foundVideoId, checkedAt: nowSeconds() }
+        delete failureCounts[setUrl]
+        setsProcessed += 1
+        continue
+      }
       if (isStopTheBatchError(e)) {
         // A block (or a broken route: forwarder down and the paid fallback
         // serving Cloudflare shells) is not the set's fault: every remaining

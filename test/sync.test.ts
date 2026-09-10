@@ -1395,3 +1395,59 @@ describe('per-tick 1001tl fetch budget (account rate-limit pacing)', () => {
     expect(r.results[0]!.stats.rechecksPending).toBe(2)
   })
 })
+
+describe('dead YouTube videos settle on the first strike', () => {
+  beforeEach(() => _resetTallyForTests())
+
+  it("a videoNotFound on insert marks the set processed as no_youtube with the rejected id, no failure credit", async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/dead', 'https://x/tracklist/next'],
+      processedTracklistUrls: [],
+      tracklistVideos: {},
+    })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValueOnce('deadVid1234').mockReturnValueOnce(null)
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new YouTubeApiError('playlistItems.insert', 404, 'videoNotFound', '{"error":{"code":404,"message":"Video not found."}}'),
+    )
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    // Both sets were handled in ONE tick; the dead one did not stop the loop.
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(r.stats.tracklistsProcessed).toBe(2)
+    expect(r.stats.tracklistsPending).toBe(0)
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.processedTracklistUrls).toEqual(['https://x/tracklist/dead', 'https://x/tracklist/next'])
+    expect(state.failureCounts).toEqual({})
+    expect(state.abandonedTracklistUrls).toEqual([])
+    // The dead id is remembered so a recheck notices a replacement recording.
+    expect(state.tracklistVideos!['https://x/tracklist/dead']!.videoId).toBe('deadVid1234')
+    const rows = await playlistAdditions(env)
+    const dead = rows.find((x) => x.record.setUrl === 'https://x/tracklist/dead')!
+    expect(dead.record.status).toBe('no_youtube')
+    expect(dead.record.videoId).toBe('deadVid1234')
+    expect(dead.record.message).toMatch(/rejected deadVid1234 as unavailable/)
+  })
+
+  it('a quota error on insert is still a plain failure (retried, not settled)', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      processedTracklistUrls: [],
+      tracklistVideos: {},
+    })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'))
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.processedTracklistUrls).toEqual([])
+    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 1 })
+  })
+})

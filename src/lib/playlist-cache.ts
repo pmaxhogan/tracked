@@ -35,7 +35,10 @@ export async function getCachedPlaylistVideoIds(
   const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
   const cached = await getJson<{ videoIds: string[] }>(env.CACHE, key)
   if (cached) {
-    log.info('sync.playlist_video_ids.cache_hit', { playlistId, count: cached.videoIds.length })
+    // Deliberately not logged: this fires for every set (artist + combined
+    // playlist) and at ~85 lines per cron tick it alone pushed busy ticks past
+    // the 256 KB Workers log cap, truncating the lines that matter. The miss
+    // below is the informative event.
     return new Set(cached.videoIds)
   }
   log.info('sync.playlist_video_ids.cache_miss', { playlistId })
