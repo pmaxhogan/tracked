@@ -58,7 +58,7 @@ export const BAN_BANNER_HTML = /* html */ `
     <div class="ban-head">
       <div class="ban-icon" id="ban-icon">🚫</div>
       <div class="ban-text">
-        <div class="ban-title" id="ban-title">1001tracklists has temp-banned your home IP</div>
+        <div class="ban-title" id="ban-title">1001tracklists is blocking the tracked sessions</div>
         <div class="ban-sub" id="ban-sub"></div>
       </div>
     </div>
@@ -124,14 +124,14 @@ export const BAN_JS = /* js */ `
     const ip = home && home.ip ? ' <code>' + esc(home.ip) + '</code>' : '';
     if (pause) {
       $icon.textContent = '⛔';
-      $title.innerHTML = 'Every 1001tracklists route is blocked — fetching is paused' + (simulated ? '<span class="ban-badge">simulated</span>' : '');
-      $sub.innerHTML = 'Your home IP' + ip + ' and every fallback bucket returned the block page. The sync stops hitting 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b>, then tries once more. BrightData used today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b>. Solve the captcha from your home network, then press re-probe to resume immediately.';
+      $title.innerHTML = '1001tracklists is blocking every tracked account — fetching is paused' + (simulated ? '<span class="ban-badge">simulated</span>' : '');
+      $sub.innerHTML = 'Even a freshly logged-in session (the proxy re-logins through the egress pool automatically) came back with the block page' + (ip ? ' (last shown IP' + ip + ')' : '') + '. The sync stops hitting 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b>, then tries once more. BrightData used today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b>. <b>Log in to 1001tracklists as one of the tracked accounts and solve the captcha</b>, then press re-probe.';
     } else {
       $icon.textContent = '🚫';
-      $title.innerHTML = '1001tracklists has temp-banned your home IP' + ip + (simulated ? '<span class="ban-badge">simulated</span>' : '');
-      const pool = home.poolTotal == null ? ' Fetches should be running through the fallback pool (status in the IP-ban history below).' : home.poolTotal > 0 ? ' Fetches are running through the fallback pool (<b>' + home.poolHealthy + '/' + home.poolTotal + '</b> buckets healthy) so nothing is lost, but the ban only lifts when a human solves the captcha.' : ' No fallback pool is configured, so fetches are failing.';
-      const next = home.until ? ' The proxy re-tries your home IP hourly (next around <b>' + esc(fmtTime(home.until)) + '</b>).' : '';
-      $sub.innerHTML = 'Blocked since <b>' + esc(fmtTime(home.since)) + '</b> (' + esc(ago(home.since)) + ').' + pool + next + ' <b>Open the captcha from this network</b>, solve it, then press re-probe.';
+      $title.innerHTML = '1001tracklists is blocking the tracked sessions' + (ip ? ' (last shown IP' + ip + ')' : '') + (simulated ? '<span class="ban-badge">simulated</span>' : '');
+      const pool = home.poolTotal == null ? ' The proxy is re-logging in through the egress pool and failing over between accounts (details in the ban history below).' : home.poolTotal > 0 ? ' The proxy re-logins through the egress pool (<b>' + home.poolHealthy + '/' + home.poolTotal + '</b> buckets healthy) and fails over between its accounts, so fetches usually keep flowing; the block itself lifts when a fresh session gets through or a human solves the captcha.' : ' No egress pool is configured, so the proxy cannot get a fresh session: fetches are failing.';
+      const next = home.until ? ' The proxy re-tries the direct route hourly (next around <b>' + esc(fmtTime(home.until)) + '</b>).' : '';
+      $sub.innerHTML = 'Blocked since <b>' + esc(fmtTime(home.since)) + '</b> (' + esc(ago(home.since)) + ').' + pool + next + ' If it does not clear on its own: <b>log in to 1001tracklists as one of the tracked accounts, solve the captcha</b>, then press re-probe.';
     }
     $dismiss.hidden = !simulated;
     $dismiss.textContent = simulated ? 'Dismiss simulated ban' : 'Dismiss';
@@ -151,13 +151,13 @@ export const BAN_JS = /* js */ `
   }
 
   if ($probe) $probe.addEventListener('click', async () => {
-    $probe.disabled = true; const orig = $probe.textContent; $probe.textContent = 'Probing your home IP…'; $foot.textContent = '';
+    $probe.disabled = true; const orig = $probe.textContent; $probe.textContent = 'Probing the direct route…'; $foot.textContent = '';
     try {
       const r = await api('/api/ban/probe', { method: 'POST' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { $foot.textContent = 'Probe failed: ' + (d.error || r.status) + (d.message ? ' — ' + d.message : ''); return; }
       if (d.cleared) { $foot.textContent = '✅ Home IP works again — ban cleared.'; }
-      else if (d.probe === 'ip_blocked') { $foot.textContent = '❌ Still blocked (' + (d.blockedIp || 'home IP') + '). Did the captcha page confirm the unblock? It must be solved from the same network as the proxy.'; }
+      else if (d.probe === 'ip_blocked') { $foot.textContent = '❌ Still blocked' + (d.blockedIp ? ' (page named ' + d.blockedIp + ')' : '') + (d.sessionReissued === false ? ', even after a fresh login' : '') + '. Did the captcha page confirm the unblock? Solve it while logged in as one of the tracked accounts.'; }
       else if (d.probe === 'ok') { $foot.textContent = '✅ Direct route is fine.'; }
       else { $foot.textContent = 'Probe result: ' + (d.probe || 'unknown') + (d.error ? ' — ' + d.error : ''); }
       await refresh(page === 'main');
@@ -255,6 +255,10 @@ export const BAN_JS = /* js */ `
       parts.push('Home proxy v' + esc(p.version || '?') + ': direct route ' + (p.direct && p.direct.blocked ? '<span class="bad">BLOCKED</span> until ' + esc(fmtTime(p.direct.blockedUntil)) : '<span class="ok">ok</span>') + ', pool <b>' + p.poolHealthy + '/' + p.poolTotal + '</b> healthy' + (p.counters ? ' · served direct ' + p.counters.directOk + ', pool ' + p.counters.poolOk + ', blocked direct ' + p.counters.directBlocked + ' / pool ' + p.counters.poolBlocked + ' since restart' : '') + '.');
       const blockedMembers = (p.pool || []).filter((m) => m.blocked).map((m) => m.label);
       if (blockedMembers.length) parts.push('Blocked buckets: <span class="mono">' + esc(blockedMembers.join(', ')) + '</span>.');
+      if (Array.isArray(p.accounts) && p.accounts.length) {
+        const acct = p.accounts.map((a) => '<span class="mono">' + esc(a.label) + '</span> ' + (a.healthy ? '<span class="ok">ok</span>' : a.blocked ? '<span class="bad">parked</span> until ' + esc(fmtTime(a.blockedUntil)) : '<span class="bad">benched</span>') + ' (' + a.okCount + ' ok, ' + a.blockedCount + ' blocked)').join(' · ');
+        parts.push('Accounts <b>' + p.accountsHealthy + '/' + p.accountsTotal + '</b> healthy: ' + acct + '.' + (p.sessionStats ? ' Re-logins ' + p.sessionStats.reissued + ', failovers ' + p.sessionStats.failovers + ' since restart.' : ''));
+      }
     }
     parts.push('BrightData today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b> calls' + (s.brightdata.used >= s.brightdata.cap ? ' <span class="bad">(budget spent)</span>' : '') + '.');
     if (s.pause) parts.push('<span class="bad">Paused</span> until ' + esc(fmtTime(s.pause.until)) + ' (' + esc(s.pause.reason) + ').');
