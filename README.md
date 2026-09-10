@@ -445,59 +445,70 @@ Connecting an **existing** Worker leaves its secrets, KV bindings, crons, and `v
 
 ## Network strategy
 
-1001tracklists treats Cloudflare Workers' egress IPs as bots and serves a captcha interstitial on tracklist *page* GETs (the search endpoint, oddly, comes through fine). The tracklist GET has up to three escape hatches in priority order:
+1001tracklists treats Cloudflare Workers' egress IPs as bots and serves a captcha interstitial on tracklist *page* GETs, and it rate-limits every IP: after a burst it serves a "solve the captcha to unblock your IP" page (HTTP 403, form posting to `/info/unblock_ip.html`) until a human solves it *from that IP*. Every 1001tracklists fetch — tracklist pages, DJ index pages and both search POSTs — goes through one cascade in `src/lib/upstream1001.ts`:
 
-1. **Home proxy** (free) — a residential-IP HTTP forwarder we run ourselves on a NAS, exposed via cloudflared. Tried first when `HOME_PROXY_URL` + `HOME_PROXY_TOKEN` are set.
-2. **Bright Data Web Unlocker** (~$3/1k) — tried when the home proxy isn't configured or returns a CF shell / IP-block / unparseable body. Requires `BRIGHTDATA_API_KEY`.
-3. **Direct `fetch()`** — only useful in local dev from a residential IP; runs the JS-challenge solver in `src/lib/fetch.ts`. Always fails on Workers.
+0. **Pause check** — if every forwarder route was blocked within the last hour (`ban:pause` in KV), the forwarder is not touched at all. This is the "retry at most once an hour" rule.
+1. **Home proxy** (free) — the residential-IP forwarder on the NAS (below). It tries the residential IP first; when 1001tracklists blocks that IP it reroutes the same request through a random tinyproxy bucket on the tailnet (19 distinct IPv4 egresses) and reports what it did in `X-Proxy-*` headers. Tried when `HOME_PROXY_URL` + `HOME_PROXY_TOKEN` are set.
+2. **Bright Data Web Unlocker** (~$1.50/1k) — tried when the forwarder isn't configured, is unreachable, returns a CF shell / unparseable body, or has every route blocked. Capped at `BRIGHTDATA_DAILY_CAP` calls per UTC day (default 333 ≈ $15/month) across tracklist, DJ, search and medialink calls. Requires `BRIGHTDATA_API_KEY`.
+3. **Direct `fetch()`** — from the Worker's own egress. Works for search, almost never for tracklist pages. Skipped while paused.
+
+When the forwarder reports every route blocked and Bright Data is unavailable or over budget, the cascade throws `UpstreamPausedError`; the sync stops the whole run right there (no set is charged a failure — blocks are never a set's fault) and the next cron tick after the cooldown resumes where it left off.
 
 | upstream                              | how we fetch it                                                                |
 | ------------------------------------- | ------------------------------------------------------------------------------ |
 | YouTube Data API                       | direct `fetch()`                                                                |
 | iTunes Search API                      | direct `fetch()`                                                                |
-| 1001tracklists `/search/result.php`    | direct `fetch()` (works from Worker IPs)                                        |
-| 1001tracklists tracklist page          | home proxy → Bright Data Unlocker → direct (whichever is configured, in order)  |
-| 1001tracklists `get_medialink.php` AJAX| direct `fetch()`, with Bright Data raced as a fallback on timeout                |
+| 1001tracklists `/search/result.php`    | home proxy (direct → pool) → Bright Data (budgeted) → direct                    |
+| 1001tracklists tracklist / DJ pages    | home proxy (direct → pool) → Bright Data (budgeted) → direct                    |
+| 1001tracklists `get_medialink.php` AJAX| direct `fetch()`, with Bright Data (budgeted) raced as a fallback on timeout     |
 
-**Cost**: at ~$3/1,000 successful requests with Web Unlocker and KV caching the search mapping + parsed tracklist for 2 hours each (short on purpose — new tracklists and newly-IDed tracks should show up quickly), ~20–40 lookups/month works out to under $0.50/month. With the home proxy configured the BrightData spend drops to whatever the residential link can't cover (per-IP rate limits, NAS downtime). Medialink (per-track Apple/YT) and Apple-Music fallback lookups have separate, much longer TTLs since track ↔ deep-link mapping is essentially immutable.
+**Cost**: with the home proxy healthy, Bright Data spend is ~zero. During the 2026-09 ban Bright Data burned ~6,000 calls in two days answering every recheck with a Cloudflare shell, which is what the daily cap now prevents.
+
+### IP-ban alerting
+
+`src/lib/ban-state.ts` turns the forwarder's `X-Proxy-*` report into KV state (`ban:home`, `ban:pause`, `ban:ep:*`, `ban:bd:<day>`) so that:
+
+- every admin page (`/subscriptions`, `/subscriptions/tracklist`, `/subscriptions/dj/<slug>`) shows a big red banner while the home IP is blocked — with the blocked IP, the fallback pool's health, the next hourly probe time, a link to the captcha and an **"I solved it — re-probe now"** button that asks the forwarder to try the residential IP immediately;
+- a **Web Push** notification fires once when a ban starts and once when it clears (`src/lib/web-push.ts`, RFC 8291/8292 via `@block65/webcrypto-web-push`). Press **Enable notifications** on each device once (the main page also asks on first visit); **Send test notification** proves delivery. Needs `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` — generate with `node scripts/gen-vapid-keys.mjs mailto:you@example.com`;
+- the main page's **IP-ban history** lists past episodes (duration, IP, how many requests went via pool / Bright Data, whether the pushes were delivered), the live forwarder route status and today's Bright Data usage. "simulate a ban" exercises the banner + push path without a real block;
+- the cron probes the forwarder once the cooldown lapses even when nothing is being fetched, so a lifted ban clears the banner and fires the all-clear push without waiting for traffic.
+
+Admin endpoints (CF Access): `GET /subscriptions/api/ban/status[?live=1]`, `POST /subscriptions/api/ban/probe`, `POST /subscriptions/api/ban/clear`, `POST /subscriptions/api/ban/simulate`, `POST /subscriptions/api/ban/requeue-victims[?days=14&dry=1]` (re-queues sets abandoned only because every route was blocked), `GET /subscriptions/api/push/config`, `POST /subscriptions/api/push/{subscribe,unsubscribe,test}`, `GET /subscriptions/sw.js`.
 
 ### Home proxy
 
-Why: BrightData occasionally serves a Cloudflare shell on tracklist pages (residential-IP rotation lands on an exit IP without warm CF clearance) and Worker IPs always do. A residential IP we control sidesteps both.
+Why: BrightData occasionally serves a Cloudflare shell on tracklist pages (residential-IP rotation lands on an exit IP without warm CF clearance) and Worker IPs always do. A residential IP we control sidesteps both — and when 1001tracklists blocks that residential IP, a pool of tailnet HTTP proxies with their own IPv4 egresses keeps fetches flowing while a human solves the captcha.
 
-What: a tiny Node service (`scripts/nas-fetch-proxy.mjs`) that accepts `GET /?url=<encoded>` with a shared bearer, fetches the target, and streams the response back. Exposed publicly via your existing cloudflared tunnel. Target hostnames are allowlisted (defaults to `www.1001tracklists.com`) so a leaked bearer can't open-proxy the world. When `UPSTREAM_1001TL_EMAIL`/`UPSTREAM_1001TL_PASSWORD` are configured, the forwarder logs in once, persists the session cookies (`uid`, `sid`, `guid`) to disk, and injects them on every 1001tl request — that's what lets us bypass the upstream Turnstile captcha gate that even residential IPs hit on cold-cache URLs.
+What: a small Node service (`scripts/nas-fetch-proxy.mjs` + `scripts/nas-fetch-proxy-lib.mjs`) that accepts `GET|POST /?url=<encoded>` with a shared bearer, fetches the target and returns the response. Exposed publicly via your existing cloudflared tunnel. Target hostnames are allowlisted (defaults to `www.1001tracklists.com`) so a leaked bearer can't open-proxy the world. When `UPSTREAM_1001TL_EMAIL`/`UPSTREAM_1001TL_PASSWORD` are configured, the forwarder logs in once, persists the session cookies (`uid`, `sid`, `guid`) to disk, and injects them on every 1001tl request — that's what lets us bypass the upstream Turnstile captcha gate that even residential IPs hit on cold-cache URLs.
 
-Setup (assumes you already have cloudflared running on the NAS):
+Routing (`nas-fetch-proxy-lib.mjs`, unit-tested in `test/nas-fetch-proxy-lib.test.ts`):
 
-1. Run the forwarder on the NAS. PM2/systemd/docker — whatever you already use to keep things up:
+- Direct (residential IP) first while it is healthy.
+- A block signal on direct — HTTP 403, or the `unblock_ip` form in the body — puts direct into a cooldown (`BLOCK_COOLDOWN_MS`, default 1 h) and the same request is retried through a random healthy member of `FALLBACK_PROXIES` (up to `MAX_POOL_ATTEMPTS`, default 2). Members that get blocked go into their own cooldown.
+- The first request after the cooldown expires tries direct again — one probe per hour. Blocked again → another cooldown.
+- Transport errors are not block signals: on direct they are returned as-is (a 1001tl outage must not double the traffic), on a pool member they just move on to the next member.
+- Every route blocked → `503` with the block page body and `X-Proxy-All-Blocked: 1`.
+
+Every response carries `X-Proxy-Route` (`direct`|`pool`|`none`), `X-Proxy-Egress` (label), `X-Proxy-Upstream-Status`, `X-Proxy-Attempts` (e.g. `direct:ip_blocked,bgp1:18183:ok`) and, while the residential IP is in cooldown, `X-Proxy-Direct-Blocked-Until/-Since/-Ip`. Endpoints: `GET /health` (unauthenticated), `GET /status` (route state, pool health, counters), `POST /probe[?url=]` (one forced direct fetch of a tracklist page — the homepage is *not* gated when blocked, so it is useless as a probe). The bearer-gated request header `X-Proxy-Force-Route: direct|pool` overrides the planner for one request (tests, the admin re-probe).
+
+Setup on the TrueNAS box (a Custom App; the compose lives in the TrueNAS middleware, `docker-compose.example.yml` documents its shape):
+
+1. `scripts/nas-fetch-proxy-deploy/deploy.sh [--set KEY=VALUE ...]` copies the forwarder into the app's build dir, builds a fresh image tagged with `scripts/nas-fetch-proxy-deploy/package.json`'s version, patches the app's compose (image tag + any `--set` env upserts) through `midclt call app.update`, and starts the app. Needs `ssh mnmserver` with passwordless sudo.
+   Env knobs: `PORT` (default 8088), `BIND` (default 0.0.0.0), `ALLOWED_HOSTS` (default `www.1001tracklists.com,1001tracklists.com`), `REQUEST_TIMEOUT_MS` (per attempt, default 15000), `FALLBACK_PROXIES` (comma/newline-separated `label=http://host:port` HTTP proxies — the tailnet tinyproxy buckets), `BLOCK_COOLDOWN_MS` (default 3600000), `MAX_POOL_ATTEMPTS` (default 2), `PROBE_URL` (tracklist page for `/probe`), `UPSTREAM_1001TL_EMAIL`/`UPSTREAM_1001TL_PASSWORD` (optional; enables logged-in mode), `COOKIE_FILE` (default `/data/1001tl-cookies.json` — persist on a volume so restarts don't re-login).
+2. Add a public hostname to your cloudflared tunnel pointing at the forwarder (Zero Trust dashboard → Tunnels → your tunnel → Public Hostnames → Add; service `http://tracked-fetch-proxy.ix-tracked-fetch-proxy.svc.cluster.local:8088` on the NAS's apps network).
+3. Smoke test from anywhere — should return your residential IP with `X-Proxy-Route: direct`, and a pool IP with `-H "X-Proxy-Force-Route: pool"`:
    ```bash
-   PROXY_TOKEN=<long-random> \
-   UPSTREAM_1001TL_EMAIL=you@example.com \
-   UPSTREAM_1001TL_PASSWORD=<password> \
-   COOKIE_FILE=/data/1001tl-cookies.json \
-   node scripts/nas-fetch-proxy.mjs
-   ```
-   Env knobs: `PORT` (default 8088), `BIND` (default 0.0.0.0 — container-friendly; set 127.0.0.1 if running on the host directly), `ALLOWED_HOSTS` (default `www.1001tracklists.com,1001tracklists.com`), `REQUEST_TIMEOUT_MS` (default 20000), `UPSTREAM_1001TL_EMAIL`/`UPSTREAM_1001TL_PASSWORD` (optional; enables logged-in mode), `COOKIE_FILE` (default `/data/1001tl-cookies.json` — persist on a volume so restarts don't re-login).
-2. Add a public hostname to your cloudflared tunnel pointing at the forwarder. Either via the Zero Trust dashboard (Tunnels → your tunnel → Public Hostnames → Add) or in `config.yml`:
-   ```yaml
-   ingress:
-     - hostname: tracked-proxy.<yourdomain>
-       service: http://localhost:8088
-     - service: http_status:404   # keep the catch-all last
-   ```
-   `cloudflared tunnel route dns <tunnel> tracked-proxy.<yourdomain>` if the DNS record isn't already there, then restart cloudflared.
-3. Smoke test from anywhere — should return your residential IP, not a Cloudflare PoP:
-   ```bash
-   curl -H "Authorization: Bearer $PROXY_TOKEN" \
+   curl -sD - -H "Authorization: Bearer $PROXY_TOKEN" \
      "https://tracked-proxy.<yourdomain>/?url=https://api.ipify.org"
    ```
+   (`api.ipify.org` has to be in `ALLOWED_HOSTS` for that; the default allowlist only has 1001tracklists.)
 4. Set the secrets on the Worker:
    ```bash
    echo "https://tracked-proxy.<yourdomain>" | npx wrangler secret put HOME_PROXY_URL
    echo $PROXY_TOKEN                          | npx wrangler secret put HOME_PROXY_TOKEN
    ```
 
-Failure handling: any of {transport throw, non-2xx, CF shell, IP-block page, parsed-zero-tracks} on the home-proxy attempt logs a `1001scrape.homeproxy_*_falling_back` warning and proceeds to the next configured path. The Worker can't speak WireGuard so it can't be on your tailnet directly — this forwarder is the bridge.
+Failure handling: a CF shell or unparseable body from the forwarder logs a `fetch1001.homeproxy_*_falling_back` warning and proceeds to the next configured path; a block report opens a ban episode (banner + push) and, if every route was blocked, the one-hour pause. The Worker can't speak WireGuard so it can't be on your tailnet directly — this forwarder is the bridge.
 
 ## How it works
 
@@ -551,13 +562,20 @@ src/
     google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
     log.ts                  structured JSON logger + per-request counters
     fetch.ts                challenge solver + cookie jar
+    upstream1001.ts         the one 1001tracklists fetch cascade: pause → home proxy → Bright Data (budgeted) → direct
+    ban-state.ts            IP-ban episodes, the 1h all-routes-blocked pause, Bright Data daily budget (KV)
+    web-push.ts             Web Push (VAPID / RFC 8291) delivery + subscription storage
     homeProxy.ts            residential-IP forwarder client (pairs with scripts/nas-fetch-proxy.mjs)
     unlocker.ts             Bright Data Web Unlocker client
     youtube.ts              YouTube Data API v3 client
     itunes.ts               Apple Music fallback search
     cache.ts                KV helpers + sha1 + TTLs
+  routes/ban-ui.ts          shared admin-page banner / alerts row / ban history / service worker
 scripts/
-  nas-fetch-proxy.mjs       Node http server that runs on the NAS and forwards to 1001tl
+  nas-fetch-proxy.mjs       Node http server that runs on the NAS and forwards to 1001tl (direct → tailnet pool)
+  nas-fetch-proxy-lib.mjs   its pure routing logic (classification, cooldowns, pool planner) + .d.mts
+  nas-fetch-proxy-deploy/   Dockerfile, package.json, compose example, deploy.sh for the TrueNAS Custom App
+  gen-vapid-keys.mjs        prints a VAPID key pair for the Web Push alerts
 test/
   fixtures/                 saved 1001tracklists HTML and JSON
   timestamp.test.ts
@@ -570,5 +588,10 @@ test/
   youtube.test.ts
   cf-access.test.ts
   google-oauth.test.ts
+  upstream1001.test.ts
+  ban-state.test.ts
+  web-push.test.ts
+  homeProxy.test.ts
+  nas-fetch-proxy-lib.test.ts
 docs/tasker-setup.md
 ```

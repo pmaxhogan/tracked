@@ -6,10 +6,12 @@
 # FALLBACK_PROXIES lists the tailnet tinyproxy buckets, one distinct IPv4
 # egress each (see ../bgp/discord-proxies.txt for the inventory). Labels are
 # free text and show up in logs, X-Proxy-Egress and the admin page.
+# vm4:18181 (147.224.155.47) is left out: its secondary IP no longer routes
+# (tinyproxy answers "500 Unable to connect"), verified 2026-09-10.
 services:
   tracked-fetch-proxy:
     build: /mnt/alpha/apps/tracked-fetch-proxy/tracked-fetch-proxy/
-    image: tracked-fetch-proxy:0.3.0
+    image: tracked-fetch-proxy:0.3.1
     container_name: tracked-fetch-proxy
     restart: unless-stopped
     environment:
@@ -40,8 +42,7 @@ services:
         vm2:18181=http://100.126.198.39:18181,
         vm3:18180=http://100.118.191.53:18180,
         vm3:18181=http://100.118.191.53:18181,
-        vm4:18180=http://100.94.155.2:18180,
-        vm4:18181=http://100.94.155.2:18181
+        vm4:18180=http://100.94.155.2:18180
     volumes:
       - tracked-fetch-proxy-data:/data
     healthcheck:

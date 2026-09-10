@@ -129,7 +129,7 @@ export const BAN_JS = /* js */ `
     } else {
       $icon.textContent = '🚫';
       $title.innerHTML = '1001tracklists has temp-banned your home IP' + ip + (simulated ? '<span class="ban-badge">simulated</span>' : '');
-      const pool = home.poolTotal ? ' Fetches are running through the fallback pool (<b>' + home.poolHealthy + '/' + home.poolTotal + '</b> buckets healthy) so nothing is lost, but the ban only lifts when a human solves the captcha.' : ' No fallback pool is configured, so fetches are failing.';
+      const pool = home.poolTotal == null ? ' Fetches should be running through the fallback pool (status in the IP-ban history below).' : home.poolTotal > 0 ? ' Fetches are running through the fallback pool (<b>' + home.poolHealthy + '/' + home.poolTotal + '</b> buckets healthy) so nothing is lost, but the ban only lifts when a human solves the captcha.' : ' No fallback pool is configured, so fetches are failing.';
       const next = home.until ? ' The proxy re-tries your home IP hourly (next around <b>' + esc(fmtTime(home.until)) + '</b>).' : '';
       $sub.innerHTML = 'Blocked since <b>' + esc(fmtTime(home.since)) + '</b> (' + esc(ago(home.since)) + ').' + pool + next + ' <b>Open the captcha from this network</b>, solve it, then press re-probe.';
     }

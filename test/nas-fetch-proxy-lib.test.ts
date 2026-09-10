@@ -135,12 +135,17 @@ describe('RoutePlanner', () => {
     expect(kinds(p.plan())).toEqual(['direct', 'pool:p0', 'pool:p1'])
   })
 
-  it('does not count pool transport errors as blocks', () => {
-    const { p } = planner({ pool: 1 })
+  it('benches a pool member for the error cooldown after a transport error, without calling it blocked', () => {
+    const { p, advance } = planner({ pool: 2 })
     const route = p.plan()[1]!
-    p.report(route, 'error')
-    expect(kinds(p.plan())).toEqual(['direct', 'pool:p0'])
-    expect(p.status().pool[0]).toMatchObject({ errorCount: 1, blocked: false })
+    const ev = p.report(route, 'error')
+    expect(ev[0]!.event).toBe('member.unhealthy')
+    expect(kinds(p.plan())).toEqual(['direct', 'pool:p1'])
+    expect(p.status().pool[0]).toMatchObject({ errorCount: 1, blocked: false, unhealthy: true, blockedCount: 0 })
+    advance(10 * 60_000)
+    expect(kinds(p.plan())).toEqual(['direct', 'pool:p0', 'pool:p1'])
+    p.report(p.plan()[1]!, 'ok')
+    expect(p.status().pool[0]).toMatchObject({ unhealthy: false, okCount: 1 })
   })
 
   it('honours the force-route header', () => {

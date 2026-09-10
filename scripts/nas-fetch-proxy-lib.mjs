@@ -18,11 +18,14 @@
  *     individually. A request may try up to `maxPoolAttempts` members.
  *   - Transport errors are NOT block signals: on direct they are returned to
  *     the caller as-is (a 1001tl outage must not double the traffic); on a
- *     pool member they just move on to the next member.
+ *     pool member they move on to the next member and bench that member for
+ *     a short error cooldown so a dead bucket is not re-tried every request.
  */
 
 export const DEFAULT_COOLDOWN_MS = 60 * 60 * 1000
 export const DEFAULT_MAX_POOL_ATTEMPTS = 2
+/** How long a pool member sits out after a transport error (proxy down, CONNECT refused). */
+export const DEFAULT_ERROR_COOLDOWN_MS = 10 * 60 * 1000
 
 const IP_BLOCK_FORM_RE = /action="\/info\/unblock_ip\.html"/
 const IP_BLOCK_IP_RE = /Your IP is ((?:\d{1,3}\.){3}\d{1,3})/
@@ -89,11 +92,13 @@ export class RoutePlanner {
   constructor({
     pool = [],
     cooldownMs = DEFAULT_COOLDOWN_MS,
+    errorCooldownMs = DEFAULT_ERROR_COOLDOWN_MS,
     maxPoolAttempts = DEFAULT_MAX_POOL_ATTEMPTS,
     now = () => Date.now(),
     random = () => Math.random(),
   } = {}) {
     this.cooldownMs = cooldownMs
+    this.errorCooldownMs = errorCooldownMs
     this.maxPoolAttempts = maxPoolAttempts
     this.now = now
     this.random = random
@@ -103,8 +108,10 @@ export class RoutePlanner {
       label: m.label,
       blockedUntil: 0,
       blockedSince: 0,
+      unhealthyUntil: 0,
       lastBlockAt: 0,
       lastOkAt: 0,
+      lastErrorAt: 0,
       okCount: 0,
       blockedCount: 0,
       errorCount: 0,
@@ -117,7 +124,7 @@ export class RoutePlanner {
   }
 
   healthyMembers(now = this.now()) {
-    return this.members.filter((m) => m.blockedUntil <= now)
+    return this.members.filter((m) => m.blockedUntil <= now && m.unhealthyUntil <= now)
   }
 
   /** Random sample (without replacement) of healthy pool members. */
@@ -191,10 +198,14 @@ export class RoutePlanner {
       events.push({ event: 'member.blocked', label: m.label, blockedUntil: m.blockedUntil })
     } else if (outcome === 'error') {
       m.errorCount++
+      m.lastErrorAt = now
+      m.unhealthyUntil = now + this.errorCooldownMs
       this.counters.poolError++
+      events.push({ event: 'member.unhealthy', label: m.label, unhealthyUntil: m.unhealthyUntil })
     } else {
       const wasBlocked = m.blockedSince > 0
       m.blockedUntil = 0
+      m.unhealthyUntil = 0
       m.lastOkAt = now
       if (outcome === 'ok') {
         m.okCount++
@@ -219,6 +230,7 @@ export class RoutePlanner {
     return {
       now: new Date(now).toISOString(),
       cooldownMs: this.cooldownMs,
+      errorCooldownMs: this.errorCooldownMs,
       direct: {
         blocked: this.isDirectBlocked(now),
         blockedSince: iso(this.direct.blockedSince),
@@ -231,10 +243,13 @@ export class RoutePlanner {
         label: m.label,
         blocked: m.blockedUntil > now,
         blockedUntil: iso(m.blockedUntil),
+        unhealthy: m.unhealthyUntil > now,
+        unhealthyUntil: iso(m.unhealthyUntil),
         okCount: m.okCount,
         blockedCount: m.blockedCount,
         errorCount: m.errorCount,
         lastOkAt: iso(m.lastOkAt),
+        lastErrorAt: iso(m.lastErrorAt),
       })),
       poolHealthy: this.healthyMembers(now).length,
       poolTotal: this.members.length,

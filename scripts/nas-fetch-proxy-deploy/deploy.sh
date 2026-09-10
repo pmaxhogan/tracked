@@ -19,7 +19,8 @@ APP=tracked-fetch-proxy
 DEST=/mnt/alpha/apps/$APP/$APP
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-VERSION=$(node -p "require('$HERE/package.json').version")
+# grep/sed rather than node: on Windows git-bash, node does not understand /c/... paths.
+VERSION=$(grep -m1 '"version"' "$HERE/package.json" | sed -E 's/.*"version": *"([^"]+)".*/\1/')
 IMAGE="$APP:$VERSION"
 
 SETS=()
@@ -64,10 +65,10 @@ print(json.dumps({\"custom_compose_config\": cfg}))
   && sudo midclt call app.update '$APP' \"\$(cat /tmp/$APP-update.json)\" >/dev/null && rm -f /tmp/$APP-update.json && echo compose updated"
 
 if [[ $START -eq 1 ]]; then
-  echo "==> starting app"
+  echo "==> starting app (app.redeploy when already running, so the new image/env is picked up)"
   ssh "$HOST" "state=\$(sudo midclt call app.query '[[\"name\",\"=\",\"$APP\"]]' | python3 -c 'import json,sys; a=json.load(sys.stdin); print(a[0][\"state\"] if a else \"MISSING\")'); \
     echo \"state before: \$state\"; \
-    if [ \"\$state\" != RUNNING ]; then sudo midclt call app.start '$APP' >/dev/null; fi; \
+    if [ \"\$state\" != RUNNING ]; then sudo midclt call app.start '$APP' >/dev/null; else sudo midclt call -j app.redeploy '$APP' >/dev/null; fi; \
     for i in \$(seq 1 30); do sleep 2; h=\$(sudo docker inspect --format '{{.State.Health.Status}}' $APP 2>/dev/null || echo starting); [ \"\$h\" = healthy ] && break; done; \
     echo \"container health: \$h\"; \
     sudo docker exec $APP wget -qO- http://127.0.0.1:8088/health; echo"

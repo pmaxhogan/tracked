@@ -50,6 +50,9 @@
  *   FALLBACK_PROXIES         comma/newline-separated HTTP proxy URLs, each
  *                            optionally `label=url`; empty = no fallback
  *   BLOCK_COOLDOWN_MS        default 3600000 (1 h)
+ *   ERROR_COOLDOWN_MS        bench time for a pool member after a transport
+ *                            error / tinyproxy error page, default 600000 (10 min)
+ *   POOL_CONNECT_TIMEOUT_MS  TCP connect timeout to a pool member, default 5000
  *   MAX_POOL_ATTEMPTS        pool members tried per request, default 2
  *   PROBE_URL                tracklist URL fetched by POST /probe; default a
  *                            known set page (the homepage is NOT gated when
@@ -69,10 +72,11 @@ import {
   parsePoolConfig,
   RoutePlanner,
   DEFAULT_COOLDOWN_MS,
+  DEFAULT_ERROR_COOLDOWN_MS,
   DEFAULT_MAX_POOL_ATTEMPTS,
 } from './nas-fetch-proxy-lib.mjs'
 
-const VERSION = '0.3.0'
+const VERSION = '0.3.1'
 const PORT = Number(process.env.PORT ?? 8088)
 const BIND = process.env.BIND ?? '0.0.0.0'
 const TOKEN = process.env.PROXY_TOKEN
@@ -84,6 +88,9 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 )
 const COOLDOWN_MS = Number(process.env.BLOCK_COOLDOWN_MS ?? DEFAULT_COOLDOWN_MS)
+const ERROR_COOLDOWN_MS = Number(process.env.ERROR_COOLDOWN_MS ?? DEFAULT_ERROR_COOLDOWN_MS)
+// A dead bucket must not hold a request for the full upstream timeout.
+const POOL_CONNECT_TIMEOUT_MS = Number(process.env.POOL_CONNECT_TIMEOUT_MS ?? 5000)
 const MAX_POOL_ATTEMPTS = Number(process.env.MAX_POOL_ATTEMPTS ?? DEFAULT_MAX_POOL_ATTEMPTS)
 const PROBE_URL =
   process.env.PROBE_URL ??
@@ -145,11 +152,11 @@ const RESPONSE_DROP = new Set([
   'set-cookie',
 ])
 
-const planner = new RoutePlanner({ pool: POOL, cooldownMs: COOLDOWN_MS, maxPoolAttempts: MAX_POOL_ATTEMPTS })
+const planner = new RoutePlanner({ pool: POOL, cooldownMs: COOLDOWN_MS, errorCooldownMs: ERROR_COOLDOWN_MS, maxPoolAttempts: MAX_POOL_ATTEMPTS })
 // One dispatcher per pool member; undici's ProxyAgent does CONNECT tunnelling
 // for https targets, which is exactly what tinyproxy expects.
 const dispatchers = new Map(
-  POOL.map((m) => [m.url, new ProxyAgent({ uri: m.url, connect: { timeout: Math.min(TIMEOUT_MS, 10000) } })]),
+  POOL.map((m) => [m.url, new ProxyAgent({ uri: m.url, connect: { timeout: POOL_CONNECT_TIMEOUT_MS } })]),
 )
 
 let session = { cookies: '', savedAt: 0 }
@@ -327,6 +334,18 @@ async function fetchVia(route, target, method, reqHeaders, body, extraHeaders) {
   return { upstream, buf, text: buf.toString('utf8') }
 }
 
+/**
+ * tinyproxy answers its own failures (cannot connect, bad gateway) with a
+ * 5xx whose Server header names it; 1001tracklists' real responses come from
+ * Apache. Only checked on pool routes.
+ */
+function isProxyErrorPage(upstream) {
+  if (upstream.status < 500) return false
+  const server = upstream.headers.get('server') ?? ''
+  const via = upstream.headers.get('via') ?? ''
+  return /tinyproxy/i.test(server) || /tinyproxy/i.test(via)
+}
+
 function directHeaders(res) {
   const s = planner.status()
   if (s.direct.blocked) {
@@ -416,6 +435,16 @@ async function handleProxy(req, res, target, parsed, force) {
       }
       for (const ev of planner.report(route, 'error')) log(`route.${ev.event}`, ev)
       log('route.member_error', { label: route.member.label, error: msg })
+      continue
+    }
+
+    if (route.kind === 'pool' && isProxyErrorPage(r.upstream)) {
+      // tinyproxy could not reach 1001tl ("500 Unable to connect", a dead
+      // secondary IP, upstream DNS failure): that is the bucket's problem,
+      // not the page's. Bench it and move on like a transport error.
+      attempts.push(`${routeLabel(route)}:error`)
+      for (const ev of planner.report(route, 'error')) log(`route.${ev.event}`, ev)
+      log('route.member_error', { label: route.member.label, error: `proxy error page ${r.upstream.status}`, body: r.text.slice(0, 120) })
       continue
     }
 
@@ -610,6 +639,8 @@ server.listen(PORT, BIND, () => {
     hasCreds: Boolean(TL_EMAIL && TL_PASSWORD),
     pool: POOL.map((m) => m.label),
     cooldownMs: COOLDOWN_MS,
+    errorCooldownMs: ERROR_COOLDOWN_MS,
+    poolConnectTimeoutMs: POOL_CONNECT_TIMEOUT_MS,
     maxPoolAttempts: MAX_POOL_ATTEMPTS,
     probeUrl: PROBE_URL,
   })
