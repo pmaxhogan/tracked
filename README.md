@@ -473,7 +473,7 @@ The sync still reasons about one `SubState` object per DJ (`lib/sync-store.ts` h
 - the audit trails are imported in bounded pages (40 keys per trail per cron tick — each full record is a separate KV `get`) with progress at `migrate:d1:audit` in `SUBS`; `INSERT OR IGNORE` on the old key makes a re-run harmless. `GET /subscriptions/api/migration` shows where it is;
 - nothing is deleted from KV. The old audit rows age out through their TTLs; the state blobs stay as a backup and are never read again once their D1 rows exist (`migrate:d1:*` flags).
 
-Tests run against the real schema: `test/helpers/fake-d1.ts` is a better-sqlite3 database with `migrations/*.sql` applied, strict like D1 about `undefined`/boolean bind values.
+Tests run against the real schema: `test/helpers/fake-d1.ts` is an in-memory sql.js (SQLite-as-WebAssembly, no native build, any Node version) database with `migrations/*.sql` applied, strict like D1 about `undefined`/boolean bind values.
 
 ## Network strategy
 
@@ -632,7 +632,7 @@ migrations/                 D1 schema, one SQL file per change (apply with npm r
 test/
   fixtures/                 saved 1001tracklists HTML and JSON
   helpers/fake-kv.ts        in-memory KVNamespace
-  helpers/fake-d1.ts        better-sqlite3-backed D1 with the real migrations applied
+  helpers/fake-d1.ts        sql.js-backed D1 with the real migrations applied
   sync-store.test.ts
   subscriptions-store.test.ts
   kv-import.test.ts
