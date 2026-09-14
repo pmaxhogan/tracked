@@ -447,8 +447,31 @@ subscriptionsApp.post('/api/ban/probe', async (c) => {
   try {
     const probe = await probeHomeProxy(c.env.HOME_PROXY_URL, c.env.HOME_PROXY_TOKEN)
     const r = await recordProbe(c.env, probe, 'manual', log)
-    log.info('subs.ban_probe', { probe: probe.probe, status: probe.status, cleared: r.cleared, blockedIp: probe.blockedIp ?? null })
-    return c.json({ probe: probe.probe, status: probe.status ?? null, blockedIp: probe.blockedIp ?? null, error: probe.error ?? null, cleared: r.cleared, home: r.home })
+    const healed = probe.healed ?? []
+    log.info('subs.ban_probe', {
+      probe: probe.probe,
+      status: probe.status,
+      cleared: r.cleared,
+      blockedIp: probe.blockedIp ?? null,
+      account: probe.account ?? null,
+      relogin: probe.relogin ?? null,
+      sessionReissued: probe.sessionReissued ?? null,
+      healed: healed.map((h) => `${h.account}:${h.kind}${h.relogin ? `/${h.relogin}` : ''}`),
+    })
+    return c.json({
+      probe: probe.probe,
+      status: probe.status ?? null,
+      blockedIp: probe.blockedIp ?? null,
+      error: probe.error ?? null,
+      account: probe.account ?? null,
+      relogin: probe.relogin ?? null,
+      sessionReissued: probe.sessionReissued ?? null,
+      healed,
+      accountsHealthy: probe.accountsHealthy ?? null,
+      accountsTotal: probe.accountsTotal ?? null,
+      cleared: r.cleared,
+      home: r.home,
+    })
   } catch (e) {
     log.error('subs.ban_probe_throw', errorFields(e))
     return c.json({ error: 'probe_failed', ...errorFields(e) }, 502)

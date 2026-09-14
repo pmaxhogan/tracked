@@ -36,9 +36,14 @@
  *                               counters
  *   POST /probe[?url=]          force one direct fetch of PROBE_URL (or ?url);
  *                               a blocked session is re-issued through a pool
- *                               egress first (see RELOGIN_COOLDOWN_MS);
- *                               responds { probe: ok|ip_blocked|gated|error, … }
- *                               plus the same snapshot as /status
+ *                               egress first, ignoring RELOGIN_COOLDOWN_MS (a
+ *                               probe that reuses a cookie already known to be
+ *                               blocked can never learn anything), and every
+ *                               other parked account gets the same fresh-login
+ *                               attempt in parallel so one probe heals the
+ *                               whole pool; responds { probe: ok|ip_blocked|
+ *                               gated|error, relogin, healed: […], … } plus the
+ *                               same snapshot as /status
  * Request header `X-Proxy-Force-Route: direct|pool` (bearer-gated like the
  * rest) overrides the planner for that one request — used by the Worker's
  * tests and the admin page's "re-probe" button.
@@ -69,7 +74,9 @@
  *                            = anonymous mode. (The old unsuffixed pair is
  *                            still read as account 0, with a warning.)
  *   RELOGIN_COOLDOWN_MS      min gap between block-driven re-logins per
- *                            account, default 600000 (10 min)
+ *                            account, default 600000 (10 min); /probe ignores it
+ *   RELOGIN_LOGIN_ATTEMPTS   pool members a re-login may try before giving
+ *                            up (transport failures only), default 3
  *   COOKIE_DIR               where per-account session files live, default
  *                            /data (files: 1001tl-cookies-<email>.json)
  *   COOKIE_FILE              legacy single-account session file; adopted for
@@ -93,7 +100,7 @@ import {
   accountFileKey,
 } from './nas-fetch-proxy-lib.mjs'
 
-const VERSION = '0.4.0'
+const VERSION = '0.4.3'
 const PORT = Number(process.env.PORT ?? 8088)
 const BIND = process.env.BIND ?? '0.0.0.0'
 const TOKEN = process.env.PROXY_TOKEN
@@ -116,6 +123,9 @@ const POOL_CONNECT_TIMEOUT_MS = Number(process.env.POOL_CONNECT_TIMEOUT_MS ?? 50
 // per RELOGIN_COOLDOWN_MS: if the new session is blocked again that fast, the
 // account is genuinely rate-limited and we back off instead of churning logins.
 const RELOGIN_COOLDOWN_MS = Number(process.env.RELOGIN_COOLDOWN_MS ?? 10 * 60_000)
+// Distinct pool members a block-driven re-login may try before giving up on
+// the login (a member that fails in transport is benched and skipped).
+const RELOGIN_LOGIN_ATTEMPTS = Math.max(1, Number(process.env.RELOGIN_LOGIN_ATTEMPTS ?? 3))
 const MAX_POOL_ATTEMPTS = Number(process.env.MAX_POOL_ATTEMPTS ?? DEFAULT_MAX_POOL_ATTEMPTS)
 const PROBE_URL =
   process.env.PROBE_URL ??
@@ -211,20 +221,48 @@ function cookieFileFor(account) {
  * healthy pool member (a clean egress issues a clean session; the flagged home
  * IP issues a pre-blocked one), then retry the same request on the same route.
  * Returns the retried result when the fresh session got through, null when the
- * re-login was skipped (cooldown), failed, or was blocked too.
+ * re-login was skipped (cooldown), failed, or was blocked too. `force` skips
+ * the cooldown: a probe is asking "is it over?", and answering that with the
+ * cookie that got blocked in the first place is not an answer.
  */
-async function reloginAndRetry(account, route, target, method, reqHeaders, body, tlDefaults, cookieFor = (s) => s.cookies) {
-  if (!accounts.canRelogin(account)) {
+async function reloginAndRetry(account, route, target, method, reqHeaders, body, tlDefaults, cookieFor = (s) => s.cookies, { force = false } = {}) {
+  if (!force && !accounts.canRelogin(account)) {
     log('session.relogin_skipped', { account: account.label, route: routeLabel(route), url: target, nextAt: new Date(account.reloginLastAt + RELOGIN_COOLDOWN_MS).toISOString() })
     return { outcome: 'skipped' }
   }
   accounts.noteReloginAttempt(account)
-  const candidates = planner.healthyMembers().filter((m) => !(route.kind === 'pool' && m.url === route.member.url))
-  const via = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : null
-  const viaLabel = via ? via.label : 'direct'
+  // A clean egress issues a clean session. Pool members come and go (a
+  // tinyproxy VM asleep, a dead CONNECT), so a login that fails in transport
+  // moves on to the next healthy member — benching the one that failed, as a
+  // forwarded request would — instead of giving up on the account over one
+  // unreachable bucket. A login 1001tl *answered* but rejected (no uid/sid)
+  // is not the member's fault and is not retried.
+  const candidates = shuffle(planner.healthyMembers().filter((m) => !(route.kind === 'pool' && m.url === route.member.url)))
+  const tries = candidates.length > 0 ? candidates.slice(0, RELOGIN_LOGIN_ATTEMPTS) : [null]
+  let s = null
+  let viaLabel = 'direct'
+  let lastError = null
+  for (const via of tries) {
+    viaLabel = via ? via.label : 'direct'
+    log('session.relogin_via', { account: account.label, via: viaLabel, route: routeLabel(route) })
+    try {
+      s = await ensureSession(account, { forceRefresh: true, dispatcher: via ? dispatchers.get(via.url) : null })
+      break
+    } catch (e) {
+      lastError = e
+      if (!via || isLoginRejection(e)) break
+      for (const ev of planner.report({ kind: 'pool', member: via }, 'error')) log(`route.${ev.event}`, ev)
+      log('session.relogin_member_error', { account: account.label, via: viaLabel, error: String(e?.message ?? e) })
+    }
+  }
+  if (!s) {
+    account.reloginFailed += 1
+    lastReloginOutcome = 'failed'
+    log('session.relogin_failed', { account: account.label, via: viaLabel, route: routeLabel(route), tried: tries.map((m) => (m ? m.label : 'direct')), error: String(lastError?.message ?? lastError) })
+    return { outcome: 'failed' }
+  }
+  log('session.reissued', { account: account.label, via: viaLabel, url: target, route: routeLabel(route) })
   try {
-    const s = await ensureSession(account, { forceRefresh: true, dispatcher: via ? dispatchers.get(via.url) : null })
-    log('session.reissued', { account: account.label, via: viaLabel, url: target, route: routeLabel(route) })
     const r = await fetchVia(route, target, method, reqHeaders, body, { ...tlDefaults, cookie: cookieFor(s) })
     const kind = classifyUpstream(r.upstream.status, r.text)
     if (kind === 'ip_blocked') {
@@ -239,11 +277,37 @@ async function reloginAndRetry(account, route, target, method, reqHeaders, body,
     log('session.recovered', { account: account.label, via: viaLabel, route: routeLabel(route), url: target, status: r.upstream.status, kind })
     return { outcome: 'recovered', r, kind }
   } catch (e) {
+    // The fresh session is fine; the retry itself died in transport on the route.
     account.reloginFailed += 1
-    lastReloginOutcome = 'failed'
-    log('session.relogin_failed', { account: account.label, via: viaLabel, route: routeLabel(route), error: String(e?.message ?? e) })
-    return { outcome: 'failed' }
+    lastReloginOutcome = 'retry_error'
+    log('session.relogin_retry_error', { account: account.label, via: viaLabel, route: routeLabel(route), url: target, error: String(e?.message ?? e) })
+    return { outcome: 'retry_error' }
   }
+}
+
+/**
+ * What to tell the account pool after a block that the re-login did not
+ * clear. Only a fresh session that was blocked too says "blocked" (the hour-
+ * long park); a login that could not be made, or a retry that died in
+ * transport, benches the account for the short error cooldown instead.
+ */
+function accountOutcomeAfterBlock(reloginOutcome) {
+  if (reloginOutcome === 'failed') return 'login_failed'
+  if (reloginOutcome === 'retry_error') return 'error'
+  return 'ip_blocked'
+}
+
+function isLoginRejection(e) {
+  return /login did not set uid\/sid/.test(String(e?.message ?? e))
+}
+
+function shuffle(arr) {
+  const out = [...arr]
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[out[i], out[j]] = [out[j], out[i]]
+  }
+  return out
 }
 
 function log(event, fields = {}) {
@@ -321,7 +385,10 @@ async function saveCookiesToDisk(account, state) {
  * login forced by a gate on a pool member happens from that member's IP.
  */
 async function doLogin(account, dispatcher) {
-  const init = (extra) => ({ ...extra, ...(dispatcher ? { dispatcher } : {}) })
+  // Same per-request timeout as a forwarded fetch. Without it a pool member
+  // that accepts the CONNECT and then stalls holds the login — and every
+  // request waiting on this account's session — for undici's 5-minute default.
+  const init = (extra) => ({ ...extra, signal: AbortSignal.timeout(TIMEOUT_MS), ...(dispatcher ? { dispatcher } : {}) })
   // 1) seed guid by visiting homepage
   const homepageRes = await undiciFetch(
     'https://www.1001tracklists.com/',
@@ -597,7 +664,7 @@ async function handleProxy(req, res, target, parsed, force) {
       lastBlocked = { route, r, ip }
       if (account) {
         // Park this account and fail over to the next one on the same route.
-        for (const ev of accounts.report(account, 'ip_blocked', { ip, route: routeLabel(route), relogin: reloginOutcome })) log(ev.event, { ...ev, url: target })
+        for (const ev of accounts.report(account, accountOutcomeAfterBlock(reloginOutcome), { ip, route: routeLabel(route), relogin: reloginOutcome })) log(ev.event, { ...ev, url: target })
         triedAccounts.add(account)
         // Only a still-blocked FRESH session says anything about the route
         // (or a site-wide limit); a parked session says nothing about the IP.
@@ -667,7 +734,63 @@ async function handleProxy(req, res, target, parsed, force) {
   return { route: 'none', kind: 'all_failed', status: 503, bytes: 0, attempts }
 }
 
-/** POST /probe: one forced direct fetch to learn whether the ban has lifted. */
+/**
+ * One direct fetch of `url` as `account` (null = anonymous). A blocked answer
+ * is retried once on a freshly issued session, ignoring the re-login cooldown
+ * — see reloginAndRetry. Parks or clears the account like the request path.
+ * Never throws: transport trouble comes back as kind 'error'.
+ */
+async function probeAs(account, url, tlDefaults) {
+  const start = Date.now()
+  let cookie = ''
+  if (account) {
+    try {
+      cookie = (await ensureSession(account)).cookies
+    } catch (e) {
+      const error = String(e?.message ?? e)
+      for (const ev of accounts.report(account, 'login_failed', { error })) log(ev.event, { ...ev, via: 'probe' })
+      return { account, kind: 'error', status: null, bytes: 0, ip: null, relogin: null, sessionReissued: false, error, ms: Date.now() - start }
+    }
+  }
+  try {
+    let r = await fetchVia({ kind: 'direct' }, url, 'GET', {}, undefined, { ...tlDefaults, cookie })
+    let kind = classifyUpstream(r.upstream.status, r.text)
+    let sessionReissued = false
+    let relogin = null
+    if (kind === 'ip_blocked' && account) {
+      const again = await reloginAndRetry(account, { kind: 'direct' }, url, 'GET', {}, undefined, tlDefaults, undefined, { force: true })
+      relogin = again.outcome
+      if (again.outcome === 'recovered') {
+        r = again.r
+        kind = again.kind
+        sessionReissued = true
+      }
+    }
+    const ip = kind === 'ip_blocked' ? extractBlockedIp(r.text) : null
+    if (account) {
+      if (kind === 'ip_blocked') for (const ev of accounts.report(account, accountOutcomeAfterBlock(relogin), { ip, route: 'direct', relogin, via: 'probe' })) log(ev.event, ev)
+      else for (const ev of accounts.report(account, 'ok')) log(ev.event, { ...ev, via: 'probe' })
+    }
+    return { account, kind, status: r.upstream.status, bytes: r.buf.length, ip, relogin, sessionReissued, error: null, ms: Date.now() - start }
+  } catch (e) {
+    const error = String(e?.message ?? e)
+    log('probe.account_error', { account: account?.label ?? null, url, error, ms: Date.now() - start })
+    return { account, kind: 'error', status: null, bytes: 0, ip: null, relogin: null, sessionReissued: false, error, ms: Date.now() - start }
+  }
+}
+
+/**
+ * POST /probe: is the direct route usable right now? The least-recently-used
+ * account (any account, when all are parked) fetches the probe page; a block
+ * is answered with a forced re-login and retry. Every *other* parked account
+ * gets the same treatment in parallel, so the "I solved it" button — and the
+ * hourly cron probe — bring the whole pool back in one go instead of leaving
+ * two accounts parked on dead cookies for the rest of their cooldown (the
+ * Worker paces fetches by healthy accounts, so that was a slow hour).
+ *
+ * `probe` answers for the route: 'ok' when any account got through. The
+ * primary account's own outcome is `primary`, the rest are in `healed`.
+ */
 async function handleProbe(req, res, url) {
   const parsed = new URL(url)
   if (!ALLOWED_HOSTS.has(parsed.hostname)) return sendJson(res, 400, { error: 'probe url host not allowed' })
@@ -679,51 +802,45 @@ async function handleProbe(req, res, url) {
     referer: 'https://www.1001tracklists.com/',
   }
   const useSession = isTracklistsHost(parsed.hostname) && HAVE_ACCOUNTS
-  let cookie = ''
-  // Probe with the least-recently-used account; if every account is parked,
-  // still probe with one of them — a probe exists to learn whether the block
-  // has lifted, and the re-login path below can clear it.
   const account = useSession ? (accounts.pick() ?? accounts.pickAny()) : null
-  if (account) {
-    try {
-      cookie = (await ensureSession(account)).cookies
-    } catch (e) {
-      for (const ev of accounts.report(account, 'login_failed', { error: String(e?.message ?? e) })) log(ev.event, ev)
-      return sendJson(res, 502, { error: `session unavailable for ${account.label}: ${e?.message ?? e}` })
-    }
-  }
+  // Parked siblings, read off the member list directly: pick()/pickAny() would
+  // bump lastUsedAt and reshuffle the round-robin.
+  const parked = useSession ? accounts.members.filter((m) => m !== account && !accounts.isHealthy(m)) : []
   const start = Date.now()
-  try {
-    let r = await fetchVia({ kind: 'direct' }, url, 'GET', {}, undefined, { ...tlDefaults, cookie })
-    let kind = classifyUpstream(r.upstream.status, r.text)
-    let sessionReissued = false
-    let reloginOutcome = null
-    if (kind === 'ip_blocked' && account) {
-      // Same self-heal as the request path: a clean session from a pool egress.
-      const again = await reloginAndRetry(account, { kind: 'direct' }, url, 'GET', {}, undefined, tlDefaults)
-      reloginOutcome = again.outcome
-      if (again.outcome === 'recovered') {
-        r = again.r
-        kind = again.kind
-        sessionReissued = true
-      }
-    }
-    const ip = kind === 'ip_blocked' ? extractBlockedIp(r.text) : null
-    if (account) {
-      if (kind === 'ip_blocked') for (const ev of accounts.report(account, 'ip_blocked', { ip, route: 'direct', relogin: reloginOutcome, via: 'probe' })) log(ev.event, ev)
-      else for (const ev of accounts.report(account, 'ok')) log(ev.event, ev)
-    }
-    // As in the request path, the route is only blamed when a fresh session was blocked too (or no account is involved).
-    const events = !account || kind !== 'ip_blocked' || reloginOutcome === 'still_blocked' ? planner.report({ kind: 'direct' }, kind, { ip }) : []
-    for (const ev of events) log(`route.${ev.event}`, { ...ev, url, via: 'probe' })
-    const out = { probe: kind, status: r.upstream.status, bytes: r.buf.length, ms: Date.now() - start, wasBlocked, blockedIp: ip, sessionReissued, account: account?.label ?? null, ...accounts.status(), sessionStats, ...planner.status() }
-    log('probe', { url, kind, status: r.upstream.status, wasBlocked, nowBlocked: planner.isDirectBlocked(), account: account?.label ?? null, sessionReissued, ms: out.ms })
-    return sendJson(res, 200, out)
-  } catch (e) {
-    const msg = String(e?.message ?? e)
-    log('probe.error', { url, error: msg, ms: Date.now() - start })
-    return sendJson(res, 200, { probe: 'error', error: msg, wasBlocked, ...accounts.status(), ...planner.status() })
+  const [primary, ...healed] = await Promise.all([probeAs(account, url, tlDefaults), ...parked.map((m) => probeAs(m, url, tlDefaults))])
+  const all = [primary, ...healed]
+  const through = all.find((p) => p.kind === 'ok') ?? null
+  // The route's verdict. Any account getting through means the IP is fine
+  // (block scope: account). Otherwise the primary speaks for the route, and —
+  // as in the request path — it is only blamed when a fresh session was
+  // blocked too (or no account is involved).
+  const kind = through ? 'ok' : primary.kind
+  const ip = primary.ip ?? all.map((p) => p.ip).find(Boolean) ?? null
+  const blameRoute = !account || kind !== 'ip_blocked' || all.some((p) => p.relogin === 'still_blocked')
+  if (kind !== 'error' && blameRoute) {
+    for (const ev of planner.report({ kind: 'direct' }, kind, { ip })) log(`route.${ev.event}`, { ...ev, url, via: 'probe' })
   }
+  const served = through ?? primary
+  const acct = (p) => ({ account: p.account?.label ?? null, kind: p.kind, status: p.status, relogin: p.relogin, sessionReissued: p.sessionReissued, error: p.error, ms: p.ms })
+  const out = {
+    probe: kind,
+    status: served.status,
+    bytes: served.bytes,
+    ms: Date.now() - start,
+    wasBlocked,
+    blockedIp: ip,
+    sessionReissued: served.sessionReissued,
+    relogin: primary.relogin,
+    error: kind === 'error' ? primary.error : null,
+    account: served.account?.label ?? null,
+    primary: acct(primary),
+    healed: healed.map(acct),
+    ...accounts.status(),
+    sessionStats,
+    ...planner.status(),
+  }
+  log('probe', { url, kind, status: served.status, wasBlocked, nowBlocked: planner.isDirectBlocked(), account: out.account, relogin: primary.relogin, sessionReissued: served.sessionReissued, healed: healed.map((p) => `${p.account.label}:${p.kind}${p.relogin ? `/${p.relogin}` : ''}`), ms: out.ms })
+  return sendJson(res, 200, out)
 }
 
 const server = createServer(async (req, res) => {

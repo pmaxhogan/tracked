@@ -125,13 +125,13 @@ export const BAN_JS = /* js */ `
     if (pause) {
       $icon.textContent = '⛔';
       $title.innerHTML = '1001tracklists is blocking every tracked account — fetching is paused' + (simulated ? '<span class="ban-badge">simulated</span>' : '');
-      $sub.innerHTML = 'Even a freshly logged-in session (the proxy re-logins through the egress pool automatically) came back with the block page' + (ip ? ' (last shown IP' + ip + ')' : '') + '. The sync stops hitting 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b>, then tries once more. BrightData used today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b>. <b>Log in to 1001tracklists as one of the tracked accounts and solve the captcha</b>, then press re-probe.';
+      $sub.innerHTML = 'Even a freshly logged-in session (the proxy re-logins through the egress pool automatically) came back with the block page' + (ip ? ' (last shown IP' + ip + ')' : '') + '. The sync stops hitting 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b>, then tries once more. BrightData used today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b>. The block sticks to the proxy\\'s own session cookies, so solving the captcha in your browser does not reach them — <b>press re-probe</b>: the proxy logs every parked account in fresh and retries. If even those fresh sessions are blocked, the accounts are rate-limited and only time clears it.';
     } else {
       $icon.textContent = '🚫';
       $title.innerHTML = '1001tracklists is blocking the tracked sessions' + (ip ? ' (last shown IP' + ip + ')' : '') + (simulated ? '<span class="ban-badge">simulated</span>' : '');
       const pool = home.poolTotal == null ? ' The proxy is re-logging in through the egress pool and failing over between accounts (details in the ban history below).' : home.poolTotal > 0 ? ' The proxy re-logins through the egress pool (<b>' + home.poolHealthy + '/' + home.poolTotal + '</b> buckets healthy) and fails over between its accounts, so fetches usually keep flowing; the block itself lifts when a fresh session gets through or a human solves the captcha.' : ' No egress pool is configured, so the proxy cannot get a fresh session: fetches are failing.';
       const next = home.until ? ' The proxy re-tries the direct route hourly (next around <b>' + esc(fmtTime(home.until)) + '</b>).' : '';
-      $sub.innerHTML = 'Blocked since <b>' + esc(fmtTime(home.since)) + '</b> (' + esc(ago(home.since)) + ').' + pool + next + ' If it does not clear on its own: <b>log in to 1001tracklists as one of the tracked accounts, solve the captcha</b>, then press re-probe.';
+      $sub.innerHTML = 'Blocked since <b>' + esc(fmtTime(home.since)) + '</b> (' + esc(ago(home.since)) + ').' + pool + next + ' If it does not clear on its own, <b>press re-probe</b>: the proxy logs every parked account in fresh and retries (the block sticks to its session cookies, so solving the captcha in your browser does not reach them).';
     }
     $dismiss.hidden = !simulated;
     $dismiss.textContent = simulated ? 'Dismiss simulated ban' : 'Dismiss';
@@ -156,10 +156,23 @@ export const BAN_JS = /* js */ `
       const r = await api('/api/ban/probe', { method: 'POST' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { $foot.textContent = 'Probe failed: ' + (d.error || r.status) + (d.message ? ' — ' + d.message : ''); return; }
-      if (d.cleared) { $foot.textContent = '✅ Home IP works again — ban cleared.'; }
-      else if (d.probe === 'ip_blocked') { $foot.textContent = '❌ Still blocked' + (d.blockedIp ? ' (page named ' + d.blockedIp + ')' : '') + (d.sessionReissued === false ? ', even after a fresh login' : '') + '. Did the captcha page confirm the unblock? Solve it while logged in as one of the tracked accounts.'; }
-      else if (d.probe === 'ok') { $foot.textContent = '✅ Direct route is fine.'; }
-      else { $foot.textContent = 'Probe result: ' + (d.probe || 'unknown') + (d.error ? ' — ' + d.error : ''); }
+      // The forwarder answers a block with a forced fresh login (and gives
+      // every other parked account one too), so the relogin field says what actually
+      // happened rather than leaving the reader to guess.
+      const healed = Array.isArray(d.healed) ? d.healed : [];
+      const healedNote = healed.length ? ' Other accounts: ' + healed.map(function (h) { return h.account + ' ' + (h.kind === 'ok' ? (h.relogin === 'recovered' ? 'recovered with a fresh login' : 'fine') : h.kind === 'ip_blocked' ? (h.relogin === 'still_blocked' ? 'fresh login blocked too' : h.relogin === 'failed' ? 'login failed' : h.relogin === 'retry_error' ? 'retry died in transport' : 'still blocked') : h.kind); }).join(', ') + '.' : '';
+      const acct = d.account ? ' as ' + d.account : '';
+      if (d.cleared) { $foot.textContent = '✅ Direct route works again' + acct + (d.sessionReissued ? ' (fresh login)' : '') + ' — ban cleared.' + healedNote; }
+      else if (d.probe === 'ip_blocked') {
+        const why = d.relogin === 'still_blocked' ? ' A freshly logged-in session was blocked too, so this is a rate limit on the account, not a stale cookie: only time clears it.'
+          : d.relogin === 'failed' ? ' The fresh login itself failed (see the forwarder log); the account is benched for a few minutes, press again after that.'
+          : d.relogin === 'retry_error' ? ' A fresh session was issued but the retry died in transport (see the forwarder log); press again.'
+          : d.relogin === 'skipped' ? ' The forwarder skipped the fresh login (re-login cooldown) — it is running a pre-0.4.1 build; redeploy it.'
+          : '';
+        $foot.textContent = '❌ Still blocked' + acct + (d.blockedIp ? ' (page named ' + d.blockedIp + ')' : '') + '.' + why + healedNote;
+      }
+      else if (d.probe === 'ok') { $foot.textContent = '✅ Direct route is fine' + acct + (d.sessionReissued ? ' (fresh login)' : '') + '.' + healedNote; }
+      else { $foot.textContent = 'Probe result: ' + (d.probe || 'unknown') + (d.error ? ' — ' + d.error : '') + healedNote; }
       await refresh(page === 'main');
     } catch (e) { $foot.textContent = 'Probe failed: ' + (e && e.message || e); }
     finally { $probe.disabled = false; $probe.textContent = orig; }

@@ -242,13 +242,40 @@ export async function fetchHomeProxyStatus(proxyUrl: string, proxyToken: string,
   return (await res.json()) as HomeProxyStatus
 }
 
+/**
+ * Outcome of the forwarder's block-driven re-login for one account (0.4.1+):
+ * the fresh session got through / was blocked too / could not be issued /
+ * was issued but the retry died in transport / was skipped (pre-0.4.1 cooldown).
+ */
+export type ProbeReloginOutcome = 'recovered' | 'still_blocked' | 'failed' | 'retry_error' | 'skipped'
+
+export type ProbeAccountOutcome = {
+  account: string | null
+  kind: 'ok' | 'ip_blocked' | 'gated' | 'error'
+  status: number | null
+  relogin: ProbeReloginOutcome | null
+  sessionReissued: boolean
+  error: string | null
+  ms: number
+}
+
 export type HomeProxyProbe = HomeProxyStatus & {
+  /** The route's verdict: 'ok' when any account got through on the direct route. */
   probe: 'ok' | 'ip_blocked' | 'gated' | 'error'
   status?: number
   error?: string
   wasBlocked?: boolean
   blockedIp?: string | null
   ms?: number
+  /** The account that served the verdict (the one that got through, else the primary). */
+  account?: string | null
+  /** True when the verdict came from a session the forwarder re-issued during this probe. */
+  sessionReissued?: boolean
+  /** The primary account's re-login outcome; null when its old session was fine or there is no account. */
+  relogin?: ProbeReloginOutcome | null
+  primary?: ProbeAccountOutcome
+  /** Every other account that was parked and got a forced fresh login in parallel. */
+  healed?: ProbeAccountOutcome[]
 }
 
 /**
