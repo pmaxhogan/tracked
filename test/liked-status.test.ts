@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { fakeD1 } from './helpers/fake-d1'
 import { attachYoutubeLiked } from '../src/lib/liked-status'
 import { makeLogger } from '../src/lib/log'
 import type { Env } from '../src/types'
@@ -33,7 +34,7 @@ const validTokens: StoredTokens = {
 }
 
 function env(subs: Record<string, string> = {}): Env {
-  return { CACHE: fakeKV(), SUBS: fakeKV(subs), API_TOKEN: 't', YOUTUBE_API_KEY: 'k' }
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(subs), API_TOKEN: 't', YOUTUBE_API_KEY: 'k' }
 }
 
 function jsonResponse(body: unknown, init: ResponseInit = { status: 200 }): Response {

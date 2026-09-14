@@ -38,7 +38,9 @@ import {
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
-import { PLAYLIST_AUDIT_PREFIX } from '../lib/playlist-audit'
+import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
+import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
+import { migrationStatus } from '../lib/kv-import'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -647,47 +649,23 @@ subscriptionsApp.get('/api/debug/dj-pagination/:slug', async (c) => {
 // ─── Audit trail (Recent requests) ──────────────────────────────────────────
 
 /**
- * Newest-first page of /now-playing audit summaries. now-playing.ts writes each
- * request as `np:<invertedTs>:<reqId>` with a compact summary in KV metadata, so
- * a single `list()` returns the most recent N rows (with their summary) in one
- * round-trip — no per-row get. Pass `cursor` (from a prior response) to page into
+ * Newest-first page of /now-playing audit summaries (the `now_playing_audit`
+ * table, lib/now-playing-audit.ts). Each record carries `key` — the row id —
+ * for the detail endpoint. Pass `cursor` (from a prior response) to page into
  * older records. Behind CF Access like everything here.
  */
 subscriptionsApp.get('/api/audit', async (c) => {
   const n = parseInt(c.req.query('limit') || '50', 10)
-  const limit = Math.min(Math.max(Number.isFinite(n) ? n : 50, 1), 200)
-  const cursor = c.req.query('cursor') || undefined
-  const res = await c.env.CACHE.list<Record<string, unknown>>({ prefix: 'np:', limit, cursor })
-  const records = await Promise.all(
-    res.keys.map(async (k) => {
-      const base = { key: k.name, expiration: k.expiration ?? null }
-      if (k.metadata) return { ...base, ...k.metadata }
-      // Legacy record written before metadata summaries existed (flat shape).
-      // Bounded work: only pre-upgrade keys lack metadata, and they age out.
-      const v = await c.env.CACHE.get<Record<string, any>>(k.name, 'json')
-      if (!v) return base
-      return {
-        ...base,
-        t: v.t,
-        status: v.status,
-        title: v.videoTitle ?? v.input?.videoTitle ?? v.videoUrl ?? '',
-        cs: v.currentSeconds ?? v.input?.currentSeconds ?? null,
-        dur: v.videoDurationSeconds ?? v.input?.videoDurationSeconds ?? null,
-        via: v.tracklistVia ?? v.search?.via ?? null,
-        skew: v.select?.currentSkewSeconds ?? null,
-        impossible: v.impossibleTimestamp ?? false,
-        ms: v.meta?.totalMs ?? null,
-      }
-    }),
-  )
-  return c.json({ records, cursor: res.list_complete ? null : res.cursor, listComplete: res.list_complete })
+  const limit = Number.isFinite(n) ? n : 50
+  const page = await listNowPlayingAudit(c.env, { limit, cursor: c.req.query('cursor') || null })
+  return c.json({ records: page.records, cursor: page.cursor, listComplete: page.cursor === null })
 })
 
-/** Full audit record for one request (the value behind an `np:` key). */
+/** Full audit record for one request (`key` = the row id from /api/audit). */
 subscriptionsApp.get('/api/audit-detail', async (c) => {
   const key = c.req.query('key') || ''
-  if (!key.startsWith('np:')) return c.json({ error: 'bad_key' }, 400)
-  const record = await c.env.CACHE.get(key, 'json')
+  if (!/^\d+$/.test(key)) return c.json({ error: 'bad_key' }, 400)
+  const record = await getNowPlayingAudit(c.env, key)
   if (!record) return c.json({ error: 'not_found' }, 404)
   return c.json({ record })
 })
@@ -695,33 +673,27 @@ subscriptionsApp.get('/api/audit-detail', async (c) => {
 // ─── Audit trail (Recent playlist additions) ────────────────────────────────
 
 /**
- * Newest-first page of the sync's per-set audit rows (`pladd:` keys written by
- * lib/playlist-audit.ts). Same contract as /api/audit above — the summary lives
- * in KV metadata, so one `list()` serves a whole page with no per-row get. This
- * trail is newer than the `np:` one and has always carried metadata, so there's
- * no legacy flat-record fallback to do here.
+ * Newest-first page of the sync's per-set audit rows (the `playlist_additions`
+ * table, lib/playlist-audit.ts). Same contract as /api/audit above.
  */
 subscriptionsApp.get('/api/playlist-additions', async (c) => {
   const n = parseInt(c.req.query('limit') || '50', 10)
-  const limit = Math.min(Math.max(Number.isFinite(n) ? n : 50, 1), 200)
-  const cursor = c.req.query('cursor') || undefined
-  const res = await c.env.CACHE.list<Record<string, unknown>>({ prefix: PLAYLIST_AUDIT_PREFIX, limit, cursor })
-  const records = res.keys.map((k) => ({
-    key: k.name,
-    expiration: k.expiration ?? null,
-    ...(k.metadata ?? {}),
-  }))
-  return c.json({ records, cursor: res.list_complete ? null : res.cursor, listComplete: res.list_complete })
+  const limit = Number.isFinite(n) ? n : 50
+  const page = await listPlaylistAdditions(c.env, { limit, cursor: c.req.query('cursor') || null })
+  return c.json({ records: page.records, cursor: page.cursor, listComplete: page.cursor === null })
 })
 
-/** Full audit record for one processed set (the value behind a `pladd:` key). */
+/** Full audit record for one processed set (`key` = the row id from /api/playlist-additions). */
 subscriptionsApp.get('/api/playlist-addition-detail', async (c) => {
   const key = c.req.query('key') || ''
-  if (!key.startsWith(PLAYLIST_AUDIT_PREFIX)) return c.json({ error: 'bad_key' }, 400)
-  const record = await c.env.CACHE.get(key, 'json')
+  if (!/^\d+$/.test(key)) return c.json({ error: 'bad_key' }, 400)
+  const record = await getPlaylistAddition(c.env, key)
   if (!record) return c.json({ error: 'not_found' }, 404)
   return c.json({ record })
 })
+
+/** Progress of the one-time KV → D1 import the cron drives (lib/kv-import.ts). */
+subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus(c.env)))
 
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
 

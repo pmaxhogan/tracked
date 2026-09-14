@@ -21,6 +21,18 @@
   // lib/combined-playlist.ts), which is what backfills sets that predate the
   // combined playlist and a newly added DJ's back catalogue.
   "triggers": { "crons": ["0 6 * * *", "*/5 * * * *"] },
+  // Queryable state: subscriptions, per-tracklist sync rows, both audit trails,
+  // the mkvid queue. Schema in migrations/; apply with `npm run d1:migrate`
+  // BEFORE pushing (Workers Builds runs `wrangler deploy` only — it never
+  // applies migrations). Create with `npx wrangler d1 create tracked`.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tracked",
+      "database_id": "9c3d6c10-4a1e-47d0-869f-332a19d47828",
+      "migrations_dir": "migrations"
+    }
+  ],
   "kv_namespaces": [
     {
       "binding": "CACHE",

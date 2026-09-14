@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { fakeD1 } from './helpers/fake-d1'
 import type { Env } from '../src/types'
 import { getDjSets, setMetaFromUrl } from '../src/lib/dj-sets'
 import { makeLogger } from '../src/lib/log'
@@ -26,7 +27,7 @@ function fakeKV(): KVNamespace {
 }
 
 function makeEnv(): Env {
-  return { CACHE: fakeKV(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k' } as Env
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k' } as Env
 }
 
 const log = makeLogger({ reqId: 'test', route: 'test' })

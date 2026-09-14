@@ -2,26 +2,26 @@
  * Durable audit trail for playlist additions — the data behind the admin
  * panel's "Recent playlist additions" view.
  *
- * Mirrors the `np:` trail /now-playing writes for requests: one KV record per
- * tracklist the sync processed, keyed `pladd:<invertedTs>:<slug>:<i>` (90-day
- * TTL) so a plain `list()` returns newest-first in a single page, with a
- * compact summary duplicated into KV **metadata** so the list view needs no
- * per-row `get`.
+ * Mirrors the trail /now-playing writes for requests: one `playlist_additions`
+ * row per tracklist the sync decided an outcome for, with the full record and
+ * a compact summary the list view renders directly. Retention is 90 days
+ * (`prunePlaylistAdditions`, run by the daily cron).
  *
- * Records are buffered during a run and flushed in one parallel batch at the
- * end (`flushPlaylistAdditions`) rather than awaited inside the set loop:
- * a run processes up to 30 sets and sequential KV puts would eat a large slice
- * of the 25 s sync deadline. The tradeoff is that a run killed mid-loop loses
- * its rows — fine, because this is diagnostics only. Idempotency and progress
- * live in the per-sub state (see lib/sync.ts), never here.
+ * Rows are buffered during a run and flushed in one batch at the end
+ * (`flushPlaylistAdditions`) rather than written inside the set loop: a run
+ * processes up to 30 sets and sequential writes would eat a slice of the 25 s
+ * sync deadline. The tradeoff is that a run killed mid-loop loses its rows —
+ * fine, because this is diagnostics only. Idempotency and progress live in
+ * the per-sub state (see lib/sync-store.ts), never here.
  */
 
 import type { Env } from '../types'
-import { invertedTs, TTL } from './cache'
+import { batchChunked, dbOf, parseJson } from './db'
+import { decodeCursor, encodeCursor, type AuditPage } from './audit-cursor'
 import type { CombinedAdditionStatus } from './combined-playlist'
 import { errorFields, type Logger } from './log'
 
-export const PLAYLIST_AUDIT_PREFIX = 'pladd:'
+export const PLAYLIST_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
 
 /**
  * Outcome for one tracklist the sync looked at:
@@ -62,21 +62,18 @@ export type PlaylistAdditionRecord = {
    * why a combined miss never fails the set. null on rows with no video.
    */
   combinedStatus: CombinedAdditionStatus | null
-  /** Which scrape path served the set page — `home-proxy` / `unlocker` / `direct`. */
+  /** Which scrape path served the set page — `home-proxy` / `unlocker` / `direct` — or `mkvid` for an upload mkvid delivered. */
   via: string | null
   /** What kicked off the run, e.g. `cron.daily`, `manual.one`. */
   trigger: string | null
-  /** Error message on `failed` / `abandoned`. */
+  /** Error message on `failed` / `abandoned`; a note on other rows (e.g. "queued for mkvid"). */
   message: string | null
   /** Consecutive failures recorded for this set URL (failure rows only). */
   failureCount: number | null
   meta: { ms: number | null }
 }
 
-/**
- * Compact form stored in KV metadata for the list view. Must stay under KV's
- * 1024-byte metadata cap, hence the short keys and the truncations.
- */
+/** Compact form the list view renders (short keys kept from the KV-metadata days). */
 export type PlaylistAdditionSummary = {
   t: string
   status: PlaylistAdditionStatus
@@ -112,46 +109,90 @@ export function playlistAdditionSummary(r: PlaylistAdditionRecord): PlaylistAddi
 }
 
 /**
- * `i` is the record's index within the flushed batch, and it is inverted for
- * the same reason the timestamp is: cached/fast sets can resolve inside a
- * single millisecond, and a forward index would list those newest-last. It
- * also keeps same-millisecond rows from overwriting each other. Width 4 is far
- * above `maxSetsPerRun`, so the padding never truncates.
- */
-export function playlistAdditionKey(r: PlaylistAdditionRecord, i: number): string {
-  const invIdx = String(9999 - i).padStart(4, '0')
-  return `${PLAYLIST_AUDIT_PREFIX}${invertedTs(Date.parse(r.t))}:${r.slug}:${invIdx}`
-}
-
-/**
- * Write a run's buffered rows. Best-effort by contract: a KV failure here must
+ * Write a run's buffered rows. Best-effort by contract: a D1 failure here must
  * never fail the sync that produced the rows, so everything is swallowed into
  * a warn log.
  */
-export async function flushPlaylistAdditions(
-  env: Env,
-  records: PlaylistAdditionRecord[],
-  log: Logger,
-): Promise<void> {
+export async function flushPlaylistAdditions(env: Env, records: PlaylistAdditionRecord[], log: Logger): Promise<void> {
   if (records.length === 0) return
   try {
-    const results = await Promise.allSettled(
-      records.map((r, i) =>
-        env.CACHE.put(playlistAdditionKey(r, i), JSON.stringify(r), {
-          expirationTtl: TTL.PLAYLIST_AUDIT,
-          metadata: playlistAdditionSummary(r),
-        }),
-      ),
+    const db = dbOf(env)
+    await batchChunked(
+      db,
+      records.map((r) => insertStatement(db, r, null)),
     )
-    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-    if (rejected.length > 0) {
-      log.warn('playlist_audit.write_failed', {
-        failed: rejected.length,
-        total: records.length,
-        ...errorFields(rejected[0]!.reason),
-      })
-    }
   } catch (e) {
     log.warn('playlist_audit.flush_threw', { total: records.length, ...errorFields(e) })
   }
+}
+
+/** The INSERT for one record; `legacyKey` is the KV key it was imported from (null for live rows). */
+export function insertStatement(db: D1Database, r: PlaylistAdditionRecord, legacyKey: string | null, summary?: PlaylistAdditionSummary): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT OR IGNORE INTO playlist_additions (t, ts, status, slug, set_url, video_id, legacy_key, summary, record)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(r.t, Date.parse(r.t) || Date.now(), r.status, r.slug, r.setUrl, r.videoId ?? null, legacyKey, JSON.stringify(summary ?? playlistAdditionSummary(r)), JSON.stringify(r))
+}
+
+type ListRow = { id: number; ts: number; summary: string }
+
+/** Newest-first page of summaries. Each record carries `key` (the row id) for the detail endpoint. */
+export async function listPlaylistAdditions(env: Env, opts: { limit: number; cursor?: string | null }): Promise<AuditPage> {
+  const limit = Math.min(Math.max(opts.limit, 1), 200)
+  const cur = decodeCursor(opts.cursor)
+  const stmt = cur
+    ? dbOf(env)
+        .prepare('SELECT id, ts, summary FROM playlist_additions WHERE ts < ? OR (ts = ? AND id < ?) ORDER BY ts DESC, id DESC LIMIT ?')
+        .bind(cur.ts, cur.ts, cur.id, limit + 1)
+    : dbOf(env).prepare('SELECT id, ts, summary FROM playlist_additions ORDER BY ts DESC, id DESC LIMIT ?').bind(limit + 1)
+  const rows = (await stmt.all<ListRow>()).results
+  const page = rows.slice(0, limit)
+  const last = page[page.length - 1]
+  return {
+    records: page.map((r) => ({ key: String(r.id), expiration: null, ...parseJson<Record<string, unknown>>(r.summary, {}) })),
+    cursor: rows.length > limit && last ? encodeCursor(last.ts, last.id) : null,
+  }
+}
+
+export async function getPlaylistAddition(env: Env, key: string): Promise<PlaylistAdditionRecord | null> {
+  const id = Number(key)
+  if (!Number.isInteger(id) || id <= 0) return null
+  const row = await dbOf(env).prepare('SELECT record FROM playlist_additions WHERE id = ?').bind(id).first<{ record: string }>()
+  return row ? parseJson<PlaylistAdditionRecord | null>(row.record, null) : null
+}
+
+/**
+ * The latest outcome recorded for each set of `slug` (newest row per set URL),
+ * as the compact summary. Used to seed recheck baselines for state that
+ * predates them (see lib/sync.ts `seedTracklistVideosFromAudit`).
+ */
+export async function latestAdditionPerSet(env: Env, slug: string): Promise<Map<string, PlaylistAdditionSummary>> {
+  const res = await dbOf(env)
+    .prepare('SELECT set_url, summary FROM playlist_additions WHERE slug = ? ORDER BY ts DESC, id DESC')
+    .bind(slug)
+    .all<{ set_url: string; summary: string }>()
+  const out = new Map<string, PlaylistAdditionSummary>()
+  for (const r of res.results) {
+    if (out.has(r.set_url)) continue
+    const s = parseJson<PlaylistAdditionSummary | null>(r.summary, null)
+    if (s) out.set(r.set_url, s)
+  }
+  return out
+}
+
+/** `failed` / `abandoned` summaries since `sinceMs`, newest first. */
+export async function failureRowsSince(env: Env, sinceMs: number): Promise<PlaylistAdditionSummary[]> {
+  const res = await dbOf(env)
+    .prepare("SELECT summary FROM playlist_additions WHERE status IN ('failed', 'abandoned') AND ts >= ? ORDER BY ts DESC, id DESC")
+    .bind(sinceMs)
+    .all<{ summary: string }>()
+  return res.results.map((r) => parseJson<PlaylistAdditionSummary | null>(r.summary, null)).filter((s): s is PlaylistAdditionSummary => !!s)
+}
+
+/** Drop rows past the retention horizon. Returns how many went. */
+export async function prunePlaylistAdditions(env: Env, now = Date.now()): Promise<number> {
+  const r = await dbOf(env).prepare('DELETE FROM playlist_additions WHERE ts < ?').bind(now - PLAYLIST_AUDIT_RETENTION_MS).run()
+  return r.meta.changes ?? 0
 }

@@ -202,7 +202,7 @@ OpenAPI spec: `GET /openapi.json` (bearer-gated).
 
 ## Subscriptions mini-app
 
-`GET /subscriptions/` is a tiny single-user web UI for managing the list of DJs to track. Paste a 1001tracklists DJ URL like `https://www.1001tracklists.com/dj/lillypalmer/index.html` and only the slug (`lillypalmer`) is stored. Subscriptions live in a separate KV namespace (`SUBS`, no TTL) so they're durable independent of the cache.
+`GET /subscriptions/` is a tiny single-user web UI for managing the list of DJs to track. Paste a 1001tracklists DJ URL like `https://www.1001tracklists.com/dj/lillypalmer/index.html` and only the slug (`lillypalmer`) is stored. Subscriptions live in the D1 `subscriptions` table (see **Storage**) so they're durable independent of the cache.
 
 The UI is gated by **Cloudflare Access**, not the bearer token used for `/now-playing`. The worker doesn't trust the `Cf-Access-Authenticated-User-Email` header on its own — every `/subscriptions/*` request goes through `cfAccess` middleware that:
 
@@ -292,9 +292,9 @@ On top of those, one **combined playlist** — **`All tracked artists (1001tklis
 - **Live mirror.** Whenever the sync resolves a set to a video, it inserts that video into the combined playlist in the same pass. This also runs for sets that are already in the artist playlist but not yet in the combined one, so an in-flight backlog closes from both ends.
 - **Backfill.** The combined playlist is defined as *the union of every artist playlist*, so each cron tick diffs it against those playlists and inserts whatever is missing. This is the only path that can cover sets the sync processed **before this feature existed** and the deep back catalogue a **newly added artist** accumulates over many ticks. It also self-heals anything the live mirror dropped — which is why a failed mirror is recorded on the audit row but never fails a sync. The backfill only ever *adds*; removals come from the recheck below.
 
-Both playlists are created on demand (looked up by exact title first, so an existing playlist is adopted rather than duplicated) and their ids are cached in KV — `subs:state:<slug>` for artists, `subs:combined` for the combined one. Deleting a playlist on YouTube is recovered from automatically: the next run re-resolves by title and re-creates if needed. Removing a subscription leaves both playlists in place. The sync never removes a video except to replace it (next paragraph), so anything you prune from a playlist by hand stays pruned.
+Both playlists are created on demand (looked up by exact title first, so an existing playlist is adopted rather than duplicated) and their ids are kept in D1 (`sub_sync.playlist_id`) for artists and in KV (`subs:combined`) for the combined one. Deleting a playlist on YouTube is recovered from automatically: the next run re-resolves by title and re-creates if needed. Removing a subscription leaves both playlists in place. The sync never removes a video except to replace it (next paragraph), so anything you prune from a playlist by hand stays pruned.
 
-**Rechecks (swapped recordings).** The first video attached to a set on 1001tracklists is often a phone recording, replaced by an official upload days later — so a set is not "done" once processed. Every processed tracklist records what it resolved to (`subs:state:<slug>` → `tracklistVideos[url] = { videoId, checkedAt }`), and once that record is older than **5 days** (`RECHECK_INTERVAL_SECONDS`) the set page is fetched again and compared:
+**Rechecks (swapped recordings).** The first video attached to a set on 1001tracklists is often a phone recording, replaced by an official upload days later — so a set is not "done" once processed. Every processed tracklist records what it resolved to (its `tracklists` row: `video_id` + `checked_at`, surfaced to the sync as `tracklistVideos[url] = { videoId, checkedAt }`), and once that record is older than **5 days** (`RECHECK_INTERVAL_SECONDS`) the set page is fetched again and compared:
 
 - **same video**, or the page **lost** its video → nothing changes (a set that drops its recording keeps the one already in the playlist), and no audit row is written — at one recheck per set every five days those would drown the rows that matter.
 - the set **had none and now has one** → added, exactly like a first-time set.
@@ -405,6 +405,10 @@ npx wrangler kv namespace create CACHE --preview
 npx wrangler kv namespace create SUBS
 npx wrangler kv namespace create SUBS --preview
 
+# 1b. Create the D1 database, paste its id into wrangler.jsonc, apply the schema
+npx wrangler d1 create tracked
+npm run d1:migrate            # wrangler d1 migrations apply tracked --remote
+
 # 2. Set secrets
 echo $API_TOKEN                 | npx wrangler secret put API_TOKEN
 echo $LIKED_SONGS_TOKEN         | npx wrangler secret put LIKED_SONGS_TOKEN   # separate token for GET /liked-songs
@@ -442,6 +446,34 @@ Pushes to `main` auto-deploy via Cloudflare's native Git integration ([Workers B
 3. Push to `main` → Cloudflare runs typecheck + tests, then `wrangler deploy`. Non-`main` branches get a preview version (`npx wrangler versions upload`) instead of a production deploy, with the preview URL posted back as a PR comment.
 
 Connecting an **existing** Worker leaves its secrets, KV bindings, crons, and `vars` in place — Workers Builds only adds the build/deploy-on-push pipeline. Secrets are never read from the repo (they're not in it); set/rotate them with `wrangler secret put` as before. The `.github/workflows/ci.yml` job still runs typecheck + tests on pull requests for pre-merge feedback.
+
+**D1 migrations are a manual pre-push step.** Workers Builds runs `wrangler deploy` and nothing else, so a new file in `migrations/` must be applied with `npm run d1:migrate` *before* the code that needs it is pushed — otherwise the deployed Worker queries a table that isn't there yet. Migrations are plain SQL and additive, so applying one ahead of the deploy is always safe.
+
+## Storage
+
+Two kinds of state, two stores:
+
+**D1** (`DB` binding, database `tracked`, schema in `migrations/`) holds everything that is queried, joined or kept as history:
+
+| table | what |
+| --- | --- |
+| `subscriptions` | the DJ list, in the order it was added |
+| `sub_sync` | per-DJ sync summary: playlist id, artist name, last run / error / stats |
+| `tracklists` | one row per set URL ever discovered for a DJ: processed / abandoned / failure count, the recorded video (`video_id`, `video_known`, `video_source` = `1001tl` or `mkvid`), and `checked_at` for the recheck cadence |
+| `now_playing_audit` | one row per `/now-playing` call (summary + full record), 90 days |
+| `playlist_additions` | one row per set the sync decided an outcome for, 90 days |
+
+The sync still reasons about one `SubState` object per DJ (`lib/sync-store.ts` hydrates it from `sub_sync` + `tracklists` and writes it back as row upserts, diffing against what it loaded so a tick that touched 20 sets writes 20 rows). The 5-minute cron picks its candidates from one aggregate query over `tracklists` instead of loading every DJ; "Invalidate & resync", ban-victim requeues and mkvid's deliveries are direct row updates. D1 has no TTLs, so the daily cron prunes both audit tables at the 90-day horizon.
+
+**KV** keeps what is genuinely a cache or a tiny blob: every `CACHE` entry that has a TTL (YouTube resolves, 1001tl searches and parsed pages, medialinks, Apple links, playlist membership, DJ set lists, the Access JWKS), the ban state and Bright Data budget, the daily combined-insert counter, `subs:combined`, the Google OAuth tokens and the Web Push subscriptions.
+
+**Migration from the KV-only layout** is automatic and one-way. Before D1, the subscription list (`subs:list` / `subs:item:*`), each DJ's state (`subs:state:<slug>`, one JSON blob) and both audit trails (`np:` / `pladd:` keys with metadata summaries) lived in KV. After the deploy that introduced D1 (`lib/kv-import.ts`):
+
+- the subscription list and every DJ's state are imported on first touch (and by the first cron tick, so the drain cron sees every backlog immediately). An import that *fails* throws rather than returning an empty state — an empty state would make the sync treat every set as new and re-fetch the DJ's whole back catalogue, which is exactly what gets the 1001tracklists account banned;
+- the audit trails are imported in bounded pages (40 keys per trail per cron tick — each full record is a separate KV `get`) with progress at `migrate:d1:audit` in `SUBS`; `INSERT OR IGNORE` on the old key makes a re-run harmless. `GET /subscriptions/api/migration` shows where it is;
+- nothing is deleted from KV. The old audit rows age out through their TTLs; the state blobs stay as a backup and are never read again once their D1 rows exist (`migrate:d1:*` flags).
+
+Tests run against the real schema: `test/helpers/fake-d1.ts` is a better-sqlite3 database with `migrations/*.sql` applied, strict like D1 about `undefined`/boolean bind values.
 
 ## Network strategy
 
@@ -538,17 +570,17 @@ Failure handling: a CF shell or unparseable body from the forwarder logs a `fetc
 
 Every cache key embeds the version of the logic that produced its value (`family:v<N>:…`, e.g. `s1001t:v2:<hash>`). When that logic changes, bump the number in `CV` (top of `routes/now-playing.ts`) and stale entries from the old code are simply not read — they age out via TTL instead of being served. This exists because a real fix once looked broken in production: the search change was correct, but a `null` tracklist cached under the un-versioned key by the *old* over-strict ranking kept coming back for two hours.
 
-Each `/now-playing` call also writes a durable audit record to KV under `np:<invertedTs>:<reqId>` (90-day TTL). The key uses an **inverted** timestamp (`10^13 − epochMs`, zero-padded) so a plain `list()` returns newest-first in one page — KV only lists ascending, so forward-epoch keys could only page from the oldest. Each record captures the full request story: inputs (`currentSeconds`, `videoDurationSeconds`, title/url), the YouTube resolution (matched id/title or the error), the tracklist-search plan and which signal hit, and the selection it produced (`currentStartSeconds`, `currentSkewSeconds`, chosen tracks) — plus an `impossibleTimestamp` flag when `currentSeconds > videoDurationSeconds` (the fingerprint of a client-side position bug). A compact summary is duplicated into KV **metadata** so the admin panel lists recent requests without a per-row `get`. Workers Logs only retains ~3 days, but timestamp/selection bugs are often noticed much later (a wrong "now playing" spotted in an old screenshot).
+Each `/now-playing` call also writes a durable audit row to D1 (`now_playing_audit`, `lib/now-playing-audit.ts`; 90-day retention, pruned by the daily cron). The write runs after the response inside `waitUntil` and swallows its own errors, so a D1 hiccup never fails a Tasker call. Each record captures the full request story: inputs (`currentSeconds`, `videoDurationSeconds`, title/url), the YouTube resolution (matched id/title or the error), the tracklist-search plan and which signal hit, and the selection it produced (`currentStartSeconds`, `currentSkewSeconds`, chosen tracks) — plus an `impossibleTimestamp` flag when `currentSeconds > videoDurationSeconds` (the fingerprint of a client-side position bug). A compact summary sits in its own column so the admin panel lists recent requests without parsing records. Workers Logs only retains ~3 days, but timestamp/selection bugs are often noticed much later (a wrong "now playing" spotted in an old screenshot).
 
-Browse this history in the **admin panel** at `/subscriptions` → **Recent requests** (newest-first, expandable per-request detail, a "problems only" filter, and anomaly highlighting for error statuses / impossible timestamps / large skews). Behind Cloudflare Access. Endpoints: `GET /subscriptions/api/audit?limit&cursor` (summaries) and `GET /subscriptions/api/audit-detail?key=` (full record). For raw CLI access: `wrangler kv key list --namespace-id <CACHE id> --prefix np: --remote` then `wrangler kv key get … --remote` (the `--remote` flag is required — `kv` commands default to the local simulation store).
+Browse this history in the **admin panel** at `/subscriptions` → **Recent requests** (newest-first, expandable per-request detail, a "problems only" filter, and anomaly highlighting for error statuses / impossible timestamps / large skews). Behind Cloudflare Access. Endpoints: `GET /subscriptions/api/audit?limit&cursor` (summaries, keyset-paged newest-first; each record's `key` is its row id) and `GET /subscriptions/api/audit-detail?key=` (full record). For raw CLI access: `npx wrangler d1 execute tracked --remote --command "SELECT t, status, summary FROM now_playing_audit ORDER BY ts DESC LIMIT 20"`.
 
 ### Playlist-addition audit trail
 
-The sync writes the same kind of trail for its own work (`lib/playlist-audit.ts`): one record per tracklist it decided an outcome for, under `pladd:<invertedTs>:<slug>:<invertedIndex>` (90-day TTL, compact summary in KV metadata — same newest-first key trick, with the batch index inverted too so sets resolved inside one millisecond still list newest-first). Statuses are `added` (video inserted), `duplicate` (already in the playlist), `replaced` (a recheck found the recording swapped: old removed, new inserted — `previousVideoId` names the old one), `no_youtube` (the set page has no recording to add), `failed` (errored this run, will be retried) and `abandoned` (errored `ABANDON_AFTER_FAILURES` times; the cron gives up). Rechecks that change nothing write no row. Each record carries the set URL, DJ, video id/url, playlist id/title, the combined-playlist outcome for the same video (`combinedStatus`: `added` / `duplicate` / `failed` / `unavailable`), which scrape path served the page, what triggered the run (`cron.daily`, `cron.pending`, `manual.all`, `manual.one`, `manual.resync`, `manual.combined`), the error message, and how long the set took. The trail doubles as the seed for recheck baselines after the upgrade that introduced them (see **Rechecks** above). This answers "why isn't that set in my playlist?" — previously only answerable from Workers Logs, which age out in ~3 days.
+The sync writes the same kind of trail for its own work (`lib/playlist-audit.ts`): one D1 row (`playlist_additions`, 90-day retention) per tracklist it decided an outcome for. Statuses are `added` (video inserted), `duplicate` (already in the playlist), `replaced` (a recheck found the recording swapped: old removed, new inserted — `previousVideoId` names the old one), `no_youtube` (the set page has no recording to add), `failed` (errored this run, will be retried) and `abandoned` (errored `ABANDON_AFTER_FAILURES` times; the cron gives up). Rechecks that change nothing write no row. Each record carries the set URL, DJ, video id/url, playlist id/title, the combined-playlist outcome for the same video (`combinedStatus`: `added` / `duplicate` / `failed` / `unavailable`), which scrape path served the page, what triggered the run (`cron.daily`, `cron.pending`, `manual.all`, `manual.one`, `manual.resync`, `manual.combined`), the error message, and how long the set took. The trail doubles as the seed for recheck baselines after the upgrade that introduced them (see **Rechecks** above). This answers "why isn't that set in my playlist?" — previously only answerable from Workers Logs, which age out in ~3 days.
 
-Rows are buffered during a run and flushed in one parallel batch at the end: awaiting up to 30 sequential KV puts inside the set loop would eat a large slice of the 25 s sync deadline. A run killed mid-loop therefore loses its rows — deliberate, since this is diagnostics only; idempotency and progress live in the per-sub state. A KV failure here is logged and swallowed, never surfaced as a sync failure.
+Rows are buffered during a run and flushed in one batch at the end: awaiting up to 30 sequential writes inside the set loop would eat a large slice of the 25 s sync deadline. A run killed mid-loop therefore loses its rows — deliberate, since this is diagnostics only; idempotency and progress live in the per-sub state. A D1 failure here is logged and swallowed, never surfaced as a sync failure.
 
-Browse it in the **admin panel** at `/subscriptions` → **Recent playlist additions**, which mirrors the requests view (newest-first, expandable per-row detail, a "problems only" filter — `failed` / `abandoned`, since `no_youtube` is a normal outcome). Endpoints: `GET /subscriptions/api/playlist-additions?limit&cursor` (summaries) and `GET /subscriptions/api/playlist-addition-detail?key=` (full record). Raw CLI access is the same as above with `--prefix pladd:`.
+Browse it in the **admin panel** at `/subscriptions` → **Recent playlist additions**, which mirrors the requests view (newest-first, expandable per-row detail, a "problems only" filter — `failed` / `abandoned`, since `no_youtube` is a normal outcome). Endpoints: `GET /subscriptions/api/playlist-additions?limit&cursor` (summaries) and `GET /subscriptions/api/playlist-addition-detail?key=` (full record). Raw CLI access is the same as above against the `playlist_additions` table.
 
 ## Files
 
@@ -566,14 +598,19 @@ src/
     timestamp.ts            cue parsing + current-track selection
     tracklists1001.ts       search, scrape, medialink, URL parsing (homeProxy → unlocker → direct)
     tracklist-resolve.ts    cached tracklist-page + per-track-link resolvers (shared by both API routes)
-    subscriptions.ts        DJ slug parser + KV CRUD for the mini-app
-    sync.ts                 auto-playlist orchestrator (crawl → scrape → insert), per-sub KV state
+    db.ts                   D1 helpers (bind-value coercion, chunked batches)
+    subscriptions.ts        DJ slug parser + the `subscriptions` table (with the one-time KV import)
+    sync.ts                 auto-playlist orchestrator (crawl → scrape → insert)
+    sync-store.ts           per-sub sync state ⇄ `sub_sync` + `tracklists` rows (diff-based saves, KV blob import)
+    kv-import.ts            one-time KV → D1 import of states + audit trails, driven from the cron
+    now-playing-audit.ts    the `now_playing_audit` table behind "Recent requests"
+    audit-cursor.ts         keyset pagination shared by both audit trails
     dj-index.ts             DJ index crawl (infinite-scroll AJAX) + set-page video id extraction
     dj-sets.ts              cached per-DJ set list behind the /subscriptions/dj/<slug> profile page
     combined-playlist.ts    the "All tracked artists" playlist: live mirror + bounded backfill
     playlist-cache.ts       KV-cached playlist video-id sets + find-or-create (shared by both)
     youtube-playlists.ts    YouTube Data API v3 playlist client (OAuth)
-    playlist-audit.ts       per-set audit rows behind "Recent playlist additions"
+    playlist-audit.ts       the `playlist_additions` table behind "Recent playlist additions"
     google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
     log.ts                  structured JSON logger + per-request counters
     fetch.ts                challenge solver + cookie jar
@@ -591,8 +628,16 @@ scripts/
   nas-fetch-proxy-lib.mjs   its pure routing logic (classification, cooldowns, pool planner) + .d.mts
   nas-fetch-proxy-deploy/   Dockerfile, package.json, compose example, deploy.sh for the TrueNAS Custom App
   gen-vapid-keys.mjs        prints a VAPID key pair for the Web Push alerts
+migrations/                 D1 schema, one SQL file per change (apply with npm run d1:migrate)
 test/
   fixtures/                 saved 1001tracklists HTML and JSON
+  helpers/fake-kv.ts        in-memory KVNamespace
+  helpers/fake-d1.ts        better-sqlite3-backed D1 with the real migrations applied
+  sync-store.test.ts
+  subscriptions-store.test.ts
+  kv-import.test.ts
+  audit-store.test.ts
+  audit-routes.test.ts
   timestamp.test.ts
   tracklists1001.test.ts
   subscriptions.test.ts

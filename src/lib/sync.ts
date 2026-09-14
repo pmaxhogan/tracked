@@ -81,12 +81,27 @@ import {
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
 import {
+  failureRowsSince,
   flushPlaylistAdditions,
-  PLAYLIST_AUDIT_PREFIX,
+  latestAdditionPerSet,
   type PlaylistAdditionRecord,
   type PlaylistAdditionStatus,
-  type PlaylistAdditionSummary,
 } from './playlist-audit'
+import {
+  invalidateSubTracklists,
+  listSubSync,
+  loadSubState,
+  requeueTracklists,
+  saveSubState,
+  slugsReferencingVideo,
+  subWorkCounts,
+  type SubState,
+  type TracklistVideo,
+} from './sync-store'
+
+// The state shape and its D1 persistence live in lib/sync-store.ts; re-exported
+// so callers (routes, tests) keep importing them from here.
+export { loadSubState, saveSubState, type SubState, type TracklistVideo }
 
 /** Human label for why a batch stopped early (surfaces as the sub's lastError). */
 function stopReasonFor(e: unknown): string {
@@ -95,7 +110,6 @@ function stopReasonFor(e: unknown): string {
   return `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
 }
 
-const STATE_PREFIX = 'subs:state:'
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 const playlistDescription = (artistName: string) =>
@@ -128,65 +142,6 @@ export const RECHECK_INTERVAL_SECONDS = 5 * 24 * 60 * 60
 // fetch through the home proxy / BrightData. Bounded per run so a mass
 // invalidation drains over a few ticks instead of hammering 1001tracklists.
 const DEFAULT_MAX_RECHECKS_PER_RUN = 20
-// Upper bound on `pladd:` list pages read when seeding a sub's baseline from
-// the audit trail (1 000 keys per page; 90 days of rows is a few pages).
-const AUDIT_SEED_MAX_PAGES = 20
-
-export type SubState = {
-  playlistId?: string
-  artistName?: string
-  /**
-   * Union over time of every tracklist URL we've ever seen on this DJ's
-   * paginated index. The DJ index uses JS infinite-scroll, so a single
-   * fetch only sees ~15 newest sets; we walk pageN.html on first sync to
-   * build this and merge in newly-appearing URLs on every subsequent run.
-   */
-  discoveredTracklistUrls?: string[]
-  processedTracklistUrls: string[]
-  /**
-   * Per-URL failure counter. When a set scrape errors (CF shell, IP block,
-   * transport), we bump the count here. Once it crosses
-   * `ABANDON_AFTER_FAILURES`, we move it to processedTracklistUrls so the
-   * cron stops retrying — otherwise every cron tick re-attempts the same
-   * failing URLs forever, which is what kept re-triggering the home-proxy
-   * IP block. Cleared on success.
-   */
-  failureCounts?: Record<string, number>
-  /** URLs we've given up retrying (after ABANDON_AFTER_FAILURES failures). */
-  abandonedTracklistUrls?: string[]
-  /**
-   * What each processed tracklist resolved to, and when we last looked. This
-   * is what a recheck compares against (see the module doc). Absent on state
-   * written before rechecks existed; `syncOne` seeds it from the audit trail
-   * on the first run after that, and any URL still without an entry is
-   * rechecked as "baseline unknown".
-   */
-  tracklistVideos?: Record<string, TracklistVideo>
-  lastRunAt?: number
-  lastError?: string
-  lastRunStats?: {
-    tracklistsSeen: number
-    tracklistsProcessed: number
-    videoIdsFound: number
-    videoIdsAdded: number
-    tracklistsRechecked?: number
-    videosReplaced?: number
-    via: 'home-proxy' | 'home-proxy-pool' | 'unlocker' | 'direct' | 'mixed'
-  }
-}
-
-export type TracklistVideo = {
-  /**
-   * The YouTube video the set page carried at `checkedAt`; null when it had
-   * none. *Absent* means the baseline is unknown — the set was processed
-   * before rechecks existed and no audit row survived — so the next recheck
-   * records rather than compares.
-   */
-  videoId?: string | null
-  /** Unix seconds of the last fetch of the set page. 0 = due now (invalidated). */
-  checkedAt: number
-}
-
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
 /** Tracklists discovered but never processed (and not given up on). */
@@ -239,14 +194,6 @@ async function pausedForRun(env: Env, log: Logger, task: string): Promise<boolea
   if (!pause) return false
   log.warn(`${task}.paused`, { until: pause.until, reason: pause.reason, since: pause.since })
   return true
-}
-
-export async function loadSubState(env: Env, slug: string): Promise<SubState | null> {
-  return ((await env.SUBS.get(`${STATE_PREFIX}${slug}`, 'json')) as SubState | null) ?? null
-}
-
-export async function saveSubState(env: Env, slug: string, state: SubState): Promise<void> {
-  await env.SUBS.put(`${STATE_PREFIX}${slug}`, JSON.stringify(state))
 }
 
 export type SyncOpts = {
@@ -327,8 +274,13 @@ function takeFetch(budget: FetchBudget | undefined): boolean {
 }
 
 /** Oldest-synced first, so a budget that runs out mid-tick starves nobody. */
-export function orderByLastRun<T extends { slug: string }>(subs: T[], states: Map<string, SubState | null>): T[] {
-  return [...subs].sort((a, b) => (states.get(a.slug)?.lastRunAt ?? 0) - (states.get(b.slug)?.lastRunAt ?? 0))
+export function orderByLastRun<T extends { slug: string }>(subs: T[], lastRunAt: Map<string, number | null | undefined>): T[] {
+  return [...subs].sort((a, b) => (lastRunAt.get(a.slug) ?? 0) - (lastRunAt.get(b.slug) ?? 0))
+}
+
+/** `slug → lastRunAt` for every sub with a sync row, from one D1 query. */
+async function lastRunMap(env: Env): Promise<Map<string, number | null | undefined>> {
+  return new Map((await listSubSync(env)).map((s) => [s.slug, s.lastRunAt] as const))
 }
 
 export type SyncOneResult = {
@@ -383,9 +335,7 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
     throw new Error('YouTube account not connected — visit /subscriptions/oauth/start first')
   }
   const allSubs = await listSubscriptions(env)
-  const states = new Map<string, SubState | null>()
-  for (const sub of allSubs) states.set(sub.slug, await loadSubState(env, sub.slug))
-  const subs = orderByLastRun(allSubs, states)
+  const subs = orderByLastRun(allSubs, await lastRunMap(env))
   const fetchBudget = opts.fetchBudget ?? newFetchBudget(env, await healthyAccountCount(env, log))
   log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit, perAccount: fetchBudget.perAccount, accounts: fetchBudget.accounts })
   const results: SyncOneResult[] = []
@@ -436,15 +386,15 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
   const log = opts.log ?? makeLogger({ task: 'sync.pending' })
   if (await pausedForRun(env, log, 'sync.pending')) return { results: [], paused: true }
   const subs = await listSubscriptions(env)
-  const states = new Map<string, SubState | null>()
-  const unordered: Subscription[] = []
-  for (const sub of subs) {
-    const state = await loadSubState(env, sub.slug)
-    states.set(sub.slug, state)
-    if (!state || !state.discoveredTracklistUrls) continue
-    if (pendingTracklistUrls(state).length > 0 || dueRechecks(state).length > 0) unordered.push(sub)
-  }
-  const candidates = orderByLastRun(unordered, states)
+  // One aggregate query instead of hydrating every DJ's state: a sub is a
+  // candidate when it has unprocessed sets or processed sets whose record is
+  // older than the recheck interval (or has none).
+  const counts = new Map((await subWorkCounts(env, RECHECK_INTERVAL_SECONDS)).map((c) => [c.slug, c] as const))
+  const unordered: Subscription[] = subs.filter((sub) => {
+    const c = counts.get(sub.slug)
+    return !!c && (c.pending > 0 || c.due > 0)
+  })
+  const candidates = orderByLastRun(unordered, await lastRunMap(env))
   if (candidates.length === 0) {
     log.info('sync.pending.nothing_to_do', { totalSubs: subs.length })
     return { results: [] }
@@ -494,11 +444,12 @@ export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ 
  */
 export async function collectCombinedSources(env: Env): Promise<PlaylistSource[]> {
   const subs = await listSubscriptions(env)
+  const syncRows = new Map((await listSubSync(env)).map((s) => [s.slug, s] as const))
   const sources: PlaylistSource[] = []
   for (const sub of subs) {
-    const state = await loadSubState(env, sub.slug)
-    if (!state?.playlistId) continue
-    sources.push({ slug: sub.slug, artistName: state.artistName ?? null, playlistId: state.playlistId })
+    const s = syncRows.get(sub.slug)
+    if (!s?.playlistId) continue
+    sources.push({ slug: sub.slug, artistName: s.artistName ?? null, playlistId: s.playlistId })
   }
   return sources
 }
@@ -568,7 +519,12 @@ export async function syncOne(
   const maxSets = opts.maxSetsPerRun ?? DEFAULT_MAX_SETS_PER_RUN
   const maxRechecks = opts.maxRechecksPerRun ?? DEFAULT_MAX_RECHECKS_PER_RUN
   const deadline = Date.now() + SYNC_DEADLINE_MS
-  const state: SubState = (await loadSubState(env, sub.slug)) ?? { processedTracklistUrls: [] }
+  const loaded = await loadSubState(env, sub.slug, log)
+  // A snapshot of what was loaded: the final save diffs against it so only
+  // rows this run changed are written. Cloned because the run mutates the
+  // loaded maps in place (tracklistVideos in particular).
+  const since = loaded ? structuredClone(loaded) : null
+  const state: SubState = loaded ?? { processedTracklistUrls: [] }
   // First run on state written before rechecks existed: recover each
   // processed set's video from the audit trail so the first recheck has a
   // baseline to compare against instead of just recording.
@@ -954,8 +910,9 @@ export async function syncOne(
         tracklistVideos[setUrl] = { videoId, checkedAt }
         log.info('sync.recheck_baseline', { slug: sub.slug, setUrl, videoId })
       } else if (videoId === null) {
-        // The set lost its recording. Keep what we have — never remove on absence.
-        tracklistVideos[setUrl] = { videoId: prev.videoId, checkedAt }
+        // The set lost its recording (or, for an mkvid upload, never had one on
+        // the page). Keep what we have — never remove on absence.
+        tracklistVideos[setUrl] = { ...prev, videoId: prev.videoId, checkedAt }
         log.info('sync.recheck_no_youtube', { slug: sub.slug, setUrl, keptVideoId: prev.videoId })
       } else if (videoId === prev.videoId) {
         tracklistVideos[setUrl] = { videoId, checkedAt }
@@ -1091,7 +1048,7 @@ export async function syncOne(
             : 'mixed',
     },
   }
-  await saveSubState(env, sub.slug, next)
+  await saveSubState(env, sub.slug, next, { since })
   // Write the post-insert/removal video set back so the next cron tick reads
   // it from KV instead of paying YT quota to re-fetch. Only on actual change —
   // a no-op run shouldn't re-extend the TTL on a cache the API already populated.
@@ -1138,23 +1095,16 @@ function referencedByOtherSet(map: Record<string, TracklistVideo>, videoId: stri
  * consulted on a swap, so the extra KV reads are rare.
  */
 async function videoReferencedByAnySub(env: Env, videoId: string, exceptSlug: string): Promise<boolean> {
-  const subs = await listSubscriptions(env)
-  for (const s of subs) {
-    if (s.slug === exceptSlug) continue
-    const st = await loadSubState(env, s.slug)
-    if (st?.tracklistVideos && referencedByOtherSet(st.tracklistVideos, videoId, '')) return true
-  }
-  return false
+  return (await slugsReferencingVideo(env, videoId, exceptSlug)).length > 0
 }
 
 /**
  * Recover a sub's per-tracklist video baseline from the playlist-addition
- * audit trail (`pladd:` rows carry set URL + video id in their metadata, 90
- * days deep). Runs once, on the first sync after `tracklistVideos` was
- * introduced, so sets processed before then can still have a swapped
- * recording detected — otherwise the first recheck could only record. Rows
- * are newest-first, so the first row seen per URL is its latest outcome.
- * Sets with no surviving row get no entry (baseline unknown).
+ * audit trail (rows carry set URL + video id, 90 days deep). Runs once, on
+ * the first sync after `tracklistVideos` was introduced, so sets processed
+ * before then can still have a swapped recording detected — otherwise the
+ * first recheck could only record. The newest row per set is its latest
+ * outcome. Sets with no surviving row get no entry (baseline unknown).
  */
 export async function seedTracklistVideosFromAudit(
   env: Env,
@@ -1163,30 +1113,22 @@ export async function seedTracklistVideosFromAudit(
   log: Logger,
 ): Promise<Record<string, TracklistVideo>> {
   const out: Record<string, TracklistVideo> = {}
-  let cursor: string | undefined
-  let pages = 0
   try {
-    do {
-      const page = await env.CACHE.list<PlaylistAdditionSummary>({ prefix: PLAYLIST_AUDIT_PREFIX, cursor, limit: 1000 })
-      pages += 1
-      for (const k of page.keys) {
-        const m = k.metadata
-        if (!m || m.slug !== slug || !m.set || out[m.set] || !processedUrls.has(m.set)) continue
-        if (m.status === 'added' || m.status === 'duplicate' || m.status === 'replaced') {
-          if (!m.vid) continue
-          out[m.set] = { videoId: m.vid, checkedAt: auditSeconds(m.t) }
-        } else if (m.status === 'no_youtube') {
-          out[m.set] = { videoId: null, checkedAt: auditSeconds(m.t) }
-        }
+    for (const [setUrl, m] of await latestAdditionPerSet(env, slug)) {
+      if (!processedUrls.has(setUrl)) continue
+      if (m.status === 'added' || m.status === 'duplicate' || m.status === 'replaced') {
+        if (!m.vid) continue
+        out[setUrl] = { videoId: m.vid, checkedAt: auditSeconds(m.t) }
+      } else if (m.status === 'no_youtube') {
+        out[setUrl] = { videoId: null, checkedAt: auditSeconds(m.t) }
       }
-      cursor = page.list_complete ? undefined : page.cursor
-    } while (cursor && pages < AUDIT_SEED_MAX_PAGES)
+    }
   } catch (e) {
     // Best-effort: an unreadable audit trail just means more sets start with
     // an unknown baseline. Never fail the sync over it.
     log.warn('sync.seed_from_audit_failed', { slug, seeded: Object.keys(out).length, ...errorFields(e) })
   }
-  log.info('sync.seed_from_audit', { slug, processed: processedUrls.size, seeded: Object.keys(out).length, pages })
+  log.info('sync.seed_from_audit', { slug, processed: processedUrls.size, seeded: Object.keys(out).length })
   return out
 }
 
@@ -1247,45 +1189,24 @@ export async function requeueBanVictims(env: Env, opts: { days?: number; dryRun?
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
   const candidates = new Map<string, Set<string>>()
   let scanned = 0
-  let cursor: string | undefined
-  let pages = 0
-  outer: do {
-    const page = await env.CACHE.list({ prefix: PLAYLIST_AUDIT_PREFIX, cursor, limit: 1000 })
-    pages++
-    for (const k of page.keys) {
-      const m = k.metadata as PlaylistAdditionSummary | undefined
-      if (!m) continue
-      scanned++
-      if (Date.parse(m.t) < cutoff) break outer
-      if ((m.status === 'abandoned' || m.status === 'failed') && m.msg && BLOCK_SHAPED_FAILURE.test(m.msg)) {
-        if (!candidates.has(m.slug)) candidates.set(m.slug, new Set())
-        candidates.get(m.slug)!.add(m.set)
-      }
+  for (const m of await failureRowsSince(env, cutoff)) {
+    scanned++
+    if (m.msg && BLOCK_SHAPED_FAILURE.test(m.msg)) {
+      if (!candidates.has(m.slug)) candidates.set(m.slug, new Set())
+      candidates.get(m.slug)!.add(m.set)
     }
-    cursor = page.list_complete ? undefined : page.cursor
-  } while (cursor && pages < AUDIT_SEED_MAX_PAGES)
+  }
 
   const requeued: Record<string, string[]> = {}
   for (const [slug, urls] of candidates) {
     const state = await loadSubState(env, slug)
     if (!state) continue
     const abandoned = new Set(state.abandonedTracklistUrls ?? [])
-    const failureCounts = { ...(state.failureCounts ?? {}) }
-    const hit: string[] = []
-    for (const u of urls) {
-      let touched = false
-      if (abandoned.delete(u)) touched = true
-      if (u in failureCounts) {
-        delete failureCounts[u]
-        touched = true
-      }
-      if (touched) hit.push(u)
-    }
+    const failureCounts = state.failureCounts ?? {}
+    const hit = [...urls].filter((u) => abandoned.has(u) || u in failureCounts)
     if (hit.length === 0) continue
     requeued[slug] = hit.sort()
-    if (!dryRun) {
-      await saveSubState(env, slug, { ...state, abandonedTracklistUrls: [...abandoned], failureCounts })
-    }
+    if (!dryRun) await requeueTracklists(env, slug, hit)
   }
   const requeuedCount = Object.values(requeued).reduce((a, x) => a + x.length, 0)
   log.info('sync.requeue_ban_victims', { days, dryRun, auditRowsScanned: scanned, requeuedCount, perSlug: Object.fromEntries(Object.entries(requeued).map(([k, v]) => [k, v.length])) })
@@ -1306,29 +1227,25 @@ export async function invalidateVideoCache(env: Env, slug: string, log: Logger):
     return { slug, tracklistsMarked: 0, abandonedCleared: 0 }
   }
   const processed = new Set(state.processedTracklistUrls)
-  const tracklistVideos =
-    state.tracklistVideos ?? (processed.size > 0 ? await seedTracklistVideosFromAudit(env, slug, processed, log) : {})
-  for (const u of processed) {
-    tracklistVideos[u] = { ...(tracklistVideos[u] ?? {}), checkedAt: 0 }
+  // State that predates rechecks has no baselines: seed them from the audit
+  // trail first, so the rechecks this triggers can compare (and swap) rather
+  // than merely record.
+  if (!state.tracklistVideos && processed.size > 0) {
+    const tracklistVideos = await seedTracklistVideosFromAudit(env, slug, processed, log)
+    await saveSubState(env, slug, { ...state, tracklistVideos }, { since: state })
   }
-  const abandonedCleared = state.abandonedTracklistUrls?.length ?? 0
-  await saveSubState(env, slug, {
-    ...state,
-    tracklistVideos,
-    abandonedTracklistUrls: [],
-    failureCounts: {},
-  })
+  const { tracklistsMarked, abandonedCleared } = await invalidateSubTracklists(env, slug)
   if (state.playlistId) await invalidatePlaylistVideoIds(env, state.playlistId)
   const combined = await loadCombinedState(env)
   if (combined.playlistId) await invalidatePlaylistVideoIds(env, combined.playlistId)
   log.info('sync.invalidate', {
     slug,
-    tracklistsMarked: processed.size,
+    tracklistsMarked,
     abandonedCleared,
     playlistId: state.playlistId ?? null,
     combinedPlaylistId: combined.playlistId ?? null,
   })
-  return { slug, tracklistsMarked: processed.size, abandonedCleared }
+  return { slug, tracklistsMarked, abandonedCleared }
 }
 
 /**

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { fakeD1 } from './helpers/fake-d1'
 import { app } from '../src/index'
 import type { Env } from '../src/types'
 import type { StoredTokens } from '../src/lib/google-oauth'
@@ -32,7 +33,7 @@ const validTokens: StoredTokens = {
 }
 
 function env(subs: Record<string, string> = {}): Env {
-  return { CACHE: fakeKV(), SUBS: fakeKV(subs), API_TOKEN: 'secret', YOUTUBE_API_KEY: 'k' }
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(subs), API_TOKEN: 'secret', YOUTUBE_API_KEY: 'k' }
 }
 
 function post(body: unknown, token = 'secret'): Request {

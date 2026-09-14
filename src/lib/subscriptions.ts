@@ -1,19 +1,21 @@
 import type { Env } from '../types'
+import { batchChunked, dbOf } from './db'
 
 /**
- * Storage layout for the /subscriptions mini-app.
+ * Storage for the /subscriptions mini-app: the `subscriptions` table in D1
+ * (one row per DJ slug, `position` preserving the order they were added in).
  *
- * One KV key (`subs:list`) holds the full ordered list of slugs as a JSON
- * array. The list is small (a personal DJ subscription list — dozens at most)
- * and KV's eventual consistency is fine for this single-user app.
- *
- * Per-subscription metadata lives alongside in `subs:item:<slug>` so we can
- * later add scrape state (last-checked timestamp, last-known tracklist ids,
- * etc.) without rewriting the whole list on every update.
+ * Before D1 the list lived in the SUBS KV namespace as `subs:list` (ordered
+ * slug array) + `subs:item:<slug>` (metadata). The first read against an
+ * empty table imports that list once, then records the fact in KV
+ * (`migrate:d1:subs`) so a table the user has since emptied on purpose is not
+ * refilled from the stale KV copy. A failed import throws — the sync must
+ * never run against a silently-empty list.
  */
 
-const LIST_KEY = 'subs:list'
-const ITEM_PREFIX = 'subs:item:'
+const LEGACY_LIST_KEY = 'subs:list'
+const LEGACY_ITEM_PREFIX = 'subs:item:'
+const MIGRATED_FLAG = 'migrate:d1:subs'
 
 export type Subscription = {
   slug: string
@@ -63,49 +65,73 @@ export function parseDjSlug(input: string): string | null {
   return SLUG_RE.test(lower) ? lower : null
 }
 
+type Row = { slug: string; source_url: string; added_at: number }
+
+async function readAll(env: Env): Promise<Subscription[]> {
+  const res = await dbOf(env).prepare('SELECT slug, source_url, added_at FROM subscriptions ORDER BY position, slug').all<Row>()
+  return res.results.map((r) => ({ slug: r.slug, sourceUrl: r.source_url, addedAt: Number(r.added_at) }))
+}
+
 export async function listSubscriptions(env: Env): Promise<Subscription[]> {
-  const list = (await env.SUBS.get(LIST_KEY, 'json')) as string[] | null
-  if (!list || list.length === 0) return []
-  const items = await Promise.all(
-    list.map(async (slug) => {
-      const meta = (await env.SUBS.get(`${ITEM_PREFIX}${slug}`, 'json')) as Omit<Subscription, 'slug'> | null
-      if (meta) return { slug, ...meta } satisfies Subscription
-      // Defensive fallback for a list entry without metadata (shouldn't happen
-      // but we'd rather show the slug than crash).
-      return { slug, sourceUrl: djUrlFor(slug), addedAt: 0 } satisfies Subscription
-    }),
-  )
-  return items
+  const rows = await readAll(env)
+  if (rows.length > 0) return rows
+  if (await importSubscriptionsFromKv(env)) return readAll(env)
+  return []
+}
+
+/**
+ * One-time import of the pre-D1 subscription list. Returns true when it
+ * imported something. Idempotent: the KV flag is set once the import (or a
+ * confirmed-empty KV) has been seen, and nothing is touched after that.
+ */
+export async function importSubscriptionsFromKv(env: Env): Promise<boolean> {
+  if ((await env.SUBS.get(MIGRATED_FLAG)) !== null) return false
+  const list = ((await env.SUBS.get(LEGACY_LIST_KEY, 'json')) as string[] | null) ?? []
+  const db = dbOf(env)
+  const statements: D1PreparedStatement[] = []
+  let position = 0
+  for (const slug of list) {
+    if (!SLUG_RE.test(slug)) continue
+    const meta = (await env.SUBS.get(`${LEGACY_ITEM_PREFIX}${slug}`, 'json')) as Omit<Subscription, 'slug'> | null
+    statements.push(
+      db
+        .prepare('INSERT OR IGNORE INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, ?, ?)')
+        .bind(slug, meta?.sourceUrl ?? djUrlFor(slug), meta?.addedAt ?? 0, position++),
+    )
+  }
+  await batchChunked(db, statements)
+  await env.SUBS.put(MIGRATED_FLAG, JSON.stringify({ at: new Date().toISOString(), imported: statements.length }))
+  return statements.length > 0
 }
 
 export async function addSubscription(env: Env, sourceUrl: string): Promise<{ added: boolean; subscription: Subscription }> {
   const slug = parseDjSlug(sourceUrl)
   if (!slug) throw new InvalidSubscriptionInput(`could not parse a 1001tracklists DJ slug from ${JSON.stringify(sourceUrl)}`)
 
-  const list = ((await env.SUBS.get(LIST_KEY, 'json')) as string[] | null) ?? []
-  const existing = (await env.SUBS.get(`${ITEM_PREFIX}${slug}`, 'json')) as Omit<Subscription, 'slug'> | null
-  if (list.includes(slug) && existing) {
-    return { added: false, subscription: { slug, ...existing } }
+  const db = dbOf(env)
+  // Make sure a legacy list has been imported before deciding "new".
+  await listSubscriptions(env)
+  const existing = await db.prepare('SELECT slug, source_url, added_at FROM subscriptions WHERE slug = ?').bind(slug).first<Row>()
+  if (existing) {
+    return { added: false, subscription: { slug, sourceUrl: existing.source_url, addedAt: Number(existing.added_at) } }
   }
   const subscription: Subscription = { slug, sourceUrl, addedAt: Math.floor(Date.now() / 1000) }
-  await env.SUBS.put(`${ITEM_PREFIX}${slug}`, JSON.stringify({ sourceUrl, addedAt: subscription.addedAt }))
-  if (!list.includes(slug)) {
-    list.push(slug)
-    await env.SUBS.put(LIST_KEY, JSON.stringify(list))
-  }
+  await db
+    .prepare(
+      `INSERT INTO subscriptions (slug, source_url, added_at, position)
+       VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM subscriptions))`,
+    )
+    .bind(slug, sourceUrl, subscription.addedAt)
+    .run()
   return { added: true, subscription }
 }
 
 export async function removeSubscription(env: Env, slug: string): Promise<boolean> {
   if (!SLUG_RE.test(slug)) throw new InvalidSubscriptionInput(`invalid slug ${JSON.stringify(slug)}`)
   const lower = slug.toLowerCase()
-  const list = ((await env.SUBS.get(LIST_KEY, 'json')) as string[] | null) ?? []
-  const idx = list.indexOf(lower)
-  if (idx === -1) return false
-  list.splice(idx, 1)
-  await env.SUBS.put(LIST_KEY, JSON.stringify(list))
-  await env.SUBS.delete(`${ITEM_PREFIX}${lower}`)
-  return true
+  await listSubscriptions(env)
+  const r = await dbOf(env).prepare('DELETE FROM subscriptions WHERE slug = ?').bind(lower).run()
+  return (r.meta.changes ?? 0) > 0
 }
 
 export function djUrlFor(slug: string): string {

@@ -2,6 +2,12 @@ export type Env = {
   CACHE: KVNamespace
   /** Durable list of DJ subscriptions for the /subscriptions mini-app. */
   SUBS: KVNamespace
+  /**
+   * D1 database (schema in `migrations/`): subscriptions, per-tracklist sync
+   * state, both audit trails and the mkvid queue. KV keeps only caches, OAuth
+   * tokens, push subscriptions and ban state — see README "Storage".
+   */
+  DB: D1Database
   API_TOKEN: string
   /** Dedicated bearer for GET /liked-songs (agents that only need the liked list). Never accepted by the Tasker routes. */
   LIKED_SONGS_TOKEN?: string

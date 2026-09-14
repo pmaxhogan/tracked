@@ -8,6 +8,9 @@ import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 import { backfillCombined, syncAll, syncPendingOnly } from './lib/sync'
 import { maintainBanState } from './lib/ban-state'
+import { runKvMigrationTickSafely } from './lib/kv-import'
+import { pruneNowPlayingAudit } from './lib/now-playing-audit'
+import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
@@ -93,6 +96,18 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       // the forwarder's cooldown lapsed, probe it so a lifted ban clears the
       // banner and fires the all-clear push without waiting for traffic.
       await maintainBanState(env, log)
+      // One-time KV → D1 import, a bounded slice per tick until it reports
+      // done (then a cheap flag check). Runs before the sync so the drain
+      // cron's D1-only candidate query sees every DJ's backlog.
+      await runKvMigrationTickSafely(env, log)
+      if (isDaily) {
+        // D1 has no TTLs: keep both audit trails at the 90-day horizon.
+        try {
+          log.info('cron.audit_pruned', { nowPlaying: await pruneNowPlayingAudit(env), playlistAdditions: await prunePlaylistAdditions(env) })
+        } catch (e) {
+          log.warn('cron.audit_prune_threw', errorFields(e))
+        }
+      }
       try {
         const r = isDaily
           ? await syncAll(env, { log, trigger })

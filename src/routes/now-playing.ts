@@ -7,7 +7,8 @@ import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
-import { TTL, getJson, invertedTs, putJson, sha1Hex } from '../lib/cache'
+import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
+import { writeNowPlayingAudit } from '../lib/now-playing-audit'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields, type Logger } from '../lib/log'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
@@ -126,13 +127,9 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       impossible: impossibleTimestamp,
       ms: record.meta.totalMs,
     }
-    // Inverted-timestamp key (see lib/cache.ts): ascending KV order becomes
-    // newest-first, so the panel fetches the most recent N in one page even
-    // past 1000 total records.
-    const invTs = invertedTs(Date.now())
-    const p = env.CACHE
-      .put(`np:${invTs}:${reqId}`, JSON.stringify(record), { expirationTtl: TTL.AUDIT, metadata: summary })
-      .catch((e) => log.warn('audit.write_failed', errorFields(e)))
+    // One D1 row (lib/now-playing-audit.ts). Runs after the response and
+    // swallows its own errors: a D1 hiccup must never fail a Tasker call.
+    const p = writeNowPlayingAudit(env, { reqId, record, summary }).catch((e) => log.warn('audit.write_failed', errorFields(e)))
     try {
       c.executionCtx.waitUntil(p)
     } catch {

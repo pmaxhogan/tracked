@@ -9,6 +9,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "d1:migrate": "wrangler d1 migrations apply tracked --remote",
+    "d1:migrate:local": "wrangler d1 migrations apply tracked --local",
     "tunnel": "cloudflared tunnel --url http://localhost:8787"
   },
   "dependencies": {
@@ -21,7 +23,9 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.6.4",
     "@cloudflare/workers-types": "^4.20250109.0",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^25.6.0",
+    "better-sqlite3": "^13.0.3",
     "typescript": "^5.7.3",
     "undici": "^7.29.1",
     "vitest": "~2.1.9",

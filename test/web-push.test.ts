@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
 import {
@@ -38,7 +39,7 @@ async function genSubscription(endpoint: string) {
 
 async function makeEnv(): Promise<Env> {
   const v = await genVapid()
-  return { CACHE: fakeKV(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', VAPID_PUBLIC_KEY: v.publicKey, VAPID_PRIVATE_KEY: v.privateKey, VAPID_SUBJECT: v.subject } as Env
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', VAPID_PUBLIC_KEY: v.publicKey, VAPID_PRIVATE_KEY: v.privateKey, VAPID_SUBJECT: v.subject } as Env
 }
 
 describe('subscription storage', () => {

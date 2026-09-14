@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { fakeD1 } from './helpers/fake-d1'
 import type { Env } from '../src/types'
 import {
   backfillCombined,
@@ -88,21 +89,39 @@ function fakeKV(): KVNamespace {
   } as unknown as KVNamespace
 }
 
-/** The `pladd:` audit rows a run wrote, newest-first (KV list order). */
+/** The playlist-addition audit rows a run wrote, newest-first (the panel's order). */
 async function playlistAdditions(env: Env) {
-  const listed = await env.CACHE.list<Record<string, unknown>>({ prefix: 'pladd:' })
-  return Promise.all(
-    listed.keys.map(async (k) => ({
-      key: k.name,
-      metadata: k.metadata,
-      record: (await env.CACHE.get(k.name, 'json')) as Record<string, unknown>,
-    })),
-  )
+  const res = await env.DB.prepare('SELECT id, summary, record FROM playlist_additions ORDER BY ts DESC, id DESC').all<{
+    id: number
+    summary: string
+    record: string
+  }>()
+  return res.results.map((r) => ({
+    key: String(r.id),
+    metadata: JSON.parse(r.summary) as Record<string, unknown>,
+    record: JSON.parse(r.record) as Record<string, any>,
+  }))
+}
+
+/** Seed audit rows straight into D1 (what an earlier run would have flushed). Bodies are empty, like the old planted KV rows, so tests can tell seeds from a run's own rows. */
+async function seedAdditionRows(
+  env: Env,
+  rows: Array<{ t: string; status: string; slug: string; set: string; vid?: string | null; msg?: string | null }>,
+) {
+  for (const r of rows) {
+    const summary = { t: r.t, status: r.status, slug: r.slug, artist: null, set: r.set, vid: r.vid ?? null, via: null, trg: 'cron.pending', msg: r.msg ?? null, ms: null, cmb: null }
+    await env.DB.prepare(
+      'INSERT INTO playlist_additions (t, ts, status, slug, set_url, video_id, legacy_key, summary, record) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)',
+    )
+      .bind(r.t, Date.parse(r.t), r.status, r.slug, r.set, r.vid ?? null, JSON.stringify(summary), '{}')
+      .run()
+  }
 }
 
 function makeEnv(): Env {
   return {
     CACHE: fakeKV(),
+    DB: fakeD1(),
     SUBS: fakeKV(),
     API_TOKEN: 't',
     YOUTUBE_API_KEY: 'k',
@@ -572,9 +591,8 @@ describe('syncOne', () => {
       vid: 'newVid12345',
       trg: 'manual.one',
     })
-    // Inverted timestamp + inverted batch index, so ascending KV order is
-    // newest-first even for sets that resolve inside the same millisecond.
-    expect(rows.every((r) => /^pladd:\d{14}:lillypalmer:\d{4}$/.test(r.key))).toBe(true)
+    // Each row is addressed by its D1 id (what the detail endpoint takes).
+    expect(rows.every((r) => /^\d+$/.test(r.key))).toBe(true)
   })
 
   it('records a failed row per set error, and an abandoned row once it gives up', async () => {
@@ -618,10 +636,10 @@ describe('syncOne', () => {
     mockCrawl(['https://x/tracklist/a'], 'X')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
-    const realPut = env.CACHE.put.bind(env.CACHE)
-    vi.spyOn(env.CACHE, 'put').mockImplementation(async (key: string, ...rest: unknown[]) => {
-      if (key.startsWith('pladd:')) throw new Error('KV write limit')
-      return (realPut as (...a: unknown[]) => Promise<void>)(key, ...rest)
+    const realPrepare = env.DB.prepare.bind(env.DB)
+    vi.spyOn(env.DB, 'prepare').mockImplementation((sql: string) => {
+      if (sql.includes('INTO playlist_additions')) throw new Error('D1 write limit')
+      return realPrepare(sql)
     })
 
     const r = await syncOne(env, sub, 'tok')
@@ -912,16 +930,12 @@ describe('syncOne', () => {
     // Audit rows from an earlier run: /a was added with the phone recording,
     // /b had no video, /c has no surviving row.
     const t = new Date(Date.now() - 6 * 86400 * 1000).toISOString()
-    await env.CACHE.put('pladd:00000000000001:lillypalmer:9999', '{}', {
-      metadata: { t, status: 'added', slug: 'lillypalmer', set: 'https://x/tracklist/a', vid: 'phoneVid123' },
-    })
-    await env.CACHE.put('pladd:00000000000001:lillypalmer:9998', '{}', {
-      metadata: { t, status: 'no_youtube', slug: 'lillypalmer', set: 'https://x/tracklist/b', vid: null },
-    })
-    // A row for another DJ's set with the same URL shape must not bleed in.
-    await env.CACHE.put('pladd:00000000000002:other:9999', '{}', {
-      metadata: { t, status: 'added', slug: 'other', set: 'https://x/tracklist/c', vid: 'otherVid123' },
-    })
+    await seedAdditionRows(env, [
+      { t, status: 'added', slug: 'lillypalmer', set: 'https://x/tracklist/a', vid: 'phoneVid123' },
+      { t, status: 'no_youtube', slug: 'lillypalmer', set: 'https://x/tracklist/b', vid: null },
+      // A row for another DJ's set with the same URL shape must not bleed in.
+      { t, status: 'added', slug: 'other', set: 'https://x/tracklist/c', vid: 'otherVid123' },
+    ])
     combinedExists(['phoneVid123'])
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockImplementation(() => 'officialV12')
 
@@ -1074,17 +1088,59 @@ describe('syncOne', () => {
   })
 })
 
+describe('legacy KV state import inside a sync', () => {
+  it('a DJ whose blob is still only in KV is imported first, so nothing already processed is re-fetched', async () => {
+    const env = makeEnv()
+    await env.SUBS.put(
+      'subs:state:lillypalmer',
+      JSON.stringify({
+        playlistId: 'PL',
+        artistName: 'X',
+        discoveredTracklistUrls: ['https://x/tracklist/old', 'https://x/tracklist/new'],
+        processedTracklistUrls: ['https://x/tracklist/old'],
+        tracklistVideos: { 'https://x/tracklist/old': fresh('oldVid12345') },
+      }),
+    )
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('newVid12345')
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(r.stats.tracklistsProcessed).toBe(1)
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual(['https://x/tracklist/new'])
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+  })
+
+  it('an import failure fails the run loudly instead of syncing against an empty state', async () => {
+    const env = makeEnv()
+    await env.SUBS.put(
+      'subs:state:lillypalmer',
+      JSON.stringify({
+        playlistId: 'PL',
+        discoveredTracklistUrls: ['https://x/tracklist/old'],
+        processedTracklistUrls: ['https://x/tracklist/old'],
+      }),
+    )
+    vi.spyOn(env.DB, 'batch').mockRejectedValue(new Error('D1 unavailable'))
+
+    await expect(syncOne(env, sub, 'tok', { skipDjCrawl: true })).rejects.toThrow('D1 unavailable')
+    expect(fetch1001Html).not.toHaveBeenCalled()
+    expect(crawlDjIndex).not.toHaveBeenCalled()
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+  })
+})
+
 describe('seedTracklistVideosFromAudit', () => {
   it('takes the newest row per set, only for this slug and only for processed URLs', async () => {
     const env = makeEnv()
-    const put = (key: string, m: Record<string, unknown>) => env.CACHE.put(key, '{}', { metadata: m })
-    // Keys ascend = newest first, like the real inverted-timestamp layout.
-    await put('pladd:1:s:9999', { t: '2026-09-01T00:00:00Z', status: 'replaced', slug: 's', set: 'u1', vid: 'newVid12345' })
-    await put('pladd:2:s:9999', { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'u1', vid: 'oldVid12345' })
-    await put('pladd:3:s:9999', { t: '2026-08-01T00:00:00Z', status: 'no_youtube', slug: 's', set: 'u2', vid: null })
-    await put('pladd:4:s:9999', { t: '2026-08-01T00:00:00Z', status: 'failed', slug: 's', set: 'u3', vid: null })
-    await put('pladd:5:s:9999', { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'unprocessed', vid: 'x1234567890' })
-    await put('pladd:6:t:9999', { t: '2026-08-01T00:00:00Z', status: 'added', slug: 't', set: 'u3', vid: 'otherVid123' })
+    // Inserted oldest-first: "newest" must come from the timestamp, not insertion order.
+    await seedAdditionRows(env, [
+      { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'u1', vid: 'oldVid12345' },
+      { t: '2026-09-01T00:00:00Z', status: 'replaced', slug: 's', set: 'u1', vid: 'newVid12345' },
+      { t: '2026-08-01T00:00:00Z', status: 'no_youtube', slug: 's', set: 'u2', vid: null },
+      { t: '2026-08-01T00:00:00Z', status: 'failed', slug: 's', set: 'u3', vid: null },
+      { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'unprocessed', vid: 'x1234567890' },
+      { t: '2026-08-01T00:00:00Z', status: 'added', slug: 't', set: 'u3', vid: 'otherVid123' },
+    ])
 
     const seeded = await seedTracklistVideosFromAudit(env, 's', new Set(['u1', 'u2', 'u3']), makeLogger({ task: 'test' }))
 
@@ -1235,12 +1291,7 @@ describe('requeueBanVictims', () => {
   const log = makeLogger({ task: 'test' })
 
   async function seedAudit(env: Env, rows: Array<{ t: string; status: string; slug: string; set: string; msg: string | null }>) {
-    for (const [i, r] of rows.entries()) {
-      const inv = String(10_000_000_000_000 - Date.parse(r.t)).padStart(14, '0')
-      await env.CACHE.put(`pladd:${inv}:${r.slug}:${String(9999 - i).padStart(4, '0')}`, JSON.stringify(r), {
-        metadata: { t: r.t, status: r.status, slug: r.slug, artist: null, set: r.set, vid: null, via: null, trg: 'cron.pending', msg: r.msg, ms: null, cmb: null },
-      })
-    }
+    await seedAdditionRows(env, rows)
   }
 
   it('re-queues sets abandoned with block-shaped errors inside the window, leaves everything else alone', async () => {

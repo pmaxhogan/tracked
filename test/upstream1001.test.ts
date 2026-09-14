@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { fakeD1 } from './helpers/fake-d1'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -22,6 +23,7 @@ const TL = 'https://www.1001tracklists.com/tracklist/abc/def.html'
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
     CACHE: fakeKV(),
+    DB: fakeD1(),
     SUBS: fakeKV(),
     API_TOKEN: 't',
     YOUTUBE_API_KEY: 'k',
