@@ -332,6 +332,22 @@ POST /subscriptions/api/combined/backfill   → { ok: true, inserted, pending, c
 
 Both crons (`0 6 * * *` and `*/5 * * * *`) end with a backfill pass, in their own try/catch so a per-artist sync failure can't stop the combined playlist from catching up on everything that did land.
 
+### Sets without a YouTube recording: mkvid
+
+Plenty of sets on 1001tracklists have no YouTube recording but do have the full set on **SoundCloud** or **hearthis.at**. Those go to [mkvid](https://github.com/pmaxhogan/mkvid) — the render/upload service on the NAS — which downloads the audio with yt-dlp, renders the static-waveform video and uploads it **unlisted** to the same channel; the Worker then adds that video to the artist playlist and the combined playlist exactly as if 1001tracklists had embedded it.
+
+The Worker can't reach the NAS (mkvid sits behind Cloudflare Access on a cloudflared tunnel), so the integration is **pull**: the sync queues work in D1 and mkvid polls for it.
+
+1. **Queue.** When the sync resolves a set page and finds no YouTube id — first-time processing or a 5-day recheck of a set that still has none — it looks for the set's own audio player: the SoundCloud widget (`api.soundcloud.com/tracks/<id>`, handed to yt-dlp as-is) or a hearthis.at player/link (the embed URL; mkvid resolves it to the track page yt-dlp accepts). If there is one, a row goes into `mkvid_requests` (one per set, ever) carrying the page title (the video title), the source, and the tracklist's **last cue** — the `no_youtube` audit row says `queued for mkvid (soundcloud)`. Only while `MKVID_TOKEN` is set; a page that parses to zero tracks (a captcha shell) is never queued. `MKVID_REQUIRE_FULL_TRACKLIST=1` additionally skips tracklists with anonymous "ID" rows (off by default: the YouTube path adds every set regardless of how many rows are IDed, and this mirrors it).
+2. **Claim.** mkvid polls `POST /mkvid/claim` (bearer `MKVID_TOKEN`) whenever its render slot is free and gets the oldest claimable request, or `null`. A request whose set has meanwhile gained a real recording is marked `superseded` and skipped. A claim nobody reports on within `MKVID_CLAIM_TTL_SECONDS` (default 3 h — mkvid died mid-job) is handed out again; three claims and it is `failed`.
+3. **"Complete recording".** Before rendering, mkvid probes the source's duration and refuses one shorter than the tracklist's last cue (`incomplete_recording`, permanent) — a SoundCloud upload that ends before the last track started is a clip, not the set.
+4. **Deliver.** `POST /mkvid/complete { id, videoId, privacy }` inserts the video into the artist playlist (created if the DJ was never synced) and the combined playlist, records it on the set's `tracklists` row with `video_source = 'mkvid'`, writes an `added` audit row (`via: mkvid`) and marks the request `done`. If the set gained a real recording while mkvid was rendering, nothing is inserted and the request is `superseded` (the upload stays on the channel; the panel shows it). `POST /mkvid/fail { id, error, permanent? }` parks a permanent failure or requeues with a 6 h × attempts backoff.
+5. **Rechecks keep working.** An mkvid video is kept while the page still has no recording (never removed on absence) and is swapped out — removed from both playlists, replaced — the day 1001tracklists attaches a real YouTube video, like any phone recording replaced by an official upload.
+
+The admin panel's **mkvid uploads** section lists every request (status, source, video, attempts, error, the privacy YouTube actually applied — an unverified OAuth app forces `private` even when `unlisted` was requested) with a **Retry** for failed ones. Endpoints (CF Access): `GET /subscriptions/api/mkvid`, `POST /subscriptions/api/mkvid/retry/<id>`. mkvid-side: `GET /mkvid/health` (counts, verifies the token), `POST /mkvid/job` (attach its job id).
+
+Setup: `openssl rand -hex 24 | npx wrangler secret put MKVID_TOKEN`, and give mkvid the same value as `TRACKED_TOKEN` with `TRACKED_URL=https://tracked.pmaxhogan.workers.dev` (see mkvid's README).
+
 ## Logs
 
 Worker observability is on (`observability.enabled: true` in `wrangler.jsonc`). Every request emits a stream of structured JSON log lines correlated by `reqId` (the Cloudflare `cf-ray` header). Each phase logs full input/output bodies and timing; every error path logs full error context (name, message, stack, upstream status/error code).
@@ -412,6 +428,7 @@ npm run d1:migrate            # wrangler d1 migrations apply tracked --remote
 # 2. Set secrets
 echo $API_TOKEN                 | npx wrangler secret put API_TOKEN
 echo $LIKED_SONGS_TOKEN         | npx wrangler secret put LIKED_SONGS_TOKEN   # separate token for GET /liked-songs
+echo $MKVID_TOKEN               | npx wrangler secret put MKVID_TOKEN         # shared with mkvid (TRACKED_TOKEN there); enables the mkvid queue
 echo $YOUTUBE_API_KEY           | npx wrangler secret put YOUTUBE_API_KEY
 echo $BRIGHTDATA_API_KEY        | npx wrangler secret put BRIGHTDATA_API_KEY
 echo $GOOGLE_OAUTH_CLIENT_ID    | npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID
@@ -462,6 +479,7 @@ Two kinds of state, two stores:
 | `tracklists` | one row per set URL ever discovered for a DJ: processed / abandoned / failure count, the recorded video (`video_id`, `video_known`, `video_source` = `1001tl` or `mkvid`), and `checked_at` for the recheck cadence |
 | `now_playing_audit` | one row per `/now-playing` call (summary + full record), 90 days |
 | `playlist_additions` | one row per set the sync decided an outcome for, 90 days |
+| `mkvid_requests` | sets handed to mkvid to render + upload (see **Sets without a YouTube recording**) |
 
 The sync still reasons about one `SubState` object per DJ (`lib/sync-store.ts` hydrates it from `sub_sync` + `tracklists` and writes it back as row upserts, diffing against what it loaded so a tick that touched 20 sets writes 20 rows). The 5-minute cron picks its candidates from one aggregate query over `tracklists` instead of loading every DJ; "Invalidate & resync", ban-victim requeues and mkvid's deliveries are direct row updates. D1 has no TTLs, so the daily cron prunes both audit tables at the 90-day horizon.
 
@@ -590,6 +608,7 @@ src/
   routes/now-playing.ts     pipeline orchestrator (track playing at an offset)
   routes/tracklist.ts       whole-tracklist → JSON dump
   routes/subscriptions.ts   DJ subscriptions mini-app (HTML + JSON API)
+  routes/mkvid.ts           the work queue mkvid polls (bearer MKVID_TOKEN)
   middleware/auth.ts        bearer token (timing-safe)
   middleware/cf-access.ts   Cloudflare Access JWT verification (RS256 + JWKS)
   schemas.ts                zod request/response (also drives OpenAPI)
@@ -604,6 +623,7 @@ src/
     sync-store.ts           per-sub sync state ⇄ `sub_sync` + `tracklists` rows (diff-based saves, KV blob import)
     kv-import.ts            one-time KV → D1 import of states + audit trails, driven from the cron
     now-playing-audit.ts    the `now_playing_audit` table behind "Recent requests"
+    mkvid.ts                the mkvid queue: set-page audio-source extraction + request lifecycle (claim/complete/fail)
     audit-cursor.ts         keyset pagination shared by both audit trails
     dj-index.ts             DJ index crawl (infinite-scroll AJAX) + set-page video id extraction
     dj-sets.ts              cached per-DJ set list behind the /subscriptions/dj/<slug> profile page

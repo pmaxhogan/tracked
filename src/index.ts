@@ -4,6 +4,7 @@ import { tracklistRoute, tracklistHandler } from './routes/tracklist'
 import { likesRoute, likesHandler } from './routes/likes'
 import { likedSongsRoute, likedSongsHandler } from './routes/liked-songs'
 import { subscriptionsApp } from './routes/subscriptions'
+import { mkvidApp } from './routes/mkvid'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 import { backfillCombined, syncAll, syncPendingOnly } from './lib/sync'
@@ -44,13 +45,20 @@ app.get('/favicon.ico', (c) => c.body(null, 204))
 // inside the sub-app's middleware), NOT by the Tasker bearer token.
 app.route('/subscriptions', subscriptionsApp)
 
+// Work queue for mkvid (the NAS render/upload service). Gated by its own
+// MKVID_TOKEN inside the sub-app, so like /subscriptions it must be skipped by
+// the API_TOKEN wildcard gate below.
+app.route('/mkvid', mkvidApp)
+
 // Bearer-gate everything else, including /openapi.json and /doc. Skip
-// /subscriptions/* — a naive wildcard would double-gate that surface, since
-// Hono runs parent middleware after a mounted sub-app's handlers; cfAccess
-// would pass but then bearerAuth would 401 the missing Authorization header.
+// /subscriptions/* and /mkvid/* — a naive wildcard would double-gate those
+// surfaces, since Hono runs parent middleware after a mounted sub-app's
+// handlers; their own gate would pass but then bearerAuth would 401 the
+// token it doesn't recognise.
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   if (path === '/subscriptions' || path.startsWith('/subscriptions/')) return next()
+  if (path === '/mkvid' || path.startsWith('/mkvid/')) return next()
   return bearerAuth(c, next)
 })
 

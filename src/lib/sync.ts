@@ -80,6 +80,8 @@ import {
   type PlaylistSource,
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
+import { parseTracklist } from './tracklists1001'
+import { enqueueMkvidRequest, extractSetAudioSource, extractSetTitle, lastCueSeconds, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
   flushPlaylistAdditions,
@@ -717,6 +719,53 @@ export async function syncOne(
     })
   }
 
+  // mkvid bridge (lib/mkvid.ts): a set with no YouTube recording but a
+  // SoundCloud / hearthis.at one is queued for mkvid to render + upload. Only
+  // while MKVID_TOKEN is configured — the queue is pointless with nobody
+  // polling it. Never fails the set: any error here is a warn log and the set
+  // is still recorded as `no_youtube` (the next recheck queues it again).
+  const mkvidEnabled = !!env.MKVID_TOKEN
+  const mkvidRequireFull = /^(1|true|yes)$/i.test(env.MKVID_REQUIRE_FULL_TRACKLIST ?? '')
+  const maybeQueueForMkvid = async (setUrl: string, html: string): Promise<string | null> => {
+    if (!mkvidEnabled) return null
+    try {
+      const source = extractSetAudioSource(html)
+      if (!source) return null
+      const tracks = parseTracklist(setUrl, html).tracks
+      // Zero rows is the fingerprint of a captcha shell, not a set — never queue from it.
+      if (tracks.length === 0) return null
+      const idedCount = tracks.filter((t) => !t.isUnidentified).length
+      if (mkvidRequireFull && idedCount < tracks.length) {
+        log.info('sync.mkvid_skip_partial', { slug: sub.slug, setUrl, source: source.kind, idedCount, trackCount: tracks.length })
+        return `mkvid: not queued, tracklist partial (${idedCount}/${tracks.length} IDed)`
+      }
+      const r = await enqueueMkvidRequest(env, {
+        slug: sub.slug,
+        setUrl,
+        artistName,
+        setTitle: extractSetTitle(html),
+        source,
+        lastCueSeconds: lastCueSeconds(tracks),
+        trackCount: tracks.length,
+        idedCount,
+      })
+      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount })
+      return r === 'queued' ? `queued for mkvid (${source.kind})` : `mkvid request already exists (${source.kind})`
+    } catch (e) {
+      log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+      return null
+    }
+  }
+  /** The set gained a real recording: a pending mkvid request has nothing left to do. */
+  const supersedeMkvid = async (setUrl: string, videoId: string): Promise<void> => {
+    if (!mkvidEnabled) return
+    try {
+      if (await supersedeMkvidRequestForSet(env, setUrl, videoId)) log.info('sync.mkvid_superseded', { slug: sub.slug, setUrl, videoId })
+    } catch (e) {
+      log.warn('sync.mkvid_supersede_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+    }
+  }
+
   /**
    * Insert into the artist playlist, recovering once from a playlist deleted
    * mid-run (re-resolve by title, then retry; later iterations pick up the
@@ -810,7 +859,8 @@ export async function syncOne(
           setUrl,
           fingerprint: youtubeFingerprint(setFetched.html),
         })
-        auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet } })
+        const note = await maybeQueueForMkvid(setUrl, setFetched.html)
+        auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
       }
       processed.add(setUrl)
       tracklistVideos[setUrl] = { videoId, checkedAt: nowSeconds() }
@@ -914,6 +964,10 @@ export async function syncOne(
         // the page). Keep what we have — never remove on absence.
         tracklistVideos[setUrl] = { ...prev, videoId: prev.videoId, checkedAt }
         log.info('sync.recheck_no_youtube', { slug: sub.slug, setUrl, keptVideoId: prev.videoId })
+        // Still nothing on YouTube: a SoundCloud/hearthis recording that has
+        // appeared since (or a request that was never queued) goes to mkvid.
+        // Idempotent — a set with a request already gets 'exists'.
+        if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html)
       } else if (videoId === prev.videoId) {
         tracklistVideos[setUrl] = { videoId, checkedAt }
         log.info('sync.recheck_unchanged', { slug: sub.slug, setUrl, videoId })
@@ -926,6 +980,7 @@ export async function syncOne(
           log.info('sync.recheck_added', { slug: sub.slug, setUrl, videoId, playlistId })
         }
         tracklistVideos[setUrl] = { videoId, checkedAt }
+        await supersedeMkvid(setUrl, videoId)
         auditSet(wasPresent ? 'duplicate' : 'added', setUrl, {
           videoId,
           videoUrl: watchUrl(videoId),

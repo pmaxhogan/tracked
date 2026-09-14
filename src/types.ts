@@ -11,6 +11,15 @@ export type Env = {
   API_TOKEN: string
   /** Dedicated bearer for GET /liked-songs (agents that only need the liked list). Never accepted by the Tasker routes. */
   LIKED_SONGS_TOKEN?: string
+  /**
+   * Bearer mkvid (the NAS render/upload service) presents on /mkvid/*. Also the
+   * feature switch: while unset, the sync never queues a set for mkvid.
+   */
+  MKVID_TOKEN?: string
+  /** "1"/"true": only queue sets whose tracklist is fully identified (no anonymous "ID" rows). Default off. */
+  MKVID_REQUIRE_FULL_TRACKLIST?: string
+  /** Seconds after which a claimed-but-unreported mkvid request is handed out again (default 10800 = 3 h). */
+  MKVID_CLAIM_TTL_SECONDS?: string
   YOUTUBE_API_KEY: string
   /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
   BRIGHTDATA_API_KEY?: string

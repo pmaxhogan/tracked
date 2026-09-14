@@ -41,6 +41,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
+import { countMkvidRequests, listMkvidRequests, requestSummary, retryMkvidRequest } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -695,6 +696,29 @@ subscriptionsApp.get('/api/playlist-addition-detail', async (c) => {
 /** Progress of the one-time KV → D1 import the cron drives (lib/kv-import.ts). */
 subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus(c.env)))
 
+// ─── mkvid uploads ──────────────────────────────────────────────────────────
+
+/** The mkvid queue (lib/mkvid.ts): every set handed to mkvid, newest activity first. */
+subscriptionsApp.get('/api/mkvid', async (c) => {
+  const n = parseInt(c.req.query('limit') || '100', 10)
+  const [requests, counts] = await Promise.all([listMkvidRequests(c.env, Number.isFinite(n) ? n : 100), countMkvidRequests(c.env)])
+  return c.json({
+    enabled: !!c.env.MKVID_TOKEN,
+    requireFullTracklist: /^(1|true|yes)$/i.test(c.env.MKVID_REQUIRE_FULL_TRACKLIST ?? ''),
+    counts,
+    requests: requests.map(requestSummary),
+  })
+})
+
+/** Give a failed / superseded / stuck request a fresh start (mkvid picks it up on its next poll). */
+subscriptionsApp.post('/api/mkvid/retry/:id', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_retry', by: c.get('cfAccessEmail') })
+  const id = c.req.param('id')
+  const ok = await retryMkvidRequest(c.env, id)
+  log.info('subs.mkvid_retry', { id, ok })
+  return c.json({ ok, id }, ok ? 200 : 404)
+})
+
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
 
 subscriptionsApp.get('/api/youtube/status', async (c) => {
@@ -864,6 +888,15 @@ const PAGE_HTML = /* html */ `<!doctype html>
   #cmb-body .counts .warn { color: var(--danger); }
   #cmb-body a { color: var(--accent); }
   /* ── YouTube video inspector ── */
+  /* ── mkvid uploads ── */
+  section#mkvid { margin-top: 2.25rem; }
+  #mkvid-summary { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.6rem; }
+  .badge.pending { background: rgba(88,166,255,0.18); color: var(--accent); }
+  .badge.claimed { background: rgba(210,153,34,0.18); color: #d29922; }
+  .badge.done { background: rgba(63,185,80,0.18); color: #3fb950; }
+  .badge.superseded { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); }
+  .arow .src { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+  .arow-detail .retry { margin-top: 0.4rem; }
   section#ytjson { margin-top: 2.25rem; }
   #ytjson-form { display: flex; gap: 0.5rem; margin: 0 0 0.5rem; }
   /* type="text", not "url", so a bare 11-char video id is accepted too — hence
@@ -954,6 +987,18 @@ ${ALERTS_ROW_HTML}
       </div>
     </div>
     <div id="cmb-body"><span class="counts">loading…</span></div>
+  </section>
+
+  <section id="mkvid">
+    <div class="audit-head">
+      <h2>mkvid uploads</h2>
+      <div class="audit-actions">
+        <button id="mkvid-refresh" class="ghost">Refresh</button>
+      </div>
+    </div>
+    <div id="mkvid-summary" class="counts">loading…</div>
+    <div id="mkvid-list"></div>
+    <div id="mkvid-empty" class="empty" hidden>No sets queued for mkvid yet.</div>
   </section>
 
   <section id="ytjson">
@@ -1721,12 +1766,100 @@ ${BAN_HISTORY_HTML}
     }
   });
 
+  // ── mkvid uploads ────────────────────────────────────────────────────────
+  // Sets with no YouTube recording but a SoundCloud / hearthis.at one, handed
+  // to mkvid (the NAS render/upload service) to turn into an unlisted video.
+  // mkvid polls the Worker; this view just shows where each request stands.
+  const $mkList = document.getElementById('mkvid-list');
+  const $mkEmpty = document.getElementById('mkvid-empty');
+  const $mkSummary = document.getElementById('mkvid-summary');
+  const $mkRefresh = document.getElementById('mkvid-refresh');
+  const MK_PROBLEM = new Set(['failed']);
+
+  function mkDetailHtml(r) {
+    const out = [];
+    out.push('<div class="grp">Set</div>');
+    out.push(dl([
+      ['tracklist', link(r.setUrl, setLabel(r.setUrl))],
+      ['title', r.setTitle ? esc(r.setTitle) : '—'],
+      ['DJ', esc(r.artistName || r.slug) + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
+      ['source', esc(r.sourceLabel || r.source) + ' ' + link(r.sourceUrl, 'open')],
+      r.trackCount != null ? ['tracklist', esc(r.idedCount) + '/' + esc(r.trackCount) + ' IDed' + (r.lastCueSeconds != null ? ' · last cue ' + clock(r.lastCueSeconds) : '')] : null,
+    ]));
+    out.push('<div class="grp">Upload</div>');
+    out.push(dl([
+      ['status', '<span class="badge ' + esc(r.status) + '">' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(r.error) + '</span>' : '')],
+      ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'open') : '—'],
+      r.privacy ? ['privacy', esc(r.privacy) + (r.privacy !== 'unlisted' ? ' <span class="warn">(unlisted was requested — an unverified OAuth app forces private)</span>' : '')] : null,
+      ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + relTime(new Date(r.notBefore * 1000).toISOString()) : '')],
+      r.jobId ? ['mkvid job', '<span class="mono">' + esc(r.jobId) + '</span>'] : null,
+      ['queued', esc(new Date(r.createdAt * 1000).toISOString())],
+      ['updated', esc(new Date(r.updatedAt * 1000).toISOString())],
+    ]));
+    if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed') {
+      out.push('<button class="ghost retry" data-id="' + esc(r.id) + '">' + (r.status === 'claimed' ? 'Release & retry' : 'Retry') + '</button>');
+    }
+    return out.join('');
+  }
+
+  function renderMkvid(d) {
+    const reqs = d.requests || [];
+    const c = d.counts || {};
+    const bits = [];
+    if (!d.enabled) bits.push('<span class="warn">MKVID_TOKEN not set — nothing is queued</span>');
+    bits.push((c.pending || 0) + ' pending', (c.claimed || 0) + ' rendering', (c.done || 0) + ' done', (c.failed || 0) + ' failed', (c.superseded || 0) + ' superseded');
+    if (d.requireFullTracklist) bits.push('full tracklists only');
+    $mkSummary.innerHTML = bits.join(' · ');
+    $mkList.innerHTML = '';
+    $mkEmpty.hidden = reqs.length > 0;
+    for (const r of reqs) {
+      const row = document.createElement('div');
+      row.className = 'arow' + (MK_PROBLEM.has(r.status) ? ' err' : '');
+      const head = document.createElement('div');
+      head.className = 'arow-head';
+      head.innerHTML =
+        '<span class="badge ' + esc(r.status) + '">' + esc(r.status) + '</span>' +
+        '<span class="title">' + esc(r.setTitle || setLabel(r.setUrl)) + '</span>' +
+        '<span class="via">' + esc(r.artistName || r.slug) + '</span>' +
+        '<span class="src">' + esc(r.sourceLabel || r.source) + '</span>' +
+        (r.videoId ? '<span class="vid">' + esc(r.videoId) + '</span>' : '') +
+        '<span class="when" title="' + esc(new Date(r.updatedAt * 1000).toISOString()) + '">' + esc(relTime(new Date(r.updatedAt * 1000).toISOString())) + '</span>';
+      row.appendChild(head);
+      const detail = document.createElement('div');
+      detail.className = 'arow-detail';
+      detail.hidden = true;
+      detail.innerHTML = mkDetailHtml(r);
+      row.appendChild(detail);
+      head.addEventListener('click', () => { detail.hidden = !detail.hidden; });
+      const retry = detail.querySelector('button.retry');
+      if (retry) retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try {
+          const resp = await fetch('/subscriptions/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin' });
+          if (!resp.ok) showError('retry failed (' + resp.status + ')');
+          await loadMkvid();
+        } finally { retry.disabled = false; }
+      });
+      $mkList.appendChild(row);
+    }
+  }
+
+  async function loadMkvid() {
+    try {
+      const r = await fetch('/subscriptions/api/mkvid', { credentials: 'same-origin' });
+      if (!r.ok) { $mkSummary.textContent = 'status unavailable (' + r.status + ')'; return; }
+      renderMkvid(await r.json());
+    } catch { $mkSummary.textContent = 'status unavailable'; }
+  }
+  $mkRefresh.addEventListener('click', loadMkvid);
+
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
   load();
   loadYouTubeStatus();
   loadCombined();
+  loadMkvid();
   loadAudit(true);
   loadPlaylistAdds(true);
 })();

@@ -6,7 +6,7 @@ import type { Env } from '../types'
  * route surface gets its own token so an agent holding LIKED_SONGS_TOKEN
  * can't drive the Tasker routes (and vice versa).
  */
-export function bearerAuthFor(secretName: 'API_TOKEN' | 'LIKED_SONGS_TOKEN'): MiddlewareHandler<{ Bindings: Env }> {
+export function bearerAuthFor(secretName: 'API_TOKEN' | 'LIKED_SONGS_TOKEN' | 'MKVID_TOKEN'): MiddlewareHandler<{ Bindings: Env }> {
   return async (c, next) => {
     const expected = c.env[secretName]
     if (!expected) return c.json({ error: `${secretName} not configured` }, 500)
@@ -25,6 +25,9 @@ export const bearerAuth = bearerAuthFor('API_TOKEN')
 
 /** Agent token — gates GET /liked-songs only. */
 export const likedSongsAuth = bearerAuthFor('LIKED_SONGS_TOKEN')
+
+/** mkvid's token — gates the /mkvid/* work queue only. */
+export const mkvidAuth = bearerAuthFor('MKVID_TOKEN')
 
 function timingSafeEqual(a: string, b: string): boolean {
   const ae = new TextEncoder().encode(a)

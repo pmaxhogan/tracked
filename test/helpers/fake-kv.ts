@@ -4,8 +4,8 @@
  * of the previous page, like the real API's opaque cursor but readable). TTLs
  * are accepted and ignored.
  */
-export function fakeKV(): KVNamespace & { _store: Map<string, { value: string; metadata?: unknown }> } {
-  const store = new Map<string, { value: string; metadata?: unknown }>()
+export function fakeKV(initial: Record<string, string> = {}): KVNamespace & { _store: Map<string, { value: string; metadata?: unknown }> } {
+  const store = new Map<string, { value: string; metadata?: unknown }>(Object.entries(initial).map(([k, value]) => [k, { value }]))
   const kv = {
     _store: store,
     async get(key: string, type?: 'json' | 'text' | { type?: string }) {

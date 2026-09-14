@@ -1,6 +1,10 @@
 API_TOKEN=replace-with-a-long-random-string
 # Separate bearer for GET /liked-songs (hand this one to agents; it can't drive the Tasker routes).
 LIKED_SONGS_TOKEN=replace-with-a-different-long-random-string
+# Optional. Bearer mkvid presents on /mkvid/* (same value as TRACKED_TOKEN in mkvid's .env).
+# While unset, the sync never queues a set for mkvid.
+# MKVID_TOKEN=replace-with-another-long-random-string
+# MKVID_REQUIRE_FULL_TRACKLIST=0
 YOUTUBE_API_KEY=replace-with-google-cloud-yt-data-api-key
 # Optional. When set, tracklist page GETs route through Bright Data Web Unlocker.
 # Leave unset for local dev from a residential IP (direct fetch works fine);

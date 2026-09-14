@@ -1,0 +1,272 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { Env } from '../src/types'
+import { fakeKV } from './helpers/fake-kv'
+import { fakeD1 } from './helpers/fake-d1'
+import {
+  claimMkvidRequest,
+  completeMkvidRequest,
+  countMkvidRequests,
+  enqueueMkvidRequest,
+  extractSetAudioSource,
+  extractSetTitle,
+  failMkvidRequest,
+  getMkvidRequest,
+  getMkvidRequestForSet,
+  lastCueSeconds,
+  listMkvidRequests,
+  MKVID_MAX_ATTEMPTS,
+  retryMkvidRequest,
+  supersedeMkvidRequestForSet,
+} from '../src/lib/mkvid'
+import { loadSubState, saveSubState } from '../src/lib/sync-store'
+import { makeLogger } from '../src/lib/log'
+
+vi.mock('../src/lib/youtube-playlists', async () => {
+  const actual = await vi.importActual<typeof import('../src/lib/youtube-playlists')>('../src/lib/youtube-playlists')
+  return {
+    ...actual,
+    findPlaylistByTitle: vi.fn(),
+    createPlaylist: vi.fn(),
+    listPlaylistVideoIds: vi.fn(),
+    addVideoToPlaylist: vi.fn(),
+    removeVideoFromPlaylist: vi.fn(),
+  }
+})
+import { addVideoToPlaylist, createPlaylist, findPlaylistByTitle, listPlaylistVideoIds } from '../src/lib/youtube-playlists'
+
+function makeEnv(overrides: Partial<Env> = {}): Env {
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', MKVID_TOKEN: 'mk', ...overrides } as Env
+}
+const log = makeLogger({ task: 'test' })
+const NOW = Math.floor(Date.now() / 1000)
+const fixture = (name: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
+
+const input = {
+  slug: 'lillypalmer',
+  setUrl: 'https://www.1001tracklists.com/tracklist/abc/lilly-palmer-x.html',
+  artistName: 'Lilly Palmer',
+  setTitle: 'Lilly Palmer @ X 2026-09-01',
+  source: { kind: 'soundcloud' as const, url: 'https://api.soundcloud.com/tracks/123' },
+  lastCueSeconds: 3600,
+  trackCount: 20,
+  idedCount: 18,
+}
+
+beforeEach(() => {
+  vi.resetAllMocks()
+  ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set<string>())
+})
+
+describe('extractSetAudioSource', () => {
+  it('finds the SoundCloud recording on real set pages and nothing on a YouTube-only page', () => {
+    expect(extractSetAudioSource(fixture('tracklist-maxstyler.html'))).toEqual({ kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/2099378310' })
+    expect(extractSetAudioSource(fixture('tracklist-habstrakt.html'))).toEqual({ kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1955469523' })
+    expect(extractSetAudioSource(fixture('tracklist-matroda.html'))).toBeNull()
+  })
+
+  it('prefers SoundCloud over hearthis when a page has both', () => {
+    const html = '<iframe src="https://app.hearthis.at/embed/123/transparent_black/"></iframe><iframe src="https://w.soundcloud.com/player/?url=https://api.soundcloud.com/tracks/9&amp;x=1"></iframe>'
+    expect(extractSetAudioSource(html)).toEqual({ kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/9' })
+  })
+
+  it.each([
+    ['app embed', '<iframe src="https://app.hearthis.at/embed/14673927/transparent_black/?hcolor=&color=&style=2"></iframe>', 'https://hearthis.at/embed/14673927/'],
+    ['bare embed', "<iframe src='https://hearthis.at/embed/555/'></iframe>", 'https://hearthis.at/embed/555/'],
+    ['track page link', '<a href="https://hearthis.at/paul-newman-ml/paul-newmans-smooth-sunday-13th-september-2026/">listen</a>', 'https://hearthis.at/paul-newman-ml/paul-newmans-smooth-sunday-13th-september-2026/'],
+    ['www track page, no trailing slash', 'see https://www.hearthis.at/dj_x/my.set-2026 now', 'https://hearthis.at/dj_x/my.set-2026/'],
+  ])('accepts hearthis %s', (_label, html, url) => {
+    expect(extractSetAudioSource(html)).toEqual({ kind: 'hearthis', url })
+  })
+
+  it('ignores hearthis links that are not a track page', () => {
+    expect(extractSetAudioSource('<a href="https://hearthis.at/user/someone/">profile</a> <a href="https://hearthis.at/search/x/">s</a>')).toBeNull()
+    expect(extractSetAudioSource('<a href="https://hearthis.at/">home</a>')).toBeNull()
+  })
+})
+
+describe('extractSetTitle / lastCueSeconds', () => {
+  it('reads and decodes the page title, rejecting the site-wide one', () => {
+    expect(extractSetTitle(fixture('tracklist-habstrakt.html'))).toBe(
+      'Habstrakt & JSTJR @ 1001Tracklists x DJ Lovers Club pres. WaterWays, Amsterdam Dance Event, Netherlands 2024-11-11',
+    )
+    expect(extractSetTitle(fixture('tracklist-matroda.html'))).toBe('Matroda @ Club Space Miami, United States 2023-08-05')
+    expect(extractSetTitle(fixture('tracklist-neptune.html'))).toBeNull()
+    expect(extractSetTitle('<title>Some Set | 1001Tracklists</title>')).toBe('Some Set')
+    expect(extractSetTitle('<html></html>')).toBeNull()
+  })
+
+  it('lastCueSeconds is the largest cue, null when nothing is cued', () => {
+    expect(lastCueSeconds([{ startSeconds: 10 }, { startSeconds: null }, { startSeconds: 4500 }, { startSeconds: 300 }])).toBe(4500)
+    expect(lastCueSeconds([{ startSeconds: null }])).toBeNull()
+    expect(lastCueSeconds([])).toBeNull()
+  })
+})
+
+describe('queue lifecycle', () => {
+  it('enqueues once per set and lists/counts it', async () => {
+    const env = makeEnv()
+    expect(await enqueueMkvidRequest(env, input)).toBe('queued')
+    expect(await enqueueMkvidRequest(env, { ...input, setTitle: 'other' })).toBe('exists')
+    const list = await listMkvidRequests(env)
+    expect(list).toHaveLength(1)
+    expect(list[0]).toMatchObject({ slug: 'lillypalmer', setUrl: input.setUrl, status: 'pending', attempts: 0, source: 'soundcloud', lastCueSeconds: 3600, idedCount: 18 })
+    expect(await countMkvidRequests(env)).toEqual({ pending: 1, claimed: 0, done: 0, failed: 0, superseded: 0 })
+    expect((await getMkvidRequestForSet(env, input.setUrl))!.id).toBe(list[0]!.id)
+  })
+
+  it('claim hands out the oldest pending request and marks it claimed', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/first' })
+    await new Promise((r) => setTimeout(r, 5))
+    // Same created_at second is possible; created_at ASC then falls back to insertion order.
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/second' })
+    const a = await claimMkvidRequest(env, log)
+    expect(a).toMatchObject({ setUrl: 'https://x/tracklist/first', status: 'claimed', attempts: 1 })
+    expect(a!.claimedAt).toBeGreaterThanOrEqual(NOW)
+    const b = await claimMkvidRequest(env, log)
+    expect(b).toMatchObject({ setUrl: 'https://x/tracklist/second', status: 'claimed', attempts: 1 })
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+  })
+
+  it('claim skips (and supersedes) a request whose set already has a video', async () => {
+    const env = makeEnv()
+    await saveSubState(env, 'lillypalmer', {
+      processedTracklistUrls: [input.setUrl],
+      tracklistVideos: { [input.setUrl]: { videoId: 'realVid1234', checkedAt: NOW } },
+    })
+    await enqueueMkvidRequest(env, input)
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect((await getMkvidRequestForSet(env, input.setUrl))!).toMatchObject({ status: 'superseded', error: 'set already resolves to realVid1234 (1001tl)' })
+  })
+
+  it('a claim older than the claim TTL is handed out again; attempts are capped', async () => {
+    const env = makeEnv({ MKVID_CLAIM_TTL_SECONDS: '60' })
+    await enqueueMkvidRequest(env, input)
+    const first = (await claimMkvidRequest(env, log))!
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    // Age the claim past the TTL.
+    await env.DB.prepare('UPDATE mkvid_requests SET claimed_at = ? WHERE id = ?').bind(NOW - 120, first.id).run()
+    const again = (await claimMkvidRequest(env, log))!
+    expect(again).toMatchObject({ id: first.id, status: 'claimed', attempts: 2 })
+    await env.DB.prepare('UPDATE mkvid_requests SET claimed_at = ?, attempts = ? WHERE id = ?').bind(NOW - 120, MKVID_MAX_ATTEMPTS, first.id).run()
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect((await getMkvidRequest(env, first.id))!).toMatchObject({ status: 'failed', error: 'too many attempts' })
+  })
+
+  it('fail: retryable goes back to pending with a backoff, permanent parks it, exhausted parks it', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    expect(await failMkvidRequest(env, { id: req.id, error: 'yt-dlp exit 1', jobId: 'job1' }, log)).toEqual({ status: 'pending', attempts: 1 })
+    const r1 = (await getMkvidRequest(env, req.id))!
+    expect(r1.notBefore).toBeGreaterThan(NOW + 5 * 3600)
+    expect(r1.jobId).toBe('job1')
+    expect(r1.error).toBe('yt-dlp exit 1')
+    // Not claimable until the backoff lapses.
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    await env.DB.prepare('UPDATE mkvid_requests SET not_before = 0 WHERE id = ?').bind(req.id).run()
+    expect((await claimMkvidRequest(env, log))!.attempts).toBe(2)
+    expect(await failMkvidRequest(env, { id: req.id, error: 'incomplete_recording: 1800s < last cue 3600s', permanent: true }, log)).toEqual({ status: 'failed', attempts: 2 })
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    // Retry from the panel resets it.
+    expect(await retryMkvidRequest(env, req.id)).toBe(true)
+    expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'pending', attempts: 0, notBefore: null, error: null })
+    expect(await failMkvidRequest(env, { id: 'nope', error: 'x' }, log)).toBeNull()
+  })
+
+  it('supersede only touches live requests', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    expect(await supersedeMkvidRequestForSet(env, input.setUrl, 'realVid1234')).toBe(true)
+    expect((await getMkvidRequestForSet(env, input.setUrl))!.status).toBe('superseded')
+    expect(await supersedeMkvidRequestForSet(env, input.setUrl, 'realVid1234')).toBe(false)
+    expect(await supersedeMkvidRequestForSet(env, 'https://x/unknown', 'realVid1234')).toBe(false)
+  })
+})
+
+describe('completeMkvidRequest', () => {
+  function playlistsExist(artist = 'PLartist', combined = 'PLcombined') {
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockImplementation(async (title: string) =>
+      title.startsWith('All tracked artists') ? { id: combined, title } : { id: artist, title },
+    )
+  }
+
+  it('adds the upload to the artist + combined playlists, records it on the tracklist row and audits it', async () => {
+    const env = makeEnv()
+    await saveSubState(env, 'lillypalmer', {
+      playlistId: 'PLartist',
+      artistName: 'Lilly Palmer',
+      processedTracklistUrls: [input.setUrl],
+      tracklistVideos: { [input.setUrl]: { videoId: null, checkedAt: NOW - 100 } },
+    })
+    playlistsExist()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+
+    const r = await completeMkvidRequest(env, { id: req.id, videoId: 'upload12345', videoUrl: 'https://youtu.be/upload12345', privacy: 'unlisted', jobId: 'job9' }, 'tok', log)
+
+    expect(r).toEqual({ status: 'done', videoId: 'upload12345', playlistId: 'PLartist', playlistStatus: 'added', combinedStatus: 'added' })
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['PLartist', 'upload12345'],
+      ['PLcombined', 'upload12345'],
+    ])
+    const state = (await loadSubState(env, 'lillypalmer'))!
+    expect(state.tracklistVideos![input.setUrl]).toEqual({ videoId: 'upload12345', checkedAt: expect.any(Number), source: 'mkvid' })
+    expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'done', videoId: 'upload12345', privacy: 'unlisted', jobId: 'job9', error: null })
+    const audit = await env.DB.prepare('SELECT record FROM playlist_additions').all<{ record: string }>()
+    expect(audit.results).toHaveLength(1)
+    expect(JSON.parse(audit.results[0]!.record)).toMatchObject({ status: 'added', via: 'mkvid', trigger: 'mkvid', videoId: 'upload12345', slug: 'lillypalmer', combinedStatus: 'added' })
+    // Membership caches were updated so the next sync tick doesn't re-list.
+    expect(await env.CACHE.get('yt:plvids:PLartist', 'json')).toEqual({ videoIds: ['upload12345'] })
+  })
+
+  it('creates the artist playlist when the DJ was never synced', async () => {
+    const env = makeEnv()
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockImplementation(async (title: string) =>
+      title.startsWith('All tracked artists') ? { id: 'PLcombined', title } : null,
+    )
+    ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLnew', title: 'Lilly Palmer (1001tklists)' })
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    const r = await completeMkvidRequest(env, { id: req.id, videoId: 'upload12345' }, 'tok', log)
+    expect(r).toMatchObject({ status: 'done', playlistId: 'PLnew', playlistStatus: 'added' })
+    expect(createPlaylist).toHaveBeenCalledTimes(1)
+    expect((await loadSubState(env, 'lillypalmer'))!.playlistId).toBe('PLnew')
+  })
+
+  it('supersedes instead of inserting when the set gained a real recording mid-render', async () => {
+    const env = makeEnv()
+    await saveSubState(env, 'lillypalmer', {
+      playlistId: 'PLartist',
+      processedTracklistUrls: [input.setUrl],
+      tracklistVideos: { [input.setUrl]: { videoId: null, checkedAt: NOW - 100 } },
+    })
+    playlistsExist()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    // A recheck found a YouTube recording while mkvid was busy.
+    await saveSubState(env, 'lillypalmer', {
+      playlistId: 'PLartist',
+      processedTracklistUrls: [input.setUrl],
+      tracklistVideos: { [input.setUrl]: { videoId: 'realVid1234', checkedAt: NOW } },
+    })
+    const r = await completeMkvidRequest(env, { id: req.id, videoId: 'upload12345', privacy: 'unlisted' }, 'tok', log)
+    expect(r).toEqual({ status: 'superseded', videoId: 'upload12345', existingVideoId: 'realVid1234' })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'superseded', videoId: 'upload12345' })
+    expect((await loadSubState(env, 'lillypalmer'))!.tracklistVideos![input.setUrl]!.videoId).toBe('realVid1234')
+  })
+
+  it('rejects unknown ids and already-finished requests', async () => {
+    const env = makeEnv()
+    playlistsExist()
+    expect(await completeMkvidRequest(env, { id: 'nope', videoId: 'upload12345' }, 'tok', log)).toEqual({ status: 'not_found' })
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    await completeMkvidRequest(env, { id: req.id, videoId: 'upload12345' }, 'tok', log)
+    expect(await completeMkvidRequest(env, { id: req.id, videoId: 'upload12345' }, 'tok', log)).toEqual({ status: 'invalid_state', current: 'done' })
+  })
+})

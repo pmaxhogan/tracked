@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { fakeD1 } from './helpers/fake-d1'
 import type { Env } from '../src/types'
+import { enqueueMkvidRequest, getMkvidRequestForSet } from '../src/lib/mkvid'
 import {
   backfillCombined,
   collectCombinedSources,
@@ -1126,6 +1130,112 @@ describe('legacy KV state import inside a sync', () => {
     expect(fetch1001Html).not.toHaveBeenCalled()
     expect(crawlDjIndex).not.toHaveBeenCalled()
     expect(addVideoToPlaylist).not.toHaveBeenCalled()
+  })
+})
+
+describe('mkvid bridge inside a sync', () => {
+  // A real set page with a SoundCloud recording and a full tracklist; the
+  // YouTube-id parser is mocked, so the same page can play "no recording".
+  const soundcloudPage = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-maxstyler.html'), 'utf8')
+  const setUrl = 'https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html'
+  const withMkvid = () => ({ ...makeEnv(), MKVID_TOKEN: 'mk' }) as Env
+
+  it('queues a set with no YouTube recording but a SoundCloud one, and notes it on the audit row', async () => {
+    const env = withMkvid()
+    mockCrawl([setUrl], 'Max Styler')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Max Styler (1001tklists)' })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'home-proxy', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+
+    await syncOne(env, sub, 'tok')
+
+    const req = await getMkvidRequestForSet(env, setUrl)
+    expect(req).toMatchObject({
+      slug: 'lillypalmer',
+      status: 'pending',
+      source: 'soundcloud',
+      sourceUrl: 'https://api.soundcloud.com/tracks/2099378310',
+      artistName: 'Max Styler',
+      setTitle: 'Max Styler @ circuitGROUNDS, EDC Las Vegas, United States 2025-05-16',
+    })
+    expect(req!.trackCount).toBeGreaterThan(10)
+    expect(req!.lastCueSeconds).toBeGreaterThan(0)
+    const rows = await playlistAdditions(env)
+    expect(rows[0]!.record).toMatchObject({ status: 'no_youtube', message: 'queued for mkvid (soundcloud)' })
+    // Nothing went to YouTube.
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+  })
+
+  it('does nothing without MKVID_TOKEN, or for a page with no audio source', async () => {
+    const env = makeEnv()
+    mockCrawl([setUrl], 'X')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    await syncOne(env, sub, 'tok')
+    expect(await getMkvidRequestForSet(env, setUrl)).toBeNull()
+
+    const env2 = withMkvid()
+    mockCrawl([setUrl], 'X')
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: '<html><div class="tlpItem"></div></html>', via: 'direct', state: { cookie: '' } })
+    await syncOne(env2, sub, 'tok')
+    expect(await getMkvidRequestForSet(env2, setUrl)).toBeNull()
+    expect((await playlistAdditions(env2))[0]!.record.message).toBeNull()
+  })
+
+  it('honours MKVID_REQUIRE_FULL_TRACKLIST for a partial tracklist', async () => {
+    const env = { ...withMkvid(), MKVID_REQUIRE_FULL_TRACKLIST: '1' } as Env
+    mockCrawl([setUrl], 'X')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
+    // The fixture has anonymous "ID" rows, so it counts as partial.
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    await syncOne(env, sub, 'tok')
+    expect(await getMkvidRequestForSet(env, setUrl)).toBeNull()
+    expect((await playlistAdditions(env))[0]!.record.message).toMatch(/not queued, tracklist partial/)
+  })
+
+  it('a recheck of a set that still has no recording queues it too (idempotently)', async () => {
+    const env = withMkvid()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: [setUrl],
+      processedTracklistUrls: [setUrl],
+      tracklistVideos: { [setUrl]: stale(null) },
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe('pending')
+    // A later recheck leaves the existing request alone.
+    await saveSubState(env, sub.slug, { ...(await loadSubState(env, sub.slug))!, tracklistVideos: { [setUrl]: stale(null) } })
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM mkvid_requests').first<{ n: number }>()).toEqual({ n: 1 })
+    // No audit row for a recheck that changed nothing.
+    expect(await playlistAdditions(env)).toEqual([])
+  })
+
+  it('a recheck that finds a real recording supersedes the pending request', async () => {
+    const env = withMkvid()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: [setUrl],
+      processedTracklistUrls: [setUrl],
+      tracklistVideos: { [setUrl]: stale(null) },
+    })
+    await enqueueMkvidRequest(env, {
+      slug: sub.slug, setUrl, artistName: 'X', setTitle: null,
+      source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1' }, lastCueSeconds: null, trackCount: 1, idedCount: 1,
+    })
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLcombined', title: 'All tracked artists (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    expect(addVideoToPlaylist).toHaveBeenCalledWith('PL', 'officialV12', 'tok')
+    expect((await getMkvidRequestForSet(env, setUrl))!).toMatchObject({ status: 'superseded', error: '1001tracklists now has officialV12' })
   })
 })
 
