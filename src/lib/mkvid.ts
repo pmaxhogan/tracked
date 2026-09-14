@@ -41,8 +41,30 @@ export const MKVID_MAX_ATTEMPTS = 3
 export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
 /** A retryable failure waits this long × attempts before it can be claimed again. */
 const RETRY_BACKOFF_SECONDS = 6 * 60 * 60
+/**
+ * Claims handed out per UTC day. mkvid uploads through the same Google Cloud
+ * project as the sync, and a `videos.insert` costs 1 600 of the project's
+ * 10 000 daily units — an unthrottled queue would starve the sync's own
+ * playlist inserts (50 each, ~6 000 budgeted). Two uploads leave that intact.
+ */
+export const DEFAULT_DAILY_CLAIM_CAP = 2
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
+const utcDayStart = (now = nowSeconds()) => now - (now % 86400)
+
+export function dailyClaimCap(env: Env): number {
+  const n = Number(env.MKVID_DAILY_CLAIM_CAP)
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_DAILY_CLAIM_CAP
+}
+
+/** Requests handed out since 00:00 UTC — counted from D1, so a deploy or KV eviction cannot reset it. */
+export async function dailyClaimsUsed(env: Env): Promise<number> {
+  const r = await dbOf(env)
+    .prepare('SELECT COUNT(*) AS n FROM mkvid_requests WHERE claimed_at IS NOT NULL AND claimed_at >= ?')
+    .bind(utcDayStart())
+    .first<{ n: number }>()
+  return Number(r?.n ?? 0)
+}
 
 // ─── page parsing ───────────────────────────────────────────────────────────
 
@@ -274,6 +296,12 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
   const db = dbOf(env)
   const now = nowSeconds()
   const stale = now - claimTtl(env)
+  const cap = dailyClaimCap(env)
+  const used = await dailyClaimsUsed(env)
+  if (used >= cap) {
+    log.info('mkvid.claim_capped', { used, cap })
+    return null
+  }
   for (let i = 0; i < 20; i++) {
     const row = await db
       .prepare(
@@ -311,7 +339,7 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
     // Lost a race with another claimer (two mkvid instances) — pick again.
     if ((r.meta.changes ?? 0) === 0) continue
     const claimed = await getMkvidRequest(env, row.id)
-    log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: (claimed?.attempts ?? 0) })
+    log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, dailyClaims: used + 1, cap })
     return claimed
   }
   return null

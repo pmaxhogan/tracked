@@ -18,7 +18,7 @@ import type { Env } from '../types'
 import { mkvidAuth } from '../middleware/auth'
 import { getAccessToken, GoogleOAuthRefreshFailed } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
-import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, failMkvidRequest } from '../lib/mkvid'
+import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, dailyClaimCap, dailyClaimsUsed, failMkvidRequest } from '../lib/mkvid'
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/
 
@@ -49,7 +49,9 @@ async function body<T>(c: { req: { json(): Promise<unknown> } }, schema: z.ZodTy
   return parsed.success ? parsed.data : null
 }
 
-mkvidApp.get('/health', async (c) => c.json({ ok: true, counts: await countMkvidRequests(c.env) }))
+mkvidApp.get('/health', async (c) =>
+  c.json({ ok: true, counts: await countMkvidRequests(c.env), dailyClaims: await dailyClaimsUsed(c.env), dailyClaimCap: dailyClaimCap(c.env) }),
+)
 
 mkvidApp.post('/claim', async (c) => {
   const log = logger(c, 'mkvid.claim')

@@ -95,7 +95,7 @@ describe('/mkvid routes', () => {
     expect((await post(env, '/mkvid/claim', {})).status).toBe(200)
     expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
     const health = await app.request('http://x/mkvid/health', { headers: { Authorization: 'Bearer mk-secret' } }, env)
-    expect(await health.json()).toEqual({ ok: true, counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0 } })
+    expect(await health.json()).toEqual({ ok: true, counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0 }, dailyClaims: 1, dailyClaimCap: 2 })
   })
 
   it('validates bodies and reports unknown / finished requests', async () => {

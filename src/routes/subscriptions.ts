@@ -41,7 +41,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
-import { countMkvidRequests, listMkvidRequests, requestSummary, retryMkvidRequest } from '../lib/mkvid'
+import { countMkvidRequests, dailyClaimCap, dailyClaimsUsed, listMkvidRequests, requestSummary, retryMkvidRequest } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -701,11 +701,17 @@ subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus
 /** The mkvid queue (lib/mkvid.ts): every set handed to mkvid, newest activity first. */
 subscriptionsApp.get('/api/mkvid', async (c) => {
   const n = parseInt(c.req.query('limit') || '100', 10)
-  const [requests, counts] = await Promise.all([listMkvidRequests(c.env, Number.isFinite(n) ? n : 100), countMkvidRequests(c.env)])
+  const [requests, counts, dailyClaims] = await Promise.all([
+    listMkvidRequests(c.env, Number.isFinite(n) ? n : 100),
+    countMkvidRequests(c.env),
+    dailyClaimsUsed(c.env),
+  ])
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
     requireFullTracklist: /^(1|true|yes)$/i.test(c.env.MKVID_REQUIRE_FULL_TRACKLIST ?? ''),
     counts,
+    dailyClaims,
+    dailyClaimCap: dailyClaimCap(c.env),
     requests: requests.map(requestSummary),
   })
 })
@@ -1808,6 +1814,7 @@ ${BAN_HISTORY_HTML}
     const bits = [];
     if (!d.enabled) bits.push('<span class="warn">MKVID_TOKEN not set — nothing is queued</span>');
     bits.push((c.pending || 0) + ' pending', (c.claimed || 0) + ' rendering', (c.done || 0) + ' done', (c.failed || 0) + ' failed', (c.superseded || 0) + ' superseded');
+    if (d.dailyClaimCap != null) bits.push((d.dailyClaims || 0) + '/' + d.dailyClaimCap + ' claims today <span title="each upload costs 1 600 of the 10 000 daily YouTube quota units the sync shares">(quota)</span>');
     if (d.requireFullTracklist) bits.push('full tracklists only');
     $mkSummary.innerHTML = bits.join(' · ');
     $mkList.innerHTML = '';

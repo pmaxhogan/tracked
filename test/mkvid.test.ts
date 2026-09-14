@@ -6,6 +6,7 @@ import type { Env } from '../src/types'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import {
+  dailyClaimsUsed,
   claimMkvidRequest,
   completeMkvidRequest,
   countMkvidRequests,
@@ -143,7 +144,7 @@ describe('queue lifecycle', () => {
   })
 
   it('a claim older than the claim TTL is handed out again; attempts are capped', async () => {
-    const env = makeEnv({ MKVID_CLAIM_TTL_SECONDS: '60' })
+    const env = makeEnv({ MKVID_CLAIM_TTL_SECONDS: '60', MKVID_DAILY_CLAIM_CAP: '10' })
     await enqueueMkvidRequest(env, input)
     const first = (await claimMkvidRequest(env, log))!
     expect(await claimMkvidRequest(env, log)).toBeNull()
@@ -175,6 +176,23 @@ describe('queue lifecycle', () => {
     expect(await retryMkvidRequest(env, req.id)).toBe(true)
     expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'pending', attempts: 0, notBefore: null, error: null })
     expect(await failMkvidRequest(env, { id: 'nope', error: 'x' }, log)).toBeNull()
+  })
+
+  it('hands out at most MKVID_DAILY_CLAIM_CAP requests per UTC day (default 2)', async () => {
+    const env = makeEnv()
+    for (const n of [1, 2, 3]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
+    expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/1')
+    expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/2')
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await countMkvidRequests(env)).toMatchObject({ pending: 1, claimed: 2 })
+    expect(await dailyClaimsUsed(env)).toBe(2)
+
+    const raised = makeEnv({ MKVID_DAILY_CLAIM_CAP: '5' })
+    for (const n of [1, 2, 3]) await enqueueMkvidRequest(raised, { ...input, setUrl: `https://x/tracklist/${n}` })
+    for (let i = 0; i < 3; i++) expect(await claimMkvidRequest(raised, log)).not.toBeNull()
+    const off = makeEnv({ MKVID_DAILY_CLAIM_CAP: '0' })
+    await enqueueMkvidRequest(off, input)
+    expect(await claimMkvidRequest(off, log)).toBeNull()
   })
 
   it('supersede only touches live requests', async () => {
