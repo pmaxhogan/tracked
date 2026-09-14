@@ -7,6 +7,7 @@ import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import {
   dailyClaimsUsed,
+  quotaDayStart,
   claimMkvidRequest,
   completeMkvidRequest,
   countMkvidRequests,
@@ -178,7 +179,28 @@ describe('queue lifecycle', () => {
     expect(await failMkvidRequest(env, { id: 'nope', error: 'x' }, log)).toBeNull()
   })
 
-  it('hands out at most MKVID_DAILY_CLAIM_CAP requests per UTC day (default 2)', async () => {
+  it('quotaDayStart is the most recent midnight Pacific', () => {
+    // 2026-09-14T18:30:00Z is 11:30 PDT → day began 07:00Z.
+    expect(quotaDayStart(Date.UTC(2026, 8, 14, 18, 30, 0))).toBe(Date.UTC(2026, 8, 14, 7, 0, 0) / 1000)
+    // 2026-09-15T02:00:00Z is still 19:00 PDT on the 14th → same day start, not 00:00Z.
+    expect(quotaDayStart(Date.UTC(2026, 8, 15, 2, 0, 0))).toBe(Date.UTC(2026, 8, 14, 7, 0, 0) / 1000)
+    // In winter (PST) the day begins at 08:00Z.
+    expect(quotaDayStart(Date.UTC(2026, 0, 10, 12, 0, 0))).toBe(Date.UTC(2026, 0, 10, 8, 0, 0) / 1000)
+  })
+
+  it('a claim refused before rendering or requeued does not use a daily slot', async () => {
+    const env = makeEnv()
+    for (const n of [1, 2, 3]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
+    const a = (await claimMkvidRequest(env, log))!
+    await failMkvidRequest(env, { id: a.id, error: 'incomplete_recording', permanent: true, jobId: null }, log)
+    const b = (await claimMkvidRequest(env, log))!
+    await failMkvidRequest(env, { id: b.id, error: 'yt-dlp exit 1', jobId: null }, log)
+    expect(await dailyClaimsUsed(env)).toBe(0)
+    expect(await claimMkvidRequest(env, log)).not.toBeNull()
+    expect(await dailyClaimsUsed(env)).toBe(1)
+  })
+
+  it('hands out at most MKVID_DAILY_CLAIM_CAP requests per quota day (default 2)', async () => {
     const env = makeEnv()
     for (const n of [1, 2, 3]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
     expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/1')

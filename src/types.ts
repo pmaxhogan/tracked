@@ -20,7 +20,7 @@ export type Env = {
   MKVID_REQUIRE_FULL_TRACKLIST?: string
   /** Seconds after which a claimed-but-unreported mkvid request is handed out again (default 10800 = 3 h). */
   MKVID_CLAIM_TTL_SECONDS?: string
-  /** Max requests handed to mkvid per UTC day (default 2): each upload costs 1 600 units of the YouTube quota the sync shares. */
+  /** Max requests handed to mkvid per YouTube quota day (midnight Pacific; default 2): each upload costs 1 600 units of the quota the sync shares. */
   MKVID_DAILY_CLAIM_CAP?: string
   YOUTUBE_API_KEY: string
   /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */

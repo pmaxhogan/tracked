@@ -42,26 +42,38 @@ export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
 /** A retryable failure waits this long × attempts before it can be claimed again. */
 const RETRY_BACKOFF_SECONDS = 6 * 60 * 60
 /**
- * Claims handed out per UTC day. mkvid uploads through the same Google Cloud
+ * Claims handed out per quota day. mkvid uploads through the same Google Cloud
  * project as the sync, and a `videos.insert` costs 1 600 of the project's
  * 10 000 daily units — an unthrottled queue would starve the sync's own
  * playlist inserts (50 each, ~6 000 budgeted). Two uploads leave that intact.
  */
 export const DEFAULT_DAILY_CLAIM_CAP = 2
+/** The YouTube Data API quota resets at midnight Pacific, not UTC. */
+const QUOTA_TZ = 'America/Los_Angeles'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
-const utcDayStart = (now = nowSeconds()) => now - (now % 86400)
+
+/** Unix seconds of the most recent midnight in the quota's time zone (DST handled by the zone). */
+export function quotaDayStart(nowMs = Date.now()): number {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: QUOTA_TZ, hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(nowMs))
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0)
+  return Math.floor(nowMs / 1000) - (get('hour') * 3600 + get('minute') * 60 + get('second'))
+}
 
 export function dailyClaimCap(env: Env): number {
   const n = Number(env.MKVID_DAILY_CLAIM_CAP)
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_DAILY_CLAIM_CAP
 }
 
-/** Requests handed out since 00:00 UTC — counted from D1, so a deploy or KV eviction cannot reset it. */
+/**
+ * Requests handed out since the quota day began — counted from D1, so a deploy
+ * cannot reset it. Only claims that (may) have cost an upload count: one that
+ * was refused before rendering (`failed`) or went back to `pending` spent nothing.
+ */
 export async function dailyClaimsUsed(env: Env): Promise<number> {
   const r = await dbOf(env)
-    .prepare('SELECT COUNT(*) AS n FROM mkvid_requests WHERE claimed_at IS NOT NULL AND claimed_at >= ?')
-    .bind(utcDayStart())
+    .prepare("SELECT COUNT(*) AS n FROM mkvid_requests WHERE status IN ('claimed', 'done') AND claimed_at IS NOT NULL AND claimed_at >= ?")
+    .bind(quotaDayStart())
     .first<{ n: number }>()
   return Number(r?.n ?? 0)
 }
