@@ -81,7 +81,7 @@ import {
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
 import { parseTracklist } from './tracklists1001'
-import { enqueueMkvidRequest, extractSetAudioSource, extractSetTitle, lastCueSeconds, supersedeMkvidRequestForSet } from './mkvid'
+import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
   flushPlaylistAdditions,
@@ -777,6 +777,7 @@ export async function syncOne(
         setUrl,
         artistName,
         setTitle: extractSetTitle(html),
+        setDate: extractSetDate(setUrl, html),
         source,
         lastCueSeconds: lastCueSeconds(tracks),
         trackCount: tracks.length,

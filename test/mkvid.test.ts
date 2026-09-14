@@ -7,6 +7,8 @@ import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import {
   dailyClaimsUsed,
+  extractSetDate,
+  nextMkvidRequests,
   quotaDayStart,
   claimMkvidRequest,
   completeMkvidRequest,
@@ -51,6 +53,7 @@ const input = {
   setUrl: 'https://www.1001tracklists.com/tracklist/abc/lilly-palmer-x.html',
   artistName: 'Lilly Palmer',
   setTitle: 'Lilly Palmer @ X 2026-09-01',
+  setDate: '2026-09-01',
   source: { kind: 'soundcloud' as const, url: 'https://api.soundcloud.com/tracks/123' },
   lastCueSeconds: 3600,
   trackCount: 20,
@@ -177,6 +180,37 @@ describe('queue lifecycle', () => {
     expect(await retryMkvidRequest(env, req.id)).toBe(true)
     expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'pending', attempts: 0, notBefore: null, error: null })
     expect(await failMkvidRequest(env, { id: 'nope', error: 'x' }, log)).toBeNull()
+  })
+
+  it('extractSetDate: URL slug first, then date-only datePublished meta, then the title', () => {
+    const html = fixture('tracklist-maxstyler.html')
+    expect(extractSetDate('https://www.1001tracklists.com/tracklist/1pmwyfn1/max-styler-circuitgrounds-edc-las-vegas-united-states-2025-05-16.html', html)).toBe('2025-05-16')
+    // No date in the URL → the page's date-only meta wins over the timestamped page-publication one.
+    expect(extractSetDate('https://www.1001tracklists.com/tracklist/1pmwyfn1/max-styler.html', html)).toBe('2025-05-16')
+    expect(extractSetDate('https://x/tracklist/y.html', '<title>Some DJ @ Somewhere 2024-11-11 | 1001Tracklists</title>')).toBe('2024-11-11')
+    expect(extractSetDate('https://x/tracklist/y-2024-13-45.html', '<title>Some DJ @ Somewhere</title>')).toBeNull()
+    expect(extractSetDate('https://x/tracklist/y.html', fixture('tracklist-neptune.html'))).toBeNull()
+  })
+
+  it('serves the newest set first, undated sets last, ties by most recently queued', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
+    const q = async (n: string, setDate: string | null) => {
+      await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate })
+      // sql.js has second resolution on created_at; force distinct queue times.
+      await env.DB.prepare('UPDATE mkvid_requests SET created_at = created_at + ? WHERE set_url = ?').bind(['old', 'mid', 'new', 'undated-old', 'undated-new'].indexOf(n), `https://x/tracklist/${n}`).run()
+    }
+    await q('old', '2014-03-06')
+    await q('undated-old', null)
+    await q('new', '2026-09-11')
+    await q('undated-new', null)
+    await q('mid', '2023-08-05')
+    expect((await nextMkvidRequests(env, 10)).map((r) => r.setUrl.split('/').pop())).toEqual(['new', 'mid', 'old', 'undated-new', 'undated-old'])
+    expect((await claimMkvidRequest(env, log))!.setDate).toBe('2026-09-11')
+    expect((await claimMkvidRequest(env, log))!.setDate).toBe('2023-08-05')
+    expect((await claimMkvidRequest(env, log))!.setDate).toBe('2014-03-06')
+    expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/undated-new')
+    expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/undated-old')
+    expect(await nextMkvidRequests(env)).toEqual([])
   })
 
   it('quotaDayStart is the most recent midnight Pacific', () => {

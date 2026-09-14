@@ -1158,6 +1158,8 @@ describe('mkvid bridge inside a sync', () => {
       sourceUrl: 'https://api.soundcloud.com/tracks/2099378310',
       artistName: 'Max Styler',
       setTitle: 'Max Styler @ circuitGROUNDS, EDC Las Vegas, United States 2025-05-16',
+      // No date in this URL, so it comes from the page's date-only datePublished meta.
+      setDate: '2025-05-16',
     })
     expect(req!.trackCount).toBeGreaterThan(10)
     expect(req!.lastCueSeconds).toBeGreaterThan(0)
@@ -1228,7 +1230,7 @@ describe('mkvid bridge inside a sync', () => {
       tracklistVideos: { [setUrl]: stale(null) },
     })
     await enqueueMkvidRequest(env, {
-      slug: sub.slug, setUrl, artistName: 'X', setTitle: null,
+      slug: sub.slug, setUrl, artistName: 'X', setTitle: null, setDate: null,
       source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1' }, lastCueSeconds: null, trackCount: 1, idedCount: 1,
     })
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLcombined', title: 'All tracked artists (1001tklists)' })
@@ -1592,8 +1594,6 @@ describe('per-tick 1001tl fetch budget (account rate-limit pacing)', () => {
     expect(r.results[0]!.stats.tracklistsRechecked).toBe(2)
     expect(r.results[0]!.stats.rechecksPending).toBe(2)
   })
-})
-
 
   it('resync-all runs one pass over every DJ on a single shared budget (the per-row browser loop was unpaced)', async () => {
     const env = { ...makeEnv(), TL_FETCHES_PER_TICK: '3' } as Env
@@ -1618,6 +1618,8 @@ describe('per-tick 1001tl fetch budget (account rate-limit pacing)', () => {
     expect(fetch1001Html).toHaveBeenCalledTimes(2)
     expect(budget).toMatchObject({ spent: 2, remaining: 0 })
   })
+})
+
 describe('dead YouTube videos settle on the first strike', () => {
   beforeEach(() => _resetTallyForTests())
 

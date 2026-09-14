@@ -126,6 +126,31 @@ export function extractSetTitle(html: string): string | null {
   return t && !/^1001Tracklists\b/i.test(t) ? t : null
 }
 
+const ISO_DATE = /(\d{4}-\d{2}-\d{2})/
+const URL_DATE_RE = /-(\d{4}-\d{2}-\d{2})\.html(?:[?#]|$)/
+const META_DATE_RE = /itemprop="datePublished"\s+content="(\d{4}-\d{2}-\d{2})"/
+
+/**
+ * The set's date as ISO YYYY-MM-DD: the 1001tracklists URL slug ends in it,
+ * failing that the page's date-only `datePublished` meta (the page-publication
+ * one carries a full timestamp and is skipped), failing that the `<title>`.
+ * Null when none of them has one — such a request is served last.
+ */
+export function extractSetDate(setUrl: string, html: string): string | null {
+  const fromUrl = setUrl.match(URL_DATE_RE)?.[1]
+  if (fromUrl && isPlausibleDate(fromUrl)) return fromUrl
+  const fromMeta = html.match(META_DATE_RE)?.[1]
+  if (fromMeta && isPlausibleDate(fromMeta)) return fromMeta
+  const title = extractSetTitle(html)
+  const fromTitle = title?.match(ISO_DATE)?.[1]
+  return fromTitle && isPlausibleDate(fromTitle) ? fromTitle : null
+}
+
+function isPlausibleDate(d: string): boolean {
+  const t = Date.parse(`${d}T00:00:00Z`)
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d && t > Date.UTC(1990, 0, 1) && t < Date.now() + 366 * 86400 * 1000
+}
+
 function decodeEntities(s: string): string {
   return s
     .replace(/&amp;/g, '&')
@@ -156,6 +181,8 @@ export type MkvidRequest = {
   setUrl: string
   artistName: string | null
   setTitle: string | null
+  /** ISO YYYY-MM-DD; the queue is served newest set first, undated last. */
+  setDate: string | null
   source: MkvidSourceKind
   sourceUrl: string
   lastCueSeconds: number | null
@@ -180,6 +207,7 @@ type Row = {
   set_url: string
   artist_name: string | null
   set_title: string | null
+  set_date: string | null
   source: string
   source_url: string
   last_cue_seconds: number | null
@@ -205,6 +233,7 @@ function rowToRequest(r: Row): MkvidRequest {
     setUrl: r.set_url,
     artistName: r.artist_name,
     setTitle: r.set_title,
+    setDate: r.set_date ?? null,
     source: r.source as MkvidSourceKind,
     sourceUrl: r.source_url,
     lastCueSeconds: r.last_cue_seconds,
@@ -229,6 +258,7 @@ export type EnqueueInput = {
   setUrl: string
   artistName: string | null
   setTitle: string | null
+  setDate: string | null
   source: MkvidSource
   lastCueSeconds: number | null
   trackCount: number | null
@@ -245,9 +275,9 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
   const r = await dbOf(env)
     .prepare(
       `INSERT OR IGNORE INTO mkvid_requests
-         (id, slug, set_url, artist_name, set_title, source, source_url, last_cue_seconds, track_count, ided_count,
+         (id, slug, set_url, artist_name, set_title, set_date, source, source_url, last_cue_seconds, track_count, ided_count,
           status, attempts, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
     )
     .bind(
       crypto.randomUUID(),
@@ -255,6 +285,7 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
       input.setUrl,
       v(input.artistName),
       v(input.setTitle),
+      v(input.setDate),
       input.source.kind,
       input.source.url,
       v(input.lastCueSeconds),
@@ -286,6 +317,24 @@ export async function listMkvidRequests(env: Env, limit = 100): Promise<MkvidReq
   return res.results.map(rowToRequest)
 }
 
+/**
+ * Queue order: newest set first (by set date), undated sets last, ties by most
+ * recently queued. Shared by the claim and the panel's "next up" preview.
+ */
+const CLAIMABLE_WHERE = `(status = 'pending' AND (not_before IS NULL OR not_before <= ?))
+            OR (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)`
+const QUEUE_ORDER = 'ORDER BY (set_date IS NULL) ASC, set_date DESC, created_at DESC'
+
+/** The head of the queue in claim order, without claiming anything. */
+export async function nextMkvidRequests(env: Env, limit = 5): Promise<MkvidRequest[]> {
+  const now = nowSeconds()
+  const res = await dbOf(env)
+    .prepare(`SELECT * FROM mkvid_requests WHERE ${CLAIMABLE_WHERE} ${QUEUE_ORDER} LIMIT ?`)
+    .bind(now, now - claimTtl(env), Math.min(Math.max(limit, 1), 50))
+    .all<Row>()
+  return res.results.map(rowToRequest)
+}
+
 export async function countMkvidRequests(env: Env): Promise<Record<MkvidStatus, number>> {
   const res = await dbOf(env).prepare('SELECT status, COUNT(*) AS n FROM mkvid_requests GROUP BY status').all<{ status: string; n: number }>()
   const out: Record<MkvidStatus, number> = { pending: 0, claimed: 0, done: 0, failed: 0, superseded: 0 }
@@ -299,8 +348,8 @@ function claimTtl(env: Env): number {
 }
 
 /**
- * Hand the oldest claimable request to mkvid: `pending` past its backoff, or
- * `claimed` for longer than the claim TTL (mkvid died mid-job). A request
+ * Hand the next claimable request to mkvid — newest set first: `pending` past
+ * its backoff, or `claimed` for longer than the claim TTL (mkvid died mid-job). A request
  * whose set has meanwhile gained a video on 1001tracklists is marked
  * `superseded` and skipped. Returns null when there is nothing to do.
  */
@@ -317,10 +366,7 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
   for (let i = 0; i < 20; i++) {
     const row = await db
       .prepare(
-        `SELECT * FROM mkvid_requests
-         WHERE (status = 'pending' AND (not_before IS NULL OR not_before <= ?))
-            OR (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)
-         ORDER BY created_at ASC LIMIT 1`,
+        `SELECT * FROM mkvid_requests WHERE ${CLAIMABLE_WHERE} ${QUEUE_ORDER} LIMIT 1`,
       )
       .bind(now, stale)
       .first<Row>()

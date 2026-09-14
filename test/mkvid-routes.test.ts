@@ -50,6 +50,7 @@ const input = {
   setUrl: 'https://www.1001tracklists.com/tracklist/abc/x.html',
   artistName: 'Lilly Palmer',
   setTitle: 'Lilly Palmer @ X',
+  setDate: '2026-09-01',
   source: { kind: 'soundcloud' as const, url: 'https://api.soundcloud.com/tracks/1' },
   lastCueSeconds: 100,
   trackCount: 3,

@@ -43,7 +43,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
-import { countMkvidRequests, dailyClaimCap, dailyClaimsUsed, listMkvidRequests, requestSummary, retryMkvidRequest } from '../lib/mkvid'
+import { countMkvidRequests, dailyClaimCap, dailyClaimsUsed, listMkvidRequests, nextMkvidRequests, requestSummary, retryMkvidRequest } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -732,10 +732,11 @@ subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus
 /** The mkvid queue (lib/mkvid.ts): every set handed to mkvid, newest activity first. */
 subscriptionsApp.get('/api/mkvid', async (c) => {
   const n = parseInt(c.req.query('limit') || '100', 10)
-  const [requests, counts, dailyClaims] = await Promise.all([
+  const [requests, counts, dailyClaims, next] = await Promise.all([
     listMkvidRequests(c.env, Number.isFinite(n) ? n : 100),
     countMkvidRequests(c.env),
     dailyClaimsUsed(c.env),
+    nextMkvidRequests(c.env, 3),
   ])
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
@@ -743,6 +744,8 @@ subscriptionsApp.get('/api/mkvid', async (c) => {
     counts,
     dailyClaims,
     dailyClaimCap: dailyClaimCap(c.env),
+    /** Head of the queue in claim order (newest set first). */
+    next: next.map(requestSummary),
     requests: requests.map(requestSummary),
   })
 })
@@ -1850,6 +1853,7 @@ ${BAN_HISTORY_HTML}
     out.push(dl([
       ['tracklist', link(r.setUrl, setLabel(r.setUrl))],
       ['title', r.setTitle ? esc(r.setTitle) : '—'],
+      ['set date', r.setDate ? esc(r.setDate) : '— <span class="when">(undated sets are queued last)</span>'],
       ['DJ', esc(r.artistName || r.slug) + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
       ['source', esc(r.sourceLabel || r.source) + ' ' + link(r.sourceUrl, 'open')],
       r.trackCount != null ? ['tracklist', esc(r.idedCount) + '/' + esc(r.trackCount) + ' IDed' + (r.lastCueSeconds != null ? ' · last cue ' + clock(r.lastCueSeconds) : '')] : null,
@@ -1878,6 +1882,9 @@ ${BAN_HISTORY_HTML}
     bits.push((c.pending || 0) + ' pending', (c.claimed || 0) + ' rendering', (c.done || 0) + ' done', (c.failed || 0) + ' failed', (c.superseded || 0) + ' superseded');
     if (d.dailyClaimCap != null) bits.push((d.dailyClaims || 0) + '/' + d.dailyClaimCap + ' claims today <span title="each upload costs 1 600 of the 10 000 daily YouTube quota units the sync shares">(quota)</span>');
     if (d.requireFullTracklist) bits.push('full tracklists only');
+    if (d.next && d.next.length) {
+      bits.push('next up: ' + d.next.map((r) => esc((r.setTitle || setLabel(r.setUrl)) + (r.setDate ? ' (' + r.setDate + ')' : ''))).join(', ') + ' <span class="when">(newest set first)</span>');
+    }
     $mkSummary.innerHTML = bits.join(' · ');
     $mkList.innerHTML = '';
     $mkEmpty.hidden = reqs.length > 0;
@@ -1889,6 +1896,7 @@ ${BAN_HISTORY_HTML}
       head.innerHTML =
         '<span class="badge ' + esc(r.status) + '">' + esc(r.status) + '</span>' +
         '<span class="title">' + esc(r.setTitle || setLabel(r.setUrl)) + '</span>' +
+        (r.setDate ? '<span class="via" title="set date">' + esc(r.setDate) + '</span>' : '') +
         '<span class="via">' + esc(r.artistName || r.slug) + '</span>' +
         '<span class="src">' + esc(r.sourceLabel || r.source) + '</span>' +
         (r.videoId ? '<span class="vid">' + esc(r.videoId) + '</span>' : '') +
