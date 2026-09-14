@@ -373,6 +373,39 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
 }
 
 /**
+ * The fetch budget a manual run (panel button) gets: sized exactly like the
+ * cron's, `TL_FETCHES_PER_TICK` per account the forwarder reports healthy.
+ * Every entry point that calls syncOne outside the cron must pass one —
+ * without a budget takeFetch() always says yes.
+ */
+export async function manualFetchBudget(env: Env, log: Logger): Promise<FetchBudget> {
+  return newFetchBudget(env, await healthyAccountCount(env, log))
+}
+
+/**
+ * "Invalidate video cache & resync all": every DJ's processed sets are marked
+ * due now (see invalidateVideoCache), then ONE sync pass runs over all of them
+ * with a single shared fetch budget. Until 2026-09-14 the panel did this by
+ * calling the per-DJ resync once per row from the browser, and each of those
+ * calls ran unpaced — ~360 fetches in 11 minutes on 2026-09-10, ~40 in 16 s
+ * on 2026-09-14, a 429 on every account both times. The pass stops when the
+ * budget is spent; the 5-minute cron drains the remaining rechecks.
+ */
+export async function resyncAll(
+  env: Env,
+  opts: SyncOpts = {},
+): Promise<{ results: SyncOneResult[]; paused?: boolean; invalidated: InvalidateResult[] }> {
+  const log = opts.log ?? makeLogger({ task: 'sync.resync_all' })
+  const subs = await listSubscriptions(env)
+  const invalidated: InvalidateResult[] = []
+  for (const sub of subs) invalidated.push(await invalidateVideoCache(env, sub.slug, log))
+  log.info('sync.resync_all.invalidated', { subCount: subs.length, tracklistsMarked: invalidated.reduce((a, r) => a + r.tracklistsMarked, 0) })
+  const fetchBudget = opts.fetchBudget ?? (await manualFetchBudget(env, log))
+  const r = await syncAll(env, { ...opts, log, trigger: opts.trigger ?? 'manual.resync', fetchBudget })
+  return { ...r, invalidated }
+}
+
+/**
  * Drain pending tracklists across every subscription without re-discovering
  * new sets. Used by the frequent (every-N-min) cron to chip away at large
  * backfills — manual sync handles only one batch, this handler keeps going

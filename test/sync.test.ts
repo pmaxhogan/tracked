@@ -17,6 +17,7 @@ import {
   requeueBanVictims,
   seedTracklistVideosFromAudit,
   newFetchBudget,
+  resyncAll,
   syncOne,
   syncPendingOnly,
   type SubState,
@@ -1593,6 +1594,30 @@ describe('per-tick 1001tl fetch budget (account rate-limit pacing)', () => {
   })
 })
 
+
+  it('resync-all runs one pass over every DJ on a single shared budget (the per-row browser loop was unpaced)', async () => {
+    const env = { ...makeEnv(), TL_FETCHES_PER_TICK: '3' } as Env
+    await twoSubs(env, 5, [200, 100])
+    mockCrawl([], null)
+    const r = await resyncAll(env)
+    expect(r.invalidated.map((x) => x.slug).sort()).toEqual(['alpha', 'beta'])
+    // Three fetches across BOTH DJs, not three per DJ: beta (older run) takes
+    // the whole budget and alpha waits for the cron.
+    expect(fetch1001Html).toHaveBeenCalledTimes(3)
+    expect(r.results.map((x) => x.slug)).toEqual(['beta'])
+    expect((await loadSubState(env, 'beta'))!.processedTracklistUrls).toHaveLength(3)
+    expect((await loadSubState(env, 'alpha'))!.processedTracklistUrls).toHaveLength(0)
+  })
+
+  it('a manual single-DJ run stops at the same budget as the cron', async () => {
+    const env = { ...makeEnv(), TL_FETCHES_PER_TICK: '2' } as Env
+    await twoSubs(env, 5, [200, 100])
+    mockCrawl([], null)
+    const budget = newFetchBudget(env, 1)
+    await syncOne(env, { slug: 'alpha', sourceUrl: 'https://www.1001tracklists.com/dj/alpha/', addedAt: 0 }, 'tok', { trigger: 'manual.one', fetchBudget: budget })
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(budget).toMatchObject({ spent: 2, remaining: 0 })
+  })
 describe('dead YouTube videos settle on the first strike', () => {
   beforeEach(() => _resetTallyForTests())
 

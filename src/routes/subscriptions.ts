@@ -34,6 +34,8 @@ import {
   backfillCombined,
   combinedPlaylistStatus,
   invalidateVideoCache,
+  manualFetchBudget,
+  resyncAll,
 } from '../lib/sync'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
@@ -309,8 +311,11 @@ subscriptionsApp.post('/api/sync/:slug', async (c) => {
     // syncOne needs a fresh access token; the helper auto-refreshes near expiry.
     const tokenInfo = await getAccessToken(c.env)
     if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
-    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log, trigger: 'manual.one' })
-    return c.json(result)
+    // Same per-account pacing as the cron: a button press is not exempt from
+    // 1001tracklists' rate limit (an unpaced run got the accounts banned).
+    const fetchBudget = await manualFetchBudget(c.env, log)
+    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log, trigger: 'manual.one', fetchBudget })
+    return c.json({ ...result, fetchesSpent: fetchBudget.spent, fetchBudget: fetchBudget.limit })
   } catch (e) {
     if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
       log.warn('subs.sync_one_reauth', { slug, status: e.status })
@@ -343,14 +348,40 @@ subscriptionsApp.post('/api/resync/:slug', async (c) => {
     const tokenInfo = await getAccessToken(c.env)
     if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
     const invalidated = await invalidateVideoCache(c.env, slug, log)
-    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log, trigger: 'manual.resync' })
-    return c.json({ ...result, invalidated })
+    const fetchBudget = await manualFetchBudget(c.env, log)
+    const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log, trigger: 'manual.resync', fetchBudget })
+    return c.json({ ...result, invalidated, fetchesSpent: fetchBudget.spent, fetchBudget: fetchBudget.limit })
   } catch (e) {
     if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
       log.warn('subs.resync_one_reauth', { slug, status: e.status })
       return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
     }
     log.error('subs.resync_one_throw', { slug, ...errorFields(e) })
+    return c.json({ error: 'resync_failed', ...errorFields(e) }, 500)
+  }
+})
+
+/**
+ * "Invalidate video cache & resync all": one server-side pass over every DJ
+ * on a single shared fetch budget (lib/sync.ts resyncAll). The panel used to
+ * call /api/resync/<slug> once per row instead — each call unpaced — which is
+ * what tripped the 1001tracklists rate limit on 2026-09-10 and 2026-09-14.
+ */
+subscriptionsApp.post('/api/resync', async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get('cf-ray') ?? 'local',
+    route: 'subs.resync_all',
+    by: c.get('cfAccessEmail'),
+  })
+  try {
+    const result = await resyncAll(c.env, { log, trigger: 'manual.resync' })
+    return c.json(result)
+  } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      log.warn('subs.resync_all_reauth', { status: e.status })
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
+    log.error('subs.resync_all_throw', errorFields(e))
     return c.json({ error: 'resync_failed', ...errorFields(e) }, 500)
   }
 })
@@ -1261,12 +1292,43 @@ ${BAN_HISTORY_HTML}
     if (!btns.length) return;
     if (!confirm('Re-fetch every set of every DJ? Swapped recordings get replaced in the playlists. This drains over the next few cron ticks.')) return;
     $resyncAll.disabled = true;
+    btns.forEach((b) => { b.disabled = true; });
     const original = $resyncAll.textContent;
     $resyncAll.textContent = 'Resyncing all…';
+    showError('');
     try {
-      for (const b of btns) await syncSlug(b.dataset.slug, b, { resync: true });
+      // One server-side pass on a single shared fetch budget — NOT one
+      // request per row: that loop ran every DJ unpaced and got the
+      // 1001tracklists accounts banned (twice).
+      const r = await fetch('/subscriptions/api/resync', { method: 'POST', credentials: 'same-origin' });
+      const raw = await r.text();
+      let data = {};
+      try { data = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON body, fall through */ }
+      if (!r.ok) {
+        if (r.status === 412 && data.error === 'youtube_reauth_required') { showReauthError(); loadYouTubeStatus(); return; }
+        showError('resync all failed: ' + (data.errorMessage || data.message || data.error || ('resync failed (' + r.status + ')')), data.errorStack || null);
+        return;
+      }
+      if (data.paused) { showError('resync all: 1001tracklists fetching is paused (see the banner); nothing was fetched.'); return; }
+      const results = data.results || [];
+      const invalidated = (data.invalidated || []).reduce((a, x) => a + (x.tracklistsMarked || 0), 0);
+      const rechecked = results.reduce((a, x) => a + ((x.stats || {}).tracklistsRechecked || 0), 0);
+      const replaced = results.reduce((a, x) => a + ((x.stats || {}).videosReplaced || 0), 0);
+      const added = results.reduce((a, x) => a + ((x.stats || {}).videoIdsAdded || 0), 0);
+      const pending = results.reduce((a, x) => a + ((x.stats || {}).rechecksPending || 0) + ((x.stats || {}).tracklistsPending || 0), 0);
+      const failed = results.filter((x) => x.ok === false).map((x) => x.slug);
+      showError(
+        'resynced ' + results.length + ' of ' + btns.length + ' DJs this pass (invalidated ' + invalidated + ' cached videos) — rechecked ' + rechecked +
+        ', replaced ' + replaced + ', ' + added + ' new' +
+        (pending ? ' · ' + pending + ' still pending — auto-continuing every 5 min' : '') +
+        (failed.length ? ' · failed: ' + failed.join(', ') : ''),
+      );
+      loadCombined();
+    } catch (e) {
+      showError('resync all failed: ' + (e && e.message || e));
     } finally {
       $resyncAll.disabled = false;
+      btns.forEach((b) => { b.disabled = false; });
       $resyncAll.textContent = original;
     }
   });
