@@ -43,7 +43,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
-import { countMkvidRequests, dailyClaimCap, dailyClaimsUsed, listMkvidRequests, nextMkvidRequests, requestSummary, retryMkvidRequest } from '../lib/mkvid'
+import { countMkvidRequests, dailyClaimCap, dailyClaimsUsed, getMkvidLastPoll, listPendingMkvidRequests, listSettledMkvidRequests, quotaDayEnd, requestSummary, retryMkvidRequest } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -729,14 +729,21 @@ subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus
 
 // ─── mkvid uploads ──────────────────────────────────────────────────────────
 
-/** The mkvid queue (lib/mkvid.ts): every set handed to mkvid, newest activity first. */
+/**
+ * The mkvid queue (lib/mkvid.ts): what has been rendered (or is rendering, or
+ * failed), the waiting line in the order it will be served, and the three
+ * things that decide whether anything moves — the daily claim cap, how much of
+ * it is used, and when mkvid last polled.
+ */
 subscriptionsApp.get('/api/mkvid', async (c) => {
-  const n = parseInt(c.req.query('limit') || '100', 10)
-  const [requests, counts, dailyClaims, next] = await Promise.all([
-    listMkvidRequests(c.env, Number.isFinite(n) ? n : 100),
+  const n = parseInt(c.req.query('limit') || '50', 10)
+  const limit = Number.isFinite(n) ? n : 50
+  const [settled, queue, counts, dailyClaims, lastPoll] = await Promise.all([
+    listSettledMkvidRequests(c.env, limit),
+    listPendingMkvidRequests(c.env, limit),
     countMkvidRequests(c.env),
     dailyClaimsUsed(c.env),
-    nextMkvidRequests(c.env, 3),
+    getMkvidLastPoll(c.env),
   ])
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
@@ -744,9 +751,14 @@ subscriptionsApp.get('/api/mkvid', async (c) => {
     counts,
     dailyClaims,
     dailyClaimCap: dailyClaimCap(c.env),
-    /** Head of the queue in claim order (newest set first). */
-    next: next.map(requestSummary),
-    requests: requests.map(requestSummary),
+    /** Unix seconds when the quota day rolls over (midnight Pacific). */
+    quotaResetsAt: quotaDayEnd(),
+    /** mkvid's last `/mkvid/claim` poll; `at` is refreshed at most every 10 min while the outcome is unchanged. */
+    lastPoll,
+    now: Math.floor(Date.now() / 1000),
+    settled: settled.map(requestSummary),
+    /** Pending requests in claim order (newest set first). */
+    queue: queue.map(requestSummary),
   })
 })
 
@@ -931,6 +943,17 @@ const PAGE_HTML = /* html */ `<!doctype html>
   /* ── mkvid uploads ── */
   section#mkvid { margin-top: 2.25rem; }
   #mkvid-summary { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.6rem; }
+  .mk-state { border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; padding: 0.5rem 0.7rem; margin-bottom: 0.6rem; font-size: 0.88rem; line-height: 1.4; }
+  .mk-state.ok { border-left-color: #3fb950; }
+  .mk-state.wait { border-left-color: #d29922; }
+  .mk-state.bad { border-left-color: var(--danger); }
+  .mk-state .sub { display: block; color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+  .mk-grp { color: var(--muted); font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin: 0.9rem 0 0.4rem; }
+  .mk-main { flex: 1; min-width: 0; }
+  .mk-main .title { display: block; }
+  .mk-meta { color: var(--muted); font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mk-meta .flag { font-weight: 400; }
+  .arow-head a { color: var(--accent); font-size: 0.78rem; white-space: nowrap; }
   .badge.pending { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.claimed { background: rgba(210,153,34,0.18); color: #d29922; }
   .badge.done { background: rgba(63,185,80,0.18); color: #3fb950; }
@@ -1036,6 +1059,7 @@ ${ALERTS_ROW_HTML}
         <button id="mkvid-refresh" class="ghost">Refresh</button>
       </div>
     </div>
+    <div id="mkvid-state" class="mk-state" hidden></div>
     <div id="mkvid-summary" class="counts">loading…</div>
     <div id="mkvid-list"></div>
     <div id="mkvid-empty" class="empty" hidden>No sets queued for mkvid yet.</div>
@@ -1844,6 +1868,7 @@ ${BAN_HISTORY_HTML}
   const $mkList = document.getElementById('mkvid-list');
   const $mkEmpty = document.getElementById('mkvid-empty');
   const $mkSummary = document.getElementById('mkvid-summary');
+  const $mkState = document.getElementById('mkvid-state');
   const $mkRefresh = document.getElementById('mkvid-refresh');
   const MK_PROBLEM = new Set(['failed']);
 
@@ -1854,7 +1879,7 @@ ${BAN_HISTORY_HTML}
       ['tracklist', link(r.setUrl, setLabel(r.setUrl))],
       ['title', r.setTitle ? esc(r.setTitle) : '—'],
       ['set date', r.setDate ? esc(r.setDate) : '— <span class="when">(undated sets are queued last)</span>'],
-      ['DJ', esc(r.artistName || r.slug) + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
+      ['DJ', esc(r.artistLabel || r.artistName || r.slug) + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
       ['source', esc(r.sourceLabel || r.source) + ' ' + link(r.sourceUrl, 'open')],
       r.trackCount != null ? ['tracklist', esc(r.idedCount) + '/' + esc(r.trackCount) + ' IDed' + (r.lastCueSeconds != null ? ' · last cue ' + clock(r.lastCueSeconds) : '')] : null,
     ]));
@@ -1874,50 +1899,103 @@ ${BAN_HISTORY_HTML}
     return out.join('');
   }
 
-  function renderMkvid(d) {
-    const reqs = d.requests || [];
+  function untilTime(sec) {
+    const m = Math.max(1, Math.round((sec - Date.now() / 1000) / 60));
+    if (m < 60) return 'in ' + m + 'm';
+    return 'in ' + Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+
+  // The one line that answers "why is nothing uploading?" — first match wins.
+  function mkState(d) {
     const c = d.counts || {};
-    const bits = [];
-    if (!d.enabled) bits.push('<span class="warn">MKVID_TOKEN not set — nothing is queued</span>');
-    bits.push((c.pending || 0) + ' pending', (c.claimed || 0) + ' rendering', (c.done || 0) + ' done', (c.failed || 0) + ' failed', (c.superseded || 0) + ' superseded');
-    if (d.dailyClaimCap != null) bits.push((d.dailyClaims || 0) + '/' + d.dailyClaimCap + ' claims today <span title="each upload costs 1 600 of the 10 000 daily YouTube quota units the sync shares">(quota)</span>');
+    const cap = d.dailyClaimCap, used = d.dailyClaims || 0;
+    const poll = d.lastPoll;
+    // The heartbeat is rewritten at most every 10 min, so only a longer silence means anything.
+    const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
+    if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
+    if (cap === 0) return ['bad', 'Paused — the daily cap is 0', 'MKVID_DAILY_CLAIM_CAP is set to 0, so every claim is refused. Set it to 2 (or delete the secret) to resume.'];
+    // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
+    if (c.claimed) return ['ok', 'Rendering ' + c.claimed + ' set' + (c.claimed === 1 ? '' : 's') + ' now', used + '/' + cap + ' of today’s uploads used.'];
+    if (silent) return ['bad', poll ? 'mkvid last polled ' + relTime(new Date(poll.at * 1000).toISOString()) : 'mkvid has not polled yet', 'It normally polls every minute. Check the mkvid container on the NAS and that it can reach this Worker (TRACKED_URL / TRACKED_TOKEN).'];
+    if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
+    if (!c.pending) return ['ok', 'Queue empty', 'Nothing is waiting for mkvid.'];
+    if (used >= cap) return ['wait', 'Today’s ' + cap + ' upload' + (cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The cap resets at midnight Pacific with the YouTube quota (each upload costs 1 600 of 10 000 units).'];
+    return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.'];
+  }
+
+  function mkRow(r, pos) {
+    const row = document.createElement('div');
+    row.className = 'arow' + (MK_PROBLEM.has(r.status) ? ' err' : '');
+    const head = document.createElement('div');
+    head.className = 'arow-head';
+    const backoff = r.status === 'pending' && r.notBefore && r.notBefore > Date.now() / 1000;
+    const meta = [r.setDate, r.artistLabel || r.artistName || r.slug, r.sourceLabel || r.source].filter(Boolean).map(esc);
+    if (backoff) meta.push('retry ' + untilTime(r.notBefore));
+    else if (r.status !== 'pending') meta.push(esc(relTime(new Date(r.updatedAt * 1000).toISOString())));
+    if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(r.error) + '</span>');
+    head.innerHTML =
+      (pos ? '<span class="pos">#' + pos + '</span>' : '<span class="badge ' + esc(r.status) + '">' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>') +
+      '<div class="mk-main"><span class="title">' + esc(r.setTitle || setLabel(r.setUrl)) + '</span>' +
+      '<div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
+      (r.videoId ? link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'watch') : '');
+    row.appendChild(head);
+    const detail = document.createElement('div');
+    detail.className = 'arow-detail';
+    detail.hidden = true;
+    detail.innerHTML = mkDetailHtml(r);
+    row.appendChild(detail);
+    head.addEventListener('click', (e) => { if (e.target.closest('a')) return; detail.hidden = !detail.hidden; });
+    const retry = detail.querySelector('button.retry');
+    if (retry) retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      try {
+        const resp = await fetch('/subscriptions/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin' });
+        if (!resp.ok) showError('retry failed (' + resp.status + ')');
+        await loadMkvid();
+      } finally { retry.disabled = false; }
+    });
+    return row;
+  }
+
+  function mkGroup(label) {
+    const h = document.createElement('div');
+    h.className = 'mk-grp';
+    h.textContent = label;
+    $mkList.appendChild(h);
+  }
+
+  function renderMkvid(d) {
+    const settled = d.settled || [], queue = d.queue || [];
+    const c = d.counts || {};
+    const cap = d.dailyClaimCap;
+    const st = mkState(d);
+    $mkState.hidden = false;
+    $mkState.className = 'mk-state ' + st[0];
+    $mkState.innerHTML = '<strong>' + esc(st[1]) + '</strong><span class="sub">' + esc(st[2]) + '</span>';
+
+    const bits = [(c.done || 0) + ' uploaded', (c.pending || 0) + ' waiting'];
+    if (c.failed) bits.push('<span class="warn">' + c.failed + ' failed</span>');
+    if (c.superseded) bits.push(c.superseded + ' superseded');
+    if (cap > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + cap + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / cap) + ' day' + (c.pending > cap ? 's' : '') + ' at ' + cap + '/day</span>');
+    if (d.lastPoll) bits.push('<span title="refreshed at most every 10 min">mkvid seen ' + esc(relTime(new Date(d.lastPoll.at * 1000).toISOString())) + '</span>');
     if (d.requireFullTracklist) bits.push('full tracklists only');
-    if (d.next && d.next.length) {
-      bits.push('next up: ' + d.next.map((r) => esc((r.setTitle || setLabel(r.setUrl)) + (r.setDate ? ' (' + r.setDate + ')' : ''))).join(', ') + ' <span class="when">(newest set first)</span>');
-    }
     $mkSummary.innerHTML = bits.join(' · ');
+
     $mkList.innerHTML = '';
-    $mkEmpty.hidden = reqs.length > 0;
-    for (const r of reqs) {
-      const row = document.createElement('div');
-      row.className = 'arow' + (MK_PROBLEM.has(r.status) ? ' err' : '');
-      const head = document.createElement('div');
-      head.className = 'arow-head';
-      head.innerHTML =
-        '<span class="badge ' + esc(r.status) + '">' + esc(r.status) + '</span>' +
-        '<span class="title">' + esc(r.setTitle || setLabel(r.setUrl)) + '</span>' +
-        (r.setDate ? '<span class="via" title="set date">' + esc(r.setDate) + '</span>' : '') +
-        '<span class="via">' + esc(r.artistName || r.slug) + '</span>' +
-        '<span class="src">' + esc(r.sourceLabel || r.source) + '</span>' +
-        (r.videoId ? '<span class="vid">' + esc(r.videoId) + '</span>' : '') +
-        '<span class="when" title="' + esc(new Date(r.updatedAt * 1000).toISOString()) + '">' + esc(relTime(new Date(r.updatedAt * 1000).toISOString())) + '</span>';
-      row.appendChild(head);
-      const detail = document.createElement('div');
-      detail.className = 'arow-detail';
-      detail.hidden = true;
-      detail.innerHTML = mkDetailHtml(r);
-      row.appendChild(detail);
-      head.addEventListener('click', () => { detail.hidden = !detail.hidden; });
-      const retry = detail.querySelector('button.retry');
-      if (retry) retry.addEventListener('click', async () => {
-        retry.disabled = true;
-        try {
-          const resp = await fetch('/subscriptions/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin' });
-          if (!resp.ok) showError('retry failed (' + resp.status + ')');
-          await loadMkvid();
-        } finally { retry.disabled = false; }
-      });
-      $mkList.appendChild(row);
+    $mkEmpty.hidden = settled.length + queue.length > 0;
+    const active = settled.filter((r) => r.status === 'claimed');
+    const finished = settled.filter((r) => r.status !== 'claimed');
+    if (active.length) {
+      mkGroup('Rendering now');
+      for (const r of active) $mkList.appendChild(mkRow(r, 0));
+    }
+    if (queue.length) {
+      mkGroup('Up next · newest set first' + (c.pending > queue.length ? ' · first ' + queue.length + ' of ' + c.pending : ''));
+      queue.forEach((r, i) => $mkList.appendChild(mkRow(r, i + 1)));
+    }
+    if (finished.length) {
+      mkGroup('Finished');
+      for (const r of finished) $mkList.appendChild(mkRow(r, 0));
     }
   }
 

@@ -108,6 +108,19 @@ describe('/mkvid routes', () => {
     expect((await post(env, '/mkvid/fail', { id: crypto.randomUUID() })).status).toBe(400)
   })
 
+  it('the panel API explains the queue: cap, usage, reset time, last poll, waiting line', async () => {
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1', MKVID_DAILY_CLAIM_CAP: '0' })
+    await enqueueMkvidRequest(env, input)
+    expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
+    const r = await app.request('http://x/subscriptions/api/mkvid', {}, env)
+    expect(r.status).toBe(200)
+    const d = (await r.json()) as { dailyClaimCap: number; dailyClaims: number; quotaResetsAt: number; now: number; lastPoll: { outcome: string } | null; queue: Array<{ setUrl: string }>; settled: unknown[] }
+    expect(d).toMatchObject({ enabled: true, dailyClaimCap: 0, dailyClaims: 0, lastPoll: { outcome: 'capped' }, settled: [] })
+    expect(d.queue.map((q) => q.setUrl)).toEqual([input.setUrl])
+    expect(d.quotaResetsAt).toBeGreaterThan(d.now)
+    expect(d.quotaResetsAt - d.now).toBeLessThanOrEqual(25 * 3600)
+  })
+
   it('fail parks or requeues, and complete 503s without a YouTube connection', async () => {
     const env = makeEnv()
     await enqueueMkvidRequest(env, input)
