@@ -1914,9 +1914,10 @@ ${BAN_HISTORY_HTML}
     const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
     if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
     if (cap === 0) return ['bad', 'Paused — the daily cap is 0', 'MKVID_DAILY_CLAIM_CAP is set to 0, so every claim is refused. Set it to 2 (or delete the secret) to resume.'];
+    // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
+    if (c.claimed) return ['ok', 'Rendering ' + c.claimed + ' set' + (c.claimed === 1 ? '' : 's') + ' now', used + '/' + cap + ' of today’s uploads used.'];
     if (silent) return ['bad', poll ? 'mkvid last polled ' + relTime(new Date(poll.at * 1000).toISOString()) : 'mkvid has not polled yet', 'It normally polls every minute. Check the mkvid container on the NAS and that it can reach this Worker (TRACKED_URL / TRACKED_TOKEN).'];
     if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
-    if (c.claimed) return ['ok', 'Rendering ' + c.claimed + ' set' + (c.claimed === 1 ? '' : 's') + ' now', used + '/' + cap + ' of today’s uploads used.'];
     if (!c.pending) return ['ok', 'Queue empty', 'Nothing is waiting for mkvid.'];
     if (used >= cap) return ['wait', 'Today’s ' + cap + ' upload' + (cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The cap resets at midnight Pacific with the YouTube quota (each upload costs 1 600 of 10 000 units).'];
     return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.'];
