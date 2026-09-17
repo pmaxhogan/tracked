@@ -6,6 +6,12 @@ import type { Env } from '../src/types'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import {
+  dailyClaimCap,
+  getMkvidLastPoll,
+  listPendingMkvidRequests,
+  listSettledMkvidRequests,
+  quotaDayEnd,
+  requestSummary,
   dailyClaimsUsed,
   extractSetDate,
   nextMkvidRequests,
@@ -249,6 +255,61 @@ describe('queue lifecycle', () => {
     const off = makeEnv({ MKVID_DAILY_CLAIM_CAP: '0' })
     await enqueueMkvidRequest(off, input)
     expect(await claimMkvidRequest(off, log)).toBeNull()
+  })
+
+  it('a blank cap is the default, not a pause — only a literal 0 pauses', () => {
+    expect(dailyClaimCap(makeEnv())).toBe(2)
+    for (const blank of ['', ' ', '\r\n']) expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: blank }))).toBe(2)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: 'two' }))).toBe(2)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: '-1' }))).toBe(2)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: '0' }))).toBe(0)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: ' 5\n' }))).toBe(5)
+  })
+
+  it('quotaDayEnd is the next Pacific midnight, across a DST change too', () => {
+    expect(quotaDayEnd(Date.parse('2026-09-17T23:30:00Z'))).toBe(Date.parse('2026-09-18T07:00:00Z') / 1000)
+    // 2026-11-01 is a 25-hour day in Los Angeles.
+    expect(quotaDayEnd(Date.parse('2026-11-01T12:00:00Z'))).toBe(Date.parse('2026-11-02T08:00:00Z') / 1000)
+    // 2026-03-08 is a 23-hour one.
+    expect(quotaDayEnd(Date.parse('2026-03-08T12:00:00Z'))).toBe(Date.parse('2026-03-09T07:00:00Z') / 1000)
+  })
+
+  it('remembers what the last poll got, so the panel can tell a capped queue from a silent mkvid', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '1' })
+    expect(await getMkvidLastPoll(env)).toBeNull()
+    await claimMkvidRequest(env, log)
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'empty' })
+    for (const n of [1, 2]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
+    await claimMkvidRequest(env, log)
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'claimed' })
+    await claimMkvidRequest(env, log)
+    const capped = await getMkvidLastPoll(env)
+    expect(capped).toMatchObject({ outcome: 'capped' })
+    expect(capped!.at).toBeGreaterThanOrEqual(NOW)
+
+    // An unchanged outcome is not rewritten every minute (KV write budget).
+    const put = vi.spyOn(env.CACHE, 'put')
+    await claimMkvidRequest(env, log)
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('lists the waiting line in claim order, apart from what has left it', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/old', setDate: '2021-01-01' })
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/new', setDate: '2026-01-01' })
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/mid', setDate: '2024-01-01' })
+    const first = await claimMkvidRequest(env, log)
+    await failMkvidRequest(env, { id: first!.id, error: 'incomplete_recording', permanent: true }, log)
+    await claimMkvidRequest(env, log)
+    expect((await listPendingMkvidRequests(env)).map((r) => r.setUrl.split('/').pop())).toEqual(['old'])
+    expect((await listSettledMkvidRequests(env)).map((r) => [r.setUrl.split('/').pop(), r.status])).toEqual([['mid', 'claimed'], ['new', 'failed']])
+  })
+
+  it('shows the artist without the "Tracklists By" prefix the stored name carries', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, { ...input, artistName: 'Tracklists By John Summit' })
+    const [r] = await listPendingMkvidRequests(env)
+    expect(requestSummary(r!)).toMatchObject({ artistName: 'Tracklists By John Summit', artistLabel: 'John Summit', sourceLabel: 'SoundCloud' })
   })
 
   it('supersede only touches live requests', async () => {

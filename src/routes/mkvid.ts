@@ -18,7 +18,7 @@ import type { Env } from '../types'
 import { mkvidAuth } from '../middleware/auth'
 import { getAccessToken, GoogleOAuthRefreshFailed } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
-import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, dailyClaimCap, dailyClaimsUsed, failMkvidRequest } from '../lib/mkvid'
+import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, dailyClaimCap, dailyClaimsUsed, failMkvidRequest, recordMkvidPoll } from '../lib/mkvid'
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/
 
@@ -59,6 +59,7 @@ mkvidApp.post('/claim', async (c) => {
     return c.json({ request: await claimMkvidRequest(c.env, log) })
   } catch (e) {
     log.error('mkvid.claim_threw', errorFields(e))
+    await recordMkvidPoll(c.env, 'error')
     return c.json({ error: 'claim_failed', ...errorFields(e) }, 500)
   }
 })

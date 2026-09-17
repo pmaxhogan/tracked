@@ -60,9 +60,52 @@ export function quotaDayStart(nowMs = Date.now()): number {
   return Math.floor(nowMs / 1000) - (get('hour') * 3600 + get('minute') * 60 + get('second'))
 }
 
+/**
+ * `0` pauses the queue, and it has to be spelled out: `Number('')` is 0 too, so
+ * a blank secret (`echo $UNSET | wrangler secret put …`) would otherwise stop
+ * every upload without anyone having asked for that.
+ */
 export function dailyClaimCap(env: Env): number {
-  const n = Number(env.MKVID_DAILY_CLAIM_CAP)
+  const raw = (env.MKVID_DAILY_CLAIM_CAP ?? '').trim()
+  if (!raw) return DEFAULT_DAILY_CLAIM_CAP
+  const n = Number(raw)
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_DAILY_CLAIM_CAP
+}
+
+/** Unix seconds at which the quota day rolls over and the daily claims start from zero again. */
+export function quotaDayEnd(nowMs = Date.now()): number {
+  // 26 h past local midnight is always inside the next local day, DST shift or not.
+  return quotaDayStart((quotaDayStart(nowMs) + 26 * 3600) * 1000)
+}
+
+// ─── poll heartbeat ─────────────────────────────────────────────────────────
+
+/** What the last `/mkvid/claim` poll got: a request, nothing queued, the daily cap, or a Worker-side error. */
+export type MkvidPollOutcome = 'claimed' | 'empty' | 'capped' | 'error'
+export type MkvidLastPoll = { at: number; outcome: MkvidPollOutcome }
+
+const LAST_POLL_KEY = 'mkvid:last_poll'
+/** mkvid polls every minute; the heartbeat is only rewritten this often (or when the outcome changes) to spare KV writes. */
+export const LAST_POLL_REFRESH_SECONDS = 10 * 60
+
+/**
+ * Remember that mkvid polled, so the panel can tell "mkvid is down / cannot
+ * reach the Worker" from "mkvid is polling and is being told no". Best-effort.
+ */
+export async function recordMkvidPoll(env: Env, outcome: MkvidPollOutcome): Promise<void> {
+  try {
+    const now = nowSeconds()
+    const prev = await getMkvidLastPoll(env)
+    if (prev && prev.outcome === outcome && now - prev.at < LAST_POLL_REFRESH_SECONDS) return
+    await env.CACHE.put(LAST_POLL_KEY, JSON.stringify({ at: now, outcome } satisfies MkvidLastPoll))
+  } catch {
+    // a heartbeat must never fail a claim
+  }
+}
+
+export async function getMkvidLastPoll(env: Env): Promise<MkvidLastPoll | null> {
+  const p = parseJson<MkvidLastPoll | null>(await env.CACHE.get(LAST_POLL_KEY), null)
+  return p && typeof p.at === 'number' ? p : null
 }
 
 /**
@@ -308,10 +351,32 @@ export async function getMkvidRequestForSet(env: Env, setUrl: string): Promise<M
   return row ? rowToRequest(row) : null
 }
 
-/** Newest first, for the admin panel. */
+/** Newest activity first, for the admin panel. */
 export async function listMkvidRequests(env: Env, limit = 100): Promise<MkvidRequest[]> {
   const res = await dbOf(env)
     .prepare('SELECT * FROM mkvid_requests ORDER BY updated_at DESC, created_at DESC LIMIT ?')
+    .bind(Math.min(Math.max(limit, 1), 500))
+    .all<Row>()
+  return res.results.map(rowToRequest)
+}
+
+/**
+ * Everything that has left the waiting line — rendering, done, failed,
+ * superseded — rendering first, then newest activity first. The panel shows
+ * this apart from the (long) pending queue, which would otherwise bury it.
+ */
+export async function listSettledMkvidRequests(env: Env, limit = 50): Promise<MkvidRequest[]> {
+  const res = await dbOf(env)
+    .prepare("SELECT * FROM mkvid_requests WHERE status != 'pending' ORDER BY (status = 'claimed') DESC, updated_at DESC, created_at DESC LIMIT ?")
+    .bind(Math.min(Math.max(limit, 1), 500))
+    .all<Row>()
+  return res.results.map(rowToRequest)
+}
+
+/** The waiting line in the order it will be served; a request in retry backoff keeps its place but is skipped until `not_before`. */
+export async function listPendingMkvidRequests(env: Env, limit = 50): Promise<MkvidRequest[]> {
+  const res = await dbOf(env)
+    .prepare(`SELECT * FROM mkvid_requests WHERE status = 'pending' ${QUEUE_ORDER} LIMIT ?`)
     .bind(Math.min(Math.max(limit, 1), 500))
     .all<Row>()
   return res.results.map(rowToRequest)
@@ -354,6 +419,12 @@ function claimTtl(env: Env): number {
  * `superseded` and skipped. Returns null when there is nothing to do.
  */
 export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidRequest | null> {
+  const { request, outcome } = await claimNext(env, log)
+  await recordMkvidPoll(env, outcome)
+  return request
+}
+
+async function claimNext(env: Env, log: Logger): Promise<{ request: MkvidRequest | null; outcome: MkvidPollOutcome }> {
   const db = dbOf(env)
   const now = nowSeconds()
   const stale = now - claimTtl(env)
@@ -361,7 +432,7 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
   const used = await dailyClaimsUsed(env)
   if (used >= cap) {
     log.info('mkvid.claim_capped', { used, cap })
-    return null
+    return { request: null, outcome: 'capped' }
   }
   for (let i = 0; i < 20; i++) {
     const row = await db
@@ -370,7 +441,7 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
       )
       .bind(now, stale)
       .first<Row>()
-    if (!row) return null
+    if (!row) return { request: null, outcome: 'empty' }
     const tl = await getTracklistRow(env, row.slug, row.set_url)
     if (tl?.video_id) {
       await db
@@ -398,9 +469,9 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
     if ((r.meta.changes ?? 0) === 0) continue
     const claimed = await getMkvidRequest(env, row.id)
     log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, dailyClaims: used + 1, cap })
-    return claimed
+    return { request: claimed, outcome: 'claimed' }
   }
-  return null
+  return { request: null, outcome: 'empty' }
 }
 
 /** mkvid tells us which of its jobs is handling a claimed request (purely informational). */
@@ -577,7 +648,13 @@ export async function supersedeMkvidRequestForSet(env: Env, setUrl: string, vide
 
 /** Read the JSON `summary`-like fields the panel needs without the full row noise. */
 export function requestSummary(r: MkvidRequest): Record<string, unknown> {
-  return { ...r, sourceLabel: r.source === 'soundcloud' ? 'SoundCloud' : 'hearthis.at' }
+  return {
+    ...r,
+    sourceLabel: r.source === 'soundcloud' ? 'SoundCloud' : 'hearthis.at',
+    // Display only: the stored name carries 1001tracklists' "Tracklists By" H1
+    // prefix, and the artist playlists are titled (and found again) by it.
+    artistLabel: (r.artistName ?? r.slug).replace(/^Tracklists By\s+/i, ''),
+  }
 }
 
 export { parseJson }
