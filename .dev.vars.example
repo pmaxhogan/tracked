@@ -34,3 +34,8 @@ DEV_BYPASS_CF_ACCESS=1
 # GOOGLE_OAUTH_CLIENT_ID=
 # GOOGLE_OAUTH_CLIENT_SECRET=
 
+# Optional. Uploads mkvid may make per YouTube quota day through its own Google
+# project (default 6; 0 pauses) and, once that is used up, through the sync's
+# project (default 0 = never; 3 in production).
+# MKVID_DAILY_CLAIM_CAP=6
+# MKVID_SHARED_DAILY_CLAIM_CAP=3

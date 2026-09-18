@@ -43,7 +43,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
-import { countMkvidRequests, dailyClaimCap, dailyClaimsUsed, getMkvidLastPoll, listPendingMkvidRequests, listSettledMkvidRequests, quotaDayEnd, requestSummary, retryMkvidRequest } from '../lib/mkvid'
+import { countMkvidRequests, getMkvidLastPoll, listPendingMkvidRequests, listSettledMkvidRequests, mkvidAccountUsage, quotaDayEnd, requestSummary, retryMkvidRequest } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -738,19 +738,21 @@ subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus
 subscriptionsApp.get('/api/mkvid', async (c) => {
   const n = parseInt(c.req.query('limit') || '50', 10)
   const limit = Number.isFinite(n) ? n : 50
-  const [settled, queue, counts, dailyClaims, lastPoll] = await Promise.all([
+  const [settled, queue, counts, accounts, lastPoll] = await Promise.all([
     listSettledMkvidRequests(c.env, limit),
     listPendingMkvidRequests(c.env, limit),
     countMkvidRequests(c.env),
-    dailyClaimsUsed(c.env),
+    mkvidAccountUsage(c.env),
     getMkvidLastPoll(c.env),
   ])
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
     requireFullTracklist: /^(1|true|yes)$/i.test(c.env.MKVID_REQUIRE_FULL_TRACKLIST ?? ''),
     counts,
-    dailyClaims,
-    dailyClaimCap: dailyClaimCap(c.env),
+    /** Per Google project (fill order): today's claims vs cap. The totals below are their sums. */
+    accounts,
+    dailyClaims: accounts.reduce((n, a) => n + a.used, 0),
+    dailyClaimCap: accounts.reduce((n, a) => n + a.cap, 0),
     /** Unix seconds when the quota day rolls over (midnight Pacific). */
     quotaResetsAt: quotaDayEnd(),
     /** mkvid's last `/mkvid/claim` poll; `at` is refreshed at most every 10 min while the outcome is unchanged. */
@@ -1889,6 +1891,7 @@ ${BAN_HISTORY_HTML}
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'open') : '—'],
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy !== 'unlisted' ? ' <span class="warn">(unlisted was requested — an unverified OAuth app forces private)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + relTime(new Date(r.notBefore * 1000).toISOString()) : '')],
+      r.status !== 'pending' ? ['project', esc(r.accountLabel || r.account)] : null,
       r.jobId ? ['mkvid job', '<span class="mono">' + esc(r.jobId) + '</span>'] : null,
       ['queued', esc(new Date(r.createdAt * 1000).toISOString())],
       ['updated', esc(new Date(r.updatedAt * 1000).toISOString())],
@@ -1913,13 +1916,14 @@ ${BAN_HISTORY_HTML}
     // The heartbeat is rewritten at most every 10 min, so only a longer silence means anything.
     const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
     if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
-    if (cap === 0) return ['bad', 'Paused — the daily cap is 0', 'MKVID_DAILY_CLAIM_CAP is set to 0, so every claim is refused. Set it to 2 (or delete the secret) to resume.'];
+    if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'MKVID_DAILY_CLAIM_CAP (and MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Set MKVID_DAILY_CLAIM_CAP to 6 (or delete the secret) to resume.'];
     // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
     if (c.claimed) return ['ok', 'Rendering ' + c.claimed + ' set' + (c.claimed === 1 ? '' : 's') + ' now', used + '/' + cap + ' of today’s uploads used.'];
     if (silent) return ['bad', poll ? 'mkvid last polled ' + relTime(new Date(poll.at * 1000).toISOString()) : 'mkvid has not polled yet', 'It normally polls every minute. Check the mkvid container on the NAS and that it can reach this Worker (TRACKED_URL / TRACKED_TOKEN).'];
     if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
+    if (poll.outcome === 'not_connected') return ['bad', 'mkvid has no YouTube account connected', 'Its token expired or was revoked. Open mkvid.maxhogan.dev and connect YouTube again.'];
     if (!c.pending) return ['ok', 'Queue empty', 'Nothing is waiting for mkvid.'];
-    if (used >= cap) return ['wait', 'Today’s ' + cap + ' upload' + (cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The cap resets at midnight Pacific with the YouTube quota (each upload costs 1 600 of 10 000 units).'];
+    if (used >= cap) return ['wait', 'Today’s ' + cap + ' upload' + (cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each upload costs 1 600 of a project’s 10 000 units).'];
     return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.'];
   }
 
@@ -1976,6 +1980,7 @@ ${BAN_HISTORY_HTML}
     const bits = [(c.done || 0) + ' uploaded', (c.pending || 0) + ' waiting'];
     if (c.failed) bits.push('<span class="warn">' + c.failed + ' failed</span>');
     if (c.superseded) bits.push(c.superseded + ' superseded');
+    for (const a of d.accounts || []) bits.push('<span title="uploads through the ' + esc(a.label) + ' Google project today">' + esc(a.label) + ' ' + a.used + '/' + a.cap + '</span>');
     if (cap > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + cap + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / cap) + ' day' + (c.pending > cap ? 's' : '') + ' at ' + cap + '/day</span>');
     if (d.lastPoll) bits.push('<span title="refreshed at most every 10 min">mkvid seen ' + esc(relTime(new Date(d.lastPoll.at * 1000).toISOString())) + '</span>');
     if (d.requireFullTracklist) bits.push('full tracklists only');
