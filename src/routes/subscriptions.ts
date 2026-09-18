@@ -987,6 +987,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .mk-act:hover { color: var(--fg); border-color: var(--muted); }
   .mk-act:disabled { opacity: 0.4; cursor: default; }
   .mk-act.ban { color: var(--danger); }
+  /* On a phone the five buttons would leave the title a few letters; drop them to their own line. */
+  @media (max-width: 520px) { .arow-head:has(.mk-acts) { flex-wrap: wrap; } .mk-acts { flex-basis: 100%; justify-content: flex-end; } }
   .arow .src { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
   .arow-detail .retry { margin-top: 0.4rem; }
   section#ytjson { margin-top: 2.25rem; }
