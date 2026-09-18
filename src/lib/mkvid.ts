@@ -782,3 +782,38 @@ export function requestSummary(r: MkvidRequest): Record<string, unknown> {
 }
 
 export { parseJson }
+
+/** What /now-playing needs to know about a set mkvid uploaded: the video and the tracklist it was rendered from. */
+export type MkvidUploadMatch = { videoId: string; setUrl: string; setTitle: string; slug: string }
+
+/**
+ * The finished mkvid upload whose YouTube title is `title`, or null.
+ *
+ * mkvid uploads unlisted, and the YouTube Data API's `search.list` never
+ * returns unlisted videos — so when Tasker posts the title of one of these
+ * sets, the key-only YouTube search that /now-playing normally runs comes
+ * back empty every time, and 1001tracklists cannot know the video's URL
+ * either. Both are pointless for a set we uploaded ourselves: the request
+ * row already holds the video id *and* the tracklist URL.
+ *
+ * Matching mirrors what mkvid sent to YouTube: `set_title` cut to YouTube's
+ * 100-character title limit (lib/youtube.ts on the mkvid side slices before
+ * `videos.insert`), compared case-insensitively and whitespace-trimmed on
+ * both sides in SQL. A `superseded` row still has its `video_id` when the
+ * upload finished before the set gained a 1001tl recording — that unlisted
+ * video is still watchable, so it still counts.
+ */
+export async function findMkvidUploadByTitle(env: Env, title: string): Promise<MkvidUploadMatch | null> {
+  const needle = title.trim()
+  if (!needle) return null
+  const row = await dbOf(env)
+    .prepare(
+      `SELECT slug, set_url, set_title, video_id FROM mkvid_requests
+       WHERE video_id IS NOT NULL AND set_title IS NOT NULL AND status IN ('done', 'superseded')
+         AND lower(substr(trim(set_title), 1, 100)) = lower(?)
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .bind(needle)
+    .first<{ slug: string; set_url: string; set_title: string; video_id: string }>()
+  return row ? { videoId: row.video_id, setUrl: row.set_url, setTitle: row.set_title, slug: row.slug } : null
+}
