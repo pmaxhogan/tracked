@@ -27,6 +27,8 @@ import {
   getMkvidRequestForSet,
   lastCueSeconds,
   listMkvidRequests,
+  banMkvidRequest,
+  moveMkvidRequest,
   mkvidAccountUsage,
   MKVID_MAX_ATTEMPTS,
   retryMkvidRequest,
@@ -125,7 +127,7 @@ describe('queue lifecycle', () => {
     const list = await listMkvidRequests(env)
     expect(list).toHaveLength(1)
     expect(list[0]).toMatchObject({ slug: 'lillypalmer', setUrl: input.setUrl, status: 'pending', attempts: 0, source: 'soundcloud', lastCueSeconds: 3600, idedCount: 18 })
-    expect(await countMkvidRequests(env)).toEqual({ pending: 1, claimed: 0, done: 0, failed: 0, superseded: 0 })
+    expect(await countMkvidRequests(env)).toEqual({ pending: 1, claimed: 0, done: 0, failed: 0, superseded: 0, banned: 0 })
     expect((await getMkvidRequestForSet(env, input.setUrl))!.id).toBe(list[0]!.id)
   })
 
@@ -351,6 +353,79 @@ describe('queue lifecycle', () => {
     await enqueueMkvidRequest(env, { ...input, artistName: 'Tracklists By John Summit' })
     const [r] = await listPendingMkvidRequests(env)
     expect(requestSummary(r!)).toMatchObject({ artistName: 'Tracklists By John Summit', artistLabel: 'John Summit', sourceLabel: 'SoundCloud' })
+  })
+
+  it('top / up / down / bottom move a pending row exactly as far as asked, ties included, and new sets still slot in by date', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
+    const ids: Record<string, string> = {}
+    let t = 0
+    const q = async (n: string, setDate: string | null) => {
+      await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate })
+      await env.DB.prepare('UPDATE mkvid_requests SET created_at = created_at + ? WHERE set_url = ?').bind(t++, `https://x/tracklist/${n}`).run()
+      ids[n] = (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id
+    }
+    const order = async () => (await listPendingMkvidRequests(env)).map((r) => r.setUrl.split('/').pop())
+    await q('A', '2026-09-13'); await q('B', '2026-09-11'); await q('C', '2026-09-05'); await q('D', '2026-09-05'); await q('E', null)
+    expect(await order()).toEqual(['A', 'B', 'D', 'C', 'E'])   // C and D tie on date; D was queued later
+
+    expect(await moveMkvidRequest(env, ids.E!, 'top')).toEqual({ position: 1, rekeyed: 1 })
+    expect(await order()).toEqual(['E', 'A', 'B', 'D', 'C'])
+    expect(await moveMkvidRequest(env, ids.E!, 'top')).toEqual({ position: 1, rekeyed: 0 })
+    expect(await moveMkvidRequest(env, ids.E!, 'bottom')).toEqual({ position: 5, rekeyed: 1 })
+    expect(await order()).toEqual(['A', 'B', 'D', 'C', 'E'])
+    // Up across a tie: exactly one step, the tie block is re-spaced, nothing else moves.
+    expect(await moveMkvidRequest(env, ids.C!, 'up')).toMatchObject({ position: 3 })
+    expect(await order()).toEqual(['A', 'B', 'C', 'D', 'E'])
+    expect(await moveMkvidRequest(env, ids.C!, 'up')).toMatchObject({ position: 2 })
+    expect(await order()).toEqual(['A', 'C', 'B', 'D', 'E'])
+    expect(await moveMkvidRequest(env, ids.A!, 'down')).toMatchObject({ position: 2 })
+    expect(await order()).toEqual(['C', 'A', 'B', 'D', 'E'])
+    expect(await moveMkvidRequest(env, ids.E!, 'down')).toEqual({ position: 5, rekeyed: 0 })
+    // A set the sync queues later still lands by date among the hand-sorted rows.
+    await q('F', '2026-09-10')
+    expect(await order()).toEqual(['C', 'A', 'B', 'F', 'D', 'E'])
+    // …but never ahead of a row put at the top, even when it is newer than everything queued.
+    expect(await moveMkvidRequest(env, ids.D!, 'top')).toMatchObject({ position: 1 })
+    await q('G', new Date().toISOString().slice(0, 10))
+    expect(await order()).toEqual(['D', 'G', 'C', 'A', 'B', 'F', 'E'])
+    // The claim follows the same order.
+    expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/D')
+    expect(await moveMkvidRequest(env, ids.D!, 'up')).toBeNull()   // not pending any more
+    expect(await moveMkvidRequest(env, crypto.randomUUID(), 'up')).toBeNull()
+
+    // A queue that is one big tie (all undated) still moves one step at a time.
+    const tie = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
+    for (const n of ['u1', 'u2', 'u3']) {
+      await enqueueMkvidRequest(tie, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: null })
+      await tie.DB.prepare('UPDATE mkvid_requests SET created_at = created_at + ? WHERE set_url = ?').bind(Number(n[1]), `https://x/tracklist/${n}`).run()
+    }
+    const tieOrder = async () => (await listPendingMkvidRequests(tie)).map((r) => r.setUrl.split('/').pop())
+    expect(await tieOrder()).toEqual(['u3', 'u2', 'u1'])
+    const u1 = (await getMkvidRequestForSet(tie, 'https://x/tracklist/u1'))!.id
+    await moveMkvidRequest(tie, u1, 'up')
+    expect(await tieOrder()).toEqual(['u3', 'u1', 'u2'])
+    await moveMkvidRequest(tie, u1, 'up')
+    expect(await tieOrder()).toEqual(['u1', 'u3', 'u2'])
+  })
+
+  it('ban parks a set for good — never claimed, never re-queued by the sync — until the panel lifts it', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const id = (await getMkvidRequestForSet(env, input.setUrl))!.id
+    expect(await banMkvidRequest(env, id)).toBe(true)
+    expect((await getMkvidRequest(env, id))!).toMatchObject({ status: 'banned', error: 'banned from the panel' })
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await enqueueMkvidRequest(env, input)).toBe('exists')
+    expect(await countMkvidRequests(env)).toMatchObject({ pending: 0, banned: 1 })
+    expect((await listSettledMkvidRequests(env)).map((r) => r.status)).toEqual(['banned'])
+    expect((await listPendingMkvidRequests(env))).toEqual([])
+    expect(await banMkvidRequest(env, id)).toBe(false)   // already banned
+    // Unban = the ordinary retry: back to pending, same place in the queue.
+    expect(await retryMkvidRequest(env, id)).toBe(true)
+    expect((await getMkvidRequest(env, id))!).toMatchObject({ status: 'pending', error: null })
+    expect((await claimMkvidRequest(env, log))!.id).toBe(id)
+    // A set mkvid is rendering cannot be banned out from under it.
+    expect(await banMkvidRequest(env, id)).toBe(false)
   })
 
   it('supersede only touches live requests', async () => {

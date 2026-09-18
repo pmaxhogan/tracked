@@ -17,6 +17,7 @@
  *                        │ fail (retryable)  ──▶ pending (after `not_before`, up to MAX_ATTEMPTS)
  *                        │ fail (permanent)  ──▶ failed
  *   any non-terminal ──the set gains a real YouTube video──▶ superseded
+ *   pending ──panel ✕──▶ banned ──panel Unban──▶ pending
  *
  * Each claim names the `account` (Google Cloud project) mkvid should upload
  * through — see MKVID_ACCOUNTS below.
@@ -38,7 +39,8 @@ import { getTracklistRow, setTracklistVideo } from './sync-store'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export type MkvidSource = { kind: MkvidSourceKind; url: string }
-export type MkvidStatus = 'pending' | 'claimed' | 'done' | 'failed' | 'superseded'
+/** `banned`: never upload this set via mkvid — the row stays so the sync cannot queue it again; the panel can lift it. */
+export type MkvidStatus = 'pending' | 'claimed' | 'done' | 'failed' | 'superseded' | 'banned'
 
 export const MKVID_MAX_ATTEMPTS = 3
 export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
@@ -249,6 +251,8 @@ export type MkvidRequest = {
   setTitle: string | null
   /** ISO YYYY-MM-DD; the queue is served newest set first, undated last. */
   setDate: string | null
+  /** Queue position key (higher = sooner): the set date as a Julian day unless the panel moved it. */
+  sortKey: number
   source: MkvidSourceKind
   sourceUrl: string
   lastCueSeconds: number | null
@@ -276,6 +280,7 @@ type Row = {
   artist_name: string | null
   set_title: string | null
   set_date: string | null
+  sort_key: number
   source: string
   source_url: string
   last_cue_seconds: number | null
@@ -303,6 +308,7 @@ function rowToRequest(r: Row): MkvidRequest {
     artistName: r.artist_name,
     setTitle: r.set_title,
     setDate: r.set_date ?? null,
+    sortKey: Number(r.sort_key ?? 0),
     source: r.source as MkvidSourceKind,
     sourceUrl: r.source_url,
     lastCueSeconds: r.last_cue_seconds,
@@ -345,9 +351,9 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
   const r = await dbOf(env)
     .prepare(
       `INSERT OR IGNORE INTO mkvid_requests
-         (id, slug, set_url, artist_name, set_title, set_date, source, source_url, last_cue_seconds, track_count, ided_count,
+         (id, slug, set_url, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count,
           status, attempts, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, COALESCE(julianday(?), 0), ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
     )
     .bind(
       crypto.randomUUID(),
@@ -355,6 +361,7 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
       input.setUrl,
       v(input.artistName),
       v(input.setTitle),
+      v(input.setDate),
       v(input.setDate),
       input.source.kind,
       input.source.url,
@@ -410,12 +417,91 @@ export async function listPendingMkvidRequests(env: Env, limit = 50): Promise<Mk
 }
 
 /**
- * Queue order: newest set first (by set date), undated sets last, ties by most
- * recently queued. Shared by the claim and the panel's "next up" preview.
+ * Queue order: by `sort_key` — the set date as a Julian day (undated = 0), so
+ * newest set first and undated last — ties by most recently queued. The panel
+ * moves a row by rewriting its key (moveMkvidRequest). Shared by the claim,
+ * the panel's waiting line and the "next up" preview.
  */
 const CLAIMABLE_WHERE = `(status = 'pending' AND (not_before IS NULL OR not_before <= ?))
             OR (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)`
-const QUEUE_ORDER = 'ORDER BY (set_date IS NULL) ASC, set_date DESC, created_at DESC'
+const QUEUE_ORDER = 'ORDER BY sort_key DESC, created_at DESC'
+
+export type MkvidMove = 'top' | 'up' | 'down' | 'bottom'
+export const MKVID_MOVES: readonly MkvidMove[] = ['top', 'up', 'down', 'bottom']
+
+/** Today as a Julian day — what a set dated today gets as its sort key. */
+const julianNow = () => Date.now() / 86_400_000 + 2_440_587.5
+
+/**
+ * Panel action: move a pending request within the waiting line. `up`/`down`
+ * swap with exactly one neighbour; `top` goes ahead of everything queued (and
+ * of anything dated up to today, so tomorrow's sync does not overtake it);
+ * `bottom` goes behind everything. Only the moved row's key is rewritten,
+ * unless its new neighbours tie (same set date) — then that tie block is
+ * re-spaced so the move is still one step and never jumps a whole same-day
+ * group. Returns the new 1-based position, or null if the request is not
+ * pending.
+ */
+export async function moveMkvidRequest(env: Env, id: string, to: MkvidMove): Promise<{ position: number; rekeyed: number } | null> {
+  const db = dbOf(env)
+  const res = await db.prepare(`SELECT id, sort_key FROM mkvid_requests WHERE status = 'pending' ${QUEUE_ORDER}`).all<{ id: string; sort_key: number }>()
+  const seq = res.results.map((r) => ({ id: r.id, key: Number(r.sort_key) }))
+  const i = seq.findIndex((r) => r.id === id)
+  if (i < 0) return null
+  const last = seq.length - 1
+  const j = to === 'top' ? 0 : to === 'bottom' ? last : to === 'up' ? Math.max(0, i - 1) : Math.min(last, i + 1)
+  if (i === j) return { position: i + 1, rekeyed: 0 }
+  const s2 = seq.slice()
+  const [x] = s2.splice(i, 1)
+  s2.splice(j, 0, x!)
+
+  // The smallest window around the new position whose outside neighbours
+  // strictly bracket it; a tie on either side pulls the whole tie block in.
+  const keyAt = (k: number) => (k < 0 ? Infinity : k >= s2.length ? -Infinity : s2[k]!.key)
+  let a = j
+  let b = j
+  while (keyAt(a - 1) <= keyAt(b + 1)) {
+    const upper = keyAt(a - 1)
+    const lower = keyAt(b + 1)
+    while (keyAt(a - 1) === upper) a--
+    while (keyAt(b + 1) === lower) b++
+  }
+  const upper = keyAt(a - 1)
+  const lower = keyAt(b + 1)
+  const n = b - a + 1
+  const keys: number[] = []
+  if (Number.isFinite(upper) && Number.isFinite(lower)) {
+    const step = (upper - lower) / (n + 1)
+    for (let k = 0; k < n; k++) keys.push(upper - step * (k + 1))
+  } else if (Number.isFinite(lower)) {
+    // Ahead of everything: a day per row above the newest, and above today.
+    const base = Math.max(lower, julianNow())
+    for (let k = 0; k < n; k++) keys.push(base + (n - k))
+  } else if (Number.isFinite(upper)) {
+    for (let k = 0; k < n; k++) keys.push(upper - (k + 1))
+  } else {
+    // The whole queue is one tie: keep everyone's key where it was, spaced by a hair.
+    const base = Math.max(...s2.slice(a, b + 1).map((r) => r.key))
+    for (let k = 0; k < n; k++) keys.push(base + (n - 1 - k) * 1e-6)
+  }
+  const now = nowSeconds()
+  const stmts = []
+  for (let k = 0; k < n; k++) {
+    const row = s2[a + k]!
+    if (row.key !== keys[k]) stmts.push(db.prepare('UPDATE mkvid_requests SET sort_key = ?, updated_at = ? WHERE id = ?').bind(keys[k], now, row.id))
+  }
+  if (stmts.length) await db.batch(stmts)
+  return { position: j + 1, rekeyed: stmts.length }
+}
+
+/** Panel action: never upload this set via mkvid. The row stays, so the sync's INSERT OR IGNORE cannot queue it again; Retry (Unban) lifts it. */
+export async function banMkvidRequest(env: Env, id: string): Promise<boolean> {
+  const r = await dbOf(env)
+    .prepare("UPDATE mkvid_requests SET status = 'banned', error = 'banned from the panel', not_before = NULL, updated_at = ? WHERE id = ? AND status IN ('pending', 'failed', 'superseded')")
+    .bind(nowSeconds(), id)
+    .run()
+  return (r.meta.changes ?? 0) > 0
+}
 
 /** The head of the queue in claim order, without claiming anything. */
 export async function nextMkvidRequests(env: Env, limit = 5): Promise<MkvidRequest[]> {
@@ -429,7 +515,7 @@ export async function nextMkvidRequests(env: Env, limit = 5): Promise<MkvidReque
 
 export async function countMkvidRequests(env: Env): Promise<Record<MkvidStatus, number>> {
   const res = await dbOf(env).prepare('SELECT status, COUNT(*) AS n FROM mkvid_requests GROUP BY status').all<{ status: string; n: number }>()
-  const out: Record<MkvidStatus, number> = { pending: 0, claimed: 0, done: 0, failed: 0, superseded: 0 }
+  const out: Record<MkvidStatus, number> = { pending: 0, claimed: 0, done: 0, failed: 0, superseded: 0, banned: 0 }
   for (const r of res.results) if (r.status in out) out[r.status as MkvidStatus] = Number(r.n)
   return out
 }
@@ -662,12 +748,12 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   return { status, attempts: req.attempts }
 }
 
-/** Panel action: give a failed (or superseded) request a fresh start. */
+/** Panel action: give a failed / superseded / stuck / banned request a fresh start (it keeps its place in the queue). */
 export async function retryMkvidRequest(env: Env, id: string): Promise<boolean> {
   const r = await dbOf(env)
     .prepare(
       `UPDATE mkvid_requests SET status = 'pending', attempts = 0, not_before = NULL, claimed_at = NULL, error = NULL, updated_at = ?
-       WHERE id = ? AND status IN ('failed', 'superseded', 'claimed')`,
+       WHERE id = ? AND status IN ('failed', 'superseded', 'claimed', 'banned')`,
     )
     .bind(nowSeconds(), id)
     .run()
