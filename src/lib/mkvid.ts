@@ -18,6 +18,9 @@
  *                        │ fail (permanent)  ──▶ failed
  *   any non-terminal ──the set gains a real YouTube video──▶ superseded
  *
+ * Each claim names the `account` (Google Cloud project) mkvid should upload
+ * through — see MKVID_ACCOUNTS below.
+ *
  * "Complete recording" is checked on the mkvid side by comparing the source's
  * duration against `last_cue_seconds` (the tracklist's last cue): a SoundCloud
  * upload that stops before the last track started is a clip, not the set, and
@@ -42,12 +45,22 @@ export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
 /** A retryable failure waits this long × attempts before it can be claimed again. */
 const RETRY_BACKOFF_SECONDS = 6 * 60 * 60
 /**
- * Claims handed out per quota day. mkvid uploads through the same Google Cloud
- * project as the sync, and a `videos.insert` costs 1 600 of the project's
- * 10 000 daily units — an unthrottled queue would starve the sync's own
- * playlist inserts (50 each, ~6 000 budgeted). Two uploads leave that intact.
+ * mkvid uploads through two Google Cloud projects, each with its own 10 000-unit
+ * YouTube quota day, and a `videos.insert` costs 1 600 of them:
+ *   - `primary` — mkvid's own project (mkvid-uploads). Nothing else spends
+ *     there, so six uploads (9 600) fit.
+ *   - `shared` — the sync's project (tracked-youtube), which also pays for
+ *     every playlist insert (50 each, ~2 000/day in steady state, far more
+ *     while a backfill runs). Off unless MKVID_SHARED_DAILY_CLAIM_CAP says
+ *     otherwise; three is the most it can carry without starving the sync.
+ * A claim fills the primary account first and spills to the shared one.
  */
-export const DEFAULT_DAILY_CLAIM_CAP = 2
+export type MkvidAccount = 'primary' | 'shared'
+export const MKVID_ACCOUNTS: readonly MkvidAccount[] = ['primary', 'shared']
+/** The Google Cloud project behind each account — what the panel shows. */
+export const MKVID_ACCOUNT_LABELS: Record<MkvidAccount, string> = { primary: 'mkvid-uploads', shared: 'tracked-youtube' }
+export const DEFAULT_DAILY_CLAIM_CAP = 6
+export const DEFAULT_SHARED_DAILY_CLAIM_CAP = 0
 /** The YouTube Data API quota resets at midnight Pacific, not UTC. */
 const QUOTA_TZ = 'America/Los_Angeles'
 
@@ -60,9 +73,55 @@ export function quotaDayStart(nowMs = Date.now()): number {
   return Math.floor(nowMs / 1000) - (get('hour') * 3600 + get('minute') * 60 + get('second'))
 }
 
-export function dailyClaimCap(env: Env): number {
-  const n = Number(env.MKVID_DAILY_CLAIM_CAP)
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_DAILY_CLAIM_CAP
+/**
+ * `0` pauses the queue, and it has to be spelled out: `Number('')` is 0 too, so
+ * a blank secret (`echo $UNSET | wrangler secret put …`) would otherwise stop
+ * every upload without anyone having asked for that.
+ */
+export function dailyClaimCap(env: Env, account: MkvidAccount = 'primary'): number {
+  const fallback = account === 'shared' ? DEFAULT_SHARED_DAILY_CLAIM_CAP : DEFAULT_DAILY_CLAIM_CAP
+  const raw = ((account === 'shared' ? env.MKVID_SHARED_DAILY_CLAIM_CAP : env.MKVID_DAILY_CLAIM_CAP) ?? '').trim()
+  if (!raw) return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
+}
+
+/** Unix seconds at which the quota day rolls over and the daily claims start from zero again. */
+export function quotaDayEnd(nowMs = Date.now()): number {
+  // 26 h past local midnight is always inside the next local day, DST shift or not.
+  return quotaDayStart((quotaDayStart(nowMs) + 26 * 3600) * 1000)
+}
+
+// ─── poll heartbeat ─────────────────────────────────────────────────────────
+
+/** What the last `/mkvid/claim` poll got: a request, nothing queued, the daily cap, no connected YouTube account on mkvid's side, or a Worker-side error. */
+export type MkvidPollOutcome = 'claimed' | 'empty' | 'capped' | 'not_connected' | 'error'
+/** `accounts` = what mkvid said it could upload with on that poll, so the panel can tell "cap reached on the accounts mkvid has" from "ready". */
+export type MkvidLastPoll = { at: number; outcome: MkvidPollOutcome; accounts?: MkvidAccount[] }
+
+const LAST_POLL_KEY = 'mkvid:last_poll'
+/** mkvid polls every minute; the heartbeat is only rewritten this often (or when the outcome changes) to spare KV writes. */
+export const LAST_POLL_REFRESH_SECONDS = 10 * 60
+
+/**
+ * Remember that mkvid polled, so the panel can tell "mkvid is down / cannot
+ * reach the Worker" from "mkvid is polling and is being told no". Best-effort.
+ */
+export async function recordMkvidPoll(env: Env, outcome: MkvidPollOutcome, accounts: readonly MkvidAccount[] = ['primary']): Promise<void> {
+  try {
+    const now = nowSeconds()
+    const prev = await getMkvidLastPoll(env)
+    const same = prev && prev.outcome === outcome && (prev.accounts ?? ['primary']).join() === accounts.join()
+    if (same && now - prev.at < LAST_POLL_REFRESH_SECONDS) return
+    await env.CACHE.put(LAST_POLL_KEY, JSON.stringify({ at: now, outcome, accounts: [...accounts] } satisfies MkvidLastPoll))
+  } catch {
+    // a heartbeat must never fail a claim
+  }
+}
+
+export async function getMkvidLastPoll(env: Env): Promise<MkvidLastPoll | null> {
+  const p = parseJson<MkvidLastPoll | null>(await env.CACHE.get(LAST_POLL_KEY), null)
+  return p && typeof p.at === 'number' ? p : null
 }
 
 /**
@@ -70,12 +129,19 @@ export function dailyClaimCap(env: Env): number {
  * cannot reset it. Only claims that (may) have cost an upload count: one that
  * was refused before rendering (`failed`) or went back to `pending` spent nothing.
  */
-export async function dailyClaimsUsed(env: Env): Promise<number> {
+export async function dailyClaimsUsed(env: Env, account: MkvidAccount = 'primary'): Promise<number> {
   const r = await dbOf(env)
-    .prepare("SELECT COUNT(*) AS n FROM mkvid_requests WHERE status IN ('claimed', 'done') AND claimed_at IS NOT NULL AND claimed_at >= ?")
-    .bind(quotaDayStart())
+    .prepare("SELECT COUNT(*) AS n FROM mkvid_requests WHERE status IN ('claimed', 'done') AND claimed_at IS NOT NULL AND claimed_at >= ? AND account = ?")
+    .bind(quotaDayStart(), account)
     .first<{ n: number }>()
   return Number(r?.n ?? 0)
+}
+
+export type MkvidAccountUsage = { account: MkvidAccount; label: string; used: number; cap: number }
+
+/** Today's claims against each account's cap, in fill order. */
+export async function mkvidAccountUsage(env: Env): Promise<MkvidAccountUsage[]> {
+  return Promise.all(MKVID_ACCOUNTS.map(async (account) => ({ account, label: MKVID_ACCOUNT_LABELS[account], used: await dailyClaimsUsed(env, account), cap: dailyClaimCap(env, account) })))
 }
 
 // ─── page parsing ───────────────────────────────────────────────────────────
@@ -189,6 +255,8 @@ export type MkvidRequest = {
   trackCount: number | null
   idedCount: number | null
   status: MkvidStatus
+  /** Which Google project mkvid should upload this one through. */
+  account: MkvidAccount
   attempts: number
   notBefore: number | null
   claimedAt: number | null
@@ -214,6 +282,7 @@ type Row = {
   track_count: number | null
   ided_count: number | null
   status: string
+  account: string
   attempts: number
   not_before: number | null
   claimed_at: number | null
@@ -240,6 +309,7 @@ function rowToRequest(r: Row): MkvidRequest {
     trackCount: r.track_count,
     idedCount: r.ided_count,
     status: r.status as MkvidStatus,
+    account: r.account === 'shared' ? 'shared' : 'primary',
     attempts: Number(r.attempts),
     notBefore: r.not_before,
     claimedAt: r.claimed_at,
@@ -308,10 +378,32 @@ export async function getMkvidRequestForSet(env: Env, setUrl: string): Promise<M
   return row ? rowToRequest(row) : null
 }
 
-/** Newest first, for the admin panel. */
+/** Newest activity first, for the admin panel. */
 export async function listMkvidRequests(env: Env, limit = 100): Promise<MkvidRequest[]> {
   const res = await dbOf(env)
     .prepare('SELECT * FROM mkvid_requests ORDER BY updated_at DESC, created_at DESC LIMIT ?')
+    .bind(Math.min(Math.max(limit, 1), 500))
+    .all<Row>()
+  return res.results.map(rowToRequest)
+}
+
+/**
+ * Everything that has left the waiting line — rendering, done, failed,
+ * superseded — rendering first, then newest activity first. The panel shows
+ * this apart from the (long) pending queue, which would otherwise bury it.
+ */
+export async function listSettledMkvidRequests(env: Env, limit = 50): Promise<MkvidRequest[]> {
+  const res = await dbOf(env)
+    .prepare("SELECT * FROM mkvid_requests WHERE status != 'pending' ORDER BY (status = 'claimed') DESC, updated_at DESC, created_at DESC LIMIT ?")
+    .bind(Math.min(Math.max(limit, 1), 500))
+    .all<Row>()
+  return res.results.map(rowToRequest)
+}
+
+/** The waiting line in the order it will be served; a request in retry backoff keeps its place but is skipped until `not_before`. */
+export async function listPendingMkvidRequests(env: Env, limit = 50): Promise<MkvidRequest[]> {
+  const res = await dbOf(env)
+    .prepare(`SELECT * FROM mkvid_requests WHERE status = 'pending' ${QUEUE_ORDER} LIMIT ?`)
     .bind(Math.min(Math.max(limit, 1), 500))
     .all<Row>()
   return res.results.map(rowToRequest)
@@ -353,16 +445,32 @@ function claimTtl(env: Env): number {
  * whose set has meanwhile gained a video on 1001tracklists is marked
  * `superseded` and skipped. Returns null when there is nothing to do.
  */
-export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidRequest | null> {
+export async function claimMkvidRequest(env: Env, log: Logger, accounts: readonly MkvidAccount[] = ['primary']): Promise<MkvidRequest | null> {
+  const { request, outcome } = await claimNext(env, log, accounts)
+  await recordMkvidPoll(env, outcome, accounts)
+  return request
+}
+
+/**
+ * `accounts` is what mkvid can upload with right now (a configured client
+ * with a connected YouTube account); the first of them with claims left today
+ * gets the request, so the primary project fills before the shared one.
+ */
+async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[]): Promise<{ request: MkvidRequest | null; outcome: MkvidPollOutcome }> {
   const db = dbOf(env)
   const now = nowSeconds()
   const stale = now - claimTtl(env)
-  const cap = dailyClaimCap(env)
-  const used = await dailyClaimsUsed(env)
-  if (used >= cap) {
-    log.info('mkvid.claim_capped', { used, cap })
-    return null
+  if (accounts.length === 0) {
+    log.info('mkvid.claim_not_connected')
+    return { request: null, outcome: 'not_connected' }
   }
+  const usage = (await mkvidAccountUsage(env)).filter((u) => accounts.includes(u.account))
+  const slot = usage.find((u) => u.used < u.cap)
+  if (!slot) {
+    log.info('mkvid.claim_capped', { accounts: usage.map((u) => `${u.account} ${u.used}/${u.cap}`) })
+    return { request: null, outcome: 'capped' }
+  }
+  const { account, used, cap } = slot
   for (let i = 0; i < 20; i++) {
     const row = await db
       .prepare(
@@ -370,7 +478,7 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
       )
       .bind(now, stale)
       .first<Row>()
-    if (!row) return null
+    if (!row) return { request: null, outcome: 'empty' }
     const tl = await getTracklistRow(env, row.slug, row.set_url)
     if (tl?.video_id) {
       await db
@@ -389,18 +497,18 @@ export async function claimMkvidRequest(env: Env, log: Logger): Promise<MkvidReq
     }
     const r = await db
       .prepare(
-        `UPDATE mkvid_requests SET status = 'claimed', claimed_at = ?, attempts = attempts + 1, job_id = NULL, updated_at = ?
+        `UPDATE mkvid_requests SET status = 'claimed', account = ?, claimed_at = ?, attempts = attempts + 1, job_id = NULL, updated_at = ?
          WHERE id = ? AND status = ? AND attempts = ?`,
       )
-      .bind(now, now, row.id, row.status, row.attempts)
+      .bind(account, now, now, row.id, row.status, row.attempts)
       .run()
     // Lost a race with another claimer (two mkvid instances) — pick again.
     if ((r.meta.changes ?? 0) === 0) continue
     const claimed = await getMkvidRequest(env, row.id)
-    log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, dailyClaims: used + 1, cap })
-    return claimed
+    log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, account, dailyClaims: used + 1, cap })
+    return { request: claimed, outcome: 'claimed' }
   }
-  return null
+  return { request: null, outcome: 'empty' }
 }
 
 /** mkvid tells us which of its jobs is handling a claimed request (purely informational). */
@@ -577,7 +685,14 @@ export async function supersedeMkvidRequestForSet(env: Env, setUrl: string, vide
 
 /** Read the JSON `summary`-like fields the panel needs without the full row noise. */
 export function requestSummary(r: MkvidRequest): Record<string, unknown> {
-  return { ...r, sourceLabel: r.source === 'soundcloud' ? 'SoundCloud' : 'hearthis.at' }
+  return {
+    ...r,
+    sourceLabel: r.source === 'soundcloud' ? 'SoundCloud' : 'hearthis.at',
+    // Display only: the stored name carries 1001tracklists' "Tracklists By" H1
+    // prefix, and the artist playlists are titled (and found again) by it.
+    artistLabel: (r.artistName ?? r.slug).replace(/^Tracklists By\s+/i, ''),
+    accountLabel: MKVID_ACCOUNT_LABELS[r.account],
+  }
 }
 
 export { parseJson }

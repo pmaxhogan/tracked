@@ -96,7 +96,13 @@ describe('/mkvid routes', () => {
     expect((await post(env, '/mkvid/claim', {})).status).toBe(200)
     expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
     const health = await app.request('http://x/mkvid/health', { headers: { Authorization: 'Bearer mk-secret' } }, env)
-    expect(await health.json()).toEqual({ ok: true, counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0 }, dailyClaims: 1, dailyClaimCap: 2 })
+    expect(await health.json()).toEqual({
+      ok: true,
+      counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0 },
+      accounts: [{ account: 'primary', label: 'mkvid-uploads', used: 1, cap: 6 }, { account: 'shared', label: 'tracked-youtube', used: 0, cap: 0 }],
+      dailyClaims: 1,
+      dailyClaimCap: 6,
+    })
   })
 
   it('validates bodies and reports unknown / finished requests', async () => {
@@ -106,6 +112,30 @@ describe('/mkvid routes', () => {
     expect((await post(env, '/mkvid/complete', { id: crypto.randomUUID(), videoId: 'upload12345' })).status).toBe(404)
     expect((await post(env, '/mkvid/fail', { id: crypto.randomUUID(), error: 'x' })).status).toBe(404)
     expect((await post(env, '/mkvid/fail', { id: crypto.randomUUID() })).status).toBe(400)
+  })
+
+  it('the panel API explains the queue: cap, usage, reset time, last poll, waiting line', async () => {
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1', MKVID_DAILY_CLAIM_CAP: '0' })
+    await enqueueMkvidRequest(env, input)
+    expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
+    const r = await app.request('http://x/subscriptions/api/mkvid', {}, env)
+    expect(r.status).toBe(200)
+    const d = (await r.json()) as { dailyClaimCap: number; dailyClaims: number; quotaResetsAt: number; now: number; lastPoll: { outcome: string } | null; queue: Array<{ setUrl: string }>; settled: unknown[] }
+    expect(d).toMatchObject({ enabled: true, dailyClaimCap: 0, dailyClaims: 0, lastPoll: { outcome: 'capped', accounts: ['primary'] }, settled: [], accounts: [{ account: 'primary', cap: 0 }, { account: 'shared', cap: 0 }] })
+    expect(d.queue.map((q) => q.setUrl)).toEqual([input.setUrl])
+    expect(d.quotaResetsAt).toBeGreaterThan(d.now)
+    expect(d.quotaResetsAt - d.now).toBeLessThanOrEqual(25 * 3600)
+  })
+
+  it('the claim body names the accounts mkvid can upload with; the request names the one it got', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '0', MKVID_SHARED_DAILY_CLAIM_CAP: '1' })
+    await enqueueMkvidRequest(env, input)
+    // Pre-accounts mkvid (no body / no field) only ever has the primary client.
+    expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
+    expect((await post(env, '/mkvid/claim', { accounts: ['bogus'] })).status).toBe(400)
+    const { request } = (await (await post(env, '/mkvid/claim', { accounts: ['primary', 'shared'] })).json()) as { request: { account: string; setUrl: string } }
+    expect(request).toMatchObject({ setUrl: input.setUrl, account: 'shared' })
+    expect(((await (await post(env, '/mkvid/claim', { accounts: [] })).json()) as { request: unknown }).request).toBeNull()
   })
 
   it('fail parks or requeues, and complete 503s without a YouTube connection', async () => {

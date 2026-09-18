@@ -6,6 +6,12 @@ import type { Env } from '../src/types'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import {
+  dailyClaimCap,
+  getMkvidLastPoll,
+  listPendingMkvidRequests,
+  listSettledMkvidRequests,
+  quotaDayEnd,
+  requestSummary,
   dailyClaimsUsed,
   extractSetDate,
   nextMkvidRequests,
@@ -21,6 +27,7 @@ import {
   getMkvidRequestForSet,
   lastCueSeconds,
   listMkvidRequests,
+  mkvidAccountUsage,
   MKVID_MAX_ATTEMPTS,
   retryMkvidRequest,
   supersedeMkvidRequestForSet,
@@ -234,21 +241,116 @@ describe('queue lifecycle', () => {
     expect(await dailyClaimsUsed(env)).toBe(1)
   })
 
-  it('hands out at most MKVID_DAILY_CLAIM_CAP requests per quota day (default 2)', async () => {
+  it('hands out at most MKVID_DAILY_CLAIM_CAP requests per quota day on the primary account (default 6)', async () => {
     const env = makeEnv()
-    for (const n of [1, 2, 3]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
-    expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/1')
-    expect((await claimMkvidRequest(env, log))!.setUrl).toBe('https://x/tracklist/2')
+    for (const n of [1, 2, 3, 4, 5, 6, 7]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
+    for (let i = 1; i <= 6; i++) expect((await claimMkvidRequest(env, log))!.setUrl).toBe(`https://x/tracklist/${i}`)
     expect(await claimMkvidRequest(env, log)).toBeNull()
-    expect(await countMkvidRequests(env)).toMatchObject({ pending: 1, claimed: 2 })
-    expect(await dailyClaimsUsed(env)).toBe(2)
+    expect(await countMkvidRequests(env)).toMatchObject({ pending: 1, claimed: 6 })
+    expect(await dailyClaimsUsed(env)).toBe(6)
+    expect(await dailyClaimsUsed(env, 'shared')).toBe(0)
 
-    const raised = makeEnv({ MKVID_DAILY_CLAIM_CAP: '5' })
-    for (const n of [1, 2, 3]) await enqueueMkvidRequest(raised, { ...input, setUrl: `https://x/tracklist/${n}` })
-    for (let i = 0; i < 3; i++) expect(await claimMkvidRequest(raised, log)).not.toBeNull()
+    const lowered = makeEnv({ MKVID_DAILY_CLAIM_CAP: '2' })
+    for (const n of [1, 2, 3]) await enqueueMkvidRequest(lowered, { ...input, setUrl: `https://x/tracklist/${n}` })
+    for (let i = 0; i < 2; i++) expect(await claimMkvidRequest(lowered, log)).not.toBeNull()
+    expect(await claimMkvidRequest(lowered, log)).toBeNull()
     const off = makeEnv({ MKVID_DAILY_CLAIM_CAP: '0' })
     await enqueueMkvidRequest(off, input)
     expect(await claimMkvidRequest(off, log)).toBeNull()
+  })
+
+  it('fills the primary account first, spills to the shared one, and only among the accounts mkvid offers', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '1', MKVID_SHARED_DAILY_CLAIM_CAP: '2' })
+    for (const n of [1, 2, 3, 4]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: `2026-09-0${5 - n}` })
+    const both = ['primary', 'shared'] as const
+    expect((await claimMkvidRequest(env, log, both))!).toMatchObject({ setUrl: 'https://x/tracklist/1', account: 'primary' })
+    expect((await claimMkvidRequest(env, log, both))!).toMatchObject({ setUrl: 'https://x/tracklist/2', account: 'shared' })
+    // Only the primary is connected: its cap is used, so nothing — the shared slot is not offered.
+    expect(await claimMkvidRequest(env, log, ['primary'])).toBeNull()
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'capped', accounts: ['primary'] })
+    expect((await claimMkvidRequest(env, log, both))!).toMatchObject({ setUrl: 'https://x/tracklist/3', account: 'shared' })
+    expect(await claimMkvidRequest(env, log, both)).toBeNull()
+    expect(await mkvidAccountUsage(env)).toEqual([
+      { account: 'primary', label: 'mkvid-uploads', used: 1, cap: 1 },
+      { account: 'shared', label: 'tracked-youtube', used: 2, cap: 2 },
+    ])
+    // The row remembers which project it went out for; the panel shows the project name.
+    const rows = await listSettledMkvidRequests(env)
+    expect(rows.map((r) => [r.setUrl.split('/').pop(), r.account])).toEqual([['1', 'primary'], ['2', 'shared'], ['3', 'shared']])
+    expect(requestSummary(rows[1]!)).toMatchObject({ account: 'shared', accountLabel: 'tracked-youtube' })
+
+    // mkvid with no YouTube account connected at all: nothing is handed out, and the panel can say why.
+    expect(await claimMkvidRequest(env, log, [])).toBeNull()
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'not_connected', accounts: [] })
+
+    // A failed request retried later is reassigned to whichever account has room then.
+    await failMkvidRequest(env, { id: rows[0]!.id, error: 'boom', permanent: true }, log)
+    expect(await retryMkvidRequest(env, rows[0]!.id)).toBe(true)
+    const fresh = makeEnv({ MKVID_DAILY_CLAIM_CAP: '0', MKVID_SHARED_DAILY_CLAIM_CAP: '5', DB: env.DB })
+    expect((await claimMkvidRequest(fresh, log, both))!).toMatchObject({ setUrl: 'https://x/tracklist/1', account: 'shared' })
+  })
+
+  it('a blank cap is the default, not a pause — only a literal 0 pauses', () => {
+    expect(dailyClaimCap(makeEnv())).toBe(6)
+    for (const blank of ['', ' ', '\r\n']) expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: blank }))).toBe(6)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: 'two' }))).toBe(6)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: '-1' }))).toBe(6)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: '0' }))).toBe(0)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: ' 5\n' }))).toBe(5)
+    // The shared (sync's) project is opt-in.
+    expect(dailyClaimCap(makeEnv(), 'shared')).toBe(0)
+    expect(dailyClaimCap(makeEnv({ MKVID_SHARED_DAILY_CLAIM_CAP: '3' }), 'shared')).toBe(3)
+    expect(dailyClaimCap(makeEnv({ MKVID_SHARED_DAILY_CLAIM_CAP: '3' }))).toBe(6)
+  })
+
+  it('quotaDayEnd is the next Pacific midnight, across a DST change too', () => {
+    expect(quotaDayEnd(Date.parse('2026-09-17T23:30:00Z'))).toBe(Date.parse('2026-09-18T07:00:00Z') / 1000)
+    // 2026-11-01 is a 25-hour day in Los Angeles.
+    expect(quotaDayEnd(Date.parse('2026-11-01T12:00:00Z'))).toBe(Date.parse('2026-11-02T08:00:00Z') / 1000)
+    // 2026-03-08 is a 23-hour one.
+    expect(quotaDayEnd(Date.parse('2026-03-08T12:00:00Z'))).toBe(Date.parse('2026-03-09T07:00:00Z') / 1000)
+  })
+
+  it('remembers what the last poll got, so the panel can tell a capped queue from a silent mkvid', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '1' })
+    expect(await getMkvidLastPoll(env)).toBeNull()
+    await claimMkvidRequest(env, log)
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'empty' })
+    for (const n of [1, 2]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
+    await claimMkvidRequest(env, log)
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'claimed' })
+    await claimMkvidRequest(env, log)
+    const capped = await getMkvidLastPoll(env)
+    expect(capped).toMatchObject({ outcome: 'capped' })
+    expect(capped!.at).toBeGreaterThanOrEqual(NOW)
+
+    // An unchanged outcome is not rewritten every minute (KV write budget)…
+    const put = vi.spyOn(env.CACHE, 'put')
+    await claimMkvidRequest(env, log)
+    expect(put).not.toHaveBeenCalled()
+    // …but a change in what mkvid offers is.
+    await claimMkvidRequest(env, log, ['primary', 'shared'])
+    expect(put).toHaveBeenCalledTimes(1)
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'capped', accounts: ['primary', 'shared'] })
+  })
+
+  it('lists the waiting line in claim order, apart from what has left it', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/old', setDate: '2021-01-01' })
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/new', setDate: '2026-01-01' })
+    await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/mid', setDate: '2024-01-01' })
+    const first = await claimMkvidRequest(env, log)
+    await failMkvidRequest(env, { id: first!.id, error: 'incomplete_recording', permanent: true }, log)
+    await claimMkvidRequest(env, log)
+    expect((await listPendingMkvidRequests(env)).map((r) => r.setUrl.split('/').pop())).toEqual(['old'])
+    expect((await listSettledMkvidRequests(env)).map((r) => [r.setUrl.split('/').pop(), r.status])).toEqual([['mid', 'claimed'], ['new', 'failed']])
+  })
+
+  it('shows the artist without the "Tracklists By" prefix the stored name carries', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, { ...input, artistName: 'Tracklists By John Summit' })
+    const [r] = await listPendingMkvidRequests(env)
+    expect(requestSummary(r!)).toMatchObject({ artistName: 'Tracklists By John Summit', artistLabel: 'John Summit', sourceLabel: 'SoundCloud' })
   })
 
   it('supersede only touches live requests', async () => {

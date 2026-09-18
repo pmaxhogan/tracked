@@ -3,7 +3,9 @@
  * own bearer token (`MKVID_TOKEN`) — never the Tasker token — and mounted in
  * src/index.ts *above* the API_TOKEN wildcard gate, which also skips this path.
  *
- *   POST /mkvid/claim     → { request } (null when nothing is queued)
+ *   POST /mkvid/claim     { accounts?: ['primary'|'shared'…] } → { request } (null when nothing is queued / claimable)
+ *                         `accounts` = the Google projects mkvid can upload through right now (default ['primary']);
+ *                         the request carries the `account` it was handed out for
  *   POST /mkvid/job       { id, jobId }                       attach mkvid's job id (informational)
  *   POST /mkvid/complete  { id, videoId, videoUrl?, privacy?, jobId? }
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
@@ -18,10 +20,11 @@ import type { Env } from '../types'
 import { mkvidAuth } from '../middleware/auth'
 import { getAccessToken, GoogleOAuthRefreshFailed } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
-import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, dailyClaimCap, dailyClaimsUsed, failMkvidRequest } from '../lib/mkvid'
+import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, failMkvidRequest, mkvidAccountUsage, recordMkvidPoll } from '../lib/mkvid'
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/
 
+const ClaimBody = z.object({ accounts: z.array(z.enum(['primary', 'shared'])).max(2).optional() })
 const JobBody = z.object({ id: z.string().uuid(), jobId: z.string().min(1).max(100) })
 const CompleteBody = z.object({
   id: z.string().uuid(),
@@ -49,16 +52,28 @@ async function body<T>(c: { req: { json(): Promise<unknown> } }, schema: z.ZodTy
   return parsed.success ? parsed.data : null
 }
 
-mkvidApp.get('/health', async (c) =>
-  c.json({ ok: true, counts: await countMkvidRequests(c.env), dailyClaims: await dailyClaimsUsed(c.env), dailyClaimCap: dailyClaimCap(c.env) }),
-)
+mkvidApp.get('/health', async (c) => {
+  const accounts = await mkvidAccountUsage(c.env)
+  return c.json({
+    ok: true,
+    counts: await countMkvidRequests(c.env),
+    accounts,
+    dailyClaims: accounts.reduce((n, a) => n + a.used, 0),
+    dailyClaimCap: accounts.reduce((n, a) => n + a.cap, 0),
+  })
+})
 
 mkvidApp.post('/claim', async (c) => {
   const log = logger(c, 'mkvid.claim')
+  // An empty/absent body is the pre-accounts mkvid: it has one client, the primary.
+  const parsed = ClaimBody.safeParse((await c.req.json().catch(() => null)) ?? {})
+  if (!parsed.success) return c.json({ error: 'invalid_request' }, 400)
+  const accounts = parsed.data.accounts ?? ['primary']
   try {
-    return c.json({ request: await claimMkvidRequest(c.env, log) })
+    return c.json({ request: await claimMkvidRequest(c.env, log, accounts) })
   } catch (e) {
     log.error('mkvid.claim_threw', errorFields(e))
+    await recordMkvidPoll(c.env, 'error', accounts)
     return c.json({ error: 'claim_failed', ...errorFields(e) }, 500)
   }
 })
