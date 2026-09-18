@@ -96,7 +96,8 @@ export function quotaDayEnd(nowMs = Date.now()): number {
 
 /** What the last `/mkvid/claim` poll got: a request, nothing queued, the daily cap, no connected YouTube account on mkvid's side, or a Worker-side error. */
 export type MkvidPollOutcome = 'claimed' | 'empty' | 'capped' | 'not_connected' | 'error'
-export type MkvidLastPoll = { at: number; outcome: MkvidPollOutcome }
+/** `accounts` = what mkvid said it could upload with on that poll, so the panel can tell "cap reached on the accounts mkvid has" from "ready". */
+export type MkvidLastPoll = { at: number; outcome: MkvidPollOutcome; accounts?: MkvidAccount[] }
 
 const LAST_POLL_KEY = 'mkvid:last_poll'
 /** mkvid polls every minute; the heartbeat is only rewritten this often (or when the outcome changes) to spare KV writes. */
@@ -106,12 +107,13 @@ export const LAST_POLL_REFRESH_SECONDS = 10 * 60
  * Remember that mkvid polled, so the panel can tell "mkvid is down / cannot
  * reach the Worker" from "mkvid is polling and is being told no". Best-effort.
  */
-export async function recordMkvidPoll(env: Env, outcome: MkvidPollOutcome): Promise<void> {
+export async function recordMkvidPoll(env: Env, outcome: MkvidPollOutcome, accounts: readonly MkvidAccount[] = ['primary']): Promise<void> {
   try {
     const now = nowSeconds()
     const prev = await getMkvidLastPoll(env)
-    if (prev && prev.outcome === outcome && now - prev.at < LAST_POLL_REFRESH_SECONDS) return
-    await env.CACHE.put(LAST_POLL_KEY, JSON.stringify({ at: now, outcome } satisfies MkvidLastPoll))
+    const same = prev && prev.outcome === outcome && (prev.accounts ?? ['primary']).join() === accounts.join()
+    if (same && now - prev.at < LAST_POLL_REFRESH_SECONDS) return
+    await env.CACHE.put(LAST_POLL_KEY, JSON.stringify({ at: now, outcome, accounts: [...accounts] } satisfies MkvidLastPoll))
   } catch {
     // a heartbeat must never fail a claim
   }
@@ -445,7 +447,7 @@ function claimTtl(env: Env): number {
  */
 export async function claimMkvidRequest(env: Env, log: Logger, accounts: readonly MkvidAccount[] = ['primary']): Promise<MkvidRequest | null> {
   const { request, outcome } = await claimNext(env, log, accounts)
-  await recordMkvidPoll(env, outcome)
+  await recordMkvidPoll(env, outcome, accounts)
   return request
 }
 

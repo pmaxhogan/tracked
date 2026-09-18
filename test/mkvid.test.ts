@@ -267,7 +267,7 @@ describe('queue lifecycle', () => {
     expect((await claimMkvidRequest(env, log, both))!).toMatchObject({ setUrl: 'https://x/tracklist/2', account: 'shared' })
     // Only the primary is connected: its cap is used, so nothing — the shared slot is not offered.
     expect(await claimMkvidRequest(env, log, ['primary'])).toBeNull()
-    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'capped' })
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'capped', accounts: ['primary'] })
     expect((await claimMkvidRequest(env, log, both))!).toMatchObject({ setUrl: 'https://x/tracklist/3', account: 'shared' })
     expect(await claimMkvidRequest(env, log, both)).toBeNull()
     expect(await mkvidAccountUsage(env)).toEqual([
@@ -281,7 +281,7 @@ describe('queue lifecycle', () => {
 
     // mkvid with no YouTube account connected at all: nothing is handed out, and the panel can say why.
     expect(await claimMkvidRequest(env, log, [])).toBeNull()
-    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'not_connected' })
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'not_connected', accounts: [] })
 
     // A failed request retried later is reassigned to whichever account has room then.
     await failMkvidRequest(env, { id: rows[0]!.id, error: 'boom', permanent: true }, log)
@@ -324,10 +324,14 @@ describe('queue lifecycle', () => {
     expect(capped).toMatchObject({ outcome: 'capped' })
     expect(capped!.at).toBeGreaterThanOrEqual(NOW)
 
-    // An unchanged outcome is not rewritten every minute (KV write budget).
+    // An unchanged outcome is not rewritten every minute (KV write budget)…
     const put = vi.spyOn(env.CACHE, 'put')
     await claimMkvidRequest(env, log)
     expect(put).not.toHaveBeenCalled()
+    // …but a change in what mkvid offers is.
+    await claimMkvidRequest(env, log, ['primary', 'shared'])
+    expect(put).toHaveBeenCalledTimes(1)
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'capped', accounts: ['primary', 'shared'] })
   })
 
   it('lists the waiting line in claim order, apart from what has left it', async () => {

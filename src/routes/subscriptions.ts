@@ -1909,10 +1909,23 @@ ${BAN_HISTORY_HTML}
   }
 
   // The one line that answers "why is nothing uploading?" — first match wins.
+  // The caps that actually apply: only the accounts mkvid offered on its last
+  // poll can be claimed against. (A heartbeat from before accounts existed
+  // names none — treat that as all of them.)
+  function mkEffective(d) {
+    const all = d.accounts || [];
+    const offered = d.lastPoll && d.lastPoll.accounts ? d.accounts.filter((a) => d.lastPoll.accounts.includes(a.account)) : all;
+    const sum = (xs, k) => xs.reduce((n, a) => n + (a[k] || 0), 0);
+    return { cap: sum(offered, 'cap'), used: sum(offered, 'used'), idle: all.filter((a) => a.cap > a.used && !offered.includes(a)) };
+  }
+
   function mkState(d) {
     const c = d.counts || {};
     const cap = d.dailyClaimCap, used = d.dailyClaims || 0;
     const poll = d.lastPoll;
+    const eff = mkEffective(d);
+    // An account with slots left that mkvid is not offering: it has no YouTube token for it.
+    const idleNote = eff.idle.length ? ' ' + eff.idle.map((a) => a.label + ' has ' + (a.cap - a.used) + ' more, but mkvid has not connected that account.').join(' ') : '';
     // The heartbeat is rewritten at most every 10 min, so only a longer silence means anything.
     const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
     if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
@@ -1923,8 +1936,8 @@ ${BAN_HISTORY_HTML}
     if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
     if (poll.outcome === 'not_connected') return ['bad', 'mkvid has no YouTube account connected', 'Its token expired or was revoked. Open mkvid.maxhogan.dev and connect YouTube again.'];
     if (!c.pending) return ['ok', 'Queue empty', 'Nothing is waiting for mkvid.'];
-    if (used >= cap) return ['wait', 'Today’s ' + cap + ' upload' + (cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each upload costs 1 600 of a project’s 10 000 units).'];
-    return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.'];
+    if (eff.used >= eff.cap || poll.outcome === 'capped') return ['wait', 'Today’s ' + eff.cap + ' upload' + (eff.cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each upload costs 1 600 of a project’s 10 000 units).' + idleNote];
+    return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.' + idleNote];
   }
 
   function mkRow(r, pos) {
@@ -1981,7 +1994,8 @@ ${BAN_HISTORY_HTML}
     if (c.failed) bits.push('<span class="warn">' + c.failed + ' failed</span>');
     if (c.superseded) bits.push(c.superseded + ' superseded');
     for (const a of d.accounts || []) bits.push('<span title="uploads through the ' + esc(a.label) + ' Google project today">' + esc(a.label) + ' ' + a.used + '/' + a.cap + '</span>');
-    if (cap > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + cap + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / cap) + ' day' + (c.pending > cap ? 's' : '') + ' at ' + cap + '/day</span>');
+    const perDay = mkEffective(d).cap || cap;
+    if (perDay > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + perDay + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + perDay + '/day</span>');
     if (d.lastPoll) bits.push('<span title="refreshed at most every 10 min">mkvid seen ' + esc(relTime(new Date(d.lastPoll.at * 1000).toISOString())) + '</span>');
     if (d.requireFullTracklist) bits.push('full tracklists only');
     $mkSummary.innerHTML = bits.join(' · ');

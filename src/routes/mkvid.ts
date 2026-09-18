@@ -73,7 +73,7 @@ mkvidApp.post('/claim', async (c) => {
     return c.json({ request: await claimMkvidRequest(c.env, log, accounts) })
   } catch (e) {
     log.error('mkvid.claim_threw', errorFields(e))
-    await recordMkvidPoll(c.env, 'error')
+    await recordMkvidPoll(c.env, 'error', accounts)
     return c.json({ error: 'claim_failed', ...errorFields(e) }, 500)
   }
 })

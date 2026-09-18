@@ -121,7 +121,7 @@ describe('/mkvid routes', () => {
     const r = await app.request('http://x/subscriptions/api/mkvid', {}, env)
     expect(r.status).toBe(200)
     const d = (await r.json()) as { dailyClaimCap: number; dailyClaims: number; quotaResetsAt: number; now: number; lastPoll: { outcome: string } | null; queue: Array<{ setUrl: string }>; settled: unknown[] }
-    expect(d).toMatchObject({ enabled: true, dailyClaimCap: 0, dailyClaims: 0, lastPoll: { outcome: 'capped' }, settled: [], accounts: [{ account: 'primary', cap: 0 }, { account: 'shared', cap: 0 }] })
+    expect(d).toMatchObject({ enabled: true, dailyClaimCap: 0, dailyClaims: 0, lastPoll: { outcome: 'capped', accounts: ['primary'] }, settled: [], accounts: [{ account: 'primary', cap: 0 }, { account: 'shared', cap: 0 }] })
     expect(d.queue.map((q) => q.setUrl)).toEqual([input.setUrl])
     expect(d.quotaResetsAt).toBeGreaterThan(d.now)
     expect(d.quotaResetsAt - d.now).toBeLessThanOrEqual(25 * 3600)
