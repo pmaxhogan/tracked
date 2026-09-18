@@ -187,7 +187,15 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     // empty every time (and a `null` gets cached for the title). Ask D1 first:
     // the mkvid request row has the video *and* the tracklist it was rendered
     // from, so this also settles phase 2.
-    const own = await findMkvidUploadByTitle(env, originalTitle)
+    // D1 is best-effort here like every other lookup in this handler: this
+    // route always answers 200 with a `status`, so a D1 hiccup must fall
+    // through to the upstream path, not escape as a bare 500 with no audit row.
+    let own: Awaited<ReturnType<typeof findMkvidUploadByTitle>> = null
+    try {
+      own = await findMkvidUploadByTitle(env, originalTitle)
+    } catch (e) {
+      log.warn('phase.video.mkvid_lookup_failed', { videoTitle: originalTitle, ...errorFields(e) })
+    }
     if (own) {
       videoId = own.videoId
       videoUrl = watchUrl(own.videoId)
@@ -225,14 +233,21 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   // upload this is the only way: 1001tracklists has never seen that (unlisted)
   // URL, so (b) cannot hit, and the title steps are redundant.
   if (videoId && !knownTracklistUrl) {
-    knownTracklistUrl = await findTracklistUrlByVideoId(env, videoId)
-    if (knownTracklistUrl) log.info('phase.search.known_video', { videoId, tracklistUrl: knownTracklistUrl })
+    try {
+      knownTracklistUrl = await findTracklistUrlByVideoId(env, videoId)
+    } catch (e) {
+      log.warn('phase.search.known_video_lookup_failed', { videoId, ...errorFields(e) })
+    }
   }
   const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
   type Attempt = { via: TracklistVia; kind: 'url' | 'title'; query: string }
   const attempts: Attempt[] = []
-  if (knownTracklistUrl) attempts.push({ via: 'tracked_db', kind: 'url', query: videoId! })
-  else {
+  if (knownTracklistUrl) {
+    // Already answered; recorded as an attempt (with its outcome, below) so the
+    // audit trail reads the same as any other resolution.
+    attempts.push({ via: 'tracked_db', kind: 'url', query: videoUrl ?? watchUrl(videoId!) })
+    log.info('phase.search.attempt', { via: 'tracked_db', kind: 'url', query: attempts[0]!.query, tracklistUrl: knownTracklistUrl })
+  } else {
     if (videoUrl && videoId) attempts.push({ via: 'youtube_url', kind: 'url', query: videoUrl })
     if (ytMatchTitle) attempts.push({ via: 'youtube_title', kind: 'title', query: ytMatchTitle })
     if (originalTitle && !(ytMatchTitle && norm(ytMatchTitle) === norm(originalTitle))) {

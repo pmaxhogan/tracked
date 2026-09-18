@@ -547,7 +547,7 @@ describe('findMkvidUploadByTitle — /now-playing resolving a set we uploaded ou
     expect(long.length).toBeGreaterThan(100)
     await done(env, 'r1', long, '_ZS9h7ePQ_0')
     expect((await findMkvidUploadByTitle(env, long.slice(0, 100)))?.videoId).toBe('_ZS9h7ePQ_0')
-    expect((await findMkvidUploadByTitle(env, long))?.videoId).toBeUndefined()
+    expect(await findMkvidUploadByTitle(env, long)).toBeNull()
   })
 
   it('ignores rows without a video (pending / failed / superseded at claim) but keeps a superseded finished upload', async () => {

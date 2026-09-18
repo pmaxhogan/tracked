@@ -147,3 +147,22 @@ describe('POST /now-playing — sets tracked itself uploaded through mkvid', () 
     expect(searchByTitle).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('POST /now-playing — the D1 lookups are best-effort', () => {
+  it('still answers 200 with a status when D1 throws, falling through to the upstream path', async () => {
+    const env = makeEnv()
+    const broken = { prepare: () => { throw new Error('D1_ERROR: Network connection lost') } }
+    ;(env as any).DB = broken
+
+    const res = await post(env, { videoTitle: SET_TITLE, currentSeconds: 10 })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as any).status).toBe('no_video')
+    expect(resolveVideo).toHaveBeenCalledTimes(1)
+    expect(searchByTitle).toHaveBeenCalledTimes(1)
+
+    const byUrl = await post(env, { videoUrl: `https://youtu.be/${VIDEO_ID}`, currentSeconds: 10 })
+    expect(byUrl.status).toBe(200)
+    expect(((await byUrl.json()) as any).status).toBe('no_tracklist')
+    expect(searchByYouTubeUrl).toHaveBeenCalledTimes(1)
+  })
+})
