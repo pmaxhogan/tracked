@@ -463,3 +463,19 @@ export async function setTracklistVideo(
     .bind(video.videoId, video.source, video.checkedAt ?? nowSeconds(), slug, url)
     .run()
 }
+
+/**
+ * The 1001tracklists set URL the sync has already resolved `videoId` to, or
+ * null. /now-playing asks this before searching 1001tracklists by video URL:
+ * for a set mkvid uploaded (unlisted) that search can never succeed, and for
+ * any set the sync has seen it is a wasted upstream call. A video referenced
+ * by several DJs' rows (a b2b set) maps to the same tracklist page, so any
+ * row will do.
+ */
+export async function findTracklistUrlByVideoId(env: Env, videoId: string): Promise<string | null> {
+  const row = await dbOf(env)
+    .prepare('SELECT url FROM tracklists WHERE video_id = ? ORDER BY checked_at DESC LIMIT 1')
+    .bind(videoId)
+    .first<{ url: string }>()
+  return row?.url ?? null
+}

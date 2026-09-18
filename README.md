@@ -35,7 +35,9 @@ If the caller already knows the YouTube URL, send it directly to skip the YouTub
 
 `videoTitle` and `videoUrl` are mutually optional but at least one is required (zod-validated). When both are sent, `videoUrl` wins. `videoDurationSeconds` is ignored on the `videoUrl` path (no tie-breaker needed).
 
-Sending `videoTitle` is the robust choice: even if the YouTube Data API can't confidently match the title to a video, the worker still searches 1001tracklists directly by that title, so the tracklist is found as long as 1001tracklists has it. `no_video` / `no_tracklist` responses carry a `message` field describing what happened (whether a video was matched, which searches ran).
+Sending `videoTitle` is the robust choice: even if the YouTube Data API can't confidently match the title to a video, the worker still searches 1001tracklists directly by that title, so the tracklist is found as long as 1001tracklists has it.
+
+Sets tracked already knows are answered from its own D1 before either upstream is asked. A title that names a set [mkvid](#sets-without-a-youtube-recording-mkvid) uploaded resolves straight to that upload and its tracklist (those videos are unlisted, so the YouTube Data API's search never returns them and 1001tracklists never has their URL), and a `videoUrl` the sync has already resolved a set to skips the 1001tracklists search. Such requests show `via: "tracked_db"` in the audit trail. `no_video` / `no_tracklist` responses carry a `message` field describing what happened (whether a video was matched, which searches ran).
 
 The response always returns `200` (errors live in `status` so the Tasker side can branch on a single field):
 

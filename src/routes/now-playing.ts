@@ -13,6 +13,8 @@ import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields, type Logger } from '../lib/log'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { attachYoutubeLiked } from '../lib/liked-status'
+import { findMkvidUploadByTitle } from '../lib/mkvid'
+import { findTracklistUrlByVideoId } from '../lib/sync-store'
 
 export const nowPlayingRoute = createRoute({
   method: 'post',
@@ -32,8 +34,12 @@ export const nowPlayingRoute = createRoute({
 
 type Res = typeof NowPlayingResponse._type
 
-/** Which signal resolved the tracklist — logged for triage. */
-type TracklistVia = 'youtube_url' | 'youtube_title' | 'posted_title'
+/**
+ * Which signal resolved the tracklist — logged for triage. `tracked_db` is
+ * tracked's own D1: a set the sync already resolved to this video (including
+ * every set mkvid uploaded), answered without asking 1001tracklists.
+ */
+type TracklistVia = 'tracked_db' | 'youtube_url' | 'youtube_title' | 'posted_title'
 
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 
@@ -162,6 +168,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   let videoUrl: string | null = null
   let ytMatchTitle: string | null = null // title of the matched YT video (may differ from the notification title)
   let ytError: string | null = null // set if the YouTube lookup threw; folded into the final message, not fatal
+  // A tracklist tracked already knows for this video, from its own D1. Set
+  // when the title names an mkvid upload (below) or the video id is on a
+  // synced tracklists row (phase 2); either way phase 2 skips 1001tracklists.
+  let knownTracklistUrl: string | null = null
   if (body.videoUrl) {
     videoId = extractVideoId(body.videoUrl)
     if (videoId) {
@@ -172,19 +182,33 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     }
   } else if (originalTitle) {
     log.info('phase.video.from_title', { videoTitle: originalTitle, videoDurationSeconds: body.videoDurationSeconds })
-    try {
-      const yt = await resolveYouTube(env, originalTitle, body.videoDurationSeconds, log)
-      if (yt) {
-        videoId = yt.videoId
-        videoUrl = watchUrl(yt.videoId)
-        ytMatchTitle = yt.matchTitle || null
-        log.info('phase.video.resolved', { videoId, videoUrl, matchTitle: ytMatchTitle })
-      } else {
-        log.warn('phase.video.no_match', { videoTitle: originalTitle, videoDurationSeconds: body.videoDurationSeconds })
+    // Sets mkvid uploaded are unlisted, and the YouTube Data API's search.list
+    // never returns unlisted videos — so for those the search below comes back
+    // empty every time (and a `null` gets cached for the title). Ask D1 first:
+    // the mkvid request row has the video *and* the tracklist it was rendered
+    // from, so this also settles phase 2.
+    const own = await findMkvidUploadByTitle(env, originalTitle)
+    if (own) {
+      videoId = own.videoId
+      videoUrl = watchUrl(own.videoId)
+      ytMatchTitle = own.setTitle
+      knownTracklistUrl = own.setUrl
+      log.info('phase.video.from_mkvid_upload', { videoId, videoUrl, setUrl: own.setUrl, slug: own.slug, matchTitle: own.setTitle })
+    } else {
+      try {
+        const yt = await resolveYouTube(env, originalTitle, body.videoDurationSeconds, log)
+        if (yt) {
+          videoId = yt.videoId
+          videoUrl = watchUrl(yt.videoId)
+          ytMatchTitle = yt.matchTitle || null
+          log.info('phase.video.resolved', { videoId, videoUrl, matchTitle: ytMatchTitle })
+        } else {
+          log.warn('phase.video.no_match', { videoTitle: originalTitle, videoDurationSeconds: body.videoDurationSeconds })
+        }
+      } catch (e) {
+        ytError = (e as Error).message
+        log.error('phase.video.youtube_throw', errorFields(e))
       }
-    } catch (e) {
-      ytError = (e as Error).message
-      log.error('phase.video.youtube_throw', errorFields(e))
     }
   } else {
     log.error('phase.video.no_input')
@@ -195,20 +219,32 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   // Phase 2 (steps b→d) — find a tracklist, trying each available signal until
   // one hits: (b) the resolved YouTube URL, (c) the resolved video's title,
   // (d) the original POSTed notification title.
+  //
+  // Step (0) first: a video the sync has already resolved a set to — any
+  // synced set, and every mkvid upload — is answered from D1. For an mkvid
+  // upload this is the only way: 1001tracklists has never seen that (unlisted)
+  // URL, so (b) cannot hit, and the title steps are redundant.
+  if (videoId && !knownTracklistUrl) {
+    knownTracklistUrl = await findTracklistUrlByVideoId(env, videoId)
+    if (knownTracklistUrl) log.info('phase.search.known_video', { videoId, tracklistUrl: knownTracklistUrl })
+  }
   const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
   type Attempt = { via: TracklistVia; kind: 'url' | 'title'; query: string }
   const attempts: Attempt[] = []
-  if (videoUrl && videoId) attempts.push({ via: 'youtube_url', kind: 'url', query: videoUrl })
-  if (ytMatchTitle) attempts.push({ via: 'youtube_title', kind: 'title', query: ytMatchTitle })
-  if (originalTitle && !(ytMatchTitle && norm(ytMatchTitle) === norm(originalTitle))) {
-    attempts.push({ via: 'posted_title', kind: 'title', query: originalTitle })
+  if (knownTracklistUrl) attempts.push({ via: 'tracked_db', kind: 'url', query: videoId! })
+  else {
+    if (videoUrl && videoId) attempts.push({ via: 'youtube_url', kind: 'url', query: videoUrl })
+    if (ytMatchTitle) attempts.push({ via: 'youtube_title', kind: 'title', query: ytMatchTitle })
+    if (originalTitle && !(ytMatchTitle && norm(ytMatchTitle) === norm(originalTitle))) {
+      attempts.push({ via: 'posted_title', kind: 'title', query: originalTitle })
+    }
   }
   log.info('phase.search.plan', { attempts: attempts.map((a) => ({ via: a.via, query: a.query })) })
   audit.search = { attempts: attempts.map((a) => ({ via: a.via, query: a.query })), via: null, tracklistUrl: null }
 
-  let tracklistUrl: string | null = null
-  let tracklistVia: TracklistVia | null = null
-  for (const a of attempts) {
+  let tracklistUrl: string | null = knownTracklistUrl
+  let tracklistVia: TracklistVia | null = knownTracklistUrl ? 'tracked_db' : null
+  for (const a of knownTracklistUrl ? [] : attempts) {
     try {
       const url =
         a.kind === 'url'

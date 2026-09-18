@@ -10,6 +10,7 @@ import {
   saveSubState,
   setTracklistVideo,
   slugsReferencingVideo,
+  findTracklistUrlByVideoId,
   stateToFields,
   subWorkCounts,
   type SubState,
@@ -233,5 +234,39 @@ describe('sync-store: queries', () => {
     await saveSubState(env, 's', { processedTracklistUrls: ['u'], tracklistVideos: { u: { videoId: null, checkedAt: NOW - 100 } } })
     await setTracklistVideo(env, 's', 'u', { videoId: 'upload12345', source: 'mkvid', checkedAt: NOW })
     expect((await loadSubState(env, 's'))!.tracklistVideos).toEqual({ u: { videoId: 'upload12345', checkedAt: NOW, source: 'mkvid' } })
+  })
+})
+
+describe('findTracklistUrlByVideoId — /now-playing answering from sets the sync already resolved', () => {
+  it('returns the set URL for a known video (mkvid upload or 1001tl-embedded) and null otherwise', async () => {
+    const env = makeEnv()
+    await saveSubState(env, 'maup', {
+      ...full,
+      discoveredTracklistUrls: ['https://x/tracklist/panorama', 'https://x/tracklist/none'],
+      processedTracklistUrls: ['https://x/tracklist/panorama', 'https://x/tracklist/none'],
+      abandonedTracklistUrls: [],
+      failureCounts: {},
+      tracklistVideos: {
+        'https://x/tracklist/panorama': { videoId: '7-HvbsxBq-4', checkedAt: NOW, source: 'mkvid' },
+        'https://x/tracklist/none': { videoId: null, checkedAt: NOW },
+      },
+    })
+    expect(await findTracklistUrlByVideoId(env, '7-HvbsxBq-4')).toBe('https://x/tracklist/panorama')
+    expect(await findTracklistUrlByVideoId(env, 'vidA1234567')).toBeNull()
+  })
+
+  it('a b2b set referenced by two DJs resolves to the same page either way', async () => {
+    const env = makeEnv()
+    const state = (url: string): SubState => ({
+      ...full,
+      discoveredTracklistUrls: [url],
+      processedTracklistUrls: [url],
+      abandonedTracklistUrls: [],
+      failureCounts: {},
+      tracklistVideos: { [url]: { videoId: 'wKOj6yQ6TAQ', checkedAt: NOW } },
+    })
+    await saveSubState(env, 'john-summit', state('https://x/tracklist/b2b'))
+    await saveSubState(env, 'moguai', state('https://x/tracklist/b2b'))
+    expect(await findTracklistUrlByVideoId(env, 'wKOj6yQ6TAQ')).toBe('https://x/tracklist/b2b')
   })
 })

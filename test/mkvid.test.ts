@@ -33,6 +33,7 @@ import {
   MKVID_MAX_ATTEMPTS,
   retryMkvidRequest,
   supersedeMkvidRequestForSet,
+  findMkvidUploadByTitle,
 } from '../src/lib/mkvid'
 import { loadSubState, saveSubState } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
@@ -519,5 +520,52 @@ describe('completeMkvidRequest', () => {
     const req = (await claimMkvidRequest(env, log))!
     await completeMkvidRequest(env, { id: req.id, videoId: 'upload12345' }, 'tok', log)
     expect(await completeMkvidRequest(env, { id: req.id, videoId: 'upload12345' }, 'tok', log)).toEqual({ status: 'invalid_state', current: 'done' })
+  })
+})
+
+describe('findMkvidUploadByTitle — /now-playing resolving a set we uploaded ourselves', () => {
+  const done = async (env: Env, id: string, setTitle: string, videoId: string | null, status = 'done', updatedAt = NOW) =>
+    env.DB.prepare(
+      `INSERT INTO mkvid_requests (id, slug, set_url, set_title, source, source_url, status, video_id, created_at, updated_at)
+       VALUES (?, 'maup', ?, ?, 'soundcloud', 'https://api.soundcloud.com/tracks/1', ?, ?, ?, ?)`,
+    )
+      .bind(id, `https://www.1001tracklists.com/tracklist/${id}/x.html`, setTitle, status, videoId, NOW, updatedAt)
+      .run()
+
+  it('finds a finished upload by its exact title, case-insensitively and trimmed', async () => {
+    const env = makeEnv()
+    await done(env, 'r1', 'Mau P @ Panorama Festival, Italy 2026-08-16', '7-HvbsxBq-4')
+    const hit = await findMkvidUploadByTitle(env, '  mau p @ panorama festival, italy 2026-08-16 ')
+    expect(hit).toEqual({ videoId: '7-HvbsxBq-4', setUrl: 'https://www.1001tracklists.com/tracklist/r1/x.html', setTitle: 'Mau P @ Panorama Festival, Italy 2026-08-16', slug: 'maup' })
+    expect(await findMkvidUploadByTitle(env, 'Mau P @ Panorama Festival, Italy 2026-08-17')).toBeNull()
+    expect(await findMkvidUploadByTitle(env, '   ')).toBeNull()
+  })
+
+  it('matches the 100-character title YouTube actually shows for a long set title', async () => {
+    const env = makeEnv()
+    const long = 'Odd Mob @ High Tide, Day Trip Festival, Queen Mary Waterfront, Long Beach, California, United States 2026-06-27'
+    expect(long.length).toBeGreaterThan(100)
+    await done(env, 'r1', long, '_ZS9h7ePQ_0')
+    expect((await findMkvidUploadByTitle(env, long.slice(0, 100)))?.videoId).toBe('_ZS9h7ePQ_0')
+    expect((await findMkvidUploadByTitle(env, long))?.videoId).toBeUndefined()
+  })
+
+  it('ignores rows without a video (pending / failed / superseded at claim) but keeps a superseded finished upload', async () => {
+    const env = makeEnv()
+    await done(env, 'p', 'Pending set', null, 'pending')
+    await done(env, 'f', 'Failed set', null, 'failed')
+    await done(env, 'sc', 'Superseded at claim', null, 'superseded')
+    await done(env, 'sd', 'Superseded after upload', 'wKOj6yQ6TAQ', 'superseded')
+    expect(await findMkvidUploadByTitle(env, 'Pending set')).toBeNull()
+    expect(await findMkvidUploadByTitle(env, 'Failed set')).toBeNull()
+    expect(await findMkvidUploadByTitle(env, 'Superseded at claim')).toBeNull()
+    expect((await findMkvidUploadByTitle(env, 'Superseded after upload'))?.videoId).toBe('wKOj6yQ6TAQ')
+  })
+
+  it('prefers the most recent upload when two sets share a title', async () => {
+    const env = makeEnv()
+    await done(env, 'old', 'Same title', 'oldVid00001', 'done', NOW - 100)
+    await done(env, 'new', 'Same title', 'newVid00001', 'done', NOW)
+    expect((await findMkvidUploadByTitle(env, 'Same title'))?.videoId).toBe('newVid00001')
   })
 })
