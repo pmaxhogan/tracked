@@ -43,7 +43,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
-import { countMkvidRequests, getMkvidLastPoll, listPendingMkvidRequests, listSettledMkvidRequests, mkvidAccountUsage, quotaDayEnd, requestSummary, retryMkvidRequest } from '../lib/mkvid'
+import { banMkvidRequest, countMkvidRequests, getMkvidLastPoll, listPendingMkvidRequests, listSettledMkvidRequests, MKVID_MOVES, mkvidAccountUsage, moveMkvidRequest, quotaDayEnd, requestSummary, retryMkvidRequest, type MkvidMove } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -773,6 +773,27 @@ subscriptionsApp.post('/api/mkvid/retry/:id', async (c) => {
   return c.json({ ok, id }, ok ? 200 : 404)
 })
 
+/** Reorder the waiting line: { to: top | up | down | bottom }. 404 when the request is not pending. */
+subscriptionsApp.post('/api/mkvid/move/:id', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_move', by: c.get('cfAccessEmail') })
+  const id = c.req.param('id')
+  const body = (await c.req.json().catch(() => null)) as { to?: unknown } | null
+  const to = body?.to
+  if (typeof to !== 'string' || !(MKVID_MOVES as readonly string[]).includes(to)) return c.json({ error: 'invalid_request', message: 'to must be top, up, down or bottom' }, 400)
+  const r = await moveMkvidRequest(c.env, id, to as MkvidMove)
+  log.info('subs.mkvid_move', { id, to, ...(r ?? { ok: false }) })
+  return r ? c.json({ ok: true, id, to, ...r }) : c.json({ error: 'not_pending', id }, 404)
+})
+
+/** Never upload this set via mkvid (pending / failed / superseded only; Retry lifts it). */
+subscriptionsApp.post('/api/mkvid/ban/:id', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_ban', by: c.get('cfAccessEmail') })
+  const id = c.req.param('id')
+  const ok = await banMkvidRequest(c.env, id)
+  log.info('subs.mkvid_ban', { id, ok })
+  return c.json({ ok, id }, ok ? 200 : 409)
+})
+
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
 
 subscriptionsApp.get('/api/youtube/status', async (c) => {
@@ -960,6 +981,12 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .badge.claimed { background: rgba(210,153,34,0.18); color: #d29922; }
   .badge.done { background: rgba(63,185,80,0.18); color: #3fb950; }
   .badge.superseded { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); }
+  .badge.banned { background: rgba(248,81,73,0.12); color: var(--danger); }
+  .mk-acts { display: flex; gap: 0.15rem; flex-shrink: 0; }
+  .mk-act { background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0.1rem 0.4rem; font-size: 0.85rem; line-height: 1.3; cursor: pointer; }
+  .mk-act:hover { color: var(--fg); border-color: var(--muted); }
+  .mk-act:disabled { opacity: 0.4; cursor: default; }
+  .mk-act.ban { color: var(--danger); }
   .arow .src { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
   .arow-detail .retry { margin-top: 0.4rem; }
   section#ytjson { margin-top: 2.25rem; }
@@ -1896,8 +1923,8 @@ ${BAN_HISTORY_HTML}
       ['queued', esc(new Date(r.createdAt * 1000).toISOString())],
       ['updated', esc(new Date(r.updatedAt * 1000).toISOString())],
     ]));
-    if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed') {
-      out.push('<button class="ghost retry" data-id="' + esc(r.id) + '">' + (r.status === 'claimed' ? 'Release & retry' : 'Retry') + '</button>');
+    if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed' || r.status === 'banned') {
+      out.push('<button class="ghost retry" data-id="' + esc(r.id) + '">' + (r.status === 'claimed' ? 'Release & retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
     }
     return out.join('');
   }
@@ -1940,6 +1967,19 @@ ${BAN_HISTORY_HTML}
     return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.' + idleNote];
   }
 
+  // Reorder / ban buttons on an "Up next" row. The list reloads after each, so
+  // positions and the next-up line stay honest.
+  const MK_ACTS = [['top', '⤒', 'Move to the top'], ['up', '↑', 'Move up one'], ['down', '↓', 'Move down one'], ['bottom', '⤓', 'Move to the bottom'], ['ban', '✕', 'Never upload this set via mkvid']];
+  function mkActsHtml() {
+    return '<span class="mk-acts">' + MK_ACTS.map((a) => '<button class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '" title="' + a[2] + '" aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
+  }
+  async function mkAct(id, act) {
+    const url = act === 'ban' ? '/subscriptions/api/mkvid/ban/' + encodeURIComponent(id) : '/subscriptions/api/mkvid/move/' + encodeURIComponent(id);
+    const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: act === 'ban' ? '{}' : JSON.stringify({ to: act }) };
+    const resp = await fetch(url, init);
+    if (!resp.ok) showError((act === 'ban' ? 'ban' : 'move') + ' failed (' + resp.status + ')');
+  }
+
   function mkRow(r, pos) {
     const row = document.createElement('div');
     row.className = 'arow' + (MK_PROBLEM.has(r.status) ? ' err' : '');
@@ -1954,14 +1994,21 @@ ${BAN_HISTORY_HTML}
       (pos ? '<span class="pos">#' + pos + '</span>' : '<span class="badge ' + esc(r.status) + '">' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>') +
       '<div class="mk-main"><span class="title">' + esc(r.setTitle || setLabel(r.setUrl)) + '</span>' +
       '<div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
-      (r.videoId ? link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'watch') : '');
+      (r.videoId ? link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'watch') : '') +
+      (pos ? mkActsHtml() : '');
     row.appendChild(head);
+    for (const btn of head.querySelectorAll('button.mk-act')) btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      for (const b of head.querySelectorAll('button.mk-act')) b.disabled = true;
+      try { await mkAct(r.id, btn.dataset.act); await loadMkvid(); }
+      finally { for (const b of head.querySelectorAll('button.mk-act')) b.disabled = false; }
+    });
     const detail = document.createElement('div');
     detail.className = 'arow-detail';
     detail.hidden = true;
     detail.innerHTML = mkDetailHtml(r);
     row.appendChild(detail);
-    head.addEventListener('click', (e) => { if (e.target.closest('a')) return; detail.hidden = !detail.hidden; });
+    head.addEventListener('click', (e) => { if (e.target.closest('a, button')) return; detail.hidden = !detail.hidden; });
     const retry = detail.querySelector('button.retry');
     if (retry) retry.addEventListener('click', async () => {
       retry.disabled = true;
@@ -1993,6 +2040,7 @@ ${BAN_HISTORY_HTML}
     const bits = [(c.done || 0) + ' uploaded', (c.pending || 0) + ' waiting'];
     if (c.failed) bits.push('<span class="warn">' + c.failed + ' failed</span>');
     if (c.superseded) bits.push(c.superseded + ' superseded');
+    if (c.banned) bits.push(c.banned + ' banned');
     for (const a of d.accounts || []) bits.push('<span title="uploads through the ' + esc(a.label) + ' Google project today">' + esc(a.label) + ' ' + a.used + '/' + a.cap + '</span>');
     const perDay = mkEffective(d).cap || cap;
     if (perDay > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + perDay + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + perDay + '/day</span>');

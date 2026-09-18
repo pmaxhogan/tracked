@@ -4,7 +4,7 @@ import type { Env } from '../src/types'
 import type { StoredTokens } from '../src/lib/google-oauth'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
-import { enqueueMkvidRequest, getMkvidRequest } from '../src/lib/mkvid'
+import { enqueueMkvidRequest, getMkvidRequest, getMkvidRequestForSet } from '../src/lib/mkvid'
 import { saveSubState } from '../src/lib/sync-store'
 
 vi.mock('../src/lib/youtube-playlists', async () => {
@@ -98,7 +98,7 @@ describe('/mkvid routes', () => {
     const health = await app.request('http://x/mkvid/health', { headers: { Authorization: 'Bearer mk-secret' } }, env)
     expect(await health.json()).toEqual({
       ok: true,
-      counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0 },
+      counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0, banned: 0 },
       accounts: [{ account: 'primary', label: 'mkvid-uploads', used: 1, cap: 6 }, { account: 'shared', label: 'tracked-youtube', used: 0, cap: 0 }],
       dailyClaims: 1,
       dailyClaimCap: 6,
@@ -136,6 +136,29 @@ describe('/mkvid routes', () => {
     const { request } = (await (await post(env, '/mkvid/claim', { accounts: ['primary', 'shared'] })).json()) as { request: { account: string; setUrl: string } }
     expect(request).toMatchObject({ setUrl: input.setUrl, account: 'shared' })
     expect(((await (await post(env, '/mkvid/claim', { accounts: [] })).json()) as { request: unknown }).request).toBeNull()
+  })
+
+  it('the panel can reorder and ban queued sets', async () => {
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
+    for (const [n, d] of [['a', '2026-09-13'], ['b', '2026-09-11'], ['c', '2026-09-05']] as Array<[string, string]>) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: d })
+    const ids = Object.fromEntries(await Promise.all(['a', 'b', 'c'].map(async (n) => [n, (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id])))
+    const panel = async () => ((await (await app.request('http://x/subscriptions/api/mkvid', {}, env)).json()) as { queue: Array<{ setUrl: string }>; settled: Array<{ status: string }> })
+    const act = (path: string, body?: unknown) => app.request(`http://x/subscriptions/api/mkvid/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }, env)
+
+    expect((await act(`move/${ids.c}`, { to: 'sideways' })).status).toBe(400)
+    const moved = await act(`move/${ids.c}`, { to: 'top' })
+    expect(moved.status).toBe(200)
+    expect(await moved.json()).toMatchObject({ ok: true, to: 'top', position: 1 })
+    expect((await panel()).queue.map((q) => q.setUrl.split('/').pop())).toEqual(['c', 'a', 'b'])
+    expect((await act(`move/${crypto.randomUUID()}`, { to: 'up' })).status).toBe(404)
+
+    expect((await act(`ban/${ids.a}`)).status).toBe(200)
+    expect((await act(`ban/${ids.a}`)).status).toBe(409)
+    const p = await panel()
+    expect(p.queue.map((q) => q.setUrl.split('/').pop())).toEqual(['c', 'b'])
+    expect(p.settled.map((s) => s.status)).toEqual(['banned'])
+    expect((await act(`retry/${ids.a}`)).status).toBe(200)
+    expect((await panel()).queue.map((q) => q.setUrl.split('/').pop())).toEqual(['c', 'a', 'b'])
   })
 
   it('fail parks or requeues, and complete 503s without a YouTube connection', async () => {
