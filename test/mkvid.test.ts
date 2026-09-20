@@ -27,6 +27,9 @@ import {
   getMkvidRequestForSet,
   lastCueSeconds,
   listMkvidRequests,
+  listMkvidQueuePage,
+  listMkvidSettledPage,
+  listMkvidDjs,
   banMkvidRequest,
   moveMkvidRequest,
   mkvidAccountUsage,
@@ -567,5 +570,102 @@ describe('findMkvidUploadByTitle — /now-playing resolving a set we uploaded ou
     await done(env, 'old', 'Same title', 'oldVid00001', 'done', NOW - 100)
     await done(env, 'new', 'Same title', 'newVid00001', 'done', NOW)
     expect((await findMkvidUploadByTitle(env, 'Same title'))?.videoId).toBe('newVid00001')
+  })
+})
+
+describe('panel list: filters and paging', () => {
+  /** Five sets, newest first: two DJs with one SoundCloud and one hearthis set each, plus one more. */
+  const SETS = [
+    ['a', '2026-09-05', 'lillypalmer', 'Lilly Palmer', 'Lilly Palmer @ Awakenings', 'soundcloud'],
+    ['b', '2026-09-04', 'lillypalmer', 'Lilly Palmer', 'Lilly Palmer @ Tomorrowland', 'hearthis'],
+    ['c', '2026-09-03', 'johnsummit', 'Tracklists By John Summit', 'John Summit @ 100% pure', 'soundcloud'],
+    ['d', '2026-09-02', 'johnsummit', 'Tracklists By John Summit', 'John Summit @ Ushuaia', 'hearthis'],
+    ['e', '2026-09-01', 'kx5', 'kx5', 'kx5 @ The Gorge', 'soundcloud'],
+  ] as const
+
+  async function seed(env: Env) {
+    for (const [n, setDate, slug, artistName, setTitle, kind] of SETS) {
+      await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate, slug, artistName, setTitle, source: { kind, url: `https://audio/${n}` } })
+    }
+  }
+  const names = (rows: ReadonlyArray<{ setUrl: string }>) => rows.map((r) => r.setUrl.split('/').pop())
+
+  it('pages the waiting line in claim order, each row knowing its place in the whole queue', async () => {
+    const env = makeEnv()
+    await seed(env)
+    const p1 = await listMkvidQueuePage(env, { limit: 2 })
+    expect(names(p1.records)).toEqual(['a', 'b'])
+    expect(p1.records.map((r) => r.position)).toEqual([1, 2])
+    expect(p1.total).toBe(5)
+    const p2 = await listMkvidQueuePage(env, { limit: 2, cursor: p1.cursor })
+    expect(names(p2.records)).toEqual(['c', 'd'])
+    expect(p2.records.map((r) => r.position)).toEqual([3, 4])
+    const p3 = await listMkvidQueuePage(env, { limit: 2, cursor: p2.cursor })
+    expect(names(p3.records)).toEqual(['e'])
+    expect(p3.cursor).toBeNull()
+    // A cursor that is not one of ours is the first page, never an error.
+    expect(names((await listMkvidQueuePage(env, { limit: 2, cursor: 'nonsense' })).records)).toEqual(['a', 'b'])
+  })
+
+  it('keyset, not offset: a claim between two pages cannot make the next row skip one', async () => {
+    const env = makeEnv()
+    await seed(env)
+    const p1 = await listMkvidQueuePage(env, { limit: 2 })
+    expect(names(p1.records)).toEqual(['a', 'b'])
+    await claimMkvidRequest(env, log)   // 'a' leaves the waiting line…
+    const p2 = await listMkvidQueuePage(env, { limit: 2, cursor: p1.cursor })
+    expect(names(p2.records)).toEqual(['c', 'd'])   // …and 'c' is still next, not skipped
+    expect((await listMkvidQueuePage(env, { limit: 2 })).total).toBe(4)
+  })
+
+  it('filters by status, source, DJ and a substring of the title, DJ or URL', async () => {
+    const env = makeEnv()
+    await seed(env)
+    expect(names((await listMkvidQueuePage(env, { source: 'hearthis' })).records)).toEqual(['b', 'd'])
+    expect(names((await listMkvidQueuePage(env, { slug: 'johnsummit' })).records)).toEqual(['c', 'd'])
+    expect(names((await listMkvidQueuePage(env, { q: 'summit' })).records)).toEqual(['c', 'd'])        // the stored DJ name
+    expect(names((await listMkvidQueuePage(env, { q: 'TOMORROWLAND' })).records)).toEqual(['b'])       // the title, case-insensitively
+    expect(names((await listMkvidQueuePage(env, { q: 'tracklist/e' })).records)).toEqual(['e'])        // the set URL
+    // A LIKE wildcard typed into the search box is a literal: '100%' is one set, not all five.
+    expect(names((await listMkvidQueuePage(env, { q: '100%' })).records)).toEqual(['c'])
+    expect(names((await listMkvidQueuePage(env, { q: '_' })).records)).toEqual([])
+    // Filters narrow the total too, and the cursor carries them.
+    const page = await listMkvidQueuePage(env, { limit: 1, source: 'soundcloud' })
+    expect(page.total).toBe(3)
+    expect(names((await listMkvidQueuePage(env, { limit: 1, source: 'soundcloud', cursor: page.cursor })).records)).toEqual(['c'])
+    // Statuses that belong to the other list are simply not in this one.
+    expect(await listMkvidQueuePage(env, { statuses: ['failed'] })).toEqual({ records: [], cursor: null, total: 0 })
+  })
+
+  it('pages what has left the waiting line, rendering first, newest activity next', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
+    await seed(env)
+    expect(await banMkvidRequest(env, (await getMkvidRequestForSet(env, 'https://x/tracklist/b'))!.id)).toBe(true)
+    const failed = (await claimMkvidRequest(env, log))!            // 'a'
+    await failMkvidRequest(env, { id: failed.id, error: 'incomplete_recording', permanent: true }, log)
+    await claimMkvidRequest(env, log)                              // 'c' is rendering now
+
+    const p1 = await listMkvidSettledPage(env, { limit: 2 })
+    expect(p1.records.map((r) => [r.setUrl.split('/').pop(), r.status])).toEqual([['c', 'claimed'], ['a', 'failed']])
+    expect(p1.total).toBe(3)
+    const p2 = await listMkvidSettledPage(env, { limit: 2, cursor: p1.cursor })
+    expect(names(p2.records)).toEqual(['b'])
+    expect(p2.cursor).toBeNull()
+    const banned = await listMkvidSettledPage(env, { statuses: ['banned'] })
+    expect(names(banned.records)).toEqual(['b'])
+    expect(banned.total).toBe(1)
+    expect(names((await listMkvidSettledPage(env, { slug: 'johnsummit' })).records)).toEqual(['c'])
+    // The waiting line is the other list's business.
+    expect(await listMkvidSettledPage(env, { statuses: ['pending'] })).toEqual({ records: [], cursor: null, total: 0 })
+  })
+
+  it('lists the DJs the queue has held, most requests first, without the stored "Tracklists By" prefix', async () => {
+    const env = makeEnv()
+    await seed(env)
+    expect(await listMkvidDjs(env)).toEqual([
+      { slug: 'johnsummit', label: 'John Summit', count: 2 },
+      { slug: 'lillypalmer', label: 'Lilly Palmer', count: 2 },
+      { slug: 'kx5', label: 'kx5', count: 1 },
+    ])
   })
 })

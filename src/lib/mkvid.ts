@@ -38,9 +38,11 @@ import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
+export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
 export type MkvidSource = { kind: MkvidSourceKind; url: string }
 /** `banned`: never upload this set via mkvid — the row stays so the sync cannot queue it again; the panel can lift it. */
 export type MkvidStatus = 'pending' | 'claimed' | 'done' | 'failed' | 'superseded' | 'banned'
+export const MKVID_STATUSES: readonly MkvidStatus[] = ['pending', 'claimed', 'done', 'failed', 'superseded', 'banned']
 
 export const MKVID_MAX_ATTEMPTS = 3
 export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
@@ -394,26 +396,192 @@ export async function listMkvidRequests(env: Env, limit = 100): Promise<MkvidReq
   return res.results.map(rowToRequest)
 }
 
+// ─── panel listing: filter + keyset pagination ──────────────────────────────
+
 /**
- * Everything that has left the waiting line — rendering, done, failed,
- * superseded — rendering first, then newest activity first. The panel shows
- * this apart from the (long) pending queue, which would otherwise bury it.
+ * What the panel can narrow either list by — every part optional, an empty
+ * filter means the whole table. `q` is a case-insensitive substring over the
+ * set title, the DJ (stored name or slug) and the set URL.
  */
-export async function listSettledMkvidRequests(env: Env, limit = 50): Promise<MkvidRequest[]> {
-  const res = await dbOf(env)
-    .prepare("SELECT * FROM mkvid_requests WHERE status != 'pending' ORDER BY (status = 'claimed') DESC, updated_at DESC, created_at DESC LIMIT ?")
-    .bind(Math.min(Math.max(limit, 1), 500))
-    .all<Row>()
-  return res.results.map(rowToRequest)
+export type MkvidFilter = {
+  /** Statuses to include; empty or absent = all of them. */
+  statuses?: readonly MkvidStatus[]
+  source?: MkvidSourceKind | null
+  account?: MkvidAccount | null
+  slug?: string | null
+  q?: string | null
 }
 
-/** The waiting line in the order it will be served; a request in retry backoff keeps its place but is skipped until `not_before`. */
-export async function listPendingMkvidRequests(env: Env, limit = 50): Promise<MkvidRequest[]> {
+export type MkvidPage<T> = {
+  records: T[]
+  /** Pass back as this section's cursor for the next (older / further down) page; null when this was the last. */
+  cursor: string | null
+  /** Rows matching the filter in this section, not just the ones on this page. */
+  total: number
+}
+
+/**
+ * A waiting-line row carries its true 1-based place in the *unfiltered* queue,
+ * so ⤒ ↑ ↓ ⤓ still mean something on a filtered or paged view.
+ */
+export type MkvidQueueRow = MkvidRequest & { position: number }
+
+const DEFAULT_PAGE = 50
+const MAX_PAGE = 200
+
+function pageLimit(limit: number | undefined): number {
+  const n = Math.floor(Number(limit ?? DEFAULT_PAGE))
+  return Number.isFinite(n) ? Math.min(Math.max(n, 1), MAX_PAGE) : DEFAULT_PAGE
+}
+
+/** `%`, `_` and `\` are LIKE wildcards: a search for `100%` must not match everything. */
+function likeTerm(q: string): string {
+  return `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`
+}
+
+type Clause = { sql: string; binds: (string | number)[] }
+
+function filterClause(f: MkvidFilter, statuses: readonly MkvidStatus[]): Clause {
+  const sql = [`status IN (${statuses.map(() => '?').join(', ')})`]
+  const binds: (string | number)[] = [...statuses]
+  if (f.source) {
+    sql.push('source = ?')
+    binds.push(f.source)
+  }
+  if (f.account) {
+    sql.push('account = ?')
+    binds.push(f.account)
+  }
+  if (f.slug) {
+    sql.push('slug = ?')
+    binds.push(f.slug)
+  }
+  const q = f.q?.trim()
+  if (q) {
+    sql.push("(COALESCE(set_title, '') LIKE ? ESCAPE '\\' OR COALESCE(artist_name, '') LIKE ? ESCAPE '\\' OR slug LIKE ? ESCAPE '\\' OR set_url LIKE ? ESCAPE '\\')")
+    const t = likeTerm(q)
+    binds.push(t, t, t, t)
+  }
+  return { sql: sql.join(' AND '), binds }
+}
+
+/** The statuses of `f` that live in this section: the waiting line is `pending`, everything else has left it. */
+function sectionStatuses(f: MkvidFilter, pending: boolean): MkvidStatus[] {
+  const here = MKVID_STATUSES.filter((s) => (s === 'pending') === pending)
+  const want = f.statuses?.length ? f.statuses : here
+  return here.filter((s) => want.includes(s))
+}
+
+/**
+ * Keyset cursor — the last row of the page handed back, as its three sort
+ * columns: `<sort key or rendering flag>|<timestamp>|<rowid>`. Keyset, not
+ * OFFSET, so a claim, a retry or a reorder between two pages cannot make a row
+ * skip a page or show up on both.
+ */
+const CURSOR_RE = /^(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\|(\d+)\|(\d+)$/
+
+function encodeMkvidCursor(a: number, b: number, row: number): string {
+  return `${a}|${b}|${row}`
+}
+
+function decodeMkvidCursor(cursor: string | null | undefined): { a: number; b: number; row: number } | null {
+  const m = cursor ? CURSOR_RE.exec(cursor) : null
+  return m ? { a: Number(m[1]), b: Number(m[2]), row: Number(m[3]) } : null
+}
+
+async function countMatching(env: Env, where: Clause): Promise<number> {
+  const row = await dbOf(env)
+    .prepare(`SELECT COUNT(*) AS n FROM mkvid_requests WHERE ${where.sql}`)
+    .bind(...where.binds)
+    .all<{ n: number }>()
+  return Number(row.results[0]?.n ?? 0)
+}
+
+export type MkvidListOptions = MkvidFilter & { limit?: number; cursor?: string | null }
+
+/**
+ * A page of the waiting line, in the order it will be served; a request in
+ * retry backoff keeps its place but is skipped until `not_before`. Each row
+ * knows its position in the whole queue, which the filter does not shift.
+ */
+export async function listMkvidQueuePage(env: Env, opts: MkvidListOptions = {}): Promise<MkvidPage<MkvidQueueRow>> {
+  const statuses = sectionStatuses(opts, true)
+  if (!statuses.length) return { records: [], cursor: null, total: 0 }
+  const limit = pageLimit(opts.limit)
+  const where = filterClause(opts, statuses)
+  const cur = decodeMkvidCursor(opts.cursor)
+  const keyset = cur ? ' AND (sort_key < ? OR (sort_key = ? AND (created_at < ? OR (created_at = ? AND rid > ?))))' : ''
+  const keysetBinds = cur ? [cur.a, cur.a, cur.b, cur.b, cur.row] : []
+  const [res, total] = await Promise.all([
+    dbOf(env)
+      .prepare(
+        `SELECT * FROM (SELECT *, rowid AS rid, ROW_NUMBER() OVER (${QUEUE_ORDER}) AS position FROM mkvid_requests WHERE status = 'pending')
+          WHERE ${where.sql}${keyset} ${QUEUE_PAGE_ORDER} LIMIT ?`,
+      )
+      .bind(...where.binds, ...keysetBinds, limit + 1)
+      .all<Row & { rid: number; position: number }>(),
+    countMatching(env, where),
+  ])
+  const page = res.results.slice(0, limit)
+  const last = page[page.length - 1]
+  return {
+    records: page.map((r) => ({ ...rowToRequest(r), position: Number(r.position) })),
+    cursor: res.results.length > limit && last ? encodeMkvidCursor(Number(last.sort_key ?? 0), Number(last.created_at), Number(last.rid)) : null,
+    total,
+  }
+}
+
+/** Sorts `claimed` (rendering now) ahead of everything else; shared by the ordering and its cursor. */
+const RENDERING = "(CASE WHEN status = 'claimed' THEN 1 ELSE 0 END)"
+const SETTLED_ORDER = `ORDER BY ${RENDERING} DESC, updated_at DESC, rowid ASC`
+
+/**
+ * A page of everything that has left the waiting line — rendering, done,
+ * failed, superseded, banned — rendering first, then newest activity first.
+ * The panel shows this apart from the (long) pending queue, which would
+ * otherwise bury it.
+ */
+export async function listMkvidSettledPage(env: Env, opts: MkvidListOptions = {}): Promise<MkvidPage<MkvidRequest>> {
+  const statuses = sectionStatuses(opts, false)
+  if (!statuses.length) return { records: [], cursor: null, total: 0 }
+  const limit = pageLimit(opts.limit)
+  const where = filterClause(opts, statuses)
+  const cur = decodeMkvidCursor(opts.cursor)
+  const keyset = cur ? ` AND (${RENDERING} < ? OR (${RENDERING} = ? AND (updated_at < ? OR (updated_at = ? AND rowid > ?))))` : ''
+  const keysetBinds = cur ? [cur.a, cur.a, cur.b, cur.b, cur.row] : []
+  const [res, total] = await Promise.all([
+    dbOf(env)
+      .prepare(`SELECT *, rowid AS rid FROM mkvid_requests WHERE ${where.sql}${keyset} ${SETTLED_ORDER} LIMIT ?`)
+      .bind(...where.binds, ...keysetBinds, limit + 1)
+      .all<Row & { rid: number }>(),
+    countMatching(env, where),
+  ])
+  const page = res.results.slice(0, limit)
+  const last = page[page.length - 1]
+  return {
+    records: page.map(rowToRequest),
+    cursor: res.results.length > limit && last ? encodeMkvidCursor(last.status === 'claimed' ? 1 : 0, Number(last.updated_at), Number(last.rid)) : null,
+    total,
+  }
+}
+
+/** The DJs the queue has ever held, most requests first — the panel's "every DJ" filter. */
+export type MkvidDj = { slug: string; label: string; count: number }
+
+export async function listMkvidDjs(env: Env): Promise<MkvidDj[]> {
   const res = await dbOf(env)
-    .prepare(`SELECT * FROM mkvid_requests WHERE status = 'pending' ${QUEUE_ORDER} LIMIT ?`)
-    .bind(Math.min(Math.max(limit, 1), 500))
-    .all<Row>()
-  return res.results.map(rowToRequest)
+    .prepare('SELECT slug, MAX(artist_name) AS artist_name, COUNT(*) AS n FROM mkvid_requests GROUP BY slug ORDER BY n DESC, slug LIMIT 200')
+    .all<{ slug: string; artist_name: string | null; n: number }>()
+  return res.results.map((r) => ({ slug: r.slug, label: artistLabel(r.artist_name, r.slug), count: Number(r.n) }))
+}
+
+/** First page of each list, unfiltered — the shape the rest of the code (and the tests) still want. */
+export async function listSettledMkvidRequests(env: Env, limit = 50): Promise<MkvidRequest[]> {
+  return (await listMkvidSettledPage(env, { limit })).records
+}
+
+export async function listPendingMkvidRequests(env: Env, limit = 50): Promise<MkvidQueueRow[]> {
+  return (await listMkvidQueuePage(env, { limit })).records
 }
 
 /**
@@ -424,7 +592,9 @@ export async function listPendingMkvidRequests(env: Env, limit = 50): Promise<Mk
  */
 const CLAIMABLE_WHERE = `(status = 'pending' AND (not_before IS NULL OR not_before <= ?))
             OR (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)`
-const QUEUE_ORDER = 'ORDER BY sort_key DESC, created_at DESC'
+const QUEUE_ORDER = 'ORDER BY sort_key DESC, created_at DESC, rowid ASC'
+/** The same order over the paged panel query, whose subquery exposes `rowid` as `rid`. */
+const QUEUE_PAGE_ORDER = 'ORDER BY sort_key DESC, created_at DESC, rid ASC'
 
 export type MkvidMove = 'top' | 'up' | 'down' | 'bottom'
 export const MKVID_MOVES: readonly MkvidMove[] = ['top', 'up', 'down', 'bottom']
@@ -769,14 +939,20 @@ export async function supersedeMkvidRequestForSet(env: Env, setUrl: string, vide
   return (r.meta.changes ?? 0) > 0
 }
 
+/**
+ * Display only: the stored name carries 1001tracklists' "Tracklists By" H1
+ * prefix, and the artist playlists are titled (and found again) by it.
+ */
+function artistLabel(artistName: string | null, slug: string): string {
+  return (artistName ?? slug).replace(/^Tracklists By\s+/i, '')
+}
+
 /** Read the JSON `summary`-like fields the panel needs without the full row noise. */
 export function requestSummary(r: MkvidRequest): Record<string, unknown> {
   return {
     ...r,
     sourceLabel: r.source === 'soundcloud' ? 'SoundCloud' : 'hearthis.at',
-    // Display only: the stored name carries 1001tracklists' "Tracklists By" H1
-    // prefix, and the artist playlists are titled (and found again) by it.
-    artistLabel: (r.artistName ?? r.slug).replace(/^Tracklists By\s+/i, ''),
+    artistLabel: artistLabel(r.artistName, r.slug),
     accountLabel: MKVID_ACCOUNT_LABELS[r.account],
   }
 }
