@@ -43,7 +43,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
-import { banMkvidRequest, countMkvidRequests, getMkvidLastPoll, listPendingMkvidRequests, listSettledMkvidRequests, MKVID_MOVES, mkvidAccountUsage, moveMkvidRequest, quotaDayEnd, requestSummary, retryMkvidRequest, type MkvidMove } from '../lib/mkvid'
+import { banMkvidRequest, countMkvidRequests, getMkvidLastPoll, listMkvidDjs, listMkvidQueuePage, listMkvidSettledPage, MKVID_ACCOUNTS, MKVID_MOVES, MKVID_SOURCES, MKVID_STATUSES, mkvidAccountUsage, moveMkvidRequest, quotaDayEnd, requestSummary, retryMkvidRequest, type MkvidAccount, type MkvidFilter, type MkvidMove, type MkvidSourceKind, type MkvidStatus } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { fetchHomeProxyStatus, probeHomeProxy, type HomeProxyStatus } from '../lib/homeProxy'
@@ -729,21 +729,66 @@ subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus
 
 // ─── mkvid uploads ──────────────────────────────────────────────────────────
 
+/** The two lists the panel pages independently; `all` is both (and the only one that carries the header). */
+const MKVID_SECTIONS = ['all', 'queue', 'settled'] as const
+type MkvidSection = (typeof MKVID_SECTIONS)[number]
+
+/**
+ * `?status=failed,banned&source=hearthis&account=shared&dj=<slug>&q=palmer` —
+ * every part optional. An unknown value is a 400 rather than a silently empty
+ * list: a typo in a filter should not read as "nothing queued".
+ */
+function mkvidQuery(url: URL): { filter: MkvidFilter; section: MkvidSection; limit: number; queueCursor: string | null; settledCursor: string | null } | { error: string } {
+  const p = url.searchParams
+  const statuses = (p.get('status') || '').split(',').map((x) => x.trim()).filter(Boolean)
+  for (const s of statuses) if (!MKVID_STATUSES.includes(s as MkvidStatus)) return { error: `unknown status: ${s}` }
+  const source = p.get('source') || null
+  if (source && !MKVID_SOURCES.includes(source as MkvidSourceKind)) return { error: `unknown source: ${source}` }
+  const account = p.get('account') || null
+  if (account && !MKVID_ACCOUNTS.includes(account as MkvidAccount)) return { error: `unknown account: ${account}` }
+  const section = (p.get('section') || 'all') as MkvidSection
+  if (!MKVID_SECTIONS.includes(section)) return { error: `unknown section: ${section}` }
+  const n = parseInt(p.get('limit') || '50', 10)
+  return {
+    filter: {
+      statuses: statuses as MkvidStatus[],
+      source: source as MkvidSourceKind | null,
+      account: account as MkvidAccount | null,
+      slug: p.get('dj') || null,
+      // Long enough for a set title, short enough that the LIKE stays cheap.
+      q: (p.get('q') || '').trim().slice(0, 120) || null,
+    },
+    section,
+    limit: Number.isFinite(n) ? n : 50,
+    queueCursor: p.get('queueCursor'),
+    settledCursor: p.get('settledCursor'),
+  }
+}
+
+const EMPTY_PAGE = { records: [], cursor: null, total: 0 }
+
 /**
  * The mkvid queue (lib/mkvid.ts): what has been rendered (or is rendering, or
  * failed), the waiting line in the order it will be served, and the three
  * things that decide whether anything moves — the daily claim cap, how much of
  * it is used, and when mkvid last polled.
+ *
+ * Both lists are filterable (see `mkvidQuery`) and paged by keyset cursor:
+ * each response hands back `queueCursor` / `settledCursor`, which come back as
+ * query params for the next page. `section=queue|settled` asks for one list's
+ * next page alone — the header and the other list are then left out.
  */
 subscriptionsApp.get('/api/mkvid', async (c) => {
-  const n = parseInt(c.req.query('limit') || '50', 10)
-  const limit = Number.isFinite(n) ? n : 50
-  const [settled, queue, counts, accounts, lastPoll] = await Promise.all([
-    listSettledMkvidRequests(c.env, limit),
-    listPendingMkvidRequests(c.env, limit),
+  const parsed = mkvidQuery(new URL(c.req.url))
+  if ('error' in parsed) return c.json({ error: 'invalid_request', message: parsed.error }, 400)
+  const { filter, section, limit } = parsed
+  const [settled, queue, counts, accounts, lastPoll, djs] = await Promise.all([
+    section === 'queue' ? EMPTY_PAGE : listMkvidSettledPage(c.env, { ...filter, limit, cursor: parsed.settledCursor }),
+    section === 'settled' ? EMPTY_PAGE : listMkvidQueuePage(c.env, { ...filter, limit, cursor: parsed.queueCursor }),
     countMkvidRequests(c.env),
     mkvidAccountUsage(c.env),
     getMkvidLastPoll(c.env),
+    listMkvidDjs(c.env),
   ])
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
@@ -758,9 +803,20 @@ subscriptionsApp.get('/api/mkvid', async (c) => {
     /** mkvid's last `/mkvid/claim` poll; `at` is refreshed at most every 10 min while the outcome is unchanged. */
     lastPoll,
     now: Math.floor(Date.now() / 1000),
-    settled: settled.map(requestSummary),
-    /** Pending requests in claim order (newest set first). */
-    queue: queue.map(requestSummary),
+    /** Echoed back so the panel can tell which filter a response belongs to. */
+    filter: { status: filter.statuses, source: filter.source, account: filter.account, dj: filter.slug, q: filter.q },
+    section,
+    limit,
+    /** Every DJ the queue has ever held, most requests first — the `dj=` filter's options. */
+    djs,
+    settled: settled.records.map(requestSummary),
+    settledCursor: settled.cursor,
+    /** Rows matching the filter in each list, not just the ones on this page. */
+    settledTotal: settled.total,
+    /** Pending requests in claim order (newest set first), each with its `position` in the whole queue. */
+    queue: queue.records.map(requestSummary),
+    queueCursor: queue.cursor,
+    queueTotal: queue.total,
   })
 })
 
@@ -966,6 +1022,12 @@ const PAGE_HTML = /* html */ `<!doctype html>
   /* ── mkvid uploads ── */
   section#mkvid { margin-top: 2.25rem; }
   #mkvid-summary { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.6rem; }
+  #mkvid-filters { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; }
+  #mkvid-filters input, #mkvid-filters select { font: inherit; font-size: 0.82rem; padding: 0.3rem 0.45rem; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; }
+  #mkvid-filters input { flex: 1 1 12rem; min-width: 0; }
+  #mkvid-filters input:focus, #mkvid-filters select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #mkvid-filters button { padding: 0.3rem 0.6rem; font-size: 0.82rem; }
+  button.mk-more { width: 100%; margin-top: 0.25rem; }
   .mk-state { border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; padding: 0.5rem 0.7rem; margin-bottom: 0.6rem; font-size: 0.88rem; line-height: 1.4; }
   .mk-state.ok { border-left-color: #3fb950; }
   .mk-state.wait { border-left-color: #d29922; }
@@ -1091,6 +1153,26 @@ ${ALERTS_ROW_HTML}
       </div>
     </div>
     <div id="mkvid-state" class="mk-state" hidden></div>
+    <div id="mkvid-filters">
+      <input id="mkvid-q" type="search" placeholder="search set, DJ or URL" aria-label="Search the mkvid queue" />
+      <select id="mkvid-status" aria-label="Status">
+        <option value="">any status</option>
+        <option value="pending">waiting</option>
+        <option value="claimed">rendering</option>
+        <option value="done">uploaded</option>
+        <option value="failed">failed</option>
+        <option value="superseded">superseded</option>
+        <option value="banned">banned</option>
+        <option value="failed,banned">problems only</option>
+      </select>
+      <select id="mkvid-source" aria-label="Source">
+        <option value="">any source</option>
+        <option value="soundcloud">SoundCloud</option>
+        <option value="hearthis">hearthis.at</option>
+      </select>
+      <select id="mkvid-dj" aria-label="DJ"><option value="">any DJ</option></select>
+      <button id="mkvid-clear" class="ghost" hidden>Clear</button>
+    </div>
     <div id="mkvid-summary" class="counts">loading…</div>
     <div id="mkvid-list"></div>
     <div id="mkvid-empty" class="empty" hidden>No sets queued for mkvid yet.</div>
@@ -1901,7 +1983,49 @@ ${BAN_HISTORY_HTML}
   const $mkSummary = document.getElementById('mkvid-summary');
   const $mkState = document.getElementById('mkvid-state');
   const $mkRefresh = document.getElementById('mkvid-refresh');
+  const $mkQ = document.getElementById('mkvid-q');
+  const $mkStatus = document.getElementById('mkvid-status');
+  const $mkSource = document.getElementById('mkvid-source');
+  const $mkDj = document.getElementById('mkvid-dj');
+  const $mkClear = document.getElementById('mkvid-clear');
   const MK_PROBLEM = new Set(['failed']);
+
+  // The waiting line and the settled list are paged separately (keyset cursors
+  // from the API) and narrowed by the filter bar. Only a whole-view load
+  // (section=all) refreshes the header; "Load more" appends to one list.
+  const MK_PAGE = 25;
+  let mkHeader = null;
+  // Typing in the search box fires overlapping loads; only the newest wins.
+  let mkSeq = 0;
+  let mkQueue = [], mkQueueCursor = null, mkQueueTotal = 0;
+  let mkSettled = [], mkSettledCursor = null, mkSettledTotal = 0;
+
+  const mkFiltered = () => !!($mkStatus.value || $mkSource.value || $mkDj.value || $mkQ.value.trim());
+
+  function mkParams(section) {
+    const p = new URLSearchParams({ limit: String(MK_PAGE), section: section });
+    if ($mkStatus.value) p.set('status', $mkStatus.value);
+    if ($mkSource.value) p.set('source', $mkSource.value);
+    if ($mkDj.value) p.set('dj', $mkDj.value);
+    const q = $mkQ.value.trim();
+    if (q) p.set('q', q);
+    if (section === 'queue' && mkQueueCursor) p.set('queueCursor', mkQueueCursor);
+    if (section === 'settled' && mkSettledCursor) p.set('settledCursor', mkSettledCursor);
+    return p;
+  }
+
+  // Every DJ the queue has ever held. One being filtered on that no longer has
+  // a row is kept as an option, so the filter does not silently turn itself off.
+  function mkDjOptions(djs) {
+    const keep = $mkDj.value;
+    $mkDj.innerHTML = '<option value="">any DJ</option>' +
+      (djs || []).map((d) => '<option value="' + esc(d.slug) + '">' + esc(d.label) + ' (' + d.count + ')</option>').join('');
+    $mkDj.value = keep;
+    if (keep && $mkDj.value !== keep) {
+      $mkDj.insertAdjacentHTML('beforeend', '<option value="' + esc(keep) + '">' + esc(keep) + '</option>');
+      $mkDj.value = keep;
+    }
+  }
 
   function mkDetailHtml(r) {
     const out = [];
@@ -2030,8 +2154,23 @@ ${BAN_HISTORY_HTML}
     $mkList.appendChild(h);
   }
 
-  function renderMkvid(d) {
-    const settled = d.settled || [], queue = d.queue || [];
+  const mkShowing = (shown, total) => (total > shown ? ' · showing ' + shown + ' of ' + total : '');
+
+  function mkMore(section, left) {
+    const b = document.createElement('button');
+    b.className = 'ghost mk-more';
+    b.textContent = left > 0 ? 'Load ' + Math.min(left, MK_PAGE) + ' more (' + left + ' left)' : 'Load more';
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      b.textContent = 'Loading…';
+      await loadMkvid(section);
+    });
+    return b;
+  }
+
+  function renderMkvid() {
+    const d = mkHeader;
+    if (!d) return;
     const c = d.counts || {};
     const cap = d.dailyClaimCap;
     const st = mkState(d);
@@ -2048,34 +2187,72 @@ ${BAN_HISTORY_HTML}
     if (perDay > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + perDay + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + perDay + '/day</span>');
     if (d.lastPoll) bits.push('<span title="refreshed at most every 10 min">mkvid seen ' + esc(relTime(new Date(d.lastPoll.at * 1000).toISOString())) + '</span>');
     if (d.requireFullTracklist) bits.push('full tracklists only');
+    if (mkFiltered()) bits.unshift('<strong>' + (mkQueueTotal + mkSettledTotal) + ' match this filter</strong>');
     $mkSummary.innerHTML = bits.join(' · ');
+    $mkClear.hidden = !mkFiltered();
 
     $mkList.innerHTML = '';
-    $mkEmpty.hidden = settled.length + queue.length > 0;
-    const active = settled.filter((r) => r.status === 'claimed');
-    const finished = settled.filter((r) => r.status !== 'claimed');
+    $mkEmpty.textContent = mkFiltered() ? 'No requests match this filter.' : 'No sets queued for mkvid yet.';
+    $mkEmpty.hidden = mkSettled.length + mkQueue.length > 0;
+    const active = mkSettled.filter((r) => r.status === 'claimed');
+    const finished = mkSettled.filter((r) => r.status !== 'claimed');
     if (active.length) {
       mkGroup('Rendering now');
       for (const r of active) $mkList.appendChild(mkRow(r, 0));
     }
-    if (queue.length) {
-      mkGroup('Up next · newest set first' + (c.pending > queue.length ? ' · first ' + queue.length + ' of ' + c.pending : ''));
-      queue.forEach((r, i) => $mkList.appendChild(mkRow(r, i + 1)));
+    if (mkQueue.length) {
+      // Positions come from the API: they are places in the whole queue, which
+      // neither the filter nor the page boundary shifts.
+      mkGroup('Up next · newest set first' + mkShowing(mkQueue.length, mkQueueTotal));
+      for (const r of mkQueue) $mkList.appendChild(mkRow(r, r.position));
+      if (mkQueueCursor) $mkList.appendChild(mkMore('queue', mkQueueTotal - mkQueue.length));
     }
     if (finished.length) {
-      mkGroup('Finished');
+      mkGroup('Finished' + mkShowing(finished.length, mkSettledTotal - active.length));
       for (const r of finished) $mkList.appendChild(mkRow(r, 0));
+      if (mkSettledCursor) $mkList.appendChild(mkMore('settled', mkSettledTotal - mkSettled.length));
     }
   }
 
-  async function loadMkvid() {
+  /**
+   * section: 'queue' / 'settled' appends that list's next page; anything else
+   * (a refresh, a filter change, an action that moved a row) reloads both
+   * lists' first page and the header with them.
+   */
+  async function loadMkvid(section) {
+    const sec = section === 'queue' || section === 'settled' ? section : 'all';
+    const seq = ++mkSeq;
     try {
-      const r = await fetch('/subscriptions/api/mkvid', { credentials: 'same-origin' });
+      const r = await fetch('/subscriptions/api/mkvid?' + mkParams(sec).toString(), { credentials: 'same-origin' });
+      if (seq !== mkSeq) return;
       if (!r.ok) { $mkSummary.textContent = 'status unavailable (' + r.status + ')'; return; }
-      renderMkvid(await r.json());
+      const d = await r.json();
+      if (seq !== mkSeq) return;
+      if (sec !== 'settled') {
+        mkQueue = sec === 'all' ? (d.queue || []) : mkQueue.concat(d.queue || []);
+        mkQueueCursor = d.queueCursor || null;
+        mkQueueTotal = d.queueTotal || 0;
+      }
+      if (sec !== 'queue') {
+        mkSettled = sec === 'all' ? (d.settled || []) : mkSettled.concat(d.settled || []);
+        mkSettledCursor = d.settledCursor || null;
+        mkSettledTotal = d.settledTotal || 0;
+      }
+      if (sec === 'all') { mkHeader = d; mkDjOptions(d.djs); }
+      renderMkvid();
     } catch { $mkSummary.textContent = 'status unavailable'; }
   }
-  $mkRefresh.addEventListener('click', loadMkvid);
+  $mkRefresh.addEventListener('click', () => loadMkvid());
+  for (const el of [$mkStatus, $mkSource, $mkDj]) el.addEventListener('change', () => loadMkvid());
+  let mkQTimer = null;
+  $mkQ.addEventListener('input', () => { clearTimeout(mkQTimer); mkQTimer = setTimeout(() => loadMkvid(), 250); });
+  $mkClear.addEventListener('click', () => {
+    $mkQ.value = '';
+    $mkStatus.value = '';
+    $mkSource.value = '';
+    $mkDj.value = '';
+    loadMkvid();
+  });
 
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
