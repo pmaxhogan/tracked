@@ -2,7 +2,7 @@ import { createRoute, type RouteHandler } from '@hono/zod-openapi'
 import { NowPlayingRequest, NowPlayingResponse, ErrorResponse } from '../schemas'
 import type { Env, ParsedTrack, ResponseTrack, Status } from '../types'
 import { resolveVideo, extractVideoId } from '../lib/youtube'
-import { searchByYouTubeUrl, searchByTitle } from '../lib/tracklists1001'
+import { searchByYouTubeUrl, searchByTitle, DecoyTracklistError } from '../lib/tracklists1001'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { lookupAppleLink } from '../lib/itunes'
@@ -92,7 +92,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       currentSkewSeconds: number | null
       trackCount: number | null
       unidentifiedCount: number | null
-      currentTracks: Array<{ artist: string; title: string; startTime: string; startSeconds: number | null }>
+      // trackUrl/artworkUrl since 2026-09-26: they are what stays real when
+      // 1001tracklists serves decoy names, so a "wrong name" report can be
+      // checked against the row's id and art instead of only its name.
+      currentTracks: Array<{ artist: string; title: string; startTime: string; startSeconds: number | null; trackUrl: string | null; artworkUrl: string | null }>
     }
   } = {}
 
@@ -323,6 +326,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       log.error('phase.scrape.cf_challenge', { tracklistUrl, errorMessage: e.message })
       return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: cf_challenge — ${e.message}`)
     }
+    if (e instanceof DecoyTracklistError) {
+      log.error('phase.scrape.decoy', { tracklistUrl, named: e.named, mismatched: e.mismatched })
+      return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${e.message}`)
+    }
     log.error('phase.scrape.throw', { tracklistUrl, ...errorFields(e) })
     return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${(e as Error).message}`)
   }
@@ -345,7 +352,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     unidentifiedCount: parsedTracks.filter((t) => t.isUnidentified).length,
     currentTracks: sel.picked
       .filter((t) => t.isCurrent)
-      .map((t) => ({ artist: t.artist, title: t.title, startTime: t.startTime, startSeconds: t.startSeconds })),
+      .map((t) => ({ artist: t.artist, title: t.title, startTime: t.startTime, startSeconds: t.startSeconds, trackUrl: t.trackUrl, artworkUrl: t.artworkUrl })),
   }
   log.info('phase.select.done', {
     currentSeconds: body.currentSeconds,

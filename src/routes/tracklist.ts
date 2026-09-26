@@ -1,7 +1,7 @@
 import { createRoute, type RouteHandler } from '@hono/zod-openapi'
 import { TracklistRequest, TracklistResponse, ErrorResponse } from '../schemas'
 import type { Env } from '../types'
-import { normalizeTracklistUrl } from '../lib/tracklists1001'
+import { normalizeTracklistUrl, DecoyTracklistError } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
 import { bearerAuth } from '../middleware/auth'
 import { makeLogger, errorFields } from '../lib/log'
@@ -66,6 +66,10 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
     if (e instanceof CloudflareChallengeError) {
       log.error('tracklist.cf_challenge', { tracklistUrl, errorMessage: e.message })
       return c.json({ error: 'upstream_error', message: `1001 scrape: cf_challenge — ${e.message}` }, 502)
+    }
+    if (e instanceof DecoyTracklistError) {
+      log.error('tracklist.decoy', { tracklistUrl, named: e.named, mismatched: e.mismatched })
+      return c.json({ error: 'upstream_error', message: `1001 scrape: ${e.message}` }, 502)
     }
     log.error('tracklist.scrape_throw', { tracklistUrl, ...errorFields(e) })
     return c.json({ error: 'upstream_error', message: `1001 scrape: ${(e as Error).message}` }, 502)

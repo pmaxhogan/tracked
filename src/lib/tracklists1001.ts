@@ -394,6 +394,53 @@ export type ScrapedTracklist = {
   /** SoundCloud widget-player URL for the whole set's recording, when 1001tl embeds one. null otherwise. */
   setSoundcloudLink: string | null
   tracks: ParsedTrack[]
+  /** How many rows contradict themselves — see `looksLikeDecoy`. */
+  decoy: DecoySignal
+}
+
+/**
+ * Evidence that the page carries decoy track data.
+ *
+ * 2026-09-26: 1001tracklists started answering accounts it has flagged as
+ * scrapers with the real page chrome, real cue times, real track ids and real
+ * artwork — and randomized names. Every fetch of the same page gives other
+ * names; within one row the microdata name (`meta[itemprop=name]`), the
+ * visible text (`span.trackValue`) and the link slug disagree with each
+ * other. On a real page all three agree on every row (0 of 89 rows across
+ * the three real fixtures disagree). Anonymous access to tracklist pages is
+ * a 401 image captcha at the same time, so there is no clean route around it.
+ */
+export type DecoySignal = {
+  /** Rows that had both a microdata name and visible text to compare. */
+  named: number
+  /** Rows whose microdata name and visible text disagree. */
+  mismatched: number
+  /** `looksLikeDecoy` of the two counts. */
+  suspected: boolean
+}
+
+/** A few named rows, and a majority of them disagreeing with themselves. */
+export function looksLikeDecoy(d: { named: number; mismatched: number }): boolean {
+  return d.named >= 3 && d.mismatched * 2 >= d.named
+}
+
+/**
+ * Thrown by the resolve helpers when a fetched page carries decoy data. The
+ * names on it are worthless (the cue times and ids are fine, but a name from
+ * another track under the right artwork is worse than no answer), so the
+ * caller reports that plainly instead of showing them.
+ */
+export class DecoyTracklistError extends Error {
+  readonly url: string
+  readonly named: number
+  readonly mismatched: number
+  constructor(url: string, d: { named: number; mismatched: number }) {
+    super(`decoy — 1001tracklists is serving randomized track names to our accounts (${d.mismatched} of ${d.named} rows contradict themselves); refusing to show wrong names`)
+    this.name = 'DecoyTracklistError'
+    this.url = url
+    this.named = d.named
+    this.mismatched = d.mismatched
+  }
 }
 
 export type FetchTracklistOpts = Omit<CascadeOpts, 'method' | 'form' | 'accept' | 'unlockerAttempts'>
@@ -435,9 +482,22 @@ export async function fetchTracklist(
     trackCount: result.tracks.length,
     unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
     mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
+    decoyNamed: result.decoy.named,
+    decoyMismatched: result.decoy.mismatched,
     ms: Date.now() - start,
   })
   if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
+  if (result.decoy.suspected) {
+    log?.error('1001scrape.decoy', {
+      tracklistUrl,
+      via: r.via,
+      egress: r.proxy?.egress ?? null,
+      account: r.proxy?.account ?? null,
+      named: result.decoy.named,
+      mismatched: result.decoy.mismatched,
+      sample: result.tracks.slice(0, 3).map((t) => `${t.artist} - ${t.title} @ ${t.trackUrl?.split('/track/')[1]?.split('/index')[0] ?? '?'}`),
+    })
+  }
   return { result, state: r.state, via: r.via }
 }
 
@@ -475,9 +535,20 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
   const cueMap = parseCueValueData(html)
   const rows = root.querySelectorAll('div.tlpItem')
   const tracks: ParsedTrack[] = []
+  let named = 0
+  let mismatched = 0
   for (const row of rows) {
     const t = parseRow(row, cueMap)
-    if (t) tracks.push(t)
+    if (!t) continue
+    tracks.push(t)
+    // Decoy check: the row's microdata name against the text the page shows.
+    // On a real page they are the same string; on a decoy page each was
+    // randomized on its own.
+    const metaName = normalizeName(decodeEntities(row.querySelector('meta[itemprop="name"]')?.getAttribute('content') ?? ''))
+    const visible = normalizeName(decodeEntities(row.querySelector('span.trackValue')?.text ?? ''))
+    if (!metaName || !visible) continue
+    named++
+    if (metaName !== visible) mismatched++
   }
 
   return {
@@ -486,7 +557,13 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     setYoutubeLink: extractSetYouTubeLink(html),
     setSoundcloudLink: extractSetSoundcloudLink(html),
     tracks,
+    decoy: { named, mismatched, suspected: looksLikeDecoy({ named, mismatched }) },
   }
+}
+
+/** Case- and whitespace-insensitive form of a track name for the decoy comparison. */
+function normalizeName(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
 /**

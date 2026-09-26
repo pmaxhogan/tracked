@@ -764,9 +764,14 @@ export async function syncOne(
     try {
       const source = extractSetAudioSource(html)
       if (!source) return null
-      const tracks = parseTracklist(setUrl, html).tracks
+      const parsed = parseTracklist(setUrl, html)
+      const tracks = parsed.tracks
       // Zero rows is the fingerprint of a captcha shell, not a set — never queue from it.
       if (tracks.length === 0) return null
+      // Decoy names (see DecoySignal) do not matter here: only the row count,
+      // the ID count and the last cue are used, and those stay real. Logged so
+      // the sync's view of the poisoning is on record too.
+      if (parsed.decoy.suspected) log.warn('sync.mkvid_decoy_page', { slug: sub.slug, setUrl, named: parsed.decoy.named, mismatched: parsed.decoy.mismatched })
       const idedCount = tracks.filter((t) => !t.isUnidentified).length
       if (mkvidRequireFull && idedCount < tracks.length) {
         log.info('sync.mkvid_skip_partial', { slug: sub.slug, setUrl, source: source.kind, idedCount, trackCount: tracks.length })

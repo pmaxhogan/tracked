@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseSearchResults, parseSearchQueryEcho, parseUrlSearchResult, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData, normalizeTracklistUrl } from '../src/lib/tracklists1001'
+import { parseSearchResult, parseSearchResults, parseSearchQueryEcho, parseUrlSearchResult, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData, normalizeTracklistUrl, looksLikeDecoy } from '../src/lib/tracklists1001'
 import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
 import { selectCurrent } from '../src/lib/timestamp'
 
@@ -693,5 +693,36 @@ describe('parseMediaLinks', () => {
   it('returns null links (incl. soundcloud) when the response is unsuccessful', () => {
     const r = parseMediaLinks({ success: false })
     expect(r).toEqual({ appleLink: null, youtubeLink: null, soundcloudLink: null })
+  })
+})
+
+// 2026-09-26: 1001tracklists started serving decoy track data to accounts it
+// has flagged as scrapers. The page chrome, cue times, track ids and artwork
+// are real; every name is randomized per fetch, and within one row the
+// microdata name, the visible text and the link slug all disagree. A real
+// page agrees with itself on every row.
+describe('decoy detection (looksLikeDecoy)', () => {
+  it('flags the captured decoy page: nearly every named row contradicts its own visible text', () => {
+    const r = parseTracklist('https://www.1001tracklists.com/tracklist/1pqq0hst/x.html', fx('tracklist-decoy-dcr839.html'))
+    expect(r.tracks.length).toBeGreaterThan(20)
+    expect(r.decoy.named).toBe(25)
+    expect(r.decoy.mismatched).toBe(24)
+    expect(r.decoy.suspected).toBe(true)
+    expect(looksLikeDecoy(r.decoy)).toBe(true)
+  })
+
+  it('does not flag any real page: zero rows disagree with themselves', () => {
+    for (const name of ['tracklist-matroda.html', 'tracklist-habstrakt.html', 'tracklist-maxstyler.html']) {
+      const r = parseTracklist(`https://www.1001tracklists.com/tracklist/x/${name}`, fx(name))
+      expect(r.decoy.mismatched, name).toBe(0)
+      expect(r.decoy.suspected, name).toBe(false)
+    }
+  })
+
+  it('needs a few named rows and a majority of mismatches before it speaks', () => {
+    expect(looksLikeDecoy({ named: 2, mismatched: 2 })).toBe(false)
+    expect(looksLikeDecoy({ named: 3, mismatched: 1 })).toBe(false)
+    expect(looksLikeDecoy({ named: 3, mismatched: 2 })).toBe(true)
+    expect(looksLikeDecoy({ named: 0, mismatched: 0 })).toBe(false)
   })
 })

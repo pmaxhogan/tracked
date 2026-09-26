@@ -1,5 +1,5 @@
 import type { Env, ParsedTrack } from '../types'
-import { fetchTracklist, fetchMediaLinks, type MediaLinks } from './tracklists1001'
+import { fetchTracklist, fetchMediaLinks, DecoyTracklistError, type MediaLinks } from './tracklists1001'
 import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
 import { fetchOptsFromEnv } from './upstream1001'
@@ -16,7 +16,8 @@ import { fetchOptsFromEnv } from './upstream1001'
  * keys — a bump in one place must invalidate for both callers.
  */
 export const TRACKLIST_CV = {
-  tracklist: 2, // parsed tracklist page → { tracks, setAppleLink, setYoutubeLink, setSoundcloudLink }
+  // 3: 2026-09-26, so the decoy pages cached before the detector existed age out.
+  tracklist: 3, // parsed tracklist page → { tracks, setAppleLink, setYoutubeLink, setSoundcloudLink }
   medialink: 1, // per-track Apple/YouTube links
 } as const
 
@@ -52,6 +53,12 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
   const { result } = await fetchTracklist(tracklistUrl, fetchOptsFromEnv(env, log))
+  if (result.decoy.suspected) {
+    // Never cache and never serve: the names are randomized (see
+    // DecoySignal). fetchTracklist already logged the details.
+    log.warn('cache.skip_decoy', { key, named: result.decoy.named, mismatched: result.decoy.mismatched })
+    throw new DecoyTracklistError(tracklistUrl, result.decoy)
+  }
   if (result.tracks.length > 0) {
     const value: CachedTracklist = {
       tracks: result.tracks,

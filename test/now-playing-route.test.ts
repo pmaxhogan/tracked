@@ -33,6 +33,7 @@ vi.mock('../src/lib/itunes', () => ({ lookupAppleLink: vi.fn(async () => null) }
 import { resolveVideo } from '../src/lib/youtube'
 import { searchByTitle, searchByYouTubeUrl } from '../src/lib/tracklists1001'
 import { resolveTracklistPage } from '../src/lib/tracklist-resolve'
+import { DecoyTracklistError } from '../src/lib/tracklists1001'
 
 const SET_URL = 'https://www.1001tracklists.com/tracklist/2u10c9r9/mau-p-panorama-festival-italy-2026-08-16.html'
 const SET_TITLE = 'Mau P @ Panorama Festival, Italy 2026-08-16'
@@ -164,5 +165,22 @@ describe('POST /now-playing — the D1 lookups are best-effort', () => {
     expect(byUrl.status).toBe(200)
     expect(((await byUrl.json()) as any).status).toBe('no_tracklist')
     expect(searchByYouTubeUrl).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('POST /now-playing — 1001tracklists serving decoy track data', () => {
+  it('answers upstream_error naming the decoy instead of showing randomized names', async () => {
+    const env = makeEnv()
+    ;(resolveVideo as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ videoId: VIDEO_ID, videoUrl: `https://www.youtube.com/watch?v=${VIDEO_ID}`, matchTitle: SET_TITLE, error: null })
+    ;(searchByYouTubeUrl as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ result: { tracklistUrl: SET_URL }, state: null })
+    ;(resolveTracklistPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new DecoyTracklistError(SET_URL, { named: 25, mismatched: 24 }))
+    const res = await post(env, { videoTitle: SET_TITLE, currentSeconds: 400, videoDurationSeconds: 3600 })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { status: string; message?: string; tracks: unknown[]; tracklistUrl: string | null }
+    expect(body.status).toBe('upstream_error')
+    expect(body.tracks).toEqual([])
+    expect(body.tracklistUrl).toBe(SET_URL)
+    expect(body.message).toMatch(/decoy/)
+    expect(body.message).toMatch(/24 of 25/)
   })
 })
