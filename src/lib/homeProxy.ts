@@ -213,7 +213,9 @@ export async function fetchViaHomeProxy(
     url,
     status: res.status,
     htmlBytes: html.length,
-    body: kind === 'proxy_error' ? html.slice(0, 300) : undefined,
+    // A served 5xx keeps its head too: the 2026-09-22/26 503s were 55 KB pages
+    // nobody could identify afterwards because only the size was logged.
+    body: kind === 'proxy_error' || res.status >= 500 ? html.replace(/\s+/g, ' ').slice(0, 300) : undefined,
     ms,
     route,
     egress: meta.egress,

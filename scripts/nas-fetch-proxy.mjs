@@ -23,6 +23,10 @@
  *      with `X-Proxy-Transport-Error: 1` — never a 502: Cloudflare replaces
  *      an origin 502/504 with its own HTML error page and drops the X-Proxy-*
  *      headers on the way to the Worker.
+ *   5. A 5xx from 1001tracklists itself on one route (0.4.5) moves the request
+ *      on to the next route; only when every reached route answered 5xx is
+ *      the last one handed back (logged as `fetch_failed`, kind
+ *      `upstream_5xx`, with the body's head under `upstream.5xx`).
  *
  * Every response carries X-Proxy-* headers describing which route served it
  * and whether direct is currently blocked, so the Worker can raise the
@@ -117,7 +121,7 @@ import {
   accountFileKey,
 } from './nas-fetch-proxy-lib.mjs'
 
-const VERSION = '0.4.4'
+const VERSION = '0.4.5'
 const PORT = Number(process.env.PORT ?? 8088)
 const BIND = process.env.BIND ?? '0.0.0.0'
 const TOKEN = process.env.PROXY_TOKEN
@@ -589,6 +593,30 @@ async function handleProxy(req, res, target, parsed, force) {
   let servedBy = null
   /** Message of the last transport failure on any route (for the all-failed answer). */
   let lastTransportError = null
+  /** The last 5xx 1001tracklists itself answered on some route: `{ route, r, servedBy }`. */
+  let lastServerError = null
+
+  /** Write `r` (served on `route`) back to the caller with the X-Proxy-* trail; returns the access-log summary. */
+  const writeUpstream = (route, r, kind) => {
+    res.statusCode = r.upstream.status
+    r.upstream.headers.forEach((value, key) => {
+      if (RESPONSE_DROP.has(key.toLowerCase())) return
+      res.setHeader(key, value)
+    })
+    directHeaders(res)
+    res.setHeader('x-proxy-route', route.kind)
+    res.setHeader('x-proxy-egress', routeLabel(route))
+    res.setHeader('x-proxy-upstream-status', String(r.upstream.status))
+    res.setHeader('x-proxy-attempts', attempts.join(','))
+    if (directRecovered) res.setHeader('x-proxy-direct-recovered', '1')
+    if (sessionReissued) {
+      res.setHeader('x-proxy-session-reissued', '1')
+      res.setHeader('x-proxy-block-scope', 'session')
+    }
+    if (servedBy) res.setHeader('x-proxy-account', servedBy)
+    res.end(r.buf)
+    return { route: routeLabel(route), kind, status: r.upstream.status, bytes: r.buf.length, attempts, sessionReissued, account: servedBy }
+  }
   // Accounts already tried for THIS request (blocked or failed to log in): the
   // next attempt on any route uses a different one. Cleared per request only.
   const triedAccounts = new Set()
@@ -707,6 +735,28 @@ async function handleProxy(req, res, target, parsed, force) {
       continue routeLoop
     }
 
+    if (kind === 'ok' && r.upstream.status >= 500) {
+      // 1001tracklists itself answered 5xx (2026-09-22 and 2026-09-26: a
+      // 503 with a ~55 KB page on the direct route, twice in a row, while
+      // the same URL was fine minutes later and from the pool). That is a
+      // route-level hiccup, not the page: try the next egress before handing
+      // it back. Neither the planner nor the account learns anything from
+      // it. Logged with the body's head so the next one can be identified.
+      attempts.push(`${routeLabel(route)}${acctLabel}:${r.upstream.status}`)
+      lastServerError = { route, r, servedBy: account?.label ?? null }
+      log('upstream.5xx', {
+        url: target,
+        route: routeLabel(route),
+        account: account?.label ?? null,
+        status: r.upstream.status,
+        bytes: r.buf.length,
+        server: r.upstream.headers.get('server'),
+        title: (r.text.match(/<title>([^<]{0,160})/i) ?? [])[1] ?? null,
+        body: r.text.replace(/\s+/g, ' ').slice(0, 300),
+      })
+      continue routeLoop
+    }
+
     for (const ev of planner.report(route, kind)) {
       log(`route.${ev.event}`, ev)
       if (ev.event === 'direct.recovered') directRecovered = true
@@ -716,26 +766,18 @@ async function handleProxy(req, res, target, parsed, force) {
       servedBy = account.label
     }
     attempts.push(`${routeLabel(route)}${acctLabel}:${kind}`)
-
-    res.statusCode = r.upstream.status
-    r.upstream.headers.forEach((value, key) => {
-      if (RESPONSE_DROP.has(key.toLowerCase())) return
-      res.setHeader(key, value)
-    })
-    directHeaders(res)
-    res.setHeader('x-proxy-route', route.kind)
-    res.setHeader('x-proxy-egress', routeLabel(route))
-    res.setHeader('x-proxy-upstream-status', String(r.upstream.status))
-    res.setHeader('x-proxy-attempts', attempts.join(','))
-    if (directRecovered) res.setHeader('x-proxy-direct-recovered', '1')
-    if (sessionReissued) {
-      res.setHeader('x-proxy-session-reissued', '1')
-      res.setHeader('x-proxy-block-scope', 'session')
-    }
-    if (servedBy) res.setHeader('x-proxy-account', servedBy)
-    res.end(r.buf)
-    return { route: routeLabel(route), kind, status: r.upstream.status, bytes: r.buf.length, attempts, sessionReissued, account: servedBy }
+    return writeUpstream(route, r, kind)
     } // account attempts
+  }
+
+  if (lastServerError && !lastBlocked) {
+    // Every route we reached answered 5xx: hand the last one back as-is (the
+    // Worker's cascade treats a served 5xx as a fallback candidate) — but log
+    // it as a failure, not a fetch.
+    const { route, r, servedBy: acct } = lastServerError
+    servedBy = acct
+    const out = writeUpstream(route, r, 'ok')
+    return { ...out, kind: 'upstream_5xx' }
   }
 
   // Every route we tried failed in transport (nothing answered, blocked or
