@@ -394,3 +394,29 @@ describe('fetch1001 — 2026-09-26: 1001tracklists 503 pages and Bright Data ref
     expect(String((second as Error).message)).toMatch(/policy/i)
   })
 })
+
+describe('fetch1001 — 1001tracklists answering Bright Data with the human-check captcha', () => {
+  const tlErrorPage = () =>
+    new Response('<html><head><title>1001Tracklists</title></head><body>error</body></html>', {
+      status: 503,
+      headers: { 'x-proxy-route': 'pool', 'x-proxy-egress': 'vm3:18180', 'x-proxy-upstream-status': '503', 'x-proxy-attempts': 'direct/acct1:503,vm3:18180/acct3:503', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' },
+    })
+  const bdCaptcha = () => new Response(JSON.stringify({ status_code: 401, headers: {}, body: '<html>We need to validate your are real human!</html>' }), { status: 200 })
+
+  it('parks the unlocker for six hours after a 401, so the next press skips it', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const calls = routeFetch({ proxy: () => tlErrorPage(), brightdata: bdCaptcha })
+    const first = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
+    expect(first).toBeInstanceOf(Error)
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(1)
+    const block = (await getBanStatus(env)).brightdataPolicyBlock
+    expect(block?.reason).toMatch(/captcha/)
+    expect(new Date(block!.until).getTime() - new Date(block!.since).getTime()).toBe(6 * 60 * 60 * 1000)
+
+    const before = calls.length
+    const second = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
+    expect(second).toBeInstanceOf(Error)
+    expect(String((second as Error).message)).toMatch(/captcha/)
+    expect(calls.slice(before).filter((c) => c.url.includes('brightdata')).length).toBe(0)
+  })
+})

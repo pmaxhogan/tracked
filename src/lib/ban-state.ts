@@ -425,12 +425,17 @@ export async function getBrightdataPolicyBlock(env: BanEnv): Promise<BrightdataP
   return (v as BrightdataPolicyBlock | null) ?? null
 }
 
-/** Park the unlocker for a day after a policy refusal (see BrightdataPolicyBlock). */
-export async function noteBrightdataPolicyBlock(env: BanEnv, reason: string, log?: Logger): Promise<BrightdataPolicyBlock> {
+/**
+ * Park the unlocker (see BrightdataPolicyBlock): a day after Bright Data's own
+ * policy refusal, or `ttlSeconds` for another standing answer — 1001tracklists
+ * serving Bright Data's exits its human-check captcha (401), which no exit
+ * rotation gets past (six hours, in the cascade).
+ */
+export async function noteBrightdataPolicyBlock(env: BanEnv, reason: string, log?: Logger, ttlSeconds = BRIGHTDATA_POLICY_TTL_SECONDS): Promise<BrightdataPolicyBlock> {
   const now = Date.now()
-  const block: BrightdataPolicyBlock = { since: new Date(now).toISOString(), until: new Date(now + BRIGHTDATA_POLICY_TTL_SECONDS * 1000).toISOString(), reason: reason.slice(0, 300) }
+  const block: BrightdataPolicyBlock = { since: new Date(now).toISOString(), until: new Date(now + ttlSeconds * 1000).toISOString(), reason: reason.slice(0, 300) }
   try {
-    await env.CACHE.put(BRIGHTDATA_POLICY_KEY, JSON.stringify(block), { expirationTtl: BRIGHTDATA_POLICY_TTL_SECONDS })
+    await env.CACHE.put(BRIGHTDATA_POLICY_KEY, JSON.stringify(block), { expirationTtl: Math.max(60, ttlSeconds) })
   } catch (e) {
     log?.warn('brightdata.policy_write_failed', { error: e instanceof Error ? e.message : String(e) })
   }

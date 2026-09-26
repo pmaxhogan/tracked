@@ -291,6 +291,12 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
           log?.error('fetch1001.unlocker_failed', { url, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt, routeFault })
           if (env && r.errorCode === 'proxy_error' && /usage policy|classified as|access denied/i.test(r.errorMessage ?? '')) {
             await noteBrightdataPolicyBlock(env, r.errorMessage ?? 'Bright Data policy refusal', log)
+          } else if (env && r.status === 401) {
+            // 2026-09-26: 1001tracklists answers anonymous visitors — every
+            // Bright Data exit included — with a 401 image captcha. Another
+            // exit is the same captcha; park for six hours rather than pay
+            // 10–20 s per press to learn it again.
+            await noteBrightdataPolicyBlock(env, "1001tracklists answers Bright Data's exits with its human-check captcha (401)", log, 6 * 60 * 60)
           }
           if (routeFault) throw stopError(`BrightData failed (${detail})`)
           throw new Error(`unlocker fetch failed for ${url} — ${detail}`)
