@@ -25,7 +25,8 @@ const UA =
  *   - `ok`             upstream answered 2xx via the reported route
  *   - `upstream_error` forwarder reached upstream, which answered non-2xx (404, 5xx…)
  *   - `all_blocked`    every route the forwarder has is in block cooldown; body is the block page (503)
- *   - `proxy_error`    the forwarder itself refused/failed (401 bad token, 400, 403 host, 502 transport, 503 session)
+ *   - `proxy_error`    the forwarder itself refused/failed (401 bad token, 400, 403 host, 503 session);
+ *                      also the shape of a 503 every-route-transport-failure, which sets `upstreamTransport`
  *   - `transport`      we never got a response from the forwarder (timeout, DNS, tunnel down)
  */
 export type HomeProxyKind = 'ok' | 'upstream_error' | 'all_blocked' | 'proxy_error' | 'transport'
@@ -58,10 +59,14 @@ export type HomeProxyResult = {
   /** True when this very request found the residential IP working again after a block. */
   directRecovered: boolean
   /**
-   * The forwarder could not reach 1001tracklists at all on the direct route
-   * (its 502 with attempts `direct:error`): a network blip on the home link,
-   * not an answer from 1001tl. The cascade treats it as a plain retryable
-   * failure rather than paying for a BrightData fallback.
+   * The forwarder could not reach 1001tracklists on any route it tried
+   * (forwarder ≥0.4.4: 503 + `X-Proxy-Transport-Error: 1`, attempts all
+   * `…:error`): an outage or a dead link, not an answer from 1001tl. The
+   * cascade treats it as a plain retryable failure rather than paying for a
+   * BrightData fallback. The pre-0.4.4 shape (the forwarder's own 502 with
+   * route `direct` and attempts `direct:error`) is still recognised, though
+   * in production it never arrived: Cloudflare replaces an origin 502 with
+   * its own HTML error page and drops the X-Proxy-* headers (2026-09-20).
    */
   upstreamTransport: boolean
   /** Which 1001tl account served this request (x-proxy-account, e.g. "acct2"); null when anonymous / not served. */
@@ -176,7 +181,9 @@ export async function fetchViaHomeProxy(
     attempts: h.get('x-proxy-attempts'),
     directBlocked,
     directRecovered: h.get('x-proxy-direct-recovered') === '1',
-    upstreamTransport: res.status === 502 && route === 'direct' && /(^|,)direct(\/acct\d+)?:error$/.test(h.get('x-proxy-attempts') ?? ''),
+    upstreamTransport:
+      h.get('x-proxy-transport-error') === '1' ||
+      (res.status === 502 && route === 'direct' && /(^|,)direct(\/acct\d+)?:error$/.test(h.get('x-proxy-attempts') ?? '')),
     account: h.get('x-proxy-account'),
     accountsHealthy: num(h.get('x-proxy-accounts-healthy')),
     accountsTotal: num(h.get('x-proxy-accounts-total')),

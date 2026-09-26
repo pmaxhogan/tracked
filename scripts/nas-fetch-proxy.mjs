@@ -14,6 +14,15 @@
  *      egress IP. The first request after the cooldown probes direct again.
  *   3. If every route is blocked the forwarder answers 503 with the block
  *      page body and `X-Proxy-All-Blocked: 1`; the Worker pauses.
+ *   4. A transport error on direct (connect timeout, reset — 2026-09-17:
+ *      1001tracklists' host started dropping TCP from the home IP outright,
+ *      with no block page to detect) moves the same request on to the pool,
+ *      and DIRECT_ERROR_THRESHOLD such errors in a row bench direct for
+ *      ERROR_COOLDOWN_MS (the first request after that probes it again).
+ *      When every route failed in transport the answer is a 503 JSON body
+ *      with `X-Proxy-Transport-Error: 1` — never a 502: Cloudflare replaces
+ *      an origin 502/504 with its own HTML error page and drops the X-Proxy-*
+ *      headers on the way to the Worker.
  *
  * Every response carries X-Proxy-* headers describing which route served it
  * and whether direct is currently blocked, so the Worker can raise the
@@ -58,7 +67,14 @@
  *                            optionally `label=url`; empty = no fallback
  *   BLOCK_COOLDOWN_MS        default 3600000 (1 h)
  *   ERROR_COOLDOWN_MS        bench time for a pool member after a transport
- *                            error / tinyproxy error page, default 600000 (10 min)
+ *                            error / tinyproxy error page, and for direct
+ *                            after DIRECT_ERROR_THRESHOLD of them in a row,
+ *                            default 600000 (10 min)
+ *   DIRECT_ERROR_THRESHOLD   consecutive direct transport errors that bench
+ *                            direct, default 3
+ *   DIRECT_CONNECT_TIMEOUT_MS TCP connect timeout on the direct route, default
+ *                            5000 (undici's own default is 10 s; a blackholed
+ *                            home IP would cost that on every probe)
  *   POOL_CONNECT_TIMEOUT_MS  TCP connect timeout to a pool member, default 5000
  *   MAX_POOL_ATTEMPTS        pool members tried per request, default 2
  *   PROBE_URL                tracklist URL fetched by POST /probe; default a
@@ -86,7 +102,7 @@
 import { createServer } from 'node:http'
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { fetch as undiciFetch, ProxyAgent } from 'undici'
+import { fetch as undiciFetch, Agent, ProxyAgent } from 'undici'
 import {
   classifyUpstream,
   extractBlockedIp,
@@ -95,12 +111,13 @@ import {
   DEFAULT_COOLDOWN_MS,
   DEFAULT_ERROR_COOLDOWN_MS,
   DEFAULT_MAX_POOL_ATTEMPTS,
+  DEFAULT_DIRECT_ERROR_THRESHOLD,
   AccountPool,
   parseAccountsFromEnv,
   accountFileKey,
 } from './nas-fetch-proxy-lib.mjs'
 
-const VERSION = '0.4.3'
+const VERSION = '0.4.4'
 const PORT = Number(process.env.PORT ?? 8088)
 const BIND = process.env.BIND ?? '0.0.0.0'
 const TOKEN = process.env.PROXY_TOKEN
@@ -115,6 +132,11 @@ const COOLDOWN_MS = Number(process.env.BLOCK_COOLDOWN_MS ?? DEFAULT_COOLDOWN_MS)
 const ERROR_COOLDOWN_MS = Number(process.env.ERROR_COOLDOWN_MS ?? DEFAULT_ERROR_COOLDOWN_MS)
 // A dead bucket must not hold a request for the full upstream timeout.
 const POOL_CONNECT_TIMEOUT_MS = Number(process.env.POOL_CONNECT_TIMEOUT_MS ?? 5000)
+// Nor must a blackholed home IP: the connect is what fails when 1001tl's host
+// drops our packets, so bound it rather than paying undici's 10 s default on
+// every direct attempt / probe.
+const DIRECT_CONNECT_TIMEOUT_MS = Number(process.env.DIRECT_CONNECT_TIMEOUT_MS ?? 5000)
+const DIRECT_ERROR_THRESHOLD = Math.max(1, Number(process.env.DIRECT_ERROR_THRESHOLD ?? DEFAULT_DIRECT_ERROR_THRESHOLD))
 // 1001tracklists' block follows the *session*, not the IP (verified 2026-09-10:
 // the old session was blocked from every egress; a fresh login made through a
 // clean pool egress worked from everywhere, including the home IP; a fresh
@@ -195,12 +217,14 @@ const RESPONSE_DROP = new Set([
   'set-cookie',
 ])
 
-const planner = new RoutePlanner({ pool: POOL, cooldownMs: COOLDOWN_MS, errorCooldownMs: ERROR_COOLDOWN_MS, maxPoolAttempts: MAX_POOL_ATTEMPTS })
+const planner = new RoutePlanner({ pool: POOL, cooldownMs: COOLDOWN_MS, errorCooldownMs: ERROR_COOLDOWN_MS, maxPoolAttempts: MAX_POOL_ATTEMPTS, directErrorThreshold: DIRECT_ERROR_THRESHOLD })
 // One dispatcher per pool member; undici's ProxyAgent does CONNECT tunnelling
 // for https targets, which is exactly what tinyproxy expects.
 const dispatchers = new Map(
   POOL.map((m) => [m.url, new ProxyAgent({ uri: m.url, connect: { timeout: POOL_CONNECT_TIMEOUT_MS } })]),
 )
+/** The direct route's dispatcher: the default agent with a bounded connect. */
+const directDispatcher = new Agent({ connect: { timeout: DIRECT_CONNECT_TIMEOUT_MS } })
 
 const accounts = new AccountPool({ accounts: ACCOUNTS, blockCooldownMs: COOLDOWN_MS, errorCooldownMs: ERROR_COOLDOWN_MS, reloginCooldownMs: RELOGIN_COOLDOWN_MS })
 /** account.index → { cookies, savedAt } */
@@ -494,7 +518,7 @@ async function fetchVia(route, target, method, reqHeaders, body, extraHeaders) {
     redirect: 'follow',
     signal: AbortSignal.timeout(TIMEOUT_MS),
   }
-  if (route.kind === 'pool') init.dispatcher = dispatchers.get(route.member.url)
+  init.dispatcher = route.kind === 'pool' ? dispatchers.get(route.member.url) : directDispatcher
   const upstream = await undiciFetch(target, init)
   const buf = Buffer.from(await upstream.arrayBuffer())
   return { upstream, buf, text: buf.toString('utf8') }
@@ -519,6 +543,7 @@ function directHeaders(res) {
     if (s.direct.blockedSince) res.setHeader('x-proxy-direct-blocked-since', s.direct.blockedSince)
     if (s.direct.blockedIp) res.setHeader('x-proxy-direct-blocked-ip', s.direct.blockedIp)
   }
+  if (s.direct.unhealthy) res.setHeader('x-proxy-direct-unhealthy-until', s.direct.unhealthyUntil)
   res.setHeader('x-proxy-pool-healthy', String(s.poolHealthy))
   res.setHeader('x-proxy-pool-total', String(s.poolTotal))
   res.setHeader('x-proxy-accounts-healthy', String(accounts.healthyMembers().length))
@@ -562,6 +587,8 @@ async function handleProxy(req, res, target, parsed, force) {
   let directRecovered = false
   let sessionReissued = false
   let servedBy = null
+  /** Message of the last transport failure on any route (for the all-failed answer). */
+  let lastTransportError = null
   // Accounts already tried for THIS request (blocked or failed to log in): the
   // next attempt on any route uses a different one. Cleared per request only.
   const triedAccounts = new Set()
@@ -608,19 +635,17 @@ async function handleProxy(req, res, target, parsed, force) {
     } catch (e) {
       const msg = String(e?.message ?? e)
       attempts.push(`${routeLabel(route)}:error`)
+      lastTransportError = msg
+      for (const ev of planner.report(route, 'error')) log(`route.${ev.event}`, { ...ev, url: target })
       if (route.kind === 'direct') {
-        // A transport failure on the residential link is not a ban. Return
-        // it as-is rather than doubling traffic through the pool during a
-        // 1001tl outage.
-        res.statusCode = 502
-        directHeaders(res)
-        res.setHeader('x-proxy-route', 'direct')
-        res.setHeader('x-proxy-attempts', attempts.join(','))
-        res.end(`upstream error: ${msg}`)
-        return { route: 'direct', kind: 'transport_error', status: 502, bytes: 0, attempts, error: msg }
+        // A transport failure on the residential link is not a ban — no
+        // captcha to solve — but the page is still wanted: move on to the
+        // pool. A streak of these benches direct (planner) so the following
+        // requests skip the dead connect entirely.
+        log('route.direct_error', { url: target, error: msg, consecutiveErrors: planner.direct.consecutiveErrors, unhealthy: planner.isDirectUnhealthy() })
+      } else {
+        log('route.member_error', { label: route.member.label, error: msg })
       }
-      for (const ev of planner.report(route, 'error')) log(`route.${ev.event}`, ev)
-      log('route.member_error', { label: route.member.label, error: msg })
       continue routeLoop
     }
 
@@ -711,6 +736,21 @@ async function handleProxy(req, res, target, parsed, force) {
     res.end(r.buf)
     return { route: routeLabel(route), kind, status: r.upstream.status, bytes: r.buf.length, attempts, sessionReissued, account: servedBy }
     } // account attempts
+  }
+
+  // Every route we tried failed in transport (nothing answered, blocked or
+  // otherwise): a 1001tl outage or a dead home link, not a ban. Say so with
+  // X-Proxy-Transport-Error rather than X-Proxy-All-Blocked, so the Worker
+  // treats it as a plain retryable failure instead of pausing or paying for
+  // BrightData. 503, never 502 (Cloudflare rewrites an origin 502 into its
+  // own HTML page and strips these headers).
+  if (!lastBlocked && attempts.length > 0 && attempts.every((a) => a.endsWith(':error'))) {
+    directHeaders(res)
+    res.setHeader('x-proxy-route', 'none')
+    res.setHeader('x-proxy-transport-error', '1')
+    res.setHeader('x-proxy-attempts', attempts.join(','))
+    sendJson(res, 503, { error: 'all_routes_failed', transport: true, attempts, lastError: lastTransportError, ...planner.status() })
+    return { route: 'none', kind: 'transport_error', status: 503, bytes: 0, attempts, error: lastTransportError }
   }
 
   // Every route we tried came back blocked (or errored, for pool members), or
@@ -817,7 +857,10 @@ async function handleProbe(req, res, url) {
   const kind = through ? 'ok' : primary.kind
   const ip = primary.ip ?? all.map((p) => p.ip).find(Boolean) ?? null
   const blameRoute = !account || kind !== 'ip_blocked' || all.some((p) => p.relogin === 'still_blocked')
-  if (kind !== 'error' && blameRoute) {
+  // A probe that died in transport counts towards direct's error streak like
+  // a request would (once per probe, whatever the account fan-out); one that
+  // reached 1001tl clears it.
+  if (kind === 'error' || blameRoute) {
     for (const ev of planner.report({ kind: 'direct' }, kind, { ip })) log(`route.${ev.event}`, { ...ev, url, via: 'probe' })
   }
   const served = through ?? primary
@@ -920,8 +963,9 @@ const server = createServer(async (req, res) => {
     })
   } catch (e) {
     if (!res.headersSent) {
-      res.statusCode = 502
-      res.end(`upstream error: ${e?.message ?? String(e)}`)
+      // 503, not 502: Cloudflare swaps an origin 502 for its own HTML page.
+      res.statusCode = 503
+      res.end(`forwarder error: ${e?.message ?? String(e)}`)
     } else {
       res.end()
     }

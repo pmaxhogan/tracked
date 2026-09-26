@@ -6,6 +6,7 @@
 export const DEFAULT_COOLDOWN_MS: number
 export const DEFAULT_MAX_POOL_ATTEMPTS: number
 export const DEFAULT_ERROR_COOLDOWN_MS: number
+export const DEFAULT_DIRECT_ERROR_THRESHOLD: number
 
 export type UpstreamKind = 'ip_blocked' | 'gated' | 'ok'
 export function classifyUpstream(status: number, bodyText: string | null | undefined): UpstreamKind
@@ -43,7 +44,13 @@ export type PlannerStatus = {
     blockedIp: string | null
     lastBlockAt: string | null
     lastOkAt: string | null
+    unhealthy: boolean
+    unhealthyUntil: string | null
+    consecutiveErrors: number
+    errorCount: number
+    lastErrorAt: string | null
   }
+  directErrorThreshold: number
   pool: Array<{
     label: string
     blocked: boolean
@@ -61,6 +68,7 @@ export type PlannerStatus = {
   counters: {
     directOk: number
     directBlocked: number
+    directError: number
     poolOk: number
     poolBlocked: number
     poolError: number
@@ -74,16 +82,30 @@ export class RoutePlanner {
     cooldownMs?: number
     errorCooldownMs?: number
     maxPoolAttempts?: number
+    directErrorThreshold?: number
     now?: () => number
     random?: () => number
   })
   cooldownMs: number
   errorCooldownMs: number
   maxPoolAttempts: number
-  direct: { blockedUntil: number; blockedSince: number; blockedIp: string | null; lastBlockAt: number; lastOkAt: number }
+  directErrorThreshold: number
+  direct: {
+    blockedUntil: number
+    blockedSince: number
+    blockedIp: string | null
+    lastBlockAt: number
+    lastOkAt: number
+    unhealthyUntil: number
+    consecutiveErrors: number
+    errorSince: number
+    errorCount: number
+    lastErrorAt: number
+  }
   members: PoolMember[]
   counters: PlannerStatus['counters']
   isDirectBlocked(now?: number): boolean
+  isDirectUnhealthy(now?: number): boolean
   healthyMembers(now?: number): PoolMember[]
   pickPool(count?: number, now?: number): PoolMember[]
   plan(force?: 'direct' | 'pool' | null): Route[]

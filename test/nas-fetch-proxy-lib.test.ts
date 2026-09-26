@@ -67,7 +67,7 @@ describe('parsePoolConfig', () => {
   })
 })
 
-function planner(opts: { pool?: number; cooldownMs?: number; maxPoolAttempts?: number } = {}) {
+function planner(opts: { pool?: number; cooldownMs?: number; maxPoolAttempts?: number; directErrorThreshold?: number } = {}) {
   let t = 1_000_000
   const now = () => t
   const advance = (ms: number) => {
@@ -76,7 +76,7 @@ function planner(opts: { pool?: number; cooldownMs?: number; maxPoolAttempts?: n
   // Deterministic "random": always pick the first healthy member.
   const random = () => 0
   const pool = Array.from({ length: opts.pool ?? 3 }, (_, i) => ({ url: `http://p${i}:1/`, label: `p${i}` }))
-  const p = new RoutePlanner({ pool, cooldownMs: opts.cooldownMs ?? 3600_000, maxPoolAttempts: opts.maxPoolAttempts ?? 2, now, random })
+  const p = new RoutePlanner({ pool, cooldownMs: opts.cooldownMs ?? 3600_000, maxPoolAttempts: opts.maxPoolAttempts ?? 2, directErrorThreshold: opts.directErrorThreshold, now, random })
   return { p, advance, now }
 }
 
@@ -153,6 +153,82 @@ describe('RoutePlanner', () => {
     expect(p.status().pool[0]).toMatchObject({ unhealthy: false, okCount: 1 })
   })
 
+  // 2026-09-17: 1001tracklists' host started dropping TCP from the home IP
+  // outright (no 403, no block page — connect timeouts for days). The old
+  // contract returned that 502 to the caller and never touched the pool.
+  it('a lone direct transport error is not held against direct (the request just moves on to the pool)', () => {
+    const { p } = planner()
+    expect(p.report({ kind: 'direct' }, 'error')).toEqual([])
+    expect(kinds(p.plan())).toEqual(['direct', 'pool:p0', 'pool:p1'])
+    expect(p.status().direct).toMatchObject({ unhealthy: false, blocked: false, consecutiveErrors: 1, errorCount: 1 })
+    expect(p.status().counters.directError).toBe(1)
+  })
+
+  it('benches direct for the error cooldown after consecutive transport errors, without calling it blocked', () => {
+    const { p, advance } = planner()
+    p.report({ kind: 'direct' }, 'error')
+    p.report({ kind: 'direct' }, 'error')
+    const ev = p.report({ kind: 'direct' }, 'error')
+    expect(ev).toEqual([{ event: 'direct.unhealthy', consecutiveErrors: 3, unhealthyUntil: 1_000_000 + 10 * 60_000 }])
+    expect(p.isDirectUnhealthy()).toBe(true)
+    expect(p.isDirectBlocked()).toBe(false)
+    expect(kinds(p.plan())).toEqual(['pool:p0', 'pool:p1'])
+    expect(p.status().direct).toMatchObject({ unhealthy: true, unhealthyUntil: new Date(1_000_000 + 10 * 60_000).toISOString(), blocked: false, consecutiveErrors: 3, errorCount: 3 })
+    // One probe per error cooldown: the first plan after it expires leads with direct again.
+    advance(10 * 60_000 - 1)
+    expect(kinds(p.plan())[0]).toBe('pool:p0')
+    advance(1)
+    expect(kinds(p.plan())[0]).toBe('direct')
+    // Still unreachable → benched again at once (the streak is already past the threshold).
+    const again = p.report({ kind: 'direct' }, 'error')
+    expect(again).toEqual([{ event: 'direct.still_unhealthy', consecutiveErrors: 4, unhealthyUntil: 1_000_000 + 20 * 60_000 }])
+    expect(kinds(p.plan())[0]).toBe('pool:p0')
+  })
+
+  it('clears the direct error streak when direct answers again', () => {
+    const { p, advance } = planner()
+    for (let i = 0; i < 3; i++) p.report({ kind: 'direct' }, 'error')
+    advance(10 * 60_000)
+    const ev = p.report({ kind: 'direct' }, 'ok')
+    expect(ev).toEqual([{ event: 'direct.reachable', errors: 3, unreachableFor: 10 * 60_000 }])
+    expect(p.isDirectUnhealthy()).toBe(false)
+    expect(p.status().direct).toMatchObject({ unhealthy: false, unhealthyUntil: null, consecutiveErrors: 0, errorCount: 3 })
+    expect(kinds(p.plan())[0]).toBe('direct')
+    // A lone error after recovery starts a fresh streak; it does not bench again.
+    expect(p.report({ kind: 'direct' }, 'error')).toEqual([])
+    expect(kinds(p.plan())[0]).toBe('direct')
+    // ...and an ok that was never preceded by a bench is silent.
+    expect(p.report({ kind: 'direct' }, 'ok')).toEqual([])
+  })
+
+  it('a block page answers the reachability question too: it resets the error streak', () => {
+    const { p } = planner()
+    for (let i = 0; i < 3; i++) p.report({ kind: 'direct' }, 'error')
+    const ev = p.report({ kind: 'direct' }, 'ip_blocked', { ip: '1.2.3.4' })
+    expect(ev.map((e) => e.event)).toEqual(['direct.blocked'])
+    expect(p.isDirectUnhealthy()).toBe(false)
+    expect(p.isDirectBlocked()).toBe(true)
+    expect(p.status().direct.consecutiveErrors).toBe(0)
+  })
+
+  it('the error threshold is configurable', () => {
+    const { p } = planner({ directErrorThreshold: 1 })
+    expect(p.report({ kind: 'direct' }, 'error')[0]!.event).toBe('direct.unhealthy')
+    expect(kinds(p.plan())[0]).toBe('pool:p0')
+  })
+
+  it('keeps trying direct while benched when there is no pool to fall over to, and honours a forced direct route', () => {
+    const { p: noPool } = planner({ pool: 0 })
+    for (let i = 0; i < 3; i++) noPool.report({ kind: 'direct' }, 'error')
+    expect(noPool.isDirectUnhealthy()).toBe(true)
+    // Nothing else to try: an empty plan would read as "every route blocked", which this is not.
+    expect(kinds(noPool.plan())).toEqual(['direct'])
+    const { p } = planner()
+    for (let i = 0; i < 3; i++) p.report({ kind: 'direct' }, 'error')
+    expect(kinds(p.plan('direct'))).toEqual(['direct'])
+    expect(kinds(p.plan('pool'))).toEqual(['pool:p0', 'pool:p1'])
+  })
+
   it('honours the force-route header', () => {
     const { p } = planner()
     p.report({ kind: 'direct' }, 'ip_blocked')
@@ -183,7 +259,7 @@ describe('RoutePlanner', () => {
     expect(s.direct.blocked).toBe(true)
     expect(s.direct.blockedIp).toBe('9.9.9.9')
     expect(s.direct.blockedUntil).toBe(new Date(1_000_000 + 3600_000).toISOString())
-    expect(s.counters).toEqual({ directOk: 1, directBlocked: 1, poolOk: 0, poolBlocked: 0, poolError: 0, allBlocked: 0 })
+    expect(s.counters).toEqual({ directOk: 1, directBlocked: 1, directError: 0, poolOk: 0, poolBlocked: 0, poolError: 0, allBlocked: 0 })
     expect(s.poolHealthy).toBe(1)
     expect(s.poolTotal).toBe(1)
   })

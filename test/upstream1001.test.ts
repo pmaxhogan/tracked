@@ -203,6 +203,40 @@ describe('fetch1001 cascade', () => {
     expect(await getPause(env)).toBeNull()
   })
 
+  it('forwarder 0.4.4: every route died in transport (503 + X-Proxy-Transport-Error) is the same plain retryable failure', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const calls = routeFetch({
+      proxy: () =>
+        new Response(JSON.stringify({ error: 'all_routes_failed', transport: true }), {
+          status: 503,
+          headers: { 'content-type': 'application/json', 'x-proxy-route': 'none', 'x-proxy-transport-error': '1', 'x-proxy-attempts': 'direct:error,bgp1:18183:error,vm1:18180:error', 'x-proxy-pool-healthy': '16', 'x-proxy-pool-total': '18' },
+        }),
+      brightdata: () => bdOk(TRACKLIST_HTML),
+    })
+    const err = await fetch1001(TL, fetchOptsFromEnv(env)).catch((e) => e)
+    expect(err).toBeInstanceOf(UpstreamTransportError)
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
+    expect(await getHomeBan(env)).toBeNull()
+    expect(await getPause(env)).toBeNull()
+  })
+
+  it('a pool-served page after a direct transport error is an ordinary success (no ban state)', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const calls = routeFetch({
+      proxy: () =>
+        new Response(TRACKLIST_HTML, {
+          status: 200,
+          headers: { 'x-proxy-route': 'pool', 'x-proxy-egress': 'bgp1:18183', 'x-proxy-upstream-status': '200', 'x-proxy-attempts': 'direct:error,bgp1:18183/acct1:ok', 'x-proxy-direct-unhealthy-until': '2026-09-20T16:00:00.000Z', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' },
+        }),
+      brightdata: () => bdOk(TRACKLIST_HTML),
+    })
+    const r = await fetch1001(TL, fetchOptsFromEnv(env))
+    expect(r.via).toBe('home-proxy-pool')
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
+    expect(await getHomeBan(env)).toBeNull()
+    expect(await getPause(env)).toBeNull()
+  })
+
   it('a 5xx from 1001tl through the forwarder still falls through to BrightData', async () => {
     const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
     routeFetch({ proxy: () => proxyUpstream(503), brightdata: () => bdOk(TRACKLIST_HTML) })

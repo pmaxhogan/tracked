@@ -217,8 +217,11 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
     } else if (proxy.kind === 'all_blocked') {
       blockedIp = extractIPBlockedAddress(proxy.html) ?? proxy.directBlocked?.ip ?? null
       log?.error('fetch1001.homeproxy_all_routes_blocked', { url, attempts: proxy.attempts, blockedIp, fallback: opts.brightdataApiKey ? 'brightdata' : 'pause' })
-    } else if (proxy.kind === 'upstream_error' && proxy.upstreamTransport) {
-      log?.warn('fetch1001.homeproxy_transport_blip', { url, attempts: proxy.attempts, errorMessage: proxy.errorMessage?.slice(0, 160) })
+    } else if (proxy.upstreamTransport) {
+      // Nothing answered on any route the forwarder tried (its 503 +
+      // X-Proxy-Transport-Error). BrightData would be a paid guess at an
+      // outage; retry next tick instead.
+      log?.warn('fetch1001.homeproxy_transport_blip', { url, status: proxy.status, attempts: proxy.attempts, errorMessage: proxy.errorMessage?.slice(0, 160) })
       throw new UpstreamTransportError(url, (proxy.errorMessage ?? 'upstream error').slice(0, 120))
     } else if (proxy.kind === 'upstream_error' && FINAL_UPSTREAM_STATUSES.has(proxy.status)) {
       // A real 404/410 from 1001tl through a working route. BrightData would

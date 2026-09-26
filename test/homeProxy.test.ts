@@ -91,6 +91,20 @@ describe('fetchViaHomeProxy', () => {
     expect(r).toMatchObject({ kind: 'transport', status: 0, html: '', errorMessage: 'fetch failed' })
   })
 
+  it('flags upstreamTransport on the 0.4.4 every-route-failed 503 and on the legacy direct 502, not on a served 5xx', async () => {
+    mockFetch(() => new Response('{"error":"all_routes_failed","transport":true}', { status: 503, headers: { 'x-proxy-route': 'none', 'x-proxy-transport-error': '1', 'x-proxy-attempts': 'direct:error,bgp1:18183:error' } }))
+    const all = await fetchViaHomeProxy('https://www.1001tracklists.com/x', PROXY, TOKEN)
+    expect(all).toMatchObject({ kind: 'proxy_error', status: 503, upstreamTransport: true, attempts: 'direct:error,bgp1:18183:error' })
+    vi.unstubAllGlobals()
+    mockFetch(() => new Response('upstream error: fetch failed', { status: 502, headers: { 'x-proxy-route': 'direct', 'x-proxy-attempts': 'direct:error' } }))
+    const legacy = await fetchViaHomeProxy('https://www.1001tracklists.com/x', PROXY, TOKEN)
+    expect(legacy).toMatchObject({ kind: 'upstream_error', upstreamTransport: true })
+    vi.unstubAllGlobals()
+    mockFetch(() => new Response('bad gateway', { status: 502, headers: { 'x-proxy-route': 'direct', 'x-proxy-upstream-status': '502', 'x-proxy-attempts': 'direct:ok' } }))
+    const served = await fetchViaHomeProxy('https://www.1001tracklists.com/x', PROXY, TOKEN)
+    expect(served).toMatchObject({ kind: 'upstream_error', upstreamTransport: false })
+  })
+
   it('forwards POST bodies, extra headers and the force-route override', async () => {
     const { calls } = mockFetch(() => new Response('ok', { status: 200, headers: { 'x-proxy-route': 'pool', 'x-proxy-egress': 'vm1:18180' } }))
     await fetchViaHomeProxy('https://www.1001tracklists.com/search/result.php', PROXY, TOKEN, undefined, {

@@ -16,16 +16,24 @@
  *     is the "one probe per hour" limit. Blocked again → another cooldown.
  *   - Pool members that return a block signal get the same cooldown
  *     individually. A request may try up to `maxPoolAttempts` members.
- *   - Transport errors are NOT block signals: on direct they are returned to
- *     the caller as-is (a 1001tl outage must not double the traffic); on a
- *     pool member they move on to the next member and bench that member for
- *     a short error cooldown so a dead bucket is not re-tried every request.
+ *   - Transport errors are NOT block signals, but they are failover signals
+ *     (0.4.4): on direct the same request moves on to the pool, and after
+ *     `directErrorThreshold` consecutive direct errors the direct route is
+ *     benched for the error cooldown — the first request after it expires
+ *     probes direct again. (2026-09-17: 1001tracklists' host started dropping
+ *     TCP from the home IP outright — connect timeouts, no block page — and
+ *     the old "return direct errors as-is" contract served 502s for three
+ *     days with eighteen idle pool egresses.) On a pool member they move on
+ *     to the next member and bench that member for the same error cooldown
+ *     so a dead bucket is not re-tried every request.
  */
 
 export const DEFAULT_COOLDOWN_MS = 60 * 60 * 1000
 export const DEFAULT_MAX_POOL_ATTEMPTS = 2
-/** How long a pool member sits out after a transport error (proxy down, CONNECT refused). */
+/** How long a route sits out after transport errors (pool: one; direct: `directErrorThreshold` in a row). */
 export const DEFAULT_ERROR_COOLDOWN_MS = 10 * 60 * 1000
+/** Consecutive direct transport errors before direct is benched for the error cooldown. */
+export const DEFAULT_DIRECT_ERROR_THRESHOLD = 3
 
 const IP_BLOCK_FORM_RE = /action="\/info\/unblock_ip\.html"/
 const IP_BLOCK_IP_RE = /Your IP is ((?:\d{1,3}\.){3}\d{1,3})/
@@ -96,15 +104,31 @@ export class RoutePlanner {
     cooldownMs = DEFAULT_COOLDOWN_MS,
     errorCooldownMs = DEFAULT_ERROR_COOLDOWN_MS,
     maxPoolAttempts = DEFAULT_MAX_POOL_ATTEMPTS,
+    directErrorThreshold = DEFAULT_DIRECT_ERROR_THRESHOLD,
     now = () => Date.now(),
     random = () => Math.random(),
   } = {}) {
     this.cooldownMs = cooldownMs
     this.errorCooldownMs = errorCooldownMs
     this.maxPoolAttempts = maxPoolAttempts
+    this.directErrorThreshold = Math.max(1, directErrorThreshold ?? DEFAULT_DIRECT_ERROR_THRESHOLD)
     this.now = now
     this.random = random
-    this.direct = { blockedUntil: 0, blockedSince: 0, blockedIp: null, lastBlockAt: 0, lastOkAt: 0 }
+    this.direct = {
+      blockedUntil: 0,
+      blockedSince: 0,
+      blockedIp: null,
+      lastBlockAt: 0,
+      lastOkAt: 0,
+      // Transport health, separate from the block state: a connect timeout
+      // is not a ban, but a streak of them means the home link cannot reach
+      // 1001tracklists and the pool should serve meanwhile.
+      unhealthyUntil: 0,
+      consecutiveErrors: 0,
+      errorSince: 0,
+      errorCount: 0,
+      lastErrorAt: 0,
+    }
     this.members = pool.map((m) => ({
       url: m.url,
       label: m.label,
@@ -118,11 +142,16 @@ export class RoutePlanner {
       blockedCount: 0,
       errorCount: 0,
     }))
-    this.counters = { directOk: 0, directBlocked: 0, poolOk: 0, poolBlocked: 0, poolError: 0, allBlocked: 0 }
+    this.counters = { directOk: 0, directBlocked: 0, directError: 0, poolOk: 0, poolBlocked: 0, poolError: 0, allBlocked: 0 }
   }
 
   isDirectBlocked(now = this.now()) {
     return this.direct.blockedUntil > now
+  }
+
+  /** Direct is benched after a streak of transport errors (not a block: no captcha to solve). */
+  isDirectUnhealthy(now = this.now()) {
+    return this.direct.unhealthyUntil > now
   }
 
   healthyMembers(now = this.now()) {
@@ -145,6 +174,9 @@ export class RoutePlanner {
    * bearer-gated X-Proxy-Force-Route header: 'direct' or 'pool'.
    * Each route is `{ kind: 'direct' }` or `{ kind: 'pool', member }`.
    * An empty array means every route is in cooldown → the caller answers 503.
+   * A direct route that is merely benched for transport errors still leads
+   * the plan when there is no healthy pool member: nothing else could serve,
+   * and an empty plan would be reported as "every route blocked".
    */
   plan(force = null) {
     const now = this.now()
@@ -152,18 +184,45 @@ export class RoutePlanner {
     const poolRoutes = this.pickPool(this.maxPoolAttempts, now).map((member) => ({ kind: 'pool', member }))
     if (force === 'pool') return poolRoutes
     if (this.isDirectBlocked(now)) return poolRoutes
+    if (this.isDirectUnhealthy(now) && poolRoutes.length > 0) return poolRoutes
     return [{ kind: 'direct' }, ...poolRoutes]
   }
 
   /**
    * Record the outcome of one attempt. Returns a list of state-change events
-   * (`direct.blocked`, `direct.recovered`, `member.blocked`, `member.recovered`)
-   * so the server can log them.
+   * (`direct.blocked`, `direct.recovered`, `direct.unhealthy`,
+   * `direct.reachable`, `member.blocked`, `member.recovered`, …) so the
+   * server can log them.
    */
   report(route, outcome, { ip = null } = {}) {
     const now = this.now()
     const events = []
     if (route.kind === 'direct') {
+      if (outcome === 'error') {
+        this.direct.errorCount++
+        this.direct.lastErrorAt = now
+        this.direct.consecutiveErrors++
+        if (this.direct.consecutiveErrors === 1) this.direct.errorSince = now
+        this.counters.directError++
+        if (this.direct.consecutiveErrors >= this.directErrorThreshold) {
+          const wasBenched = this.direct.unhealthyUntil > 0
+          this.direct.unhealthyUntil = now + this.errorCooldownMs
+          events.push({
+            event: wasBenched ? 'direct.still_unhealthy' : 'direct.unhealthy',
+            consecutiveErrors: this.direct.consecutiveErrors,
+            unhealthyUntil: this.direct.unhealthyUntil,
+          })
+        }
+        return events
+      }
+      // Any answer from 1001tracklists — a page or a block — settles the
+      // transport question: direct is reachable again.
+      if (this.direct.unhealthyUntil > 0 && outcome !== 'ip_blocked') {
+        events.push({ event: 'direct.reachable', errors: this.direct.consecutiveErrors, unreachableFor: now - this.direct.errorSince })
+      }
+      this.direct.unhealthyUntil = 0
+      this.direct.consecutiveErrors = 0
+      this.direct.errorSince = 0
       if (outcome === 'ip_blocked') {
         const wasBlocked = this.direct.blockedSince > 0
         this.direct.blockedUntil = now + this.cooldownMs
@@ -240,7 +299,13 @@ export class RoutePlanner {
         blockedIp: this.direct.blockedIp,
         lastBlockAt: iso(this.direct.lastBlockAt),
         lastOkAt: iso(this.direct.lastOkAt),
+        unhealthy: this.isDirectUnhealthy(now),
+        unhealthyUntil: this.isDirectUnhealthy(now) ? iso(this.direct.unhealthyUntil) : null,
+        consecutiveErrors: this.direct.consecutiveErrors,
+        errorCount: this.direct.errorCount,
+        lastErrorAt: iso(this.direct.lastErrorAt),
       },
+      directErrorThreshold: this.directErrorThreshold,
       pool: this.members.map((m) => ({
         label: m.label,
         blocked: m.blockedUntil > now,
