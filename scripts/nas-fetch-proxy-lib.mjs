@@ -43,8 +43,13 @@ const IP_BLOCK_IP_RE = /Your IP is ((?:\d{1,3}\.){3}\d{1,3})/
  *   - `ip_blocked`: 1001tracklists has rate-limited the egress IP. Either the
  *     status is 403 (how the block page is served since at least 2026-09) or
  *     the body carries the unblock_ip captcha form (older 200-with-form shape).
- *   - `gated`: the Turnstile "Please wait, you will be forwarded" shell served
- *     to cold/unauthenticated sessions. Not a ban — a re-login usually clears it.
+ *   - `gated`: a page that wants the *session* proven rather than the IP —
+ *     the Turnstile "Please wait, you will be forwarded" shell served to
+ *     cold/unauthenticated sessions, or (2026-09-26) the 401 "We need to
+ *     validate your are real human!" image captcha that 1001tracklists now
+ *     serves to anonymous visitors and to a logged-in session it has stopped
+ *     trusting. Not a ban — a fresh login clears it (verified 2026-09-26: the
+ *     same account, logged in again, got a page).
  *   - `ok`: anything else, including 404s and 5xx, which are passed through.
  */
 export function classifyUpstream(status, bodyText) {
@@ -53,8 +58,12 @@ export function classifyUpstream(status, bodyText) {
   // the same unblock_ip form. Either status, or the form itself, is a block.
   if (status === 403 || status === 429 || IP_BLOCK_FORM_RE.test(body)) return 'ip_blocked'
   if (body.includes('turnstile-container') && body.includes('Please wait, you will be forwarded')) return 'gated'
+  if (status === 401 && HUMAN_CAPTCHA_RE.test(body)) return 'gated'
   return 'ok'
 }
+
+/** The 2026-09-26 image-captcha gate: a 401 with this sentence and a `captcha` text box. */
+const HUMAN_CAPTCHA_RE = /validate your? are (a )?real human/i
 
 export function extractBlockedIp(bodyText) {
   const m = typeof bodyText === 'string' ? bodyText.match(IP_BLOCK_IP_RE) : null

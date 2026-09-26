@@ -81,11 +81,21 @@ export type BanEpisode = {
 
 export type BrightdataUsage = { date: string; used: number; cap: number; remaining: number }
 
+/**
+ * Bright Data refusing the domain outright (2026-09-26: "Access denied:
+ * www.1001tracklists.com is classified as Streaming Media and blocked by
+ * Bright Data as it might breach Bright Data usage policy"). A policy answer,
+ * not a transient — every further call would be the same refusal, paid for in
+ * budget and in 10–20 s of the phone's wait. Parked for a day at a time.
+ */
+export type BrightdataPolicyBlock = { since: string; until: string; reason: string }
+
 export type BanStatus = {
   now: string
   home: HomeBan | null
   pause: Pause | null
   brightdata: BrightdataUsage
+  brightdataPolicyBlock: BrightdataPolicyBlock | null
   episodes: BanEpisode[]
   pushConfigured: boolean
 }
@@ -406,11 +416,33 @@ export async function tryConsumeBrightdata(env: BanEnv, log?: Logger): Promise<{
   return { ok: true, usage: { ...usage, used: usage.used + 1, remaining: Math.max(0, usage.cap - usage.used - 1) } }
 }
 
+const BRIGHTDATA_POLICY_KEY = 'ban:bd:policy'
+const BRIGHTDATA_POLICY_TTL_SECONDS = 24 * 60 * 60
+
+/** Bright Data's standing refusal of the domain, while it lasts. */
+export async function getBrightdataPolicyBlock(env: BanEnv): Promise<BrightdataPolicyBlock | null> {
+  const v = await env.CACHE.get(BRIGHTDATA_POLICY_KEY, 'json')
+  return (v as BrightdataPolicyBlock | null) ?? null
+}
+
+/** Park the unlocker for a day after a policy refusal (see BrightdataPolicyBlock). */
+export async function noteBrightdataPolicyBlock(env: BanEnv, reason: string, log?: Logger): Promise<BrightdataPolicyBlock> {
+  const now = Date.now()
+  const block: BrightdataPolicyBlock = { since: new Date(now).toISOString(), until: new Date(now + BRIGHTDATA_POLICY_TTL_SECONDS * 1000).toISOString(), reason: reason.slice(0, 300) }
+  try {
+    await env.CACHE.put(BRIGHTDATA_POLICY_KEY, JSON.stringify(block), { expirationTtl: BRIGHTDATA_POLICY_TTL_SECONDS })
+  } catch (e) {
+    log?.warn('brightdata.policy_write_failed', { error: e instanceof Error ? e.message : String(e) })
+  }
+  log?.error('brightdata.policy_blocked', { ...block })
+  return block
+}
+
 // ─── Admin surface ───────────────────────────────────────────────────────────
 
 export async function getBanStatus(env: BanEnv, episodeLimit = 10): Promise<BanStatus> {
-  const [home, pause, brightdata, episodes] = await Promise.all([getHomeBan(env), getPause(env), brightdataUsage(env), listEpisodes(env, episodeLimit)])
-  return { now: nowIso(), home, pause, brightdata, episodes, pushConfigured: pushConfigured(env as Env) }
+  const [home, pause, brightdata, brightdataPolicyBlock, episodes] = await Promise.all([getHomeBan(env), getPause(env), brightdataUsage(env), getBrightdataPolicyBlock(env), listEpisodes(env, episodeLimit)])
+  return { now: nowIso(), home, pause, brightdata, brightdataPolicyBlock, episodes, pushConfigured: pushConfigured(env as Env) }
 }
 
 /** Admin test hook: open a fake episode (banner + push) that only a manual clear ends. */

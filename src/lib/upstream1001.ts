@@ -25,7 +25,7 @@
 import { fetchHtml, postForm, isIPBlocked, extractIPBlockedAddress, IPBlockedError, looksLikeCfShell, CloudflareChallengeError, type ChallengeState } from './fetch'
 import { fetchViaHomeProxy, type HomeProxyResult } from './homeProxy'
 import { fetchViaUnlocker } from './unlocker'
-import { isPaused, noteProxyResult, tryConsumeBrightdata, type Pause } from './ban-state'
+import { isPaused, noteProxyResult, tryConsumeBrightdata, getBrightdataPolicyBlock, noteBrightdataPolicyBlock, type Pause } from './ban-state'
 import type { Logger } from './log'
 import type { Env } from '../types'
 
@@ -136,6 +136,12 @@ export type Fetch1001Opts = {
   forceRoute?: 'direct' | 'pool'
   /** Set false to never fall back to the Worker's own egress (search must, tracklist pages may). */
   allowDirect?: boolean
+  /**
+   * Pause before the one forwarder retry that follows a 5xx 1001tracklists
+   * itself answered on every route (2026-09-26: its error page, gone again
+   * seconds later). Default 2500 ms; tests pass 0.
+   */
+  serverErrorRetryDelayMs?: number
 }
 
 /**
@@ -194,13 +200,27 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
 
   // ── 1. Home forwarder ────────────────────────────────────────────────────
   if (haveHomeProxy && !pause) {
-    proxy = await fetchViaHomeProxy(url, opts.homeProxyUrl!, opts.homeProxyToken!, log, {
-      method,
-      body,
-      headers: opts.headers,
-      forceRoute: opts.forceRoute,
-    })
-    if (env) await noteProxyResult(env, proxy, log)
+    for (let attempt = 1; ; attempt++) {
+      proxy = await fetchViaHomeProxy(url, opts.homeProxyUrl!, opts.homeProxyToken!, log, {
+        method,
+        body,
+        headers: opts.headers,
+        forceRoute: opts.forceRoute,
+      })
+      if (env) await noteProxyResult(env, proxy, log)
+      // 1001tracklists' own 5xx page on every route the forwarder reached
+      // (2026-09-26: a 503 with the homepage <title>, answered to all three
+      // accounts within a second and gone twenty seconds later). One short
+      // pause and one more forwarder try costs nothing; the paid fallback
+      // after it would only fetch the same error page — or, now, be refused.
+      if (attempt === 1 && proxy.kind === 'upstream_error' && proxy.status >= 500 && !proxy.upstreamTransport) {
+        const delay = opts.serverErrorRetryDelayMs ?? 2500
+        log?.warn('fetch1001.homeproxy_5xx_retry', { url, status: proxy.status, route: proxy.route, attempts: proxy.attempts, delayMs: delay })
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+        continue
+      }
+      break
+    }
     if (proxy.kind === 'ok') {
       if (isIPBlocked(proxy.html)) {
         // Belt and braces: the forwarder classifies blocks itself, so this only
@@ -245,6 +265,14 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
 
   // ── 2. BrightData Web Unlocker, budgeted ────────────────────────────────
   if (opts.brightdataApiKey) {
+    const policy = env ? await getBrightdataPolicyBlock(env) : null
+    if (policy) {
+      // Bright Data refuses the domain by policy (BrightdataPolicyBlock):
+      // asking again is the same answer, paid for. Behave as if over budget.
+      log?.warn('fetch1001.brightdata_policy_blocked', { url, until: policy.until, reason: policy.reason })
+      if (routeFault) throw stopError(`BrightData refuses the domain by policy until ${policy.until}`)
+      throw new Error(`unlocker parked until ${policy.until} — Bright Data policy: ${policy.reason}`)
+    }
     const budget = env ? await tryConsumeBrightdata(env, log) : { ok: true, usage: null }
     if (!budget.ok) {
       log?.warn('fetch1001.brightdata_over_budget', { url, usage: budget.usage })
@@ -261,6 +289,9 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
         if (!r.html) {
           const detail = r.errorCode ? `${r.errorCode}: ${r.errorMessage ?? ''}` : `status ${r.status}`
           log?.error('fetch1001.unlocker_failed', { url, status: r.status, errorCode: r.errorCode, errorMessage: r.errorMessage, attempt, routeFault })
+          if (env && r.errorCode === 'proxy_error' && /usage policy|classified as|access denied/i.test(r.errorMessage ?? '')) {
+            await noteBrightdataPolicyBlock(env, r.errorMessage ?? 'Bright Data policy refusal', log)
+          }
           if (routeFault) throw stopError(`BrightData failed (${detail})`)
           throw new Error(`unlocker fetch failed for ${url} — ${detail}`)
         }

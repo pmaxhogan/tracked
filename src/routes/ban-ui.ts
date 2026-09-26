@@ -274,6 +274,7 @@ export const BAN_JS = /* js */ `
       }
     }
     parts.push('BrightData today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b> calls' + (s.brightdata.used >= s.brightdata.cap ? ' <span class="bad">(budget spent)</span>' : '') + '.');
+    if (s.brightdataPolicyBlock) parts.push('<span class="bad">BrightData refuses 1001tracklists by policy</span> until <b>' + esc(fmtTime(s.brightdataPolicyBlock.until)) + '</b> — not asked until then (' + esc(s.brightdataPolicyBlock.reason.slice(0, 120)) + ').');
     if (s.pause) parts.push('<span class="bad">Paused</span> until ' + esc(fmtTime(s.pause.until)) + ' (' + esc(s.pause.reason) + ').');
     $route.innerHTML = parts.join(' ');
   }

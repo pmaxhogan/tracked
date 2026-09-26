@@ -121,7 +121,7 @@ import {
   accountFileKey,
 } from './nas-fetch-proxy-lib.mjs'
 
-const VERSION = '0.4.5'
+const VERSION = '0.4.6'
 const PORT = Number(process.env.PORT ?? 8088)
 const BIND = process.env.BIND ?? '0.0.0.0'
 const TOKEN = process.env.PROXY_TOKEN

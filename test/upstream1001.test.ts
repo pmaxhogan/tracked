@@ -350,3 +350,47 @@ describe('wrappers', () => {
     expect('tracklistUrl' in result).toBe(true)
   })
 })
+
+describe('fetch1001 — 2026-09-26: 1001tracklists 503 pages and Bright Data refusing the domain', () => {
+  const tlErrorPage = () =>
+    new Response('<!DOCTYPE html><html><head><title>1001Tracklists &sdot; The World\'s Leading DJ Tracklist/Playlist Database</title></head><body>error</body></html>', {
+      status: 503,
+      headers: { 'x-proxy-route': 'pool', 'x-proxy-egress': 'vm3:18180', 'x-proxy-upstream-status': '503', 'x-proxy-attempts': 'direct/acct1:503,vm2:18180/acct2:503,vm3:18180/acct3:503', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' },
+    })
+
+  it('retries the forwarder once after a served 5xx before paying for anything', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    let n = 0
+    const calls = routeFetch({ proxy: () => (n++ === 0 ? tlErrorPage() : proxyOk(TRACKLIST_HTML)), brightdata: () => bdOk(TRACKLIST_HTML) })
+    const r = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 })
+    expect(r.via).toBe('home-proxy')
+    expect(calls.filter((c) => c.url.startsWith(PROXY)).length).toBe(2)
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
+  })
+
+  it('a 5xx on both tries still falls through to BrightData as before', async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const calls = routeFetch({ proxy: () => tlErrorPage(), brightdata: () => bdOk(TRACKLIST_HTML) })
+    const r = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 })
+    expect(r.via).toBe('unlocker')
+    expect(calls.filter((c) => c.url.startsWith(PROXY)).length).toBe(2)
+  })
+
+  it("Bright Data's policy refusal parks the unlocker for a day: the next call never asks it", async () => {
+    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
+    const denied = () =>
+      new Response(JSON.stringify({ status_code: 502, headers: { 'x-brd-error-code': 'proxy_error', 'x-brd-error': 'Access denied: www.1001tracklists.com is classified as Streaming Media and blocked by Bright Data as it might breach Bright Data usage policy.' }, body: '' }), { status: 200 })
+    const calls = routeFetch({ proxy: () => tlErrorPage(), brightdata: denied })
+    const first = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
+    expect(first).toBeInstanceOf(Error)
+    expect(String((first as Error).message)).toMatch(/policy/i)
+    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(1)
+    expect((await getBanStatus(env)).brightdataPolicyBlock).toMatchObject({ reason: expect.stringMatching(/Streaming Media/) })
+
+    const before = calls.length
+    const second = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
+    expect(second).toBeInstanceOf(Error)
+    expect(calls.slice(before).filter((c) => c.url.includes('brightdata')).length).toBe(0)
+    expect(String((second as Error).message)).toMatch(/policy/i)
+  })
+})

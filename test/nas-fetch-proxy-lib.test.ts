@@ -375,3 +375,15 @@ describe('AccountPool', () => {
     expect(st.accounts[0]!.relogin.attempts).toBe(1)
   })
 })
+
+describe('classifyUpstream — the 2026-09-26 human-check captcha', () => {
+  it('treats the 401 "validate your are real human" page as gated (re-login), not as ok or a block', () => {
+    expect(classifyUpstream(401, fx('captcha-401.html'))).toBe('gated')
+  })
+
+  it('does not call a plain 401 or a real page gated', () => {
+    expect(classifyUpstream(401, '<html>unauthorized</html>')).toBe('ok')
+    expect(classifyUpstream(200, fx('tracklist-matroda.html'))).toBe('ok')
+    expect(classifyUpstream(200, fx('captcha-401.html'))).toBe('ok')
+  })
+})
