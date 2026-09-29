@@ -85,7 +85,7 @@ import {
   type PlaylistSource,
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
-import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
+import { parseTracklist } from './tracklists1001'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import { isVerified } from './verification'
 import {
@@ -726,12 +726,12 @@ export async function syncOne(
   // is still recorded as `no_youtube` (the next recheck queues it again).
   const mkvidEnabled = !!env.MKVID_TOKEN
   const mkvidRequireFull = /^(1|true|yes)$/i.test(env.MKVID_REQUIRE_FULL_TRACKLIST ?? '')
-  const maybeQueueForMkvid = async (setUrl: string, html: string, parsedAlready?: ScrapedTracklist | null): Promise<string | null> => {
+  const maybeQueueForMkvid = async (setUrl: string, html: string): Promise<string | null> => {
     if (!mkvidEnabled) return null
     try {
       const source = extractSetAudioSource(html)
       if (!source) return null
-      const parsed = parsedAlready ?? parseTracklist(setUrl, html)
+      const parsed = parseTracklist(setUrl, html)
       const tracks = parsed.tracks
       // Zero rows is the fingerprint of a captcha shell, not a set — never queue from it.
       if (tracks.length === 0) return null
@@ -768,7 +768,7 @@ export async function syncOne(
         tracksSaved = 'failed'
         log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
       }
-      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount, tracksSaved, tracksTrusted: tracksSaved === 'saved' || tracksSaved === 'kept' ? mkvidTracksTrusted(parsed.decoy, await isVerified(env, setUrl)) : false })
+      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount, tracksSaved, tracksTrusted: mkvidTracksTrusted(parsed.decoy, await isVerified(env, setUrl)) })
       return r === 'queued' ? `queued for mkvid (${source.kind})` : `mkvid request already exists (${source.kind})`
     } catch (e) {
       log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
@@ -846,7 +846,7 @@ export async function syncOne(
       foundVia = setFetched.via
       const videoId = parseSetYouTubeId(setFetched.html)
       foundVideoId = videoId
-      const fetchedRecord = await noteFetched(setUrl, setFetched, videoId)
+      await noteFetched(setUrl, setFetched, videoId)
       if (videoId) {
         videoIdsFound += 1
         if (!existingVideoIds.has(videoId)) {
@@ -880,7 +880,7 @@ export async function syncOne(
           setUrl,
           fingerprint: youtubeFingerprint(setFetched.html),
         })
-        const note = await maybeQueueForMkvid(setUrl, setFetched.html, fetchedRecord.parsed)
+        const note = await maybeQueueForMkvid(setUrl, setFetched.html)
         auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
       }
       processed.add(setUrl)
@@ -978,8 +978,8 @@ export async function syncOne(
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
       const videoId = parseSetYouTubeId(setFetched.html)
-      const fetchedRecord = await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null)
       const checkedAt = nowSeconds()
+      await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null)
       if (!prev || prev.videoId === undefined) {
         // Unknown baseline: record what the page has now, change nothing.
         tracklistVideos[setUrl] = { videoId, checkedAt }
@@ -992,7 +992,7 @@ export async function syncOne(
         // Still nothing on YouTube: a SoundCloud/hearthis recording that has
         // appeared since (or a request that was never queued) goes to mkvid.
         // Idempotent — a set with a request already gets 'exists'.
-        if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html, fetchedRecord.parsed)
+        if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html)
       } else if (videoId === prev.videoId) {
         tracklistVideos[setUrl] = { videoId, checkedAt }
         log.info('sync.recheck_unchanged', { slug: sub.slug, setUrl, videoId })

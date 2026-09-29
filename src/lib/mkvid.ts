@@ -280,7 +280,7 @@ export const MKVID_MAX_TRACKS = 300
  *     compared and not one of them contradicting itself (stricter than
  *     `looksLikeDecoy`, which needs a majority to *refuse* a page).
  */
-export function mkvidTracksTrusted(d: { named: number; mismatched: number; suspected: boolean }, verified: boolean): boolean {
+export function mkvidTracksTrusted(d: { named: number; mismatched: number; suspected: boolean }, verified = false): boolean {
   return verified && !d.suspected && d.named >= 3 && d.mismatched === 0
 }
 
