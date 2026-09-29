@@ -64,6 +64,10 @@ export const TICK_BACKOFF_KEY = 'pool:tick_backoff_until'
 const MAX_BACKOFF_SECONDS = 6 * HOUR
 /** Schedule rows created per tick at most (the first ticks after launch spread the backlog in a few passes). */
 const INIT_BATCH = 500
+/** An overdue set with a pending mkvid request is spread over at most this, not its whole interval (its render waits on verification). */
+const MKVID_WAITING_SPREAD_SECONDS = 2 * 24 * HOUR
+/** A discovery / backfill step that did not complete is retried after about this long, not a whole interval later. */
+const DJ_RETRY_SECONDS = HOUR
 
 // ─── set schedules ──────────────────────────────────────────────────────────
 
@@ -78,13 +82,14 @@ export async function ensureSetSchedules(env: Env, settings: PoolSettings, nowSe
   const res = await db
     .prepare(
       `SELECT t.url AS url, MIN(COALESCE(t.checked_at, 0)) AS checked_at,
-              MAX(CASE WHEN t.video_known = 1 AND t.video_id IS NULL THEN 1 ELSE 0 END) AS no_video
+              MAX(CASE WHEN t.video_known = 1 AND t.video_id IS NULL THEN 1 ELSE 0 END) AS no_video,
+              EXISTS (SELECT 1 FROM mkvid_requests m WHERE m.set_url = t.url AND m.status IN ('pending', 'claimed')) AS mkvid_waiting
          FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
         WHERE t.processed = 1 AND t.abandoned = 0 AND s.url IS NULL
         GROUP BY t.url LIMIT ?`,
     )
     .bind(limit)
-    .all<{ url: string; checked_at: number; no_video: number }>()
+    .all<{ url: string; checked_at: number; no_video: number; mkvid_waiting: number }>()
   if (res.results.length === 0) return 0
   const insert = db.prepare(
     `INSERT OR IGNORE INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at)
@@ -97,7 +102,10 @@ export async function ensureSetSchedules(env: Env, settings: PoolSettings, nowSe
     if (interval !== null) {
       const checked = Number(r.checked_at) || 0
       const natural = checked + jitter(interval, settings.recheck.jitterFraction, random)
-      next = natural > nowSec ? natural : nowSec + Math.floor(random() * interval)
+      // Overdue: somewhere inside one interval - or within two days for a set
+      // mkvid is waiting on, whose render needs a verified list first.
+      const spread = Number(r.mkvid_waiting) === 1 ? Math.min(interval, MKVID_WAITING_SPREAD_SECONDS) : interval
+      next = natural > nowSec ? natural : nowSec + Math.floor(random() * spread)
     }
     return insert.bind(r.url, setDate, next, Number(r.checked_at) || null, Number(r.no_video) === 1 ? 1 : 0, nowSec)
   })
@@ -211,6 +219,10 @@ async function ensureDjSchedules(env: Env, settings: PoolSettings, slugs: string
   )
 }
 
+async function setDjDue(env: Env, column: 'next_discovery_at' | 'next_backfill_at', slug: string, at: number, nowSec: number): Promise<void> {
+  await dbOf(env).prepare(`UPDATE dj_schedule SET ${column} = ?, updated_at = ? WHERE slug = ?`).bind(at, nowSec, slug).run()
+}
+
 function nextIn(hours: number, jitterHours: number, nowSec: number, random: () => number): number {
   return nowSec + Math.max(15 * 60, Math.round(hours * HOUR + (random() * 2 - 1) * jitterHours * HOUR))
 }
@@ -320,12 +332,16 @@ export async function pickTickItems(env: Env, settings: PoolSettings, n: number,
     buckets.verify.push({ cls: 'verify', kind: 'verify', slug: v.slug, url: v.url, excludeAccounts: v.excludeAccounts })
   }
 
+  // Due by schedule - or marked due by hand: `checked_at = 0` is how
+  // "Invalidate & resync" and playlist hygiene (owner removed / dead video)
+  // ask for a recheck, and those go first.
   const rechecks = await db
     .prepare(
-      `SELECT s.url AS url, MIN(t.slug) AS slug FROM set_schedule s
-         JOIN tracklists t ON t.url = s.url AND t.processed = 1 AND t.abandoned = 0
-        WHERE s.next_due_at IS NOT NULL AND s.next_due_at <= ?
-        GROUP BY s.url ORDER BY MIN(s.next_due_at) LIMIT ?`,
+      `SELECT t.url AS url, MIN(t.slug) AS slug, MIN(CASE WHEN t.checked_at = 0 THEN 0 ELSE COALESCE(s.next_due_at, 0) END) AS due
+         FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
+        WHERE t.processed = 1 AND t.abandoned = 0
+          AND (t.checked_at = 0 OR (s.next_due_at IS NOT NULL AND s.next_due_at <= ?))
+        GROUP BY t.url ORDER BY due LIMIT ?`,
     )
     .bind(nowSec, lim)
     .all<{ url: string; slug: string }>()
@@ -418,15 +434,28 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     let retryAfter: number | null = null
     try {
       if (item.kind === 'dj_backfill') {
-        await dbOf(env).prepare('UPDATE dj_schedule SET next_backfill_at = ?, updated_at = ? WHERE slug = ?').bind(nextIn(settings.backfill.stepIntervalHours, settings.backfill.jitterHours, nowSec, random), nowSec, item.slug).run()
+        // Claim for a short while; only a completed step earns the full interval.
+        await setDjDue(env, 'next_backfill_at', item.slug, nowSec + DJ_RETRY_SECONDS, nowSec)
         const b = await runDjBackfillStep(env, item.slug, log)
+        if (b.status === 'stepped' || b.status === 'done' || b.status === 'no_cursor') {
+          await setDjDue(env, 'next_backfill_at', item.slug, nextIn(settings.backfill.stepIntervalHours, settings.backfill.jitterHours, nowSec, random), nowSec)
+        } else if (b.status === 'soft_failed') {
+          await setDjDue(env, 'next_backfill_at', item.slug, nowSec + 6 * HOUR, nowSec)
+        }
         r = { item, outcome: b.status, ...(b.stopReason ? { stopReason: b.stopReason } : {}) }
         retryAfter = b.retryAfterSeconds ?? null
       } else {
         let res: SyncOneResult
         if (item.kind === 'discovery') {
-          await dbOf(env).prepare('UPDATE dj_schedule SET next_discovery_at = ?, updated_at = ? WHERE slug = ?').bind(nextIn(settings.discovery.intervalHours, settings.discovery.jitterHours, nowSec, random), nowSec, item.slug).run()
+          await setDjDue(env, 'next_discovery_at', item.slug, nowSec + DJ_RETRY_SECONDS, nowSec)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.discovery', priority: 'new', selection: { newUrls: [], recheckUrls: [] }, settings })
+          if (res.crawlStopReason === 'fetch_failed' && !res.stoppedBy) {
+            // The crawl swallows its fetch errors (a pool refusal included):
+            // end the tick rather than ask again, and retry this DJ in an hour.
+            res = { ...res, stoppedBy: { reason: 'discovery page fetch failed', retryAfterSeconds: null } }
+          } else if (!res.stoppedBy) {
+            await setDjDue(env, 'next_discovery_at', item.slug, nextIn(settings.discovery.intervalHours, settings.discovery.jitterHours, nowSec, random), nowSec)
+          }
         } else if (item.kind === 'recheck') {
           await deferSetSchedule(env, item.url, nowSec + CLAIM_RECHECK_SECONDS)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })

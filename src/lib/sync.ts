@@ -309,6 +309,8 @@ export type SyncOneResult = {
   }
   /** Set when a pool refusal / pause stopped the run early (charged nothing). */
   stoppedBy?: { reason: string; retryAfterSeconds: number | null }
+  /** Why the DJ-page crawl stopped, when this run crawled. */
+  crawlStopReason?: string
 }
 
 const EMPTY_STATS: SyncOneResult['stats'] = {
@@ -522,6 +524,7 @@ export async function syncOne(
   // few minutes, and skipping saves ~14 AJAX hops per sub).
   const discovered = new Set<string>(state.discoveredTracklistUrls ?? [])
   let artistName: string
+  let crawlStopReason: string | undefined
   // A manual run's crawl costs page views too: page 1 is charged to its
   // budget, and a spent budget skips the crawl.
   const crawlBudgetOk = opts.skipDjCrawl || takeFetch(opts.fetchBudget)
@@ -545,6 +548,7 @@ export async function syncOne(
       knownUrls: new Set(discovered),
     })
     artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
+    crawlStopReason = crawl.stopReason
     // Union with previously-discovered URLs — earlier pages may have failed
     // to fetch this run but we don't want to lose them from the todo set.
     const knownBefore = discovered.size
@@ -1154,6 +1158,7 @@ export async function syncOne(
       rechecksPending: dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings).length,
     },
     ...(stoppedBy ? { stoppedBy } : {}),
+    ...(crawlStopReason ? { crawlStopReason } : {}),
   }
 }
 

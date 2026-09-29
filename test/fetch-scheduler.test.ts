@@ -274,3 +274,66 @@ describe('runSchedulerTick', () => {
     expect(rows.every((r) => r.next_discovery_at <= NOW + 24 * H)).toBe(true)
   })
 })
+
+describe('hand-made rechecks and failure handling', () => {
+  const always = (x: number) => () => x
+
+  it('a set marked due by checked_at = 0 (Invalidate & resync, playlist hygiene) is a recheck even without a schedule row, and goes first', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const byHand = setUrl('hand', 400)
+    const bySchedule = setUrl('sched', 20)
+    await saveSubState(env, 'a', {
+      playlistId: 'PL',
+      artistName: 'A',
+      discoveredTracklistUrls: [bySchedule, byHand],
+      processedTracklistUrls: [bySchedule, byHand],
+      tracklistVideos: { [bySchedule]: { videoId: 'v1', checkedAt: NOW - 9 * D }, [byHand]: { videoId: null, checkedAt: 0 } },
+    })
+    await markSetDue(env, bySchedule, NOW - 60)
+    const items = await pickTickItems(env, DEFAULT_POOL_SETTINGS, 5, new Set(['a']), NOW)
+    expect(items.map((i) => (i.kind === 'recheck' ? i.url : i.kind))).toEqual([byHand, bySchedule])
+  })
+
+  it('a discovery whose page fetch failed ends the tick and is retried in about an hour, not a day', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [setUrl('x', 1)], processedTracklistUrls: [] })
+    await env.DB.prepare('INSERT INTO dj_schedule (slug, next_discovery_at, next_backfill_at, updated_at) VALUES (?, ?, ?, ?)').bind('a', NOW - 1, NOW + 30 * D, NOW).run()
+    mocked(crawlDjIndex).mockResolvedValue({ artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null })
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW }) // draws 3: discovery, then the pending set
+    expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([['discovery', 'stopped']])
+    expect(fetch1001Html).not.toHaveBeenCalled()
+    const next = (await env.DB.prepare('SELECT next_discovery_at FROM dj_schedule WHERE slug = ?').bind('a').first<{ next_discovery_at: number }>())!.next_discovery_at
+    expect(next).toBe(NOW + H)
+  })
+
+  it('a backfill step the pool refused keeps its cursor and is retried in about an hour', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [], processedTracklistUrls: [] })
+    await env.DB.prepare('INSERT INTO dj_schedule (slug, next_discovery_at, next_backfill_at, updated_at) VALUES (?, ?, ?, ?)').bind('a', NOW + 30 * D, NOW - 1, NOW).run()
+    const keys = { type: 'artist', idScrollObject: 'q', subtype: 'tracklists' }
+    await saveDjBackfill(env, 'a', { cursor: { pos: 15, id: 'x' }, done: false, at: 0, keys })
+    mocked(djScrollStep).mockRejectedValue(new PoolPausedError('challenge_pending', 300))
+    const r = await runSchedulerTick(env, { random: always(0.26), now: NOW })
+    expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([['dj_backfill', 'stopped']])
+    expect(Number(await env.CACHE.get(TICK_BACKOFF_KEY))).toBe(NOW + 300)
+    expect(await loadDjBackfill(env, 'a')).toMatchObject({ cursor: { pos: 15, id: 'x' } })
+    const next = (await env.DB.prepare('SELECT next_backfill_at FROM dj_schedule WHERE slug = ?').bind('a').first<{ next_backfill_at: number }>())!.next_backfill_at
+    expect(next).toBe(NOW + H)
+  })
+
+  it('an overdue set mkvid is waiting on is spread over two days, not its whole interval (its render needs a verified list)', async () => {
+    const env = makeEnv()
+    const old = setUrl('mk', 300)
+    await saveSubState(env, 'dj', { discoveredTracklistUrls: [old], processedTracklistUrls: [old], tracklistVideos: { [old]: { videoId: null, checkedAt: NOW - 200 * D } } })
+    const { enqueueMkvidRequest } = await import('../src/lib/mkvid')
+    await enqueueMkvidRequest(env, { slug: 'dj', setUrl: old, artistName: 'X', setTitle: null, setDate: null, source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1' }, lastCueSeconds: null, trackCount: 1, idedCount: 1 })
+    await ensureSetSchedules(env, DEFAULT_POOL_SETTINGS, NOW, always(0.999))
+    const row = await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(old).first<{ next_due_at: number }>()
+    expect(row!.next_due_at - NOW).toBeLessThanOrEqual(2 * D)
+    expect(row!.next_due_at - NOW).toBeGreaterThan(D)
+  })
+})
