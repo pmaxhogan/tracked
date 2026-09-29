@@ -16,8 +16,15 @@ export type Env = {
    * feature switch: while unset, the sync never queues a set for mkvid.
    */
   MKVID_TOKEN?: string
-  /** "1"/"true": only queue sets whose tracklist is fully identified (no anonymous "ID" rows). Default off. */
-  MKVID_REQUIRE_FULL_TRACKLIST?: string
+  /**
+   * mkvid's base URL (e.g. https://mkvid.example.com): "Delete and recreate"
+   * asks it to delete the replaced video (POST /api/videos/<id>/delete, bearer
+   * MKVID_TOKEN). Unset = the deletes wait (and are retried) until it is set.
+   */
+  MKVID_URL?: string
+  /** Optional Cloudflare Access service token for reaching MKVID_URL through Access (sent as CF-Access-Client-Id / -Secret). */
+  MKVID_ACCESS_CLIENT_ID?: string
+  MKVID_ACCESS_CLIENT_SECRET?: string
   /** Seconds after which a claimed-but-unreported mkvid request is handed out again (default 10800 = 3 h). */
   MKVID_CLAIM_TTL_SECONDS?: string
   /** Max requests handed to mkvid per YouTube quota day (midnight Pacific) on its own Google project, mkvid-uploads (default 24, of the project's 100 uploads/day; uploads no longer spend the 10 000-unit general pool). `0` pauses. */

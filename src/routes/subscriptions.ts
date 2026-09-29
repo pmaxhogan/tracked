@@ -43,6 +43,8 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
+import { readinessFor, setSkipIdWait } from '../lib/mkvid-readiness'
+import { countOldStyleVideos, deleteOldVideo, listUndeletedOldVideos, recreateMkvidRequest, recreateOldStyleVideos, resetOldVideoDelete } from '../lib/mkvid-recreate'
 import { banMkvidRequest, countMkvidRequests, getMkvidLastPoll, listMkvidDjs, listMkvidQueuePage, listMkvidSettledPage, MKVID_ACCOUNTS, MKVID_MOVES, MKVID_SOURCES, MKVID_STATUSES, mkvidAccountUsage, moveMkvidRequest, quotaDayEnd, requestSummary, retryMkvidRequest, type MkvidAccount, type MkvidFilter, type MkvidMove, type MkvidSourceKind, type MkvidStatus } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
@@ -782,18 +784,26 @@ subscriptionsApp.get('/api/mkvid', async (c) => {
   const parsed = mkvidQuery(new URL(c.req.url))
   if ('error' in parsed) return c.json({ error: 'invalid_request', message: parsed.error }, 400)
   const { filter, section, limit } = parsed
-  const [settled, queue, counts, accounts, lastPoll, djs] = await Promise.all([
+  const [settled, queue, counts, accounts, lastPoll, djs, oldStyleCount, oldVideos] = await Promise.all([
     section === 'queue' ? EMPTY_PAGE : listMkvidSettledPage(c.env, { ...filter, limit, cursor: parsed.settledCursor }),
     section === 'settled' ? EMPTY_PAGE : listMkvidQueuePage(c.env, { ...filter, limit, cursor: parsed.queueCursor }),
     countMkvidRequests(c.env),
     mkvidAccountUsage(c.env),
     getMkvidLastPoll(c.env),
     listMkvidDjs(c.env),
+    countOldStyleVideos(c.env),
+    listUndeletedOldVideos(c.env),
   ])
+  // Why each waiting set is (not) next: unverified, waiting for IDs until <t>, backoff, or ready (the panel adds "capped").
+  const readiness = await readinessFor(c.env, [...queue.records, ...settled.records.filter((r) => r.status === 'claimed' || r.status === 'failed')])
+  const withReadiness = (r: Parameters<typeof requestSummary>[0]) => ({ ...requestSummary(r), readiness: readiness.get(r.id) ?? null })
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
-    requireFullTracklist: /^(1|true|yes)$/i.test(c.env.MKVID_REQUIRE_FULL_TRACKLIST ?? ''),
     counts,
+    /** Done videos made with a style other than scene (unknown counts): what "Recreate all old-style videos" would queue. */
+    oldStyleCount,
+    /** Videos a recreation replaced that are not deleted from YouTube yet (pending retry, or refused by mkvid). */
+    oldVideos,
     /** Per Google project (fill order): today's claims vs cap. The totals below are their sums. */
     accounts,
     dailyClaims: accounts.reduce((n, a) => n + a.used, 0),
@@ -809,12 +819,12 @@ subscriptionsApp.get('/api/mkvid', async (c) => {
     limit,
     /** Every DJ the queue has ever held, most requests first — the `dj=` filter's options. */
     djs,
-    settled: settled.records.map(requestSummary),
+    settled: settled.records.map(withReadiness),
     settledCursor: settled.cursor,
     /** Rows matching the filter in each list, not just the ones on this page. */
     settledTotal: settled.total,
     /** Pending requests in claim order (newest set first), each with its `position` in the whole queue. */
-    queue: queue.records.map(requestSummary),
+    queue: queue.records.map(withReadiness),
     queueCursor: queue.cursor,
     queueTotal: queue.total,
   })
@@ -848,6 +858,52 @@ subscriptionsApp.post('/api/mkvid/ban/:id', async (c) => {
   const ok = await banMkvidRequest(c.env, id)
   log.info('subs.mkvid_ban', { id, ok })
   return c.json({ ok, id }, ok ? 200 : 409)
+})
+
+/** "Render now": skip the 7-day wait for IDs on this request (a verified list is still required). */
+subscriptionsApp.post('/api/mkvid/render-now/:id', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_render_now', by: c.get('cfAccessEmail') })
+  const id = c.req.param('id')
+  const ok = await setSkipIdWait(c.env, id)
+  log.info('subs.mkvid_render_now', { id, ok })
+  return c.json({ ok, id }, ok ? 200 : 409)
+})
+
+/**
+ * "Delete and recreate" (done requests only): queue the set again at the back
+ * of the queue; once the new video is delivered and in the playlists, the old
+ * one is taken out and deleted from YouTube (lib/mkvid-recreate.ts).
+ */
+subscriptionsApp.post('/api/mkvid/recreate/:id', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_recreate', by: c.get('cfAccessEmail') })
+  const id = c.req.param('id')
+  const r = await recreateMkvidRequest(c.env, id, log)
+  log.info('subs.mkvid_recreate', { id, ...r })
+  if (r.ok) return c.json(r)
+  return c.json({ ...r, id }, r.error === 'not_found' ? 404 : 409)
+})
+
+/** How many videos "Recreate all old-style videos" would queue — the confirm step. */
+subscriptionsApp.get('/api/mkvid/recreate-old-style', async (c) => c.json({ count: await countOldStyleVideos(c.env) }))
+
+/** Queue every old-style video for recreation. Body `{ expect: <count shown in the confirm> }`; 409 with the fresh count when it changed. */
+subscriptionsApp.post('/api/mkvid/recreate-old-style', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_recreate_old_style', by: c.get('cfAccessEmail') })
+  const body = (await c.req.json().catch(() => null)) as { expect?: unknown } | null
+  const expect = body?.expect
+  if (typeof expect !== 'number' || !Number.isInteger(expect) || expect < 0) return c.json({ error: 'invalid_request', message: 'expect must be the confirmed count' }, 400)
+  const r = await recreateOldStyleVideos(c.env, expect, log)
+  log.info('subs.mkvid_recreate_old_style', { expect, ...r })
+  return r.ok ? c.json(r) : c.json(r, 409)
+})
+
+/** Try deleting a replaced video again now (a pending or refused one). */
+subscriptionsApp.post('/api/mkvid/old-videos/:videoId/retry', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_old_video_retry', by: c.get('cfAccessEmail') })
+  const videoId = c.req.param('videoId')
+  if (!(await resetOldVideoDelete(c.env, videoId))) return c.json({ error: 'not_found', videoId }, 404)
+  const r = await deleteOldVideo(c.env, videoId, log)
+  return c.json({ ok: r?.state === 'deleted', oldVideo: r })
 })
 
 // ─── YouTube / Google OAuth ─────────────────────────────────────────────────
@@ -1038,6 +1094,8 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .mk-main .title { display: block; }
   .mk-meta { color: var(--muted); font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mk-meta .flag { font-weight: 400; }
+  .mk-meta .why { color: #d29922; }
+  .mk-meta .why.ready { color: #3fb950; }
   .arow-head a { color: var(--accent); font-size: 0.78rem; white-space: nowrap; }
   .badge.pending { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.claimed { background: rgba(210,153,34,0.18); color: #d29922; }
@@ -1149,6 +1207,7 @@ ${ALERTS_ROW_HTML}
     <div class="audit-head">
       <h2>mkvid uploads</h2>
       <div class="audit-actions">
+        <button id="mkvid-recreate-old" class="ghost" hidden title="Delete and recreate every done video made with a style other than scene">Recreate all old-style videos</button>
         <button id="mkvid-refresh" class="ghost">Refresh</button>
       </div>
     </div>
@@ -1988,6 +2047,7 @@ ${BAN_HISTORY_HTML}
   const $mkSource = document.getElementById('mkvid-source');
   const $mkDj = document.getElementById('mkvid-dj');
   const $mkClear = document.getElementById('mkvid-clear');
+  const $mkRecreateOld = document.getElementById('mkvid-recreate-old');
   const MK_PROBLEM = new Set(['failed']);
 
   // The waiting line and the settled list are paged separately (keyset cursors
@@ -2045,12 +2105,22 @@ ${BAN_HISTORY_HTML}
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy !== 'unlisted' ? ' <span class="warn">(unlisted was requested — an unverified OAuth app forces private)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + relTime(new Date(r.notBefore * 1000).toISOString()) : '')],
       r.status !== 'pending' ? ['project', esc(r.accountLabel || r.account)] : null,
+      r.videoId ? ['style', r.style ? esc(r.style) : '<span class="warn">unknown (old style)</span>'] : null,
+      r.replacesVideoId ? ['recreating', 'replaces <span class="mono">' + esc(r.replacesVideoId) + '</span> ' + link('https://youtu.be/' + r.replacesVideoId, 'open') + ' <span class="when">(stays up until the new video is in the playlists, then is deleted)</span>'] : null,
+      r.readiness ? ['waiting', mkWhy(r.readiness, false)] : null,
+      r.skipIdWait ? ['ID wait', 'skipped (Render now)'] : null,
       r.jobId ? ['mkvid job', '<span class="mono">' + esc(r.jobId) + '</span>'] : null,
       ['queued', esc(new Date(r.createdAt * 1000).toISOString())],
       ['updated', esc(new Date(r.updatedAt * 1000).toISOString())],
     ]));
     if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed' || r.status === 'banned') {
       out.push('<button class="ghost retry" data-id="' + esc(r.id) + '">' + (r.status === 'claimed' ? 'Release & retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
+    }
+    if (r.readiness && r.readiness.state === 'waiting_ids' && !r.skipIdWait) {
+      out.push(' <button class="ghost render-now" title="Render with the IDs shown instead of waiting until the set is 7 days old">Render now</button>');
+    }
+    if (r.status === 'done' && r.videoId && !r.replacesVideoId) {
+      out.push(' <button class="ghost recreate" title="Render the set again (back of the queue, counts against the daily cap); the old video is deleted once the new one is in the playlists">Delete and recreate</button>');
     }
     return out.join('');
   }
@@ -2059,6 +2129,18 @@ ${BAN_HISTORY_HTML}
     const m = Math.max(1, Math.round((sec - Date.now() / 1000) / 60));
     if (m < 60) return 'in ' + m + 'm';
     return 'in ' + Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+
+  // Why one waiting set is (not) next. Capped only matters for a set that is otherwise ready.
+  let mkCapped = false;
+  function mkWhy(rd, short) {
+    if (!rd) return '';
+    const day = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
+    if (rd.state === 'unverified') return '<span class="why">not verified' + (short ? '' : ' — the track list needs a second matching fetch before anything is rendered') + '</span>';
+    if (rd.state === 'waiting_ids') return '<span class="why">waiting for IDs until ' + esc(day(rd.until)) + (short ? '' : ' (' + esc(rd.idRows) + ' ID row' + (rd.idRows === 1 ? '' : 's') + '; Render now skips the wait)') + '</span>';
+    if (rd.state === 'backoff') return '<span class="why">retry ' + untilTime(rd.until) + '</span>';
+    if (mkCapped) return '<span class="why">capped — today’s uploads are used</span>';
+    return '<span class="why ready">ready</span>';
   }
 
   // The one line that answers "why is nothing uploading?" — first match wins.
@@ -2113,8 +2195,11 @@ ${BAN_HISTORY_HTML}
     head.className = 'arow-head';
     const backoff = r.status === 'pending' && r.notBefore && r.notBefore > Date.now() / 1000;
     const meta = [r.setDate, r.artistLabel || r.artistName || r.slug, r.sourceLabel || r.source].filter(Boolean).map(esc);
-    if (backoff) meta.push('retry ' + untilTime(r.notBefore));
+    if (r.status === 'pending' && r.readiness) meta.push(mkWhy(r.readiness, true));
+    else if (backoff) meta.push('retry ' + untilTime(r.notBefore));
     else if (r.status !== 'pending') meta.push(esc(relTime(new Date(r.updatedAt * 1000).toISOString())));
+    if (r.replacesVideoId) meta.push('<span class="why">recreating</span>');
+    if (r.status === 'done' && r.oldStyle) meta.push('old style');
     if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(r.error) + '</span>');
     head.innerHTML =
       (pos ? '<span class="pos">#' + pos + '</span>' : '<span class="badge ' + esc(r.status) + '">' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>') +
@@ -2135,6 +2220,21 @@ ${BAN_HISTORY_HTML}
     detail.innerHTML = mkDetailHtml(r);
     row.appendChild(detail);
     head.addEventListener('click', (e) => { if (e.target.closest('a, button')) return; detail.hidden = !detail.hidden; });
+    const post = async (btn, url, what) => {
+      btn.disabled = true;
+      try {
+        const resp = await fetch(url, { method: 'POST', credentials: 'same-origin' });
+        if (!resp.ok) showError(what + ' failed (' + resp.status + ')');
+        await loadMkvid();
+      } finally { btn.disabled = false; }
+    };
+    const renderNow = detail.querySelector('button.render-now');
+    if (renderNow) renderNow.addEventListener('click', () => post(renderNow, '/subscriptions/api/mkvid/render-now/' + encodeURIComponent(r.id), 'render now'));
+    const recreate = detail.querySelector('button.recreate');
+    if (recreate) recreate.addEventListener('click', () => {
+      if (!confirm('Delete and recreate this video? The set is rendered again at the back of the queue; the current video stays up until the new one is in the playlists, then it is deleted from YouTube.')) return;
+      post(recreate, '/subscriptions/api/mkvid/recreate/' + encodeURIComponent(r.id), 'recreate');
+    });
     const retry = detail.querySelector('button.retry');
     if (retry) retry.addEventListener('click', async () => {
       retry.disabled = true;
@@ -2144,6 +2244,32 @@ ${BAN_HISTORY_HTML}
         await loadMkvid();
       } finally { retry.disabled = false; }
     });
+    return row;
+  }
+
+  // A video a recreation replaced: out of the playlists, waiting for mkvid to delete it (the cron retries).
+  function mkOldRow(o) {
+    const row = document.createElement('div');
+    row.className = 'arow' + (o.state === 'refused' || o.attempts > 0 ? ' err' : '');
+    const head = document.createElement('div');
+    head.className = 'arow-head';
+    const meta = [esc(setLabel(o.setUrl)), 'replaced by <span class="mono">' + esc(o.replacedBy) + '</span>'];
+    if (o.state === 'refused') meta.push('<span class="flag">mkvid refused: ' + esc(o.lastError || '') + '</span>');
+    else if (o.lastError) meta.push('<span class="flag">' + esc(o.lastError) + '</span>', 'try ' + (o.attempts + 1) + ' ' + untilTime(o.nextTryAt));
+    else meta.push('deleting');
+    head.innerHTML = '<span class="badge ' + (o.state === 'refused' ? 'failed' : 'pending') + '">' + esc(o.state) + '</span>' +
+      '<div class="mk-main"><span class="title mono">' + esc(o.videoId) + '</span><div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
+      link('https://youtu.be/' + o.videoId, 'watch') + ' <button class="ghost">Retry now</button>';
+    const b = head.querySelector('button');
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const resp = await fetch('/subscriptions/api/mkvid/old-videos/' + encodeURIComponent(o.videoId) + '/retry', { method: 'POST', credentials: 'same-origin' });
+        if (!resp.ok) showError('delete retry failed (' + resp.status + ')');
+        await loadMkvid();
+      } finally { b.disabled = false; }
+    });
+    row.appendChild(head);
     return row;
   }
 
@@ -2174,6 +2300,10 @@ ${BAN_HISTORY_HTML}
     const c = d.counts || {};
     const cap = d.dailyClaimCap;
     const st = mkState(d);
+    const effNow = mkEffective(d);
+    mkCapped = effNow.cap === 0 || effNow.used >= effNow.cap || (d.lastPoll && d.lastPoll.outcome === 'capped');
+    $mkRecreateOld.hidden = !(d.oldStyleCount > 0);
+    $mkRecreateOld.textContent = 'Recreate all old-style videos (' + (d.oldStyleCount || 0) + ')';
     $mkState.hidden = false;
     $mkState.className = 'mk-state ' + st[0];
     $mkState.innerHTML = '<strong>' + esc(st[1]) + '</strong><span class="sub">' + esc(st[2]) + '</span>';
@@ -2186,7 +2316,7 @@ ${BAN_HISTORY_HTML}
     const perDay = mkEffective(d).cap || cap;
     if (perDay > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + perDay + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + perDay + '/day</span>');
     if (d.lastPoll) bits.push('<span title="refreshed at most every 10 min">mkvid seen ' + esc(relTime(new Date(d.lastPoll.at * 1000).toISOString())) + '</span>');
-    if (d.requireFullTracklist) bits.push('full tracklists only');
+    if ((d.oldVideos || []).length) bits.push('<span class="warn">' + d.oldVideos.length + ' replaced video' + (d.oldVideos.length === 1 ? '' : 's') + ' not deleted yet</span>');
     if (mkFiltered()) bits.unshift('<strong>' + (mkQueueTotal + mkSettledTotal) + ' match this filter</strong>');
     $mkSummary.innerHTML = bits.join(' · ');
     $mkClear.hidden = !mkFiltered();
@@ -2206,6 +2336,11 @@ ${BAN_HISTORY_HTML}
       mkGroup('Up next · newest set first' + mkShowing(mkQueue.length, mkQueueTotal));
       for (const r of mkQueue) $mkList.appendChild(mkRow(r, r.position));
       if (mkQueueCursor) $mkList.appendChild(mkMore('queue', mkQueueTotal - mkQueue.length));
+    }
+    const olds = d.oldVideos || [];
+    if (olds.length) {
+      mkGroup('Replaced videos to delete from YouTube');
+      for (const o of olds) $mkList.appendChild(mkOldRow(o));
     }
     if (finished.length) {
       mkGroup('Finished' + mkShowing(finished.length, mkSettledTotal - active.length));
@@ -2243,6 +2378,18 @@ ${BAN_HISTORY_HTML}
     } catch { $mkSummary.textContent = 'status unavailable'; }
   }
   $mkRefresh.addEventListener('click', () => loadMkvid());
+  // Bulk recreate: confirm with the live count, and send it back so a count that changed meanwhile is refused.
+  $mkRecreateOld.addEventListener('click', async () => {
+    $mkRecreateOld.disabled = true;
+    try {
+      const c = await fetch('/subscriptions/api/mkvid/recreate-old-style', { credentials: 'same-origin' }).then((r) => r.json());
+      if (!c.count) { showError('no old-style videos to recreate'); return; }
+      if (!confirm('Recreate ' + c.count + ' old-style video' + (c.count === 1 ? '' : 's') + '? Each set is rendered again at the back of the queue (they count against the daily cap); every old video stays up until its new one is in the playlists, then it is deleted from YouTube.')) return;
+      const resp = await fetch('/subscriptions/api/mkvid/recreate-old-style', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expect: c.count }) });
+      if (!resp.ok) showError(resp.status === 409 ? 'the number of old-style videos changed — try again' : 'recreate failed (' + resp.status + ')');
+      await loadMkvid();
+    } finally { $mkRecreateOld.disabled = false; }
+  });
   for (const el of [$mkStatus, $mkSource, $mkDj]) el.addEventListener('change', () => loadMkvid());
   let mkQTimer = null;
   $mkQ.addEventListener('input', () => { clearTimeout(mkQTimer); mkQTimer = setTimeout(() => loadMkvid(), 250); });

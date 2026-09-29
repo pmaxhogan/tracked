@@ -14,6 +14,7 @@ import { runKvMigrationTickSafely } from './lib/kv-import'
 import { pruneNowPlayingAudit } from './lib/now-playing-audit'
 import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
+import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
 // which is not the `{ error, message }` shape every route documents. Normalise
@@ -125,6 +126,11 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       // done (then a cheap flag check). Runs before the sync so the drain
       // cron's D1-only candidate query sees every DJ's backlog.
       await runKvMigrationTickSafely(env, log)
+      // Old mkvid videos a recreation replaced: retry the YouTube deletes that are due (never throws).
+      if (env.MKVID_TOKEN) {
+        const d = await retryDueOldVideoDeletions(env, log)
+        if (d.tried) log.info('cron.mkvid_old_video_deletes', d)
+      }
       if (isDaily) {
         // D1 has no TTLs: keep both audit trails at the 90-day horizon.
         try {

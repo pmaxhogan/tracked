@@ -4,13 +4,21 @@ import type { Env } from '../src/types'
 import type { StoredTokens } from '../src/lib/google-oauth'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
-import { enqueueMkvidRequest, getMkvidRequest, getMkvidRequestForSet, saveMkvidTracks } from '../src/lib/mkvid'
+import { enqueueMkvidRequest as enqueueRaw, getMkvidRequest, getMkvidRequestForSet, saveMkvidTracks } from '../src/lib/mkvid'
 import { MkvidClaimResponse } from '../src/schemas'
 import { parseTracklist } from '../src/lib/tracklists1001'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { saveSubState } from '../src/lib/sync-store'
+import { storeVerifiedList } from './helpers/mkvid-lists'
+
+/** Queue a set with a verified list (no ID rows), so the claim gate lets it through. */
+async function enqueueMkvidRequest(env: Env, i: Parameters<typeof enqueueRaw>[1]) {
+  const r = await enqueueRaw(env, i)
+  if (r === 'queued') await storeVerifiedList(env, i.setUrl)
+  return r
+}
 
 vi.mock('../src/lib/youtube-playlists', async () => {
   const actual = await vi.importActual<typeof import('../src/lib/youtube-playlists')>('../src/lib/youtube-playlists')

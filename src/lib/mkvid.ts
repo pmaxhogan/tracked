@@ -18,6 +18,12 @@
  *                        │ fail (permanent)  ──▶ failed
  *   any non-terminal ──the set gains a real YouTube video──▶ superseded
  *   pending ──panel ✕──▶ banned ──panel Unban──▶ pending
+ *   done ──panel "Delete and recreate"──▶ pending (back of the queue; lib/mkvid-recreate.ts)
+ *
+ * A pending request is only claimable once its track list is verified and
+ * any wait for IDs is over (lib/mkvid-readiness.ts); until then the claim
+ * passes over it without using an attempt. mkvid refusing a list as
+ * `unverified_tracklist` puts it back the same way.
  *
  * Each claim names the `account` (Google Cloud project) mkvid should upload
  * through — see MKVID_ACCOUNTS below.
@@ -32,10 +38,12 @@ import type { Env, ParsedTrack } from '../types'
 import { dbOf, parseJson, v } from './db'
 import { errorFields, type Logger } from './log'
 import { flushPlaylistAdditions, type PlaylistAdditionRecord } from './playlist-audit'
-import { addToCombined, flushCombined, openCombinedPlaylist, type CombinedAdditionStatus } from './combined-playlist'
+import { addToCombined, flushCombined, openCombinedPlaylist, type CombinedAdditionStatus, type CombinedHandle } from './combined-playlist'
 import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds } from './playlist-cache'
 import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
+import { CLAIM_READY_SQL, ID_WAIT_SECONDS, isVerified } from './mkvid-readiness'
+import { isOldStyle, retireReplacedVideo } from './mkvid-recreate'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
@@ -48,6 +56,8 @@ export const MKVID_MAX_ATTEMPTS = 3
 export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
 /** A retryable failure waits this long × attempts before it can be claimed again. */
 const RETRY_BACKOFF_SECONDS = 6 * 60 * 60
+/** mkvid refused a list as unverified: look again after this long (no attempt used). */
+const UNVERIFIED_RETRY_SECONDS = 60 * 60
 /**
  * mkvid uploads through two Google Cloud projects. Since September 2026 (checked
  * with gcloud on both) YouTube meters uploads apart from everything else: each
@@ -321,18 +331,28 @@ export async function saveMkvidTracks(
   if (!req) return 'no_request'
   const trusted = mkvidTracksTrusted(parsed.decoy)
   const tracks = toMkvidTracks(parsed.rows, trusted)
+  // ID rows of the list mkvid would draw — what the 7-day ID wait looks at (lib/mkvid-readiness.ts).
+  const idRows = tracks.filter((t) => t.isId).length
   const r = await db
     .prepare(
-      `INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at, id_rows)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(request_id) DO UPDATE SET
          tracks = excluded.tracks, track_count = excluded.track_count, trusted = excluded.trusted,
-         named = excluded.named, mismatched = excluded.mismatched, scraped_at = excluded.scraped_at
+         named = excluded.named, mismatched = excluded.mismatched, scraped_at = excluded.scraped_at, id_rows = excluded.id_rows
        WHERE excluded.trusted >= mkvid_request_tracks.trusted`,
     )
-    .bind(req.id, JSON.stringify(tracks), tracks.length, trusted ? 1 : 0, parsed.decoy.named, parsed.decoy.mismatched, nowSeconds())
+    .bind(req.id, JSON.stringify(tracks), tracks.length, trusted ? 1 : 0, parsed.decoy.named, parsed.decoy.mismatched, nowSeconds(), idRows)
     .run()
-  return (r.meta.changes ?? 0) > 0 ? 'saved' : 'kept'
+  if ((r.meta.changes ?? 0) === 0) return 'kept'
+  // The request's counts follow the stored list: every row, anonymous "ID - ID" ones included.
+  await db.prepare('UPDATE mkvid_requests SET track_count = ?, ided_count = ? WHERE id = ?').bind(tracks.length, tracks.length - idRows, req.id).run()
+  return 'saved'
+}
+
+/** Page rows → the request's counts: every row, and the identified ones (anonymous "ID - ID" rows are neither named nor identified). */
+export function mkvidRowCounts(rows: ReadonlyArray<ParsedTrack & { anonymous?: boolean }>): { trackCount: number; idedCount: number } {
+  return { trackCount: rows.length, idedCount: rows.filter((t) => !t.anonymous && !t.isUnidentified).length }
 }
 
 /**
@@ -385,6 +405,12 @@ export type MkvidRequest = {
   error: string | null
   createdAt: number
   updatedAt: number
+  /** "Render now": skip the 7-day wait for IDs (a verified list is still required). */
+  skipIdWait: boolean
+  /** The visual style mkvid made the current video with; null = unknown (an old-style video). */
+  style: string | null
+  /** Mid "Delete and recreate": the video being replaced (still up until the new one is delivered). */
+  replacesVideoId: string | null
 }
 
 type Row = {
@@ -412,6 +438,9 @@ type Row = {
   error: string | null
   created_at: number
   updated_at: number
+  skip_id_wait?: number | null
+  style?: string | null
+  replaces_video_id?: string | null
 }
 
 function rowToRequest(r: Row): MkvidRequest {
@@ -440,6 +469,9 @@ function rowToRequest(r: Row): MkvidRequest {
     error: r.error,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
+    skipIdWait: Number(r.skip_id_wait ?? 0) === 1,
+    style: r.style ?? null,
+    replacesVideoId: r.replaces_video_id ?? null,
   }
 }
 
@@ -707,6 +739,10 @@ const CLAIMABLE_WHERE = `(status = 'pending' AND (not_before IS NULL OR not_befo
 const QUEUE_ORDER = 'ORDER BY sort_key DESC, created_at DESC, rowid ASC'
 /** The same order over the paged panel query, whose subquery exposes `rowid` as `rid`. */
 const QUEUE_PAGE_ORDER = 'ORDER BY sort_key DESC, created_at DESC, rid ASC'
+/** CLAIMABLE_WHERE and QUEUE_ORDER over `mkvid_requests r` joined to its track list. */
+const CLAIMABLE_WHERE_R = `(r.status = 'pending' AND (r.not_before IS NULL OR r.not_before <= ?))
+            OR (r.status = 'claimed' AND r.claimed_at IS NOT NULL AND r.claimed_at < ?)`
+const QUEUE_ORDER_R = 'ORDER BY r.sort_key DESC, r.created_at DESC, r.rowid ASC'
 
 export type MkvidMove = 'top' | 'up' | 'down' | 'bottom'
 export const MKVID_MOVES: readonly MkvidMove[] = ['top', 'up', 'down', 'bottom']
@@ -785,12 +821,15 @@ export async function banMkvidRequest(env: Env, id: string): Promise<boolean> {
   return (r.meta.changes ?? 0) > 0
 }
 
-/** The head of the queue in claim order, without claiming anything. */
+/** The head of the queue in claim order — only what a claim would take (verified, ID wait over) — without claiming anything. */
 export async function nextMkvidRequests(env: Env, limit = 5): Promise<MkvidRequest[]> {
   const now = nowSeconds()
   const res = await dbOf(env)
-    .prepare(`SELECT * FROM mkvid_requests WHERE ${CLAIMABLE_WHERE} ${QUEUE_ORDER} LIMIT ?`)
-    .bind(now, now - claimTtl(env), Math.min(Math.max(limit, 1), 50))
+    .prepare(
+      `SELECT r.* FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id
+        WHERE (${CLAIMABLE_WHERE_R}) AND ${CLAIM_READY_SQL} ${QUEUE_ORDER_R} LIMIT ?`,
+    )
+    .bind(now, now - claimTtl(env), now - ID_WAIT_SECONDS, Math.min(Math.max(limit, 1), 50))
     .all<Row>()
   return res.results.map(rowToRequest)
 }
@@ -843,44 +882,74 @@ async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[
     return { request: null, outcome: 'capped' }
   }
   const { account, used, cap } = slot
-  for (let i = 0; i < 20; i++) {
-    const row = await db
+  // Only requests whose list is verified and whose ID wait is over (or
+  // skipped) are candidates (lib/mkvid-readiness.ts); the rest stay pending,
+  // untouched, in their place. Each row is looked at once per claim.
+  const seen = new Set<string>()
+  for (let round = 0; round < 4; round++) {
+    const batch = await db
       .prepare(
-        `SELECT * FROM mkvid_requests WHERE ${CLAIMABLE_WHERE} ${QUEUE_ORDER} LIMIT 1`,
+        `SELECT r.* FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id
+          WHERE (${CLAIMABLE_WHERE_R}) AND ${CLAIM_READY_SQL} ${QUEUE_ORDER_R} LIMIT 25`,
       )
-      .bind(now, stale)
-      .first<Row>()
-    if (!row) return { request: null, outcome: 'empty' }
+      .bind(now, stale, now - ID_WAIT_SECONDS)
+      .all<Row>()
+    const fresh = batch.results.filter((row) => !seen.has(row.id))
+    if (!fresh.length) return { request: null, outcome: 'empty' }
+    for (const row of fresh) {
+      seen.add(row.id)
+      const r = await tryClaimRow(env, log, row, { account, used, cap, now })
+      if (r) return { request: r, outcome: 'claimed' }
+    }
+  }
+  return { request: null, outcome: 'empty' }
+}
+
+/** Claim one candidate row, or settle it (superseded / failed / not verified after all) and return null. */
+async function tryClaimRow(
+  env: Env,
+  log: Logger,
+  row: Row,
+  a: { account: MkvidAccount; used: number; cap: number; now: number },
+): Promise<MkvidRequest | null> {
+  const db = dbOf(env)
+  const { account, used, cap, now } = a
+  {
     const tl = await getTracklistRow(env, row.slug, row.set_url)
-    if (tl?.video_id) {
+    // A recreation's set still resolves to the mkvid video being replaced: that is not a real recording.
+    if (tl?.video_id && !(tl.video_source === 'mkvid' && tl.video_id === row.replaces_video_id)) {
       await db
         .prepare("UPDATE mkvid_requests SET status = 'superseded', error = ?, updated_at = ? WHERE id = ?")
         .bind(`set already resolves to ${tl.video_id} (${tl.video_source ?? '1001tl'})`, now, row.id)
         .run()
       log.info('mkvid.claim_superseded', { id: row.id, setUrl: row.set_url, videoId: tl.video_id })
-      continue
+      return null
     }
-    if (row.attempts >= MKVID_MAX_ATTEMPTS) {
-      await db
-        .prepare("UPDATE mkvid_requests SET status = 'failed', error = COALESCE(error, 'too many attempts'), updated_at = ? WHERE id = ?")
-        .bind(now, row.id)
-        .run()
-      continue
-    }
-    const r = await db
-      .prepare(
-        `UPDATE mkvid_requests SET status = 'claimed', account = ?, claimed_at = ?, attempts = attempts + 1, job_id = NULL, updated_at = ?
-         WHERE id = ? AND status = ? AND attempts = ?`,
-      )
-      .bind(account, now, now, row.id, row.status, row.attempts)
-      .run()
-    // Lost a race with another claimer (two mkvid instances) — pick again.
-    if ((r.meta.changes ?? 0) === 0) continue
-    const claimed = await getMkvidRequest(env, row.id)
-    log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, account, dailyClaims: used + 1, cap })
-    return { request: claimed, outcome: 'claimed' }
   }
-  return { request: null, outcome: 'empty' }
+  if (row.attempts >= MKVID_MAX_ATTEMPTS) {
+    await db
+      .prepare("UPDATE mkvid_requests SET status = 'failed', error = COALESCE(error, 'too many attempts'), updated_at = ? WHERE id = ?")
+      .bind(now, row.id)
+      .run()
+    return null
+  }
+  // The SQL gate reads the stored `trusted` flag; the fetch layer's verdict is the one that counts.
+  if (!(await isVerified(env, row.set_url))) {
+    log.info('mkvid.claim_skip_unverified', { id: row.id, setUrl: row.set_url })
+    return null
+  }
+  const r = await db
+    .prepare(
+      `UPDATE mkvid_requests SET status = 'claimed', account = ?, claimed_at = ?, attempts = attempts + 1, job_id = NULL, updated_at = ?
+       WHERE id = ? AND status = ? AND attempts = ?`,
+    )
+    .bind(account, now, now, row.id, row.status, row.attempts)
+    .run()
+  // Lost a race with another claimer (two mkvid instances) — pick again.
+  if ((r.meta.changes ?? 0) === 0) return null
+  const claimed = await getMkvidRequest(env, row.id)
+  log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, account, dailyClaims: used + 1, cap, recreate: !!row.replaces_video_id })
+  return claimed
 }
 
 /** mkvid tells us which of its jobs is handling a claimed request (purely informational). */
@@ -894,10 +963,20 @@ export type CompleteInput = {
   videoUrl?: string | null
   privacy?: string | null
   jobId?: string | null
+  /** The visual style mkvid rendered with ('static' | 'waves' | 'scene'); absent from older mkvids = unknown. */
+  style?: string | null
 }
 
 export type CompleteResult =
-  | { status: 'done'; videoId: string; playlistId: string; playlistStatus: 'added' | 'duplicate'; combinedStatus: CombinedAdditionStatus }
+  | {
+      status: 'done'
+      videoId: string
+      playlistId: string
+      playlistStatus: 'added' | 'duplicate'
+      combinedStatus: CombinedAdditionStatus
+      /** A recreation: the old video, now out of the playlists and queued for deletion from YouTube. */
+      replacedVideoId?: string
+    }
   | { status: 'superseded'; videoId: string; existingVideoId: string }
   | { status: 'not_found' }
   | { status: 'invalid_state'; current: MkvidStatus }
@@ -920,10 +999,15 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
   const now = nowSeconds()
 
   const tl = await getTracklistRow(env, req.slug, req.setUrl)
-  if (tl?.video_id && tl.video_id !== input.videoId) {
+  // A recreation: the set still resolving to the mkvid video being replaced is expected, not a real recording.
+  const oldVideoId = req.replacesVideoId && req.replacesVideoId !== input.videoId ? req.replacesVideoId : null
+  const replacing = !!oldVideoId && tl?.video_source === 'mkvid' && tl.video_id === oldVideoId
+  if (tl?.video_id && tl.video_id !== input.videoId && !replacing) {
     await db
-      .prepare("UPDATE mkvid_requests SET status = 'superseded', video_id = ?, video_url = ?, privacy = ?, job_id = COALESCE(?, job_id), error = ?, updated_at = ? WHERE id = ?")
-      .bind(input.videoId, v(input.videoUrl), v(input.privacy), v(input.jobId), `set gained ${tl.video_id} before the upload finished`, now, req.id)
+      .prepare(
+        "UPDATE mkvid_requests SET status = 'superseded', video_id = ?, video_url = ?, privacy = ?, style = ?, replaces_video_id = NULL, job_id = COALESCE(?, job_id), error = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(input.videoId, v(input.videoUrl), v(input.privacy), v(input.style), v(input.jobId), `set gained ${tl.video_id} before the upload finished`, now, req.id)
       .run()
     log.info('mkvid.complete_superseded', { id: req.id, setUrl: req.setUrl, uploaded: input.videoId, existing: tl.video_id })
     return { status: 'superseded', videoId: input.videoId, existingVideoId: tl.video_id }
@@ -972,26 +1056,53 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
 
   // Combined playlist mirror — best-effort, like the sync's.
   let combinedStatus: CombinedAdditionStatus = 'unavailable'
+  let combined: CombinedHandle | null = null
   try {
-    const handle = await openCombinedPlaylist(env, accessToken, log)
-    if (handle) {
-      combinedStatus = await addToCombined(env, handle, input.videoId, accessToken, log)
-      await flushCombined(env, handle, log)
-    }
+    combined = await openCombinedPlaylist(env, accessToken, log)
+    if (combined) combinedStatus = await addToCombined(env, combined, input.videoId, accessToken, log)
   } catch (e) {
     combinedStatus = 'failed'
     log.warn('mkvid.combined_add_failed', { id: req.id, videoId: input.videoId, ...errorFields(e) })
   }
 
+  // A recreation: the new video is in; now the old one comes out of both
+  // playlists and is queued for deletion from YouTube (lib/mkvid-recreate.ts).
+  if (replacing && oldVideoId) {
+    await retireReplacedVideo(env, {
+      requestId: req.id,
+      slug: req.slug,
+      setUrl: req.setUrl,
+      oldVideoId,
+      oldStyle: req.style,
+      newVideoId: input.videoId,
+      playlistId: playlistId!,
+      playlistVideoIds: existing,
+      combined,
+      accessToken,
+      log,
+    })
+  }
+  if (combined) {
+    try {
+      await flushCombined(env, combined, log)
+    } catch (e) {
+      log.warn('mkvid.combined_flush_failed', { id: req.id, ...errorFields(e) })
+    }
+  }
+
   await setTracklistVideo(env, req.slug, req.setUrl, { videoId: input.videoId, source: 'mkvid', checkedAt: now })
   await db
-    .prepare("UPDATE mkvid_requests SET status = 'done', video_id = ?, video_url = ?, privacy = ?, job_id = COALESCE(?, job_id), error = NULL, updated_at = ? WHERE id = ?")
-    .bind(input.videoId, v(input.videoUrl), v(input.privacy), v(input.jobId), now, req.id)
+    .prepare(
+      "UPDATE mkvid_requests SET status = 'done', video_id = ?, video_url = ?, privacy = ?, style = ?, replaces_video_id = NULL, job_id = COALESCE(?, job_id), error = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(input.videoId, v(input.videoUrl), v(input.privacy), v(input.style), v(input.jobId), now, req.id)
     .run()
 
   const record: PlaylistAdditionRecord = {
     t: new Date().toISOString(),
-    status: 'added',
+    // A recreation is a swap, like a recheck that finds a better recording: the old id rides along.
+    status: replacing ? 'replaced' : 'added',
+    ...(replacing ? { previousVideoId: oldVideoId } : {}),
     slug: req.slug,
     artistName: req.artistName,
     setUrl: req.setUrl,
@@ -1001,14 +1112,16 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
     playlistTitle,
     combinedStatus,
     via: 'mkvid',
-    trigger: 'mkvid',
-    message: `rendered by mkvid from ${req.source} (${input.privacy ?? 'unlisted'})${playlistStatus === 'duplicate' ? ' — already in the playlist' : ''}`,
+    trigger: replacing ? 'mkvid.recreate' : 'mkvid',
+    message:
+      `rendered by mkvid from ${req.source} (${input.privacy ?? 'unlisted'}${input.style ? `, ${input.style}` : ''})${playlistStatus === 'duplicate' ? ' — already in the playlist' : ''}` +
+      (replacing ? ` — recreated: ${oldVideoId} removed from the playlists, deletion from YouTube requested` : ''),
     failureCount: null,
     meta: { ms: null },
   }
   await flushPlaylistAdditions(env, [record], log)
-  log.info('mkvid.completed', { id: req.id, slug: req.slug, setUrl: req.setUrl, videoId: input.videoId, playlistId, playlistStatus, combinedStatus, privacy: input.privacy ?? null })
-  return { status: 'done', videoId: input.videoId, playlistId: playlistId!, playlistStatus, combinedStatus }
+  log.info('mkvid.completed', { id: req.id, slug: req.slug, setUrl: req.setUrl, videoId: input.videoId, playlistId, playlistStatus, combinedStatus, privacy: input.privacy ?? null, style: input.style ?? null, replacedVideoId: replacing ? oldVideoId : null })
+  return { status: 'done', videoId: input.videoId, playlistId: playlistId!, playlistStatus, combinedStatus, ...(replacing && oldVideoId ? { replacedVideoId: oldVideoId } : {}) }
 }
 
 export type FailInput = { id: string; error: string; permanent?: boolean; jobId?: string | null }
@@ -1023,6 +1136,19 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   if (!req) return null
   if (req.status === 'done' || req.status === 'superseded') return { status: req.status, attempts: req.attempts }
   const now = nowSeconds()
+  // mkvid refused before downloading because the list it was handed is not
+  // verified (a race with a re-fetch, or tracked and mkvid disagreeing): back
+  // to pending without using an attempt; the claim gate decides when it is ready.
+  if (/^unverified_tracklist\b/.test(input.error)) {
+    await dbOf(env)
+      .prepare(
+        "UPDATE mkvid_requests SET status = 'pending', attempts = MAX(0, attempts - 1), claimed_at = NULL, not_before = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?",
+      )
+      .bind(now + UNVERIFIED_RETRY_SECONDS, input.error.slice(0, 500), v(input.jobId), now, req.id)
+      .run()
+    log.warn('mkvid.refused_unverified', { id: req.id, slug: req.slug, setUrl: req.setUrl, error: input.error.slice(0, 200) })
+    return { status: 'pending', attempts: Math.max(0, req.attempts - 1) }
+  }
   const exhausted = req.attempts >= MKVID_MAX_ATTEMPTS
   const status: MkvidStatus = input.permanent || exhausted ? 'failed' : 'pending'
   const notBefore = status === 'pending' ? now + RETRY_BACKOFF_SECONDS * Math.max(1, req.attempts) : null
@@ -1070,6 +1196,8 @@ export function requestSummary(r: MkvidRequest): Record<string, unknown> {
     sourceLabel: r.source === 'soundcloud' ? 'SoundCloud' : 'hearthis.at',
     artistLabel: artistLabel(r.artistName, r.slug),
     accountLabel: MKVID_ACCOUNT_LABELS[r.account],
+    /** A video made with a style other than the current one (unknown counts): "Recreate all old-style videos" takes it. */
+    oldStyle: !!r.videoId && isOldStyle(r.style),
   }
 }
 
@@ -1101,7 +1229,7 @@ export async function findMkvidUploadByTitle(env: Env, title: string): Promise<M
   const row = await dbOf(env)
     .prepare(
       `SELECT slug, set_url, set_title, video_id FROM mkvid_requests
-       WHERE video_id IS NOT NULL AND set_title IS NOT NULL AND status IN ('done', 'superseded')
+       WHERE video_id IS NOT NULL AND set_title IS NOT NULL AND (status IN ('done', 'superseded') OR replaces_video_id IS NOT NULL)
          AND lower(substr(trim(set_title), 1, 100)) = lower(?)
        ORDER BY updated_at DESC LIMIT 1`,
     )

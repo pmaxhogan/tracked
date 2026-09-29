@@ -249,7 +249,7 @@ export const MkvidClaimedRequest = z
     tracks: z.array(MkvidTrackSchema).max(300).openapi({ description: 'The set\'s track list: every row of the page in order, anonymous "ID - ID" rows included (at most 300 rows); [] when none is stored.' }),
     tracksTrusted: z.boolean().openapi({
       description:
-        'true only when the list came from a page that passed the decoy check with evidence (≥3 rows compared, none contradicting itself). Since ~2026-09-22 1001tracklists serves our accounts pages with real cues/artwork and randomized names, and shows a random 15–35% of identified rows as "ID - ID"; an untrusted list carries no names, and its isId cannot be believed (cueSeconds, artworkUrl and layered still can). false when the list is empty.',
+        'true when the list is verified: two fetches by different pool accounts agreed on every row. Only verified requests are handed out, so a claim always carries true and a non-empty list; mkvid must refuse anything else (POST /mkvid/fail with error "unverified_tracklist: …", which returns the request to pending without using an attempt). An unverified stored list carries no names and its isId cannot be believed.',
     }),
   })
   .passthrough()
