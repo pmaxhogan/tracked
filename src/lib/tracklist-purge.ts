@@ -5,7 +5,7 @@ import { errorFields, type Logger } from './log'
 import { getJson } from './cache'
 import { findTracklistUrlByVideoId } from './sync-store'
 import { DecoyTracklistError, normalizeTracklistUrl } from './tracklists1001'
-import { deleteCachedTracklist, readCachedTracklist, tracklistCacheKey, tracklistSlug, type CachedTracklist } from './tracklist-cache'
+import { readCachedTracklist, tracklistCacheKey, tracklistSlug, type CachedTracklist } from './tracklist-cache'
 import { resolveTracklistPage } from './tracklist-resolve'
 import { UpstreamHttpError, UpstreamPausedError, UpstreamUnavailableError } from './upstream1001'
 import { extractVideoId } from './youtube'
@@ -16,9 +16,10 @@ import { extractVideoId } from './youtube'
  * `POST /subscriptions/api/tracklist/purge` (Access, the viewer's "Refresh
  * track list" button) and `/now-playing` with `refresh: true`.
  *
- * The entry is deleted BEFORE the refetch, so a refetch that fails leaves the
- * cache empty and the next read fetches again; a stale list is never kept
- * around as a fallback.
+ * The refetch happens first, bypassing the cache read; only a clean,
+ * non-empty parse replaces the cached entry. When it fails (paused, budget,
+ * challenge, decoy, timeout) the old entry is KEPT, still served, and the
+ * answer says so: `stale: true` with the kept entry's `fetchedAt`.
  */
 
 /**
@@ -94,13 +95,24 @@ export type PurgeSummary = {
 
 export type PurgeResult =
   | { ok: true; summary: PurgeSummary }
-  | { ok: false; status: 404 | 502 | 503; error: string; message: string; tracklistUrl: string }
+  | {
+      ok: false
+      status: 404 | 502 | 503
+      error: string
+      message: string
+      tracklistUrl: string
+      /** True when an older cached list was kept (and is still served). */
+      stale: boolean
+      /** That kept entry's fetchedAt (null when none, or it predates the stamp). */
+      fetchedAt: string | null
+    }
 
 /**
  * An upstream failure as the HTTP answer the purge routes give. A real 404/410
  * is the URL's own answer; a pause is 503 (retry later); the rest is 502.
  */
 export function describeFetchError(e: unknown): { status: 404 | 502 | 503; error: string; message: string } {
+  if (e instanceof EmptyParseError) return { status: 502, error: 'upstream_error', message: e.message }
   if (e instanceof UpstreamHttpError) return { status: 404, error: 'not_found', message: e.message }
   if (e instanceof UpstreamPausedError) return { status: 503, error: 'paused', message: e.message }
   if (e instanceof IPBlockedError) return { status: 502, error: 'upstream_error', message: `1001 scrape: ip_blocked (${e.clientIp ?? 'unknown'})` }
@@ -110,27 +122,56 @@ export function describeFetchError(e: unknown): { status: 404 | 502 | 503; error
   return { status: 502, error: 'upstream_error', message: `1001 scrape: ${e instanceof Error ? e.message : String(e)}` }
 }
 
+/** The refetch parsed zero tracks (usually a captcha shell). Nothing was written. */
+export class EmptyParseError extends Error {
+  constructor() {
+    super('parsed 0 tracks (likely a transient captcha) — try again shortly')
+    this.name = 'EmptyParseError'
+  }
+}
+
 /**
- * Delete the cached list for `tracklistUrl` and fetch it again now at priority
- * phone. Returns the fresh list (written back to the cache unless empty);
- * throws what the fetch throws. /now-playing's `refresh: true` uses this.
+ * A refresh whose refetch failed. `previous` is the cached entry that was kept
+ * (undefined when there was none); `reason` is what the fetch threw.
+ */
+export class RefreshFailedError extends Error {
+  readonly reason: unknown
+  readonly previous: CachedTracklist | undefined
+  constructor(reason: unknown, previous: CachedTracklist | undefined) {
+    super(reason instanceof Error ? reason.message : String(reason))
+    this.name = 'RefreshFailedError'
+    this.reason = reason
+    this.previous = previous
+  }
+}
+
+/**
+ * Fetch the list for `tracklistUrl` again now at priority phone, bypassing the
+ * cache read. Success replaces the cached entry. Any failure (paused, blocked,
+ * challenge, decoy, empty parse, timeout) KEEPS the old entry and throws
+ * RefreshFailedError carrying it. /now-playing's `refresh: true` uses this.
  */
 export async function refreshTracklistPage(env: Env, tracklistUrl: string, log: Logger): Promise<CachedTracklist> {
   const slug = tracklistSlug(tracklistUrl)
-  await deleteCachedTracklist(env, slug)
-  log.info('tracklist.purge', { key: tracklistCacheKey(slug), tracklistUrl })
-  return resolveTracklistPage(env, tracklistUrl, log, { force: true, priority: 'phone' })
+  const previous = await readCachedTracklist(env, slug)
+  log.info('tracklist.refresh', { key: tracklistCacheKey(slug), tracklistUrl, hadEntry: !!previous, previousFetchedAt: previous?.fetchedAt ?? null })
+  let fresh: CachedTracklist
+  try {
+    // Writes the entry only for a clean, non-empty parse (cacheParsedTracklist),
+    // so a decoy or empty page never replaces a good entry.
+    fresh = await resolveTracklistPage(env, tracklistUrl, log, { force: true, priority: 'phone' })
+  } catch (e) {
+    throw new RefreshFailedError(e, previous)
+  }
+  if (fresh.tracks.length === 0) throw new RefreshFailedError(new EmptyParseError(), previous)
+  return fresh
 }
 
-/** Purge + refetch, summarized for the purge routes; failures become an HTTP answer. */
+/** Refresh, summarized for the purge routes; a failure becomes an HTTP answer with the kept entry's age. */
 export async function purgeAndRefetch(env: Env, tracklistUrl: string, log: Logger): Promise<PurgeResult> {
   const slug = tracklistSlug(tracklistUrl)
   try {
     const fresh = await refreshTracklistPage(env, tracklistUrl, log)
-    if (fresh.tracks.length === 0) {
-      log.warn('tracklist.purge.empty', { tracklistUrl })
-      return { ok: false, status: 502, error: 'upstream_error', message: 'parsed 0 tracks (likely a transient captcha) — try again shortly', tracklistUrl }
-    }
     const summary: PurgeSummary = {
       tracklistUrl,
       slug,
@@ -143,8 +184,11 @@ export async function purgeAndRefetch(env: Env, tracklistUrl: string, log: Logge
     log.info('tracklist.purge.done', { ...summary })
     return { ok: true, summary }
   } catch (e) {
-    const d = describeFetchError(e)
-    log.error('tracklist.purge.failed', { tracklistUrl, status: d.status, error: d.error, ...errorFields(e) })
-    return { ok: false, ...d, tracklistUrl }
+    const reason = e instanceof RefreshFailedError ? e.reason : e
+    const previous = e instanceof RefreshFailedError ? e.previous : undefined
+    const d = describeFetchError(reason)
+    const stale = !!previous && previous.tracks.length > 0
+    log.error('tracklist.purge.failed', { tracklistUrl, status: d.status, error: d.error, stale, ...errorFields(reason) })
+    return { ok: false, ...d, tracklistUrl, stale, fetchedAt: stale ? (previous!.fetchedAt ?? null) : null }
   }
 }

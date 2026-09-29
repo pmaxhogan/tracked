@@ -33,7 +33,7 @@ If the caller already knows the YouTube URL, send it directly to skip the YouTub
 }
 ```
 
-**Cache age and forced refresh.** Once a tracklist is resolved, the answer carries `cache: { fetchedAt, ageSeconds, ttlSeconds, refreshed }` — when the parsed list it came from was fetched from 1001tracklists, and how long that entry is kept (see [Tracklist cache](#tracklist-cache-and-purge)). Add `"refresh": true` to the request to purge that set's cached list and fetch it again before the current track is picked (one upstream fetch at priority `phone`; `refreshed: true` in the answer). Meant for a Tasker "force refresh" task when the list looks stale or wrong:
+**Cache age and forced refresh.** Once a tracklist is resolved, the answer carries `cache: { fetchedAt, ageSeconds, ttlSeconds, refreshed }` — when the parsed list it came from was fetched from 1001tracklists, and how long that entry is kept (see [Tracklist cache](#tracklist-cache-and-purge)). Add `"refresh": true` to the request to fetch that set's list again before the current track is picked (one upstream fetch at priority `phone`; `refreshed: true` in the answer); the fresh list replaces the cached one. If the refetch fails (paused, blocked, challenge, decoy, empty parse, timeout) the cached list is kept and the answer is `status: "upstream_error"` with `cache: { stale: true, fetchedAt, ageSeconds, … }` describing the kept list (`fetchedAt: null` when there was none); a plain call afterwards is still served from it. Meant for a Tasker "force refresh" task when the list looks stale or wrong:
 
 ```bash
 curl -sS -X POST https://<worker>/now-playing -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json'   -d '{"videoUrl":"79n8BaQAL2Q","currentSeconds":4595,"refresh":true}'
@@ -166,7 +166,7 @@ Every parsed tracklist is cached in KV under `tl:v4:<slug>`, whichever path fetc
 
 The set's date comes from its URL (or, for sync fetches, the page's date meta / title); a set with no readable date counts as not new. A decoy page or a zero-track parse is never cached. Each entry records `fetchedAt`, `ttlSeconds` and its `tracklistUrl`.
 
-`POST /tracklist/purge` (same bearer as `/now-playing`) deletes one set's cached list and fetches it again right away at priority `phone`. Name the set with exactly one of:
+`POST /tracklist/purge` (same bearer as `/now-playing`) fetches one set's list again right away at priority `phone`, bypassing the cache read, and replaces the cached entry with the fresh list. Name the set with exactly one of:
 
 - `url` — a 1001tracklists tracklist URL;
 - `slug` — the short id in `/tracklist/<slug>/…`, for a set tracked already knows (cached, synced, or queued for mkvid);
@@ -178,7 +178,7 @@ curl -sS -X POST https://<worker>/tracklist/purge -H "Authorization: Bearer $TOK
 #     "fetchedAt": "2026-09-29T14:03:11.000Z", "ttlSeconds": 21600 }
 ```
 
-`rowCount` counts every page row (anonymous "ID - ID" rows included), `trackCount` the named rows `/tracklist` returns, `identifiedCount` the named rows that are not "ID". Errors: `400` for no/more than one/an invalid identifier, `401` bad bearer, `404 unknown_slug` / `unknown_video` when tracked cannot map the identifier to a set (nothing is fetched then), `404 not_found` when 1001tracklists answers 404/410, `502` for a failed fetch (`error: "decoy"` for a decoy page), `503 paused` while fetching is paused. The old entry is deleted before the refetch, so after a failed refetch the cache is empty and the next read fetches again.
+`rowCount` counts every page row (anonymous "ID - ID" rows included), `trackCount` the named rows `/tracklist` returns, `identifiedCount` the named rows that are not "ID". Errors: `400` for no/more than one/an invalid identifier, `401` bad bearer, `404 unknown_slug` / `unknown_video` when tracked cannot map the identifier to a set (nothing is fetched then), `404 not_found` when 1001tracklists answers 404/410, `502` for a failed fetch (`error: "decoy"` for a decoy page), `503 paused` while fetching is paused. A failed refetch never costs the set its list: the old entry is **kept** (and still served), and the error body says so — `{ error, message, stale: true, fetchedAt: "<kept entry's fetchedAt>" }` (`stale: false, fetchedAt: null` when nothing was cached). A decoy or empty parse never replaces a good entry.
 
 The tracklist viewer has the same thing as a **Refresh track list** button (`POST /subscriptions/api/tracklist/purge`, behind Cloudflare Access), next to the list's cache age.
 

@@ -201,7 +201,7 @@ subscriptionsApp.post('/api/tracklist/purge', async (c) => {
   const target = await resolvePurgeTarget(c.env, { url: str(body?.url), slug: str(body?.slug), videoId: str(body?.videoId) })
   if (!target.ok) return c.json({ error: target.error, message: target.message }, target.status)
   const r = await purgeAndRefetch(c.env, target.tracklistUrl, log)
-  return r.ok ? c.json(r.summary) : c.json({ error: r.error, message: r.message }, r.status)
+  return r.ok ? c.json(r.summary) : c.json({ error: r.error, message: r.message, stale: r.stale, fetchedAt: r.fetchedAt }, r.status)
 })
 
 /**
@@ -2569,7 +2569,7 @@ ${BAN_BANNER_HTML}
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         $refreshResult.className = 'result bad';
-        $refreshResult.textContent = 'Refresh failed: ' + (d.message || d.error || ('HTTP ' + r.status));
+        $refreshResult.textContent = 'Refresh failed: ' + (d.message || d.error || ('HTTP ' + r.status)) + (d.stale ? ' — still showing the list ' + fmtAge(d.fetchedAt ? Math.round((Date.now() - Date.parse(d.fetchedAt)) / 1000) : null) : '');
         return;
       }
       $refreshResult.textContent = 'Refreshed: ' + d.rowCount + ' rows, ' + d.identifiedCount + ' of ' + d.trackCount + ' identified';

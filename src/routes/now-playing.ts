@@ -15,7 +15,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { attachYoutubeLiked } from '../lib/liked-status'
 import { findMkvidUploadByTitle } from '../lib/mkvid'
 import { findTracklistUrlByVideoId } from '../lib/sync-store'
-import { SEARCH_URL_CV, refreshTracklistPage } from '../lib/tracklist-purge'
+import { SEARCH_URL_CV, RefreshFailedError, refreshTracklistPage } from '../lib/tracklist-purge'
 import { cacheAgeSeconds } from '../lib/tracklist-cache'
 
 export const nowPlayingRoute = createRoute({
@@ -326,7 +326,8 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   // written before `rows` existed).
   let selectable: Array<ParsedTrack & { anonymous?: boolean }>
   let setAppleLink: string | null = null
-  // Age of the cached list the answer comes from (`refresh: true` purges and refetches first).
+  // Age of the cached list the answer comes from (`refresh: true` refetches first;
+  // when that fails the cached list is kept and the answer is the error, stale: true).
   let cache: Res['cache'] = null
   try {
     const scraped = body.refresh ? await refreshTracklistPage(env, tracklistUrl, log) : await resolveTracklistPage(env, tracklistUrl, log)
@@ -336,21 +337,28 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       ? keepRows(scraped.rows, (r) => !r.anonymous || (!r.isMashupLinked && r.startSeconds !== null))
       : parsedTracks
     setAppleLink = scraped.setAppleLink
-  } catch (e) {
+  } catch (err) {
+    let e = err
+    if (err instanceof RefreshFailedError) {
+      e = err.reason
+      const kept = err.previous
+      cache = { fetchedAt: kept?.fetchedAt ?? null, ageSeconds: kept ? cacheAgeSeconds(kept) : null, ttlSeconds: kept?.ttlSeconds ?? null, refreshed: false, stale: true }
+      log.warn('phase.scrape.refresh_failed', { tracklistUrl, keptEntry: !!kept, keptFetchedAt: kept?.fetchedAt ?? null })
+    }
     if (e instanceof IPBlockedError) {
       log.error('phase.scrape.ip_blocked', { tracklistUrl, clientIp: e.clientIp })
-      return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ip_blocked (${e.clientIp ?? 'unknown'})`)
+      return respond('upstream_error', { videoUrl, tracklistUrl, cache }, `1001 scrape: ip_blocked (${e.clientIp ?? 'unknown'})`)
     }
     if (e instanceof CloudflareChallengeError) {
       log.error('phase.scrape.cf_challenge', { tracklistUrl, errorMessage: e.message })
-      return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: cf_challenge — ${e.message}`)
+      return respond('upstream_error', { videoUrl, tracklistUrl, cache }, `1001 scrape: cf_challenge — ${e.message}`)
     }
     if (e instanceof DecoyTracklistError) {
       log.error('phase.scrape.decoy', { tracklistUrl, named: e.named, mismatched: e.mismatched })
-      return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${e.message}`)
+      return respond('upstream_error', { videoUrl, tracklistUrl, cache }, `1001 scrape: ${e.message}`)
     }
     log.error('phase.scrape.throw', { tracklistUrl, ...errorFields(e) })
-    return respond('upstream_error', { videoUrl, tracklistUrl }, `1001 scrape: ${(e as Error).message}`)
+    return respond('upstream_error', { videoUrl, tracklistUrl, cache }, `1001 scrape: ${(e as Error).message}`)
   }
   log.info('phase.scrape.resolved', {
     tracklistUrl,

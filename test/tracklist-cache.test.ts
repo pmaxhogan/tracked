@@ -6,6 +6,7 @@ import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import type { Env, ParsedTrack } from '../src/types'
 import { makeLogger } from '../src/lib/log'
+import { setPause, _resetTallyForTests } from '../src/lib/ban-state'
 import {
   NEW_SET_AGE_SECONDS,
   TRACKLIST_TTL,
@@ -90,6 +91,7 @@ const log = makeLogger({ task: 'test' })
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
+  _resetTallyForTests() // the pause test leaves an in-isolate pause memo
 })
 
 describe('tracklistCacheTtl (decision 19)', () => {
@@ -270,13 +272,46 @@ describe('POST /tracklist/purge (bearer)', () => {
     expect((await bearer(env, '/tracklist/purge', { url: 'https://example.com/x' })).status).toBe(400)
   })
 
-  it('a failed refetch answers the error and leaves the cache empty', async () => {
+  it('a failed refetch (decoy) keeps the old entry and answers the error with stale: true and its fetchedAt', async () => {
     const env = makeEnv()
     await seedStaleEntry(env)
+    const before = await env.CACHE.get(tracklistCacheKey(FULL_SLUG))
+    const oldFetchedAt = JSON.parse(before!).fetchedAt
     proxyServes(fx('tracklist-decoy-dcr839.html'))
     const res = await bearer(env, '/tracklist/purge', { url: FULL_URL })
     expect(res.status).toBe(502)
-    expect((await res.json() as any).error).toBe('decoy')
+    expect(await res.json() as any).toMatchObject({ error: 'decoy', stale: true, fetchedAt: oldFetchedAt })
+    expect(await env.CACHE.get(tracklistCacheKey(FULL_SLUG))).toBe(before)
+  })
+
+  it('an empty parse never replaces a good entry', async () => {
+    const env = makeEnv()
+    await seedStaleEntry(env)
+    const before = await env.CACHE.get(tracklistCacheKey(FULL_SLUG))
+    proxyServes(fx('tracklist-neptune.html'))
+    const res = await bearer(env, '/tracklist/purge', { url: FULL_URL })
+    expect(res.status).toBe(502)
+    expect(await res.json() as any).toMatchObject({ error: 'upstream_error', stale: true })
+    expect(await env.CACHE.get(tracklistCacheKey(FULL_SLUG))).toBe(before)
+  })
+
+  it('while fetching is paused: 503, old entry kept, no upstream call', async () => {
+    const env = makeEnv()
+    await seedStaleEntry(env)
+    const before = await env.CACHE.get(tracklistCacheKey(FULL_SLUG))
+    await setPause(env, 'all_routes_blocked', null)
+    const res = await bearer(env, '/tracklist/purge', { url: FULL_URL })
+    expect(res.status).toBe(503)
+    expect(await res.json() as any).toMatchObject({ error: 'paused', stale: true, fetchedAt: JSON.parse(before!).fetchedAt })
+    expect(await env.CACHE.get(tracklistCacheKey(FULL_SLUG))).toBe(before)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('a failure with nothing cached answers stale: false', async () => {
+    const env = makeEnv()
+    proxyServes(fx('tracklist-decoy-dcr839.html'))
+    const res = await bearer(env, '/tracklist/purge', { url: FULL_URL })
+    expect(await res.json() as any).toMatchObject({ error: 'decoy', stale: false, fetchedAt: null })
     expect(await env.CACHE.get(tracklistCacheKey(FULL_SLUG))).toBeNull()
   })
 })
@@ -350,6 +385,23 @@ describe('/now-playing cache age and refresh flag', () => {
     expect(body.cache).toMatchObject({ refreshed: true, ttlSeconds: TRACKLIST_TTL.FULL })
     expect(body.cache.ageSeconds).toBeLessThan(60)
     expect(JSON.parse((await env.CACHE.get(tracklistCacheKey(FULL_SLUG)))!).tracks).toHaveLength(31)
+  })
+
+  it('refresh: true whose refetch fails answers upstream_error with cache.stale and keeps the old list', async () => {
+    proxyServes(fx('tracklist-decoy-dcr839.html'))
+    const env = makeEnv()
+    await seedTracklistRow(env, FULL_URL, VIDEO_ID)
+    await seedStaleEntry(env)
+    const before = await env.CACHE.get(tracklistCacheKey(FULL_SLUG))
+    const body = await (await np(env, { refresh: true })).json() as any
+    expect(body.status).toBe('upstream_error')
+    expect(body.message).toMatch(/decoy/)
+    expect(body.cache).toMatchObject({ refreshed: false, stale: true, fetchedAt: JSON.parse(before!).fetchedAt })
+    expect(body.cache.ageSeconds).toBeGreaterThanOrEqual(5 * 3600 - 5)
+    expect(await env.CACHE.get(tracklistCacheKey(FULL_SLUG))).toBe(before)
+    // A plain call afterwards is still served from the kept list.
+    const again = await (await np(env)).json() as any
+    expect(again.tracks[0]).toMatchObject({ artist: 'Old', title: 'Stale' })
   })
 
   it('refresh must be a boolean', async () => {

@@ -24,7 +24,7 @@ export const NowPlayingRequest = z
     refresh: z.boolean().optional().openapi({
       example: false,
       description:
-        'When true, the cached track list for the resolved set is purged and fetched again right now (same as POST /tracklist/purge) before the current track is picked. Costs one upstream fetch; use it when the list looks stale or wrong.',
+        'When true, the track list for the resolved set is fetched again right now (same as POST /tracklist/purge) before the current track is picked, and replaces the cached one on success. If the refetch fails the cached list is kept and the answer is upstream_error with cache.stale true. Costs one upstream fetch.',
     }),
   })
   .refine((d) => Boolean(d.videoTitle || d.videoUrl), {
@@ -78,7 +78,8 @@ export const TracklistCacheInfo = z
     fetchedAt: z.string().nullable().openapi({ example: '2026-09-29T14:03:11.000Z', description: 'When the list was fetched from 1001tracklists. null for an entry cached before this was recorded.' }),
     ageSeconds: z.number().int().nullable().openapi({ example: 5400, description: 'Seconds since fetchedAt (null when unknown).' }),
     ttlSeconds: z.number().int().nullable().openapi({ example: 21600, description: 'How long the entry is cached: 259200 (3 days) when every row is identified, 21600 (6 hours) with ID rows or a set under 2 days old.' }),
-    refreshed: z.boolean().openapi({ description: 'True when this request purged and refetched the list (refresh: true).' }),
+    refreshed: z.boolean().openapi({ description: 'True when this request refetched the list (refresh: true) and got a fresh one.' }),
+    stale: z.boolean().optional().openapi({ description: 'True when refresh: true was asked but the refetch failed: the answer carries the error, and fetchedAt/ageSeconds describe the older list that was kept (null when there was none).' }),
   })
   .openapi('TracklistCacheInfo')
 
@@ -310,3 +311,12 @@ export const TracklistPurgeResponse = z
     ttlSeconds: z.number().int().nullable().openapi({ description: 'How long the fresh list is cached (259200 or 21600).' }),
   })
   .openapi('TracklistPurgeResponse')
+
+export const TracklistPurgeError = z
+  .object({
+    error: z.string(),
+    message: z.string().optional(),
+    stale: z.boolean().openapi({ description: 'True when the refetch failed and the older cached list was kept (it is still served).' }),
+    fetchedAt: z.string().nullable().openapi({ description: 'fetchedAt of the kept list; null when none was kept.' }),
+  })
+  .openapi('TracklistPurgeError')
