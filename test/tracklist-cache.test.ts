@@ -316,6 +316,10 @@ describe('POST /subscriptions/api/tracklist/purge (Cloudflare Access)', () => {
     const page = await (await app.request('http://x/subscriptions/tracklist', {}, env)).text()
     expect(page).toContain('Refresh track list')
     expect(page).toContain('/subscriptions/api/tracklist/purge')
+    // The viewer's inline scripts must at least parse.
+    const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
+    expect(scripts.length).toBeGreaterThan(0)
+    for (const js of scripts) expect(() => new Function(js)).not.toThrow()
   })
 })
 
