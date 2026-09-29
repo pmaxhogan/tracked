@@ -338,7 +338,7 @@ self.addEventListener('push', (event) => {
     body: data.body || '',
     tag: data.tag || 'tracked',
     renotify: true,
-    requireInteraction: data.kind === 'ban_start',
+    requireInteraction: data.kind === 'ban_start' || data.requireInteraction === true || /^challenge/.test(data.kind || ''),
     timestamp: data.ts ? Date.parse(data.ts) : Date.now(),
     data: { url: data.url || '/subscriptions', kind: data.kind || null },
   };

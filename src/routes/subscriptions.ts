@@ -1113,7 +1113,7 @@ ${BAN_CSS}
 <main>
 ${BAN_BANNER_HTML}
   <h1>DJ subscriptions</h1>
-  <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>. &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer →</a></p>
+  <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>. &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer →</a> &nbsp;·&nbsp; <a href="/subscriptions/pool">Pool accounts →</a></p>
 ${ALERTS_ROW_HTML}
   <div id="yt" class="yt" hidden>
     <div class="info">

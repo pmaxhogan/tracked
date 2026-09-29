@@ -5,6 +5,7 @@ import { likesRoute, likesHandler } from './routes/likes'
 import { likedSongsRoute, likedSongsHandler } from './routes/liked-songs'
 import { subscriptionsApp } from './routes/subscriptions'
 import { mkvidApp } from './routes/mkvid'
+import { poolUiApp } from './routes/pool-ui'
 import { MkvidClaimBody, MkvidClaimResponse } from './schemas'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
@@ -44,6 +45,7 @@ app.get('/favicon.ico', (c) => c.body(null, 204))
 
 // Mini-app for managing DJ subscriptions. Gated by Cloudflare Access (verified
 // inside the sub-app's middleware), NOT by the Tasker bearer token.
+app.route('/subscriptions', poolUiApp) // pool admin pages (own CF Access gate); ahead of subscriptionsApp so its '*' gate doesn't run twice
 app.route('/subscriptions', subscriptionsApp)
 
 // Work queue for mkvid (the NAS render/upload service). Gated by its own
