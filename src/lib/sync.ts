@@ -89,7 +89,7 @@ import { pickSetVideo, rejectionNote } from './playlist-hygiene'
 import { combinedRefuses } from './playlist-blocklist'
 import { parseTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
-import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
+import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
   flushPlaylistAdditions,
@@ -728,7 +728,6 @@ export async function syncOne(
   // polling it. Never fails the set: any error here is a warn log and the set
   // is still recorded as `no_youtube` (the next recheck queues it again).
   const mkvidEnabled = !!env.MKVID_TOKEN
-  const mkvidRequireFull = /^(1|true|yes)$/i.test(env.MKVID_REQUIRE_FULL_TRACKLIST ?? '')
   const maybeQueueForMkvid = async (setUrl: string, html: string): Promise<string | null> => {
     if (!mkvidEnabled) return null
     try {
@@ -744,11 +743,10 @@ export async function syncOne(
       // from any page it cannot trust. Logged so the sync's view of the
       // poisoning is on record too.
       if (parsed.decoy.suspected) log.warn('sync.mkvid_decoy_page', { slug: sub.slug, setUrl, named: parsed.decoy.named, mismatched: parsed.decoy.mismatched })
-      const idedCount = tracks.filter((t) => !t.isUnidentified).length
-      if (mkvidRequireFull && idedCount < tracks.length) {
-        log.info('sync.mkvid_skip_partial', { slug: sub.slug, setUrl, source: source.kind, idedCount, trackCount: tracks.length })
-        return `mkvid: not queued, tracklist partial (${idedCount}/${tracks.length} IDed)`
-      }
+      // Every page row counts, anonymous "ID - ID" rows included. A list with
+      // IDs is still queued: the claim holds it until the set is 7 days old
+      // (lib/mkvid-readiness.ts), and never renders an unverified one.
+      const { trackCount, idedCount } = mkvidRowCounts(parsed.rows.length ? parsed.rows : tracks)
       const r = await enqueueMkvidRequest(env, {
         slug: sub.slug,
         setUrl,
@@ -757,7 +755,7 @@ export async function syncOne(
         setDate: extractSetDate(setUrl, html),
         source,
         lastCueSeconds: lastCueSeconds(tracks),
-        trackCount: tracks.length,
+        trackCount,
         idedCount,
       })
       // The per-track list mkvid draws from — on first queueing, and on every
@@ -771,11 +769,25 @@ export async function syncOne(
         tracksSaved = 'failed'
         log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
       }
-      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount, tracksSaved, tracksTrusted: mkvidTracksTrusted(parsed.decoy) })
+      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount, idedCount, tracksSaved, tracksTrusted: mkvidTracksTrusted(parsed.decoy) })
       return r === 'queued' ? `queued for mkvid (${source.kind})` : `mkvid request already exists (${source.kind})`
     } catch (e) {
       log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
       return null
+    }
+  }
+  /**
+   * A set whose video is an mkvid upload keeps its stored track list current
+   * too, so a "Delete and recreate" renders from the newest list. Only writes
+   * when the set has a request; never fails the recheck.
+   */
+  const refreshMkvidTracks = async (setUrl: string, html: string): Promise<void> => {
+    if (!mkvidEnabled) return
+    try {
+      const parsed = parseTracklist(setUrl, html)
+      if (parsed.tracks.length > 0) await saveMkvidTracks(env, setUrl, parsed)
+    } catch (e) {
+      log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
     }
   }
   /** The set gained a real recording: a pending mkvid request has nothing left to do. */
@@ -1001,6 +1013,7 @@ export async function syncOne(
         // appeared since (or a request that was never queued) goes to mkvid.
         // Idempotent — a set with a request already gets 'exists'.
         if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html)
+        else await refreshMkvidTracks(setUrl, setFetched.html)
       } else if (videoId === prev.videoId) {
         tracklistVideos[setUrl] = { videoId, checkedAt }
         log.info('sync.recheck_unchanged', { slug: sub.slug, setUrl, videoId })

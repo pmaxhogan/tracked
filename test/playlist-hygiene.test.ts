@@ -30,6 +30,7 @@ import {
   hasGoodVideo,
   isMassRemoval,
   listHolds,
+  mkvidReplacedIds,
   approveHold,
   pickSetVideo,
   removeAndReplace,
@@ -558,11 +559,20 @@ describe("mkvid's own videos (W7 interface)", () => {
     await seedSub(env)
     await seedSet(env, setUrl(1), 'oldR0000001')
     listing({ [PL]: [] })
-    await env.DB.exec('CREATE TABLE mkvid_old_videos (video_id TEXT PRIMARY KEY, set_url TEXT)')
-    await env.DB.prepare('INSERT INTO mkvid_old_videos (video_id, set_url) VALUES (?, ?)').bind('oldR0000001', setUrl(1)).run()
+    // The row W7's retireReplacedVideo writes (migration 0009 schema; the column is video_id on both sides).
+    await env.DB.prepare(
+      `INSERT INTO mkvid_old_videos (video_id, request_id, slug, set_url, style, replaced_by, state, attempts, next_try_at, created_at, updated_at)
+       VALUES (?, 'req-1', 'dj', ?, NULL, 'newR0000001', 'pending', 0, 0, 1, 1)`,
+    )
+      .bind('oldR0000001', setUrl(1))
+      .run()
+    expect(await mkvidReplacedIds(env, log)).toEqual(new Set(['oldR0000001']))
     const [r] = await comparePlaylists(env, 'tok', { log })
     expect(r).toMatchObject({ status: 'ok', expected: 0, missing: 0 })
     expect(await removals(env)).toHaveLength(0)
     expect((await row(env, setUrl(1)))!.video_id).toBe('oldR0000001')
+    // A database without migration 0009 yet: no table, no throw, nothing skipped.
+    await env.DB.exec('DROP TABLE mkvid_old_videos')
+    expect(await mkvidReplacedIds(env, log)).toEqual(new Set())
   })
 })

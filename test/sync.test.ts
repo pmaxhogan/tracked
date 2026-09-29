@@ -1139,7 +1139,7 @@ describe('mkvid bridge inside a sync', () => {
     expect(addVideoToPlaylist).not.toHaveBeenCalled()
   })
 
-  it('stores anonymous ID rows in the list for mkvid, but leaves them out of trackCount / idedCount', async () => {
+  it('stores anonymous ID rows in the list for mkvid and counts them: in trackCount, not in idedCount', async () => {
     const env = withMkvid()
     const decoyPage = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-decoy-dcr839.html'), 'utf8')
     mockCrawl([setUrl], 'Adam Beyer')
@@ -1148,11 +1148,15 @@ describe('mkvid bridge inside a sync', () => {
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
     await syncOne(env, sub, 'tok')
     const req = (await getMkvidRequestForSet(env, setUrl))!
-    expect(req.trackCount).toBe(25)
+    // Every page row counts (the anonymous "ID - ID" rows used to be in neither count).
+    expect(req.trackCount).toBe(41)
     const list = await getMkvidTracks(env, req.id)
     expect(list.tracksTrusted).toBe(false)
     expect(list.tracks).toHaveLength(41)
-    expect(list.tracks.filter((t) => t.isId).length).toBeGreaterThanOrEqual(16)
+    const idRows = list.tracks.filter((t) => t.isId).length
+    expect(idRows).toBeGreaterThanOrEqual(16)
+    expect(req.idedCount).toBe(41 - idRows)
+    expect(await env.DB.prepare('SELECT id_rows FROM mkvid_request_tracks WHERE request_id = ?').bind(req.id).first()).toEqual({ id_rows: idRows })
   })
 
   it('does nothing without MKVID_TOKEN, or for a page with no audio source', async () => {
@@ -1172,16 +1176,38 @@ describe('mkvid bridge inside a sync', () => {
     expect((await playlistAdditions(env2))[0]!.record.message).toBeNull()
   })
 
-  it('honours MKVID_REQUIRE_FULL_TRACKLIST for a partial tracklist', async () => {
+  it('queues a partial tracklist too (the claim does the ID wait now; MKVID_REQUIRE_FULL_TRACKLIST is gone)', async () => {
     const env = { ...withMkvid(), MKVID_REQUIRE_FULL_TRACKLIST: '1' } as Env
     mockCrawl([setUrl], 'X')
     ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
-    // The fixture has anonymous "ID" rows, so it counts as partial.
+    // The fixture has anonymous "ID" rows.
     ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
     await syncOne(env, sub, 'tok')
-    expect(await getMkvidRequestForSet(env, setUrl)).toBeNull()
-    expect((await playlistAdditions(env))[0]!.record.message).toMatch(/not queued, tracklist partial/)
+    const req = (await getMkvidRequestForSet(env, setUrl))!
+    expect(req.status).toBe('pending')
+    expect(req.idedCount!).toBeLessThan(req.trackCount!)
+  })
+
+  it('a recheck of a set whose video is an mkvid upload refreshes its stored list (for a recreation)', async () => {
+    const env = withMkvid()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PL',
+      artistName: 'X',
+      discoveredTracklistUrls: [setUrl],
+      processedTracklistUrls: [setUrl],
+      tracklistVideos: { [setUrl]: stale('mkvidVid001') },
+    })
+    await enqueueMkvidRequest(env, {
+      slug: sub.slug, setUrl, artistName: 'X', setTitle: null, setDate: null,
+      source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1' }, lastCueSeconds: null, trackCount: 1, idedCount: 1,
+    })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const req = (await getMkvidRequestForSet(env, setUrl))!
+    expect((await getMkvidTracks(env, req.id)).tracks.length).toBeGreaterThan(1)
+    expect(req.trackCount).toBeGreaterThan(1)
   })
 
   it('a recheck of a set that still has no recording queues it too (idempotently)', async () => {

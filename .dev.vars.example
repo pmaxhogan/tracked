@@ -4,7 +4,10 @@ LIKED_SONGS_TOKEN=replace-with-a-different-long-random-string
 # Optional. Bearer mkvid presents on /mkvid/* (same value as TRACKED_TOKEN in mkvid's .env).
 # While unset, the sync never queues a set for mkvid.
 # MKVID_TOKEN=replace-with-another-long-random-string
-# MKVID_REQUIRE_FULL_TRACKLIST=0
+# mkvid's base URL, for deleting videos a "Delete and recreate" replaced (optional Access service token).
+# MKVID_URL=https://mkvid.example.com
+# MKVID_ACCESS_CLIENT_ID=
+# MKVID_ACCESS_CLIENT_SECRET=
 YOUTUBE_API_KEY=replace-with-google-cloud-yt-data-api-key
 # tlpool, the NAS browser pool. EVERY 1001tracklists request goes through it
 # (README "Network strategy"); while unset nothing is fetched from

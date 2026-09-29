@@ -364,7 +364,7 @@ function clearSetVideoStmt(db: D1Database, slug: string, videoId: string, setUrl
 
 /**
  * Videos W7's "delete and recreate" replaced and took out of the playlists
- * itself (table `mkvid_old_videos`, migration 0009 on that branch). Their
+ * itself (table `mkvid_old_videos`, migration 0009, keyed by `video_id`). Their
  * absence is not an owner removal. Guarded: the table may not exist yet.
  */
 export async function mkvidReplacedIds(env: Env, log?: Logger): Promise<Set<string>> {

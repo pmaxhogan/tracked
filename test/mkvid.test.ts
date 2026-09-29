@@ -19,7 +19,7 @@ import {
   claimMkvidRequest,
   completeMkvidRequest,
   countMkvidRequests,
-  enqueueMkvidRequest,
+  enqueueMkvidRequest as enqueueRaw,
   extractSetAudioSource,
   extractSetTitle,
   failMkvidRequest,
@@ -49,6 +49,14 @@ import { DEFAULT_POOL_SETTINGS } from '../src/lib/pool-settings'
 import { MkvidClaimResponse } from '../src/schemas'
 import { loadSubState, saveSubState } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
+import { storeVerifiedList } from './helpers/mkvid-lists'
+
+/** Queue a set with a verified list (no ID rows), so the claim gate lets it through. */
+async function enqueueMkvidRequest(env: Env, i: Parameters<typeof enqueueRaw>[1]) {
+  const r = await enqueueRaw(env, i)
+  if (r === 'queued') await storeVerifiedList(env, i.setUrl)
+  return r
+}
 
 vi.mock('../src/lib/youtube-playlists', async () => {
   const actual = await vi.importActual<typeof import('../src/lib/youtube-playlists')>('../src/lib/youtube-playlists')
@@ -791,7 +799,7 @@ describe('track list for mkvid', () => {
     const real = tl('tracklist-matroda.html')
     const decoy = tl('tracklist-decoy-dcr839.html')
     expect(await saveMkvidTracks(env, input.setUrl, real)).toBe('no_request')
-    await enqueueMkvidRequest(env, input)
+    await enqueueRaw(env, input)
     const id = (await getMkvidRequestForSet(env, input.setUrl))!.id
     expect(await getMkvidTracks(env, id)).toEqual({ tracks: [], tracksTrusted: false })
 
@@ -822,12 +830,15 @@ describe('track list for mkvid', () => {
     expect((await listSettledMkvidRequests(env))[0]).not.toHaveProperty('tracks')
   })
 
-  it('a request with no stored list is claimed with an empty, untrusted one', async () => {
+  it('a request with no stored list, or an unverified one, is never claimed and stays pending untouched', async () => {
     const env = makeEnv()
-    await enqueueMkvidRequest(env, input)
-    const claimed = (await claimMkvidRequest(env, log))!
-    expect(claimed).toMatchObject({ tracks: [], tracksTrusted: false })
-    expect(MkvidClaimResponse.safeParse({ request: claimed }).success).toBe(true)
+    await enqueueRaw(env, input)
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    await saveMkvidTracks(env, input.setUrl, tl('tracklist-decoy-dcr839.html'))
+    expect((await getMkvidTracks(env, (await getMkvidRequestForSet(env, input.setUrl))!.id)).tracksTrusted).toBe(false)
+    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await getMkvidRequestForSet(env, input.setUrl)).toMatchObject({ status: 'pending', attempts: 0, notBefore: null, error: null })
+    expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'empty' })
     expect(MkvidClaimResponse.safeParse({ request: null }).success).toBe(true)
   })
 })

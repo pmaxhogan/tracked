@@ -9,8 +9,15 @@
  *                         `tracks` [{ cueSeconds, artist, title, artworkUrl, isId, layered }] + `tracksTrusted`
  *                         (names only from a page that passed the decoy check; [] + false when none is stored)
  *   POST /mkvid/job       { id, jobId }                       attach mkvid's job id (informational)
- *   POST /mkvid/complete  { id, videoId, videoUrl?, privacy?, jobId? }
+ *                         Only requests whose list is verified (and whose 7-day ID wait is over or skipped)
+ *                         are handed out, so `tracksTrusted` is true and `tracks` non-empty on every claim.
+ *   POST /mkvid/complete  { id, videoId, videoUrl?, privacy?, jobId?, style? }
+ *                         `style` = the visual style the video was made with (static | waves | scene);
+ *                         absent = unknown = old style. A recreation's answer names `replacedVideoId`,
+ *                         which the Worker then asks mkvid to delete (lib/mkvid-recreate.ts).
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
+ *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
+ *                         no attempt used.
  *   GET  /mkvid/health    → { ok, counts }                    lets mkvid verify its token/config
  *
  * See lib/mkvid.ts for the lifecycle these drive.
@@ -23,6 +30,7 @@ import { mkvidAuth } from '../middleware/auth'
 import { MkvidClaimBody } from '../schemas'
 import { getAccessToken, GoogleOAuthRefreshFailed } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
+import { deleteOldVideo } from '../lib/mkvid-recreate'
 import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, failMkvidRequest, mkvidAccountUsage, recordMkvidPoll } from '../lib/mkvid'
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/
@@ -36,6 +44,7 @@ const CompleteBody = z.object({
   videoUrl: z.string().url().max(300).optional().nullable(),
   privacy: z.enum(['private', 'unlisted', 'public']).optional().nullable(),
   jobId: z.string().min(1).max(100).optional().nullable(),
+  style: z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/).optional().nullable(),
 })
 const FailBody = z.object({
   id: z.string().uuid(),
@@ -106,6 +115,16 @@ mkvidApp.post('/complete', async (c) => {
     const r = await completeMkvidRequest(c.env, b, accessToken, log)
     if (r.status === 'not_found') return c.json({ error: 'not_found' }, 404)
     if (r.status === 'invalid_state') return c.json({ error: 'invalid_state', current: r.current }, 409)
+    // A recreation: ask mkvid to delete the old video once this answer is out
+    // (the cron retries it if this attempt fails).
+    if (r.status === 'done' && r.replacedVideoId) {
+      const job = deleteOldVideo(c.env, r.replacedVideoId, log).catch((e) => log.warn('mkvid.old_video_delete_threw', errorFields(e)))
+      try {
+        c.executionCtx.waitUntil(job)
+      } catch {
+        await job // no execution context (tests)
+      }
+    }
     return c.json(r)
   } catch (e) {
     log.error('mkvid.complete_threw', { id: b.id, videoId: b.videoId, ...errorFields(e) })
