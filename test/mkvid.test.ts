@@ -37,7 +37,14 @@ import {
   retryMkvidRequest,
   supersedeMkvidRequestForSet,
   findMkvidUploadByTitle,
+  getMkvidTracks,
+  mkvidTracksTrusted,
+  saveMkvidTracks,
+  toMkvidTracks,
+  MKVID_MAX_TRACKS,
 } from '../src/lib/mkvid'
+import { parseTracklist } from '../src/lib/tracklists1001'
+import { MkvidClaimResponse } from '../src/schemas'
 import { loadSubState, saveSubState } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
 
@@ -247,14 +254,18 @@ describe('queue lifecycle', () => {
     expect(await dailyClaimsUsed(env)).toBe(1)
   })
 
-  it('hands out at most MKVID_DAILY_CLAIM_CAP requests per quota day on the primary account (default 6)', async () => {
+  it('hands out at most MKVID_DAILY_CLAIM_CAP requests per quota day on the primary account (default 24)', async () => {
     const env = makeEnv()
-    for (const n of [1, 2, 3, 4, 5, 6, 7]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
-    for (let i = 1; i <= 6; i++) expect((await claimMkvidRequest(env, log))!.setUrl).toBe(`https://x/tracklist/${i}`)
+    const n = 25
+    for (let i = 1; i <= n; i++) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${i}`, setDate: null })
+    for (let i = 1; i <= 24; i++) expect(await claimMkvidRequest(env, log)).not.toBeNull()
     expect(await claimMkvidRequest(env, log)).toBeNull()
-    expect(await countMkvidRequests(env)).toMatchObject({ pending: 1, claimed: 6 })
-    expect(await dailyClaimsUsed(env)).toBe(6)
+    expect(await countMkvidRequests(env)).toMatchObject({ pending: 1, claimed: 24 })
+    expect(await dailyClaimsUsed(env)).toBe(24)
     expect(await dailyClaimsUsed(env, 'shared')).toBe(0)
+    // With the shared account offered too, the defaults add up to 30 a day.
+    expect((await claimMkvidRequest(env, log, ['primary', 'shared']))!).toMatchObject({ account: 'shared' })
+    expect((await mkvidAccountUsage(env)).reduce((t, u) => t + u.cap, 0)).toBe(30)
 
     const lowered = makeEnv({ MKVID_DAILY_CLAIM_CAP: '2' })
     for (const n of [1, 2, 3]) await enqueueMkvidRequest(lowered, { ...input, setUrl: `https://x/tracklist/${n}` })
@@ -297,16 +308,18 @@ describe('queue lifecycle', () => {
   })
 
   it('a blank cap is the default, not a pause — only a literal 0 pauses', () => {
-    expect(dailyClaimCap(makeEnv())).toBe(6)
-    for (const blank of ['', ' ', '\r\n']) expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: blank }))).toBe(6)
-    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: 'two' }))).toBe(6)
-    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: '-1' }))).toBe(6)
+    expect(dailyClaimCap(makeEnv())).toBe(24)
+    for (const blank of ['', ' ', '\r\n']) expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: blank }))).toBe(24)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: 'two' }))).toBe(24)
+    expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: '-1' }))).toBe(24)
     expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: '0' }))).toBe(0)
     expect(dailyClaimCap(makeEnv({ MKVID_DAILY_CLAIM_CAP: ' 5\n' }))).toBe(5)
-    // The shared (sync's) project is opt-in.
-    expect(dailyClaimCap(makeEnv(), 'shared')).toBe(0)
+    // The shared (sync's) project takes the spill-over: 6 by default, 30 a day in total.
+    expect(dailyClaimCap(makeEnv(), 'shared')).toBe(6)
+    expect(dailyClaimCap(makeEnv({ MKVID_SHARED_DAILY_CLAIM_CAP: '' }), 'shared')).toBe(6)
+    expect(dailyClaimCap(makeEnv({ MKVID_SHARED_DAILY_CLAIM_CAP: '0' }), 'shared')).toBe(0)
     expect(dailyClaimCap(makeEnv({ MKVID_SHARED_DAILY_CLAIM_CAP: '3' }), 'shared')).toBe(3)
-    expect(dailyClaimCap(makeEnv({ MKVID_SHARED_DAILY_CLAIM_CAP: '3' }))).toBe(6)
+    expect(dailyClaimCap(makeEnv({ MKVID_SHARED_DAILY_CLAIM_CAP: '3' }))).toBe(24)
   })
 
   it('quotaDayEnd is the next Pacific midnight, across a DST change too', () => {
@@ -318,7 +331,7 @@ describe('queue lifecycle', () => {
   })
 
   it('remembers what the last poll got, so the panel can tell a capped queue from a silent mkvid', async () => {
-    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '1' })
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '1', MKVID_SHARED_DAILY_CLAIM_CAP: '0' })
     expect(await getMkvidLastPoll(env)).toBeNull()
     await claimMkvidRequest(env, log)
     expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'empty' })
@@ -667,5 +680,143 @@ describe('panel list: filters and paging', () => {
       { slug: 'lillypalmer', label: 'Lilly Palmer', count: 2 },
       { slug: 'kx5', label: 'kx5', count: 1 },
     ])
+  })
+})
+
+// The claim hands mkvid the track list so it can draw per-track titles and
+// artwork. 1001tracklists serves decoy pages (real cues and art, randomized
+// names) to our accounts since ~2026-09-22, so names are only passed on from a
+// page the detector had enough evidence to clear.
+describe('track list for mkvid', () => {
+  const tl = (name: string) => parseTracklist(`https://www.1001tracklists.com/tracklist/x/${name}`, fixture(name))
+
+  it('trusts a page only when enough rows were checked and none contradicts itself', () => {
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 0, suspected: false })).toBe(true)
+    expect(mkvidTracksTrusted({ named: 3, mismatched: 0, suspected: false })).toBe(true)
+    // Too few rows to judge, or any contradiction at all, or a suspected decoy: not trusted.
+    expect(mkvidTracksTrusted({ named: 2, mismatched: 0, suspected: false })).toBe(false)
+    expect(mkvidTracksTrusted({ named: 0, mismatched: 0, suspected: false })).toBe(false)
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 1, suspected: false })).toBe(false)
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 24, suspected: true })).toBe(false)
+    expect(mkvidTracksTrusted(tl('tracklist-matroda.html').decoy)).toBe(true)
+    expect(mkvidTracksTrusted(tl('tracklist-decoy-dcr839.html').decoy)).toBe(false)
+  })
+
+  it('a trusted page keeps names, cues, artwork and the ID flag', () => {
+    const parsed = tl('tracklist-matroda.html')
+    const out = toMkvidTracks(parsed.tracks, true)
+    expect(out).toHaveLength(parsed.tracks.length)
+    expect(Object.keys(out[0]!).sort()).toEqual(['artist', 'artworkUrl', 'cueSeconds', 'isId', 'layered', 'title'])
+    const named = out.filter((t) => !t.isId)
+    expect(named.length).toBeGreaterThan(0)
+    for (const t of named) expect(t.title).toBeTruthy()
+    expect(out.some((t) => t.cueSeconds !== null)).toBe(true)
+    expect(out.some((t) => t.artworkUrl?.startsWith('https://'))).toBe(true)
+    expect(out.map((t) => t.cueSeconds)).toEqual(parsed.tracks.map((t) => (t.isMashupLinked ? t.ownStartSeconds : t.startSeconds)))
+  })
+
+  it('an anonymous "ID" row has no title, and an untrusted page has no names at all', () => {
+    expect(toMkvidTracks([{ startTime: '', startSeconds: 60, artist: 'ID', title: 'ID', trackId: null, trackUrl: null, artworkUrl: null, isUnidentified: true, idStatus: null, isMashupLinked: false, ownStartSeconds: 60 }], true))
+      .toEqual([{ cueSeconds: 60, artist: null, title: null, artworkUrl: null, isId: true, layered: false }])
+    expect(toMkvidTracks([{ startTime: '', startSeconds: null, artist: 'Cave Studio', title: 'ID', trackId: null, trackUrl: null, artworkUrl: null, isUnidentified: true, idStatus: null, isMashupLinked: false, ownStartSeconds: null }], true))
+      .toEqual([{ cueSeconds: null, artist: 'Cave Studio', title: null, artworkUrl: null, isId: true, layered: false }])
+    const decoy = tl('tracklist-decoy-dcr839.html')
+    const out = toMkvidTracks(decoy.tracks, false)
+    expect(out).toHaveLength(decoy.tracks.length)
+    for (const t of out) expect([t.artist, t.title]).toEqual([null, null])
+    // Cues and artwork stay: those are real on a decoy page.
+    expect(out.map((t) => t.cueSeconds)).toEqual(decoy.tracks.map((t) => (t.isMashupLinked ? t.ownStartSeconds : t.startSeconds)))
+    expect(out.map((t) => t.layered)).toEqual(decoy.tracks.map((t) => t.isMashupLinked))
+    expect(out.map((t) => t.artworkUrl)).toEqual(decoy.tracks.map((t) => t.artworkUrl))
+  })
+
+  it("marks 'w/' rows layered, in page order, with only their own cue", () => {
+    const max = tl('tracklist-maxstyler.html')
+    const out = toMkvidTracks(max.tracks, true)
+    const i = out.findIndex((t) => t.title === "Let Em' Know")
+    // On top of Mokba, which carries the cue; no time of its own on the page.
+    expect(out[i - 1]).toMatchObject({ title: 'Mokba', cueSeconds: 2325, layered: false })
+    expect(out[i]).toMatchObject({ artist: 'Max Styler', cueSeconds: null, layered: true })
+    expect(out.filter((t) => t.layered)).toHaveLength(1)
+    expect(out.map((t) => t.title)).toEqual(max.tracks.map((t) => (t.title === 'ID' ? null : t.title)))
+    // Matroda's w/ row prints its own time (1:17:30), a minute after its base (1:16:30).
+    const mat = toMkvidTracks(tl('tracklist-matroda.html').tracks, true)
+    const j = mat.findIndex((t) => t.title === 'Calypso')
+    expect(mat[j - 1]).toMatchObject({ cueSeconds: 4590, layered: false })
+    expect(mat[j]).toMatchObject({ cueSeconds: 4650, layered: true })
+    // A page without w/ rows has none.
+    expect(toMkvidTracks(tl('tracklist-habstrakt.html').tracks, true).some((t) => t.layered)).toBe(false)
+  })
+
+  it('never sends the first row layered', () => {
+    const row = { startTime: '', startSeconds: 5, artist: 'A', title: 'B', trackId: null, trackUrl: null, artworkUrl: null, isUnidentified: false, idStatus: null, isMashupLinked: true, ownStartSeconds: null }
+    expect(toMkvidTracks([row, row], true).map((t) => [t.layered, t.cueSeconds])).toEqual([[false, 5], [true, null]])
+  })
+
+  it('an untrusted list keeps the layering (it comes from row classes, not names)', () => {
+    const decoy = tl('tracklist-decoy-dcr839.html')
+    expect(toMkvidTracks(decoy.tracks, false).filter((t) => t.layered)).toHaveLength(3)
+  })
+
+  it("sends anonymous 'ID - ID' rows in page order, and layers a w/ row on its true base", () => {
+    const d = tl('tracklist-decoy-dcr839.html')
+    const out = toMkvidTracks(d.rows, false)
+    expect(out).toHaveLength(41)
+    expect(out[4]).toEqual({ cueSeconds: 866, artist: null, title: null, artworkUrl: null, isId: true, layered: false })
+    expect(out[14]).toEqual({ cueSeconds: null, artist: null, title: null, artworkUrl: null, isId: true, layered: true })
+    const orphan = d.rows.findIndex((r) => r.trackId === '32060')
+    expect(out[orphan - 1]).toMatchObject({ cueSeconds: 5883, isId: true, layered: false })
+    expect(out[orphan]).toMatchObject({ cueSeconds: null, isId: false, layered: true })
+    expect(out.filter((t) => t.layered)).toHaveLength(6)
+    // Cues and artwork of the other rows survive the untrusted list.
+    expect(out.filter((t) => t.cueSeconds !== null).length).toBeGreaterThan(30)
+    expect(out.some((t) => t.artworkUrl?.startsWith('https://'))).toBe(true)
+    // Even on a trusted list an anonymous row has no name and no art.
+    const anon = { ...d.rows[4]!, artist: 'X', artworkUrl: 'https://a/b.jpg' }
+    expect(toMkvidTracks([anon], true)).toEqual([{ cueSeconds: 866, artist: null, title: null, artworkUrl: null, isId: true, layered: false }])
+  })
+
+  it('caps a huge list', () => {
+    const row = { startTime: '', startSeconds: 1, artist: 'A', title: 'B', trackId: null, trackUrl: null, artworkUrl: null, isUnidentified: false, idStatus: null, isMashupLinked: false, ownStartSeconds: 1 }
+    expect(toMkvidTracks(Array.from({ length: MKVID_MAX_TRACKS + 50 }, () => row), true)).toHaveLength(MKVID_MAX_TRACKS)
+  })
+
+  it('stores the list per request, never lets an untrusted list replace a trusted one, and the claim carries it', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
+    const real = tl('tracklist-matroda.html')
+    const decoy = tl('tracklist-decoy-dcr839.html')
+    expect(await saveMkvidTracks(env, input.setUrl, real)).toBe('no_request')
+    await enqueueMkvidRequest(env, input)
+    const id = (await getMkvidRequestForSet(env, input.setUrl))!.id
+    expect(await getMkvidTracks(env, id)).toEqual({ tracks: [], tracksTrusted: false })
+
+    // Untrusted first (a decoy page), then a real page upgrades it...
+    expect(await saveMkvidTracks(env, input.setUrl, decoy)).toBe('saved')
+    expect(await getMkvidTracks(env, id)).toEqual({ tracks: toMkvidTracks(decoy.rows, false), tracksTrusted: false })
+    expect((await getMkvidTracks(env, id)).tracks).toHaveLength(41) // anonymous rows included
+    expect(await saveMkvidTracks(env, input.setUrl, real)).toBe('saved')
+    const stored = await getMkvidTracks(env, id)
+    expect(stored).toEqual({ tracks: toMkvidTracks(real.rows, true), tracksTrusted: true })
+    // ...and a later decoy fetch does not downgrade it.
+    expect(await saveMkvidTracks(env, input.setUrl, decoy)).toBe('kept')
+    expect(await getMkvidTracks(env, id)).toEqual(stored)
+    // A zero-row parse (captcha shell) stores nothing.
+    expect(await saveMkvidTracks(env, input.setUrl, { rows: [], decoy: { named: 0, mismatched: 0, suspected: false } })).toBe('empty')
+
+    const claimed = (await claimMkvidRequest(env, log))!
+    expect(claimed).toMatchObject({ id, tracksTrusted: true })
+    expect(claimed.tracks).toEqual(stored.tracks)
+    expect(MkvidClaimResponse.safeParse({ request: claimed }).success).toBe(true)
+    // The panel's rows stay lean: no track list in them.
+    expect((await listSettledMkvidRequests(env))[0]).not.toHaveProperty('tracks')
+  })
+
+  it('a request with no stored list is claimed with an empty, untrusted one', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const claimed = (await claimMkvidRequest(env, log))!
+    expect(claimed).toMatchObject({ tracks: [], tracksTrusted: false })
+    expect(MkvidClaimResponse.safeParse({ request: claimed }).success).toBe(true)
+    expect(MkvidClaimResponse.safeParse({ request: null }).success).toBe(true)
   })
 })

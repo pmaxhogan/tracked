@@ -4,7 +4,12 @@ import type { Env } from '../src/types'
 import type { StoredTokens } from '../src/lib/google-oauth'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
-import { enqueueMkvidRequest, getMkvidRequest, getMkvidRequestForSet } from '../src/lib/mkvid'
+import { enqueueMkvidRequest, getMkvidRequest, getMkvidRequestForSet, saveMkvidTracks } from '../src/lib/mkvid'
+import { MkvidClaimResponse } from '../src/schemas'
+import { parseTracklist } from '../src/lib/tracklists1001'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { saveSubState } from '../src/lib/sync-store'
 
 vi.mock('../src/lib/youtube-playlists', async () => {
@@ -99,10 +104,30 @@ describe('/mkvid routes', () => {
     expect(await health.json()).toEqual({
       ok: true,
       counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0, banned: 0 },
-      accounts: [{ account: 'primary', label: 'mkvid-uploads', used: 1, cap: 6 }, { account: 'shared', label: 'tracked-youtube', used: 0, cap: 0 }],
+      accounts: [{ account: 'primary', label: 'mkvid-uploads', used: 1, cap: 24 }, { account: 'shared', label: 'tracked-youtube', used: 0, cap: 6 }],
       dailyClaims: 1,
-      dailyClaimCap: 6,
+      dailyClaimCap: 30,
     })
+  })
+
+  it('the claim carries the track list and whether its names can be trusted', async () => {
+    const env = makeEnv()
+    const html = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-matroda.html'), 'utf8')
+    await enqueueMkvidRequest(env, input)
+    await saveMkvidTracks(env, input.setUrl, parseTracklist(input.setUrl, html))
+    const body = await (await post(env, '/mkvid/claim', {})).json()
+    const parsed = MkvidClaimResponse.parse(body)
+    expect(parsed.request!.tracksTrusted).toBe(true)
+    expect(parsed.request!.tracks.length).toBeGreaterThan(5)
+    expect(parsed.request!.tracks[0]).toMatchObject({ cueSeconds: 0, artist: expect.any(String), title: expect.any(String), isId: false, layered: false })
+    // Matroda's 'w/' row (Calypso over Odd Mob) comes through layered with its own printed cue.
+    expect(parsed.request!.tracks.filter((t) => t.layered)).toEqual([expect.objectContaining({ title: 'Calypso', cueSeconds: 4650 })])
+    expect(parsed.request!.tracks.some((t) => t.artworkUrl)).toBe(true)
+    // Documented in the OpenAPI spec (which itself sits behind the Tasker token).
+    const spec = (await (await app.request('http://x/openapi.json', { headers: { Authorization: 'Bearer tasker' } }, env)).json()) as { paths: Record<string, unknown>; components: { schemas: Record<string, unknown> } }
+    expect(spec.paths['/mkvid/claim']).toBeDefined()
+    expect(spec.components.schemas).toHaveProperty('MkvidTrack')
+    expect(spec.components.schemas).toHaveProperty('MkvidClaimResponse')
   })
 
   it('validates bodies and reports unknown / finished requests', async () => {
@@ -115,7 +140,7 @@ describe('/mkvid routes', () => {
   })
 
   it('the panel API explains the queue: cap, usage, reset time, last poll, waiting line', async () => {
-    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1', MKVID_DAILY_CLAIM_CAP: '0' })
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1', MKVID_DAILY_CLAIM_CAP: '0', MKVID_SHARED_DAILY_CLAIM_CAP: '0' })
     await enqueueMkvidRequest(env, input)
     expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
     const r = await app.request('http://x/subscriptions/api/mkvid', {}, env)

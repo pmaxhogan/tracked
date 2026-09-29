@@ -33,8 +33,9 @@ export type SubState = {
   /**
    * Union over time of every tracklist URL we've ever seen on this DJ's
    * paginated index. The DJ index uses JS infinite-scroll, so a single
-   * fetch only sees ~15 newest sets; we walk pageN.html on first sync to
-   * build this and merge in newly-appearing URLs on every subsequent run.
+   * fetch only sees the 15 newest sets; `crawlDjIndex` walks the scroll
+   * endpoint down to the first known set on each run, and the daily cron's
+   * backfill (cursor in SUBS KV, `loadDjBackfill`) reaches older history.
    */
   discoveredTracklistUrls?: string[]
   processedTracklistUrls: string[]
@@ -441,6 +442,34 @@ export async function requeueTracklists(env: Env, slug: string, urls: string[]):
     hit.map((url) => db.prepare('UPDATE tracklists SET abandoned = 0, failure_count = 0 WHERE slug = ? AND url = ?').bind(slug, url)),
   )
   return hit
+}
+
+// ─── DJ-index backfill cursor ───────────────────────────────────────────────
+
+/**
+ * How far the daily cron has walked into one DJ's 1001tracklists history
+ * (see `crawlDjIndex`'s backfill). Kept in SUBS KV rather than D1 so it needs
+ * no migration; losing it only restarts the walk from page 1's tail (the
+ * rows it re-sees are already known, so nothing is fetched twice but the
+ * cheap scroll steps). Absent = never started.
+ */
+export type DjBackfillState = {
+  /** Resume point (`pos` rows shown, last row's data-id); null once done. */
+  cursor: { pos: number; id: string } | null
+  /** The end of the DJ's list was reached: every set on the index is known. */
+  done: boolean
+  /** Unix seconds of the last backfill step. */
+  at: number
+}
+
+const BACKFILL_PREFIX = 'djbackfill:'
+
+export async function loadDjBackfill(env: Env, slug: string): Promise<DjBackfillState | null> {
+  return (await env.SUBS.get(`${BACKFILL_PREFIX}${slug}`, 'json')) as DjBackfillState | null
+}
+
+export async function saveDjBackfill(env: Env, slug: string, state: DjBackfillState): Promise<void> {
+  await env.SUBS.put(`${BACKFILL_PREFIX}${slug}`, JSON.stringify(state))
 }
 
 /** One tracklist row, or null. */

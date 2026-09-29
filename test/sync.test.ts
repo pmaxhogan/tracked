@@ -4,10 +4,11 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fakeD1 } from './helpers/fake-d1'
 import type { Env } from '../src/types'
-import { enqueueMkvidRequest, getMkvidRequestForSet } from '../src/lib/mkvid'
+import { enqueueMkvidRequest, getMkvidRequestForSet, getMkvidTracks } from '../src/lib/mkvid'
 import {
   backfillCombined,
   collectCombinedSources,
+  DJ_BACKFILL_STEPS_PER_DAY,
   dueRechecks,
   invalidateVideoCache,
   loadSubState,
@@ -1163,10 +1164,34 @@ describe('mkvid bridge inside a sync', () => {
     })
     expect(req!.trackCount).toBeGreaterThan(10)
     expect(req!.lastCueSeconds).toBeGreaterThan(0)
+    // The track list is stored for the claim, names included: this page passes the decoy check.
+    const list = await getMkvidTracks(env, req!.id)
+    expect(list.tracksTrusted).toBe(true)
+    expect(list.tracks).toHaveLength(req!.trackCount!)
+    expect(list.tracks.some((t) => t.artist && t.title)).toBe(true)
+    // The one 'w/' row on this page (Let Em' Know over Mokba) is stored layered, without a cue of its own,
+    // and counted in trackCount like any other row.
+    expect(list.tracks.filter((t) => t.layered)).toEqual([expect.objectContaining({ title: "Let Em' Know", cueSeconds: null })])
     const rows = await playlistAdditions(env)
     expect(rows[0]!.record).toMatchObject({ status: 'no_youtube', message: 'queued for mkvid (soundcloud)' })
     // Nothing went to YouTube.
     expect(addVideoToPlaylist).not.toHaveBeenCalled()
+  })
+
+  it('stores anonymous ID rows in the list for mkvid, but leaves them out of trackCount / idedCount', async () => {
+    const env = withMkvid()
+    const decoyPage = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-decoy-dcr839.html'), 'utf8')
+    mockCrawl([setUrl], 'Adam Beyer')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Adam Beyer (1001tklists)' })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: decoyPage, via: 'home-proxy', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    await syncOne(env, sub, 'tok')
+    const req = (await getMkvidRequestForSet(env, setUrl))!
+    expect(req.trackCount).toBe(25)
+    const list = await getMkvidTracks(env, req.id)
+    expect(list.tracksTrusted).toBe(false)
+    expect(list.tracks).toHaveLength(41)
+    expect(list.tracks.filter((t) => t.isId).length).toBeGreaterThanOrEqual(16)
   })
 
   it('does nothing without MKVID_TOKEN, or for a page with no audio source', async () => {
@@ -1212,10 +1237,14 @@ describe('mkvid bridge inside a sync', () => {
 
     await syncOne(env, sub, 'tok', { skipDjCrawl: true })
     expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe('pending')
-    // A later recheck leaves the existing request alone.
+    // A later recheck leaves the existing request alone…
+    const req = (await getMkvidRequestForSet(env, setUrl))!
+    await env.DB.prepare('DELETE FROM mkvid_request_tracks').run()
     await saveSubState(env, sub.slug, { ...(await loadSubState(env, sub.slug))!, tracklistVideos: { [setUrl]: stale(null) } })
     await syncOne(env, sub, 'tok', { skipDjCrawl: true })
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM mkvid_requests').first<{ n: number }>()).toEqual({ n: 1 })
+    // …but fills in its track list, which is how requests queued before lists were stored get one.
+    expect((await getMkvidTracks(env, req.id)).tracksTrusted).toBe(true)
     // No audit row for a recheck that changed nothing.
     expect(await playlistAdditions(env)).toEqual([])
   })
@@ -1673,5 +1702,54 @@ describe('dead YouTube videos settle on the first strike', () => {
     const state = (await loadSubState(env, sub.slug))!
     expect(state.processedTracklistUrls).toEqual([])
     expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 1 })
+  })
+})
+
+describe('DJ-index backfill wiring', () => {
+  const crawl = crawlDjIndex as ReturnType<typeof vi.fn>
+
+  it('only the daily cron asks for a backfill; it resumes from the stored cursor and saves the new one', async () => {
+    const env = makeEnv()
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'X (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+
+    // A button press: head walk only, with the known sets passed in.
+    crawl.mockResolvedValue({ artistName: 'X', tracklistUrls: ['https://x/tracklist/a'], pagesWalked: 1, stopReason: 'known', tail: { pos: 15, id: 'a' } })
+    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
+    expect(crawl.mock.calls[0]![1].backfill).toBeUndefined()
+    expect(crawl.mock.calls[0]![1].maxPages).toBe(4)
+    expect(await env.SUBS.get('djbackfill:lillypalmer')).toBeNull()
+
+    // First daily run: no cursor yet → backfill starts where the head walk stopped (from: null).
+    crawl.mockReset()
+    crawl.mockResolvedValue({
+      artistName: 'X',
+      tracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
+      pagesWalked: 1,
+      stopReason: 'known',
+      tail: { pos: 15, id: 'a' },
+      backfill: { steps: 1, added: 1, cursor: { pos: 25, id: 'b' }, done: false },
+    })
+    await syncOne(env, sub, 'tok', { trigger: 'cron.daily' })
+    expect(crawl.mock.calls[0]![1].backfill).toEqual({ from: null, maxSteps: DJ_BACKFILL_STEPS_PER_DAY })
+    expect([...crawl.mock.calls[0]![1].knownUrls]).toEqual(['https://x/tracklist/a'])
+    expect(await env.SUBS.get('djbackfill:lillypalmer', 'json')).toMatchObject({ cursor: { pos: 25, id: 'b' }, done: false })
+    expect((await loadSubState(env, sub.slug))!.discoveredTracklistUrls).toContain('https://x/tracklist/b')
+
+    // Next daily run resumes from it; once done, later runs stop asking.
+    crawl.mockReset()
+    crawl.mockResolvedValue({
+      artistName: 'X',
+      tracklistUrls: ['https://x/tracklist/a'],
+      pagesWalked: 1,
+      stopReason: 'known',
+      tail: { pos: 15, id: 'a' },
+      backfill: { steps: 1, added: 0, cursor: null, done: true },
+    })
+    await syncOne(env, sub, 'tok', { trigger: 'cron.daily' })
+    expect(crawl.mock.calls[0]![1].backfill).toEqual({ from: { pos: 25, id: 'b' }, maxSteps: DJ_BACKFILL_STEPS_PER_DAY })
+    crawl.mockClear()
+    await syncOne(env, sub, 'tok', { trigger: 'cron.daily' })
+    expect(crawl.mock.calls[0]![1].backfill).toBeUndefined()
   })
 })

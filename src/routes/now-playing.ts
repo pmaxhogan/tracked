@@ -2,7 +2,7 @@ import { createRoute, type RouteHandler } from '@hono/zod-openapi'
 import { NowPlayingRequest, NowPlayingResponse, ErrorResponse } from '../schemas'
 import type { Env, ParsedTrack, ResponseTrack, Status } from '../types'
 import { resolveVideo, extractVideoId } from '../lib/youtube'
-import { searchByYouTubeUrl, searchByTitle, DecoyTracklistError } from '../lib/tracklists1001'
+import { searchByYouTubeUrl, searchByTitle, DecoyTracklistError, keepRows } from '../lib/tracklists1001'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
 import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { lookupAppleLink } from '../lib/itunes'
@@ -92,6 +92,11 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       currentSkewSeconds: number | null
       trackCount: number | null
       unidentifiedCount: number | null
+      // Cued anonymous "ID - ID" rows selected from alongside the named tracks,
+      // and whether the current group is one — so an answer that came from an
+      // anonymous row reads apart from a named "ID" row in the audit log.
+      anonymousRowCount: number
+      currentFromAnonymousRow: boolean
       // trackUrl/artworkUrl since 2026-09-26: they are what stays real when
       // 1001tracklists serves decoy names, so a "wrong name" report can be
       // checked against the row's id and art instead of only its name.
@@ -312,10 +317,19 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
 
   // Phase 3 — scrape the tracklist
   let parsedTracks: ParsedTrack[]
+  // What the current track is picked from: the named tracks plus every
+  // anonymous "ID - ID" row with a cue of its own, which ends the slot of the
+  // track before it. An anonymous row without a cue cannot bound anything and
+  // is left out, as all of them were before (and as they are on cache entries
+  // written before `rows` existed).
+  let selectable: Array<ParsedTrack & { anonymous?: boolean }>
   let setAppleLink: string | null = null
   try {
     const scraped = await resolveTracklistPage(env, tracklistUrl, log)
     parsedTracks = scraped.tracks
+    selectable = scraped.rows
+      ? keepRows(scraped.rows, (r) => !r.anonymous || (!r.isMashupLinked && r.startSeconds !== null))
+      : parsedTracks
     setAppleLink = scraped.setAppleLink
   } catch (e) {
     if (e instanceof IPBlockedError) {
@@ -342,7 +356,8 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
 
   // Phase 4 — pick current tracks (videoDurationSeconds caps the last group's
   // duration when present; harmless to omit otherwise)
-  const sel = selectCurrent(parsedTracks, body.currentSeconds, body.videoDurationSeconds ?? null)
+  const sel = selectCurrent(selectable, body.currentSeconds, body.videoDurationSeconds ?? null)
+  const anonymousRowCount = selectable.filter((t) => t.anonymous).length
   const cued = parsedTracks.map((t) => t.startSeconds).filter((s): s is number => s !== null)
   const currentStartSeconds = sel.picked.find((t) => t.isCurrent)?.startSeconds ?? null
   audit.select = {
@@ -350,6 +365,8 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     currentSkewSeconds: currentStartSeconds !== null ? body.currentSeconds - currentStartSeconds : null,
     trackCount: parsedTracks.length,
     unidentifiedCount: parsedTracks.filter((t) => t.isUnidentified).length,
+    anonymousRowCount,
+    currentFromAnonymousRow: sel.currentAnonymous,
     currentTracks: sel.picked
       .filter((t) => t.isCurrent)
       .map((t) => ({ artist: t.artist, title: t.title, startTime: t.startTime, startSeconds: t.startSeconds, trackUrl: t.trackUrl, artworkUrl: t.artworkUrl })),
@@ -367,6 +384,8 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     pickedCount: sel.picked.length,
     currentCount: sel.picked.filter((t) => t.isCurrent).length,
     anyUnidentified: sel.anyUnidentified,
+    anonymousRowCount,
+    currentFromAnonymousRow: sel.currentAnonymous,
     pickedTitles: sel.picked.map((t) => `${t.startTime} ${t.artist} - ${t.title} (${t.durationTime || '?'})${t.isCurrent ? ' *' : ''}`),
   })
   if (sel.picked.length === 0) {
@@ -377,7 +396,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   // Phase 5 — enrich with deep links
   const enriched = await Promise.all(
     sel.picked.map(async (t) => {
-      const parsed = parsedTracks.find((p) => p.title === t.title && p.startSeconds === t.startSeconds)
+      const parsed = selectable.find((p) => p.title === t.title && p.startSeconds === t.startSeconds)
       const links = await resolveLinks(env, parsed, t, log)
       return { ...t, ...links } satisfies ResponseTrack
     }),

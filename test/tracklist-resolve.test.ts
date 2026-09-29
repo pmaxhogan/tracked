@@ -46,6 +46,16 @@ describe('resolveTracklistPage', () => {
     expect(await env.CACHE.get(`tl:v${TRACKLIST_CV.tracklist}:1pqq0hst`)).not.toBeNull()
   })
 
+  it('caches every page row too (anonymous "ID - ID" rows included), for /now-playing; a cached entry from before rows existed still serves', async () => {
+    const env = makeEnv()
+    proxyServes(fx('tracklist-matroda.html'))
+    const r = await resolveTracklistPage(env, TL, makeLogger({ task: 'test' }))
+    expect(r.rows).toHaveLength(r.tracks.length) // no anonymous rows on this page
+    expect(TRACKLIST_CV.tracklist).toBe(4)
+    const cached = JSON.parse((await env.CACHE.get(`tl:v4:1pqq0hst`))!)
+    expect(cached.rows).toHaveLength(r.tracks.length)
+  })
+
   it('refuses a decoy page — throws DecoyTracklistError and caches nothing', async () => {
     const env = makeEnv()
     proxyServes(fx('tracklist-decoy-dcr839.html'))

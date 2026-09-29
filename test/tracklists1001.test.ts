@@ -726,3 +726,112 @@ describe('decoy detection (looksLikeDecoy)', () => {
     expect(looksLikeDecoy({ named: 0, mismatched: 0 })).toBe(false)
   })
 })
+
+// 'w/' rows: a track played on top of the row before it (mashup, acapella over
+// an instrumental, two tracks together). On the page the row carries the class
+// `con`, repeats its parent's trRow number, shows "w/" (title "played together
+// with previous track") where the number would be, and usually has no cue of
+// its own: 1001tl files it as ids[1+] of its parent's cueValuesEntry.
+describe("parseTracklist: 'w/' (layered) rows", () => {
+  const url = 'https://www.1001tracklists.com/tracklist/x/y.html'
+  const p = (name: string) => parseTracklist(url, fx(name))
+
+  it("gives a 'w/' row without a cue of its own ownStartSeconds null, leaving the inherited startSeconds alone", () => {
+    const t = p('tracklist-maxstyler.html').tracks
+    const i = t.findIndex((r) => r.title === "Let Em' Know")
+    expect(t[i]!.isMashupLinked).toBe(true)
+    expect(t[i]!.startSeconds).toBe(2325) // the parent's cue, as /now-playing groups by it
+    expect(t[i]!.ownStartSeconds).toBeNull()
+    expect(t[i - 1]!.title).toBe('Mokba') // its base, directly before it
+    expect(t[i - 1]!.ownStartSeconds).toBe(2325)
+  })
+
+  it("reads a 'w/' row's own visible cue when it shows one", () => {
+    const t = p('tracklist-matroda.html').tracks
+    const i = t.findIndex((r) => r.title === 'Calypso')
+    expect(t[i]!.isMashupLinked).toBe(true)
+    expect(t[i]!.startSeconds).toBe(4590) // shared entry with the parent
+    expect(t[i]!.ownStartSeconds).toBe(4650) // "1:17:30" on the row itself
+  })
+
+  it('every other row has ownStartSeconds equal to startSeconds (a shared entry without w/ is not layered)', () => {
+    for (const name of ['tracklist-matroda.html', 'tracklist-maxstyler.html', 'tracklist-habstrakt.html', 'tracklist-decoy-dcr839.html']) {
+      for (const r of p(name).tracks.filter((r) => !r.isMashupLinked)) expect(r.ownStartSeconds, `${name} ${r.title}`).toBe(r.startSeconds)
+    }
+    // Habstrakt's Badders is ids[1] of Guest List's entry but a numbered row of its own.
+    const badders = p('tracklist-habstrakt.html').tracks.find((r) => r.title === 'Badders')!
+    expect(badders.isMashupLinked).toBe(false)
+    expect(badders.ownStartSeconds).toBe(750)
+  })
+
+  it("a 'w/' row whose base was dropped (anonymous 'ID - ID' rows carry no microdata) is not linked to the unrelated row before it", () => {
+    const t = p('tracklist-decoy-dcr839.html').tracks
+    // trRow27 is "ID - ID" and dropped; its w/ partner (track id 32060) survives.
+    const orphan = t.find((r) => r.trackId === '32060')!
+    expect(orphan.isMashupLinked).toBe(false)
+    expect(orphan.startSeconds).toBe(5883)
+    expect(orphan.ownStartSeconds).toBe(5883) // the page's cue for the moment it came in
+    // Rows whose base was kept stay linked, without a cue of their own.
+    for (const id of ['10868', '143730', '352759']) {
+      const r = t.find((x) => x.trackId === id)!
+      expect(r.isMashupLinked, id).toBe(true)
+      expect(r.ownStartSeconds, id).toBeNull()
+    }
+    // Page order kept: Don Diablo (495505) → w/ 10868 → w/ 143730.
+    const ids = t.map((r) => r.trackId)
+    expect(ids.indexOf('10868')).toBe(ids.indexOf('495505') + 1)
+    expect(ids.indexOf('143730')).toBe(ids.indexOf('495505') + 2)
+  })
+
+  it("selectCurrent keeps an orphaned 'w/' row out of the unrelated group before it", () => {
+    const t = p('tracklist-decoy-dcr839.html').tracks
+    const orphan = t.find((r) => r.trackId === '32060')!
+    const before = t[t.indexOf(orphan) - 1]!
+    expect(before.startSeconds).not.toBe(5883)
+    const cur = selectCurrent(t, 5890).picked.filter((r) => r.isCurrent)
+    expect(cur.map((r) => r.trackUrl)).toEqual([orphan.trackUrl])
+  })
+
+  it("never links the first row of a list, even when the page marks it 'w/'", () => {
+    const row = (n: number, cls: string, name: string) =>
+      `<div class="tlpTog bItm tlpItem trRow${n}${cls}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="${name}"><span class="trackValue">${name}</span></div></div>`
+    const html = row(1, ' con', 'A - One') + row(2, ' con', 'B - Two') +
+      `<script>cueValuesEntry = {}; cueValuesEntry.seconds = 30; cueValuesEntry.ids = []; cueValuesEntry.ids[0] = 'tlp1_content'; cueValuesEntry.ids[1] = 'tlp2_content';</script>`
+    const t = parseTracklist(url, html).tracks
+    expect(t.map((r) => [r.isMashupLinked, r.startSeconds, r.ownStartSeconds])).toEqual([[false, 30, 30], [true, 30, null]])
+  })
+
+  it("rows: every page row in order, anonymous 'ID - ID' rows included and flagged; tracks: the same list without them", () => {
+    const d = p('tracklist-decoy-dcr839.html')
+    expect(d.rows).toHaveLength(41)
+    const anon = d.rows.filter((r) => r.anonymous)
+    expect(anon).toHaveLength(16)
+    for (const r of anon) {
+      expect(r).toMatchObject({ artist: 'ID', title: 'ID', isUnidentified: true, artworkUrl: null, trackUrl: null, idStatus: null })
+      expect(r.trackId).toMatch(/^\d+$/) // the row's data-id
+    }
+    // Their own cues, from the page (row 5 at 14:26; row 27 at 1:38:03).
+    expect(d.rows[4]).toMatchObject({ anonymous: true, startSeconds: 866, ownStartSeconds: 866, startTime: '14:26', isMashupLinked: false })
+    // A w/ row on an anonymous row is linked to it, without a cue of its own.
+    expect(d.rows[14]).toMatchObject({ anonymous: true, isMashupLinked: true, startSeconds: 2833, ownStartSeconds: null })
+    const orphan = d.rows.findIndex((r) => r.trackId === '32060')
+    expect(d.rows[orphan - 1]).toMatchObject({ anonymous: true, startSeconds: 5883 })
+    expect(d.rows[orphan]).toMatchObject({ anonymous: false, isMashupLinked: true, ownStartSeconds: null })
+    // `tracks` is exactly what it was: the named rows, the orphan unlinked there.
+    expect(d.tracks).toHaveLength(25)
+    expect(d.tracks.map((t) => t.trackId)).toEqual(d.rows.filter((r) => !r.anonymous).map((r) => r.trackId))
+    expect(d.tracks.some((t) => 'anonymous' in t)).toBe(false)
+    expect(d.tracks.find((t) => t.trackId === '32060')!.isMashupLinked).toBe(false)
+    // Real pages here have no anonymous rows: rows and tracks agree.
+    for (const name of ['tracklist-matroda.html', 'tracklist-maxstyler.html', 'tracklist-habstrakt.html']) {
+      const r = p(name)
+      expect(r.rows.map(({ anonymous, ...t }) => (expect(anonymous).toBe(false), t)), name).toEqual(r.tracks)
+    }
+  })
+
+  it('counts: 2 of the 89 rows on the three real pages are w/ rows; the decoy page has 3 linked + 1 orphan among its kept rows', () => {
+    const linked = (name: string) => p(name).tracks.filter((r) => r.isMashupLinked).length
+    expect([linked('tracklist-matroda.html'), linked('tracklist-maxstyler.html'), linked('tracklist-habstrakt.html')]).toEqual([1, 1, 0])
+    expect(linked('tracklist-decoy-dcr839.html')).toBe(3)
+  })
+})

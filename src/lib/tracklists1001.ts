@@ -6,6 +6,7 @@ import { fetch1001, type Fetch1001Opts as CascadeOpts } from './upstream1001'
 import { tryConsumeBrightdata } from './ban-state'
 import { parseSetYouTubeId } from './dj-index'
 import type { Logger } from './log'
+import { parseTime } from './timestamp'
 
 const ORIGIN = 'https://www.1001tracklists.com'
 
@@ -385,6 +386,9 @@ export function normalizeTracklistUrl(input: string): string | null {
   return `${ORIGIN}${u.pathname}`
 }
 
+/** A page row: a ParsedTrack, or a fully anonymous "ID - ID" row with no microdata. */
+export type PageRow = ParsedTrack & { anonymous: boolean }
+
 export type ScrapedTracklist = {
   slug: string
   /** Apple Music album/playlist link for the whole set, when 1001tl embeds one. null otherwise. */
@@ -393,7 +397,18 @@ export type ScrapedTracklist = {
   setYoutubeLink: string | null
   /** SoundCloud widget-player URL for the whole set's recording, when 1001tl embeds one. null otherwise. */
   setSoundcloudLink: string | null
+  /**
+   * The named rows — what every consumer but mkvid's track list uses (counts,
+   * /now-playing, /tracklist, the sync). Anonymous "ID - ID" rows are not in it.
+   */
   tracks: ParsedTrack[]
+  /**
+   * Every track row on the page in order, anonymous "ID - ID" rows included
+   * (`anonymous: true`: artist and title 'ID', no id-page, no art, their own
+   * cue). A "w/" row on an anonymous row is linked to it here. Only the list
+   * handed to mkvid reads this, so the video shows "ID" while one plays.
+   */
+  rows: PageRow[]
   /** How many rows contradict themselves — see `looksLikeDecoy`. */
   decoy: DecoySignal
 }
@@ -532,14 +547,33 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
   const root = parse(html)
   const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
 
-  const cueMap = parseCueValueData(html)
+  const cueMap = parseCueEntries(html)
   const rows = root.querySelectorAll('div.tlpItem')
+  const pageRows: PageRow[] = []
   const tracks: ParsedTrack[] = []
   let named = 0
   let mismatched = 0
+  // Whether the page row right before this one made it into the list being
+  // built. A "w/" row is only linked when its base did — otherwise linking it
+  // to whatever row came before would put it on top of the wrong track.
+  let prevRow = false
+  let prevTrack = false
   for (const row of rows) {
-    const t = parseRow(row, cueMap)
-    if (!t) continue
+    const r = parseRow(row, cueMap)
+    if (!r) {
+      prevRow = prevTrack = false
+      continue
+    }
+    pageRows.push(unlinkedUnless(r, prevRow && pageRows.length > 0))
+    prevRow = true
+    // `tracks` leaves anonymous rows out, as it always has.
+    if (r.anonymous) {
+      prevTrack = false
+      continue
+    }
+    const { anonymous: _, ...track } = r
+    const t = unlinkedUnless(track, prevTrack && tracks.length > 0)
+    prevTrack = true
     tracks.push(t)
     // Decoy check: the row's microdata name against the text the page shows.
     // On a real page they are the same string; on a decoy page each was
@@ -557,8 +591,38 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     setYoutubeLink: extractSetYouTubeLink(html),
     setSoundcloudLink: extractSetSoundcloudLink(html),
     tracks,
+    rows: pageRows,
     decoy: { named, mismatched, suspected: looksLikeDecoy({ named, mismatched }) },
   }
+}
+
+/**
+ * The rows `keep` accepts, in order, with a "w/" row unlinked when the row
+ * before it was left out (see unlinkedUnless). /now-playing uses it to add the
+ * cued anonymous rows to what it selects from.
+ */
+export function keepRows(rows: readonly PageRow[], keep: (r: PageRow) => boolean): PageRow[] {
+  const out: PageRow[] = []
+  let prev = false
+  for (const r of rows) {
+    if (!keep(r)) {
+      prev = false
+      continue
+    }
+    out.push(unlinkedUnless(r, prev && out.length > 0))
+    prev = true
+  }
+  return out
+}
+
+/**
+ * A "w/" row with no base before it in its list is the first of its group
+ * there, so it is not linked and the page's cue for the group (when it came
+ * in) is its own. Returns a copy; `rows` and `tracks` may disagree on this.
+ */
+function unlinkedUnless<T extends ParsedTrack>(t: T, hasBase: boolean): T {
+  if (!t.isMashupLinked || hasBase) return { ...t }
+  return { ...t, isMashupLinked: false, ownStartSeconds: t.startSeconds }
 }
 
 /** Case- and whitespace-insensitive form of a track name for the decoy comparison. */
@@ -606,7 +670,15 @@ export function extractSetSoundcloudLink(html: string): string | null {
  * null gap in the timeline and confuse `selectCurrent`'s range matcher.
  */
 export function parseCueValueData(html: string): Map<string, number> {
-  const out = new Map<string, number>()
+  return new Map([...parseCueEntries(html)].map(([id, e]) => [id, e.seconds]))
+}
+
+/**
+ * parseCueValueData with the slot each id held: `own` = ids[0], the row the
+ * entry belongs to; ids[1+] only share it (a "w/" row inherits its base's cue).
+ */
+function parseCueEntries(html: string): Map<string, { seconds: number; own: boolean }> {
+  const out = new Map<string, { seconds: number; own: boolean }>()
   // Walk each entry block (delimited by `cueValuesEntry = {}`) and pair its
   // .seconds with every .ids[N] in the same block.
   const blocks = html.split(/cueValuesEntry\s*=\s*\{\}/)
@@ -614,10 +686,10 @@ export function parseCueValueData(html: string): Map<string, number> {
     const sm = block.match(/cueValuesEntry\.seconds\s*=\s*(\d+)/)
     if (!sm) continue
     const seconds = Number(sm[1])
-    const idRe = /cueValuesEntry\.ids\[\d+\]\s*=\s*'([^']+)'/g
+    const idRe = /cueValuesEntry\.ids\[(\d+)\]\s*=\s*'([^']+)'/g
     let im
     while ((im = idRe.exec(block))) {
-      out.set(im[1]!, seconds)
+      out.set(im[2]!, { seconds, own: im[1] === '0' })
     }
   }
   return out
@@ -640,9 +712,12 @@ export function extractSetAppleLink(html: string): string | null {
   return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ''}`
 }
 
-function parseRow(row: HTMLElement, cueMap: Map<string, number>): ParsedTrack | null {
+function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: boolean }>): PageRow | null {
   const dataId = row.getAttribute('data-id') ?? null
   const cls = row.getAttribute('class') ?? ''
+  // "w/" row: class `con`, the parent's trRow number repeated, and a
+  // `<span title="played together with previous track"> w/ </span>` where the
+  // track number goes.
   const isMashupLinked = / con(\s|$)/.test(cls)
 
   // Source of truth for the cue is the JS-emitted cueValueData map keyed by
@@ -650,17 +725,45 @@ function parseRow(row: HTMLElement, cueMap: Map<string, number>): ParsedTrack | 
   // untimed extras) get null even when their hidden form input reads "0".
   const contentDiv = row.querySelector('[id^="tlp"][id$="_content"]')
   const contentId = contentDiv?.getAttribute('id') ?? ''
-  const cueFromMap = cueMap.get(contentId)
-  const startSeconds = cueFromMap === undefined ? null : cueFromMap
+  const cueEntry = cueMap.get(contentId)
+  const startSeconds = cueEntry === undefined ? null : cueEntry.seconds
   const cueDiv = row.querySelector('div.cue')
   const startTime = (cueDiv?.text ?? '').trim()
+  // A "w/" row's startSeconds is usually its base's (ids[1+] of the base's
+  // entry). Its own cue is the time printed on the row, or an entry of its own.
+  const ownStartSeconds = !isMashupLinked
+    ? startSeconds
+    : startTime
+      ? parseTime(startTime)
+      : cueEntry?.own
+        ? cueEntry.seconds
+        : null
 
   const nameMeta = row.querySelector('meta[itemprop="name"]')
   const artistMeta = row.querySelector('meta[itemprop="byArtist"]')
   const fullName = decodeEntities(nameMeta?.getAttribute('content') ?? '')
   const artistRaw = decodeEntities(artistMeta?.getAttribute('content') ?? '')
 
-  if (!fullName) return null
+  if (!fullName) {
+    // A fully anonymous "ID - ID" row: no microdata, no track page, no art —
+    // only its place in the list and (usually) its cue. Not a row at all
+    // without the content div.
+    if (!contentDiv) return null
+    return {
+      startTime: startTime || (startSeconds !== null ? formatCue(startSeconds) : ''),
+      startSeconds,
+      artist: 'ID',
+      title: 'ID',
+      trackId: dataId,
+      trackUrl: null,
+      artworkUrl: null,
+      isUnidentified: true,
+      idStatus: null,
+      isMashupLinked,
+      ownStartSeconds,
+      anonymous: true,
+    }
+  }
 
   let title = ''
   let artist = artistRaw
@@ -713,6 +816,8 @@ function parseRow(row: HTMLElement, cueMap: Map<string, number>): ParsedTrack | 
     isUnidentified,
     idStatus,
     isMashupLinked,
+    ownStartSeconds,
+    anonymous: false,
   }
 }
 

@@ -81,7 +81,7 @@ import {
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
 import { parseTracklist } from './tracklists1001'
-import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, supersedeMkvidRequestForSet } from './mkvid'
+import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
   flushPlaylistAdditions,
@@ -92,7 +92,9 @@ import {
 import {
   invalidateSubTracklists,
   listSubSync,
+  loadDjBackfill,
   loadSubState,
+  saveDjBackfill,
   requeueTracklists,
   saveSubState,
   slugsReferencingVideo,
@@ -122,11 +124,20 @@ const playlistDescription = (artistName: string) =>
 // of 15, but small enough to keep YouTube quota usage bounded — at 50
 // quota per insert, 30 inserts × 4 subs = 6 000 of the daily 10 000.
 const DEFAULT_MAX_SETS_PER_RUN = 30
-// AJAX pagination hops are ~30 ms each (the endpoint is JSON, not a CF-gated
-// page), so 100 pages costs ~3 s of the 25 s sync deadline. End-of-list is
-// signaled explicitly by `end:true` from 1001tl and almost always fires
-// first; this cap is just a safety net for a DJ with a wildly deep history.
-const DEFAULT_MAX_DJ_PAGES = 100
+// DJ-index head walk: page 1 plus at most 3 infinite-scroll steps (10 sets
+// each), stopping at the first page that shows an already-known set — which
+// for a DJ already in the database is page 1 itself, so a normal daily run
+// costs no scroll request at all. A brand-new subscription gets its newest
+// 45 sets here; older history comes from the backfill below.
+const DEFAULT_MAX_DJ_PAGES = 4
+/**
+ * Scroll steps (10 sets each) the *daily* cron spends per DJ walking further
+ * into its history, resuming from a cursor in SUBS KV. Every set found this
+ * way becomes one tracklist-page fetch through the forwarder accounts, so
+ * this is what bounds the backfill's load on 1001tracklists: ≤10 new sets per
+ * DJ per day. A 1,000-set DJ takes ~100 days; raise it to go faster.
+ */
+export const DJ_BACKFILL_STEPS_PER_DAY = 1
 // Hard wall-clock deadline so we save state and return cleanly before
 // Cloudflare kills the worker. Workers' fetch event budget is ~30 s; we
 // leave headroom for network I/O on the response itself.
@@ -207,7 +218,7 @@ export type SyncOpts = {
    * `state.discoveredTracklistUrls`. Used by the frequent "drain pending"
    * cron — we don't need to re-discover new sets on every 5-minute tick
    * (the daily 06:00 UTC cron does that), and skipping the crawl saves
-   * the BrightData/home-proxy round-trip + ~14 AJAX hops per sub.
+   * the page-1 round-trip through the forwarder per sub.
    */
   skipDjCrawl?: boolean
   /** Cap how many already-processed tracklists we re-fetch to look for a swapped video. */
@@ -585,22 +596,34 @@ export async function syncOne(
       tracklistsKnownTotal: discovered.size,
     })
   } else {
+    // Only the daily discovery run digs into a DJ's history; button presses
+    // and the 5-minute ticks never spend backfill requests.
+    const backfillPrev = opts.trigger === 'cron.daily' ? await loadDjBackfill(env, sub.slug) : null
+    const wantBackfill = opts.trigger === 'cron.daily' && !backfillPrev?.done
     const crawl = await crawlDjIndex(sub.slug, {
       ...fetchOpts,
       maxPages: DEFAULT_MAX_DJ_PAGES,
       deadlineMs: deadline,
+      knownUrls: new Set(discovered),
+      ...(wantBackfill ? { backfill: { from: backfillPrev?.cursor ?? null, maxSteps: DJ_BACKFILL_STEPS_PER_DAY } } : {}),
     })
     artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
     // Union with previously-discovered URLs — earlier pages may have failed
     // to fetch this run but we don't want to lose them from the todo set.
+    const knownBefore = discovered.size
     for (const u of crawl.tracklistUrls) discovered.add(u)
+    if (crawl.backfill && (crawl.backfill.steps > 0 || crawl.backfill.done || !backfillPrev)) {
+      await saveDjBackfill(env, sub.slug, { cursor: crawl.backfill.cursor, done: crawl.backfill.done, at: nowSeconds() })
+    }
     log.info('sync.dj_parsed', {
       slug: sub.slug,
       artistName,
       pagesWalked: crawl.pagesWalked,
       stopReason: crawl.stopReason,
       tracklistsSeenThisRun: crawl.tracklistUrls.length,
+      tracklistsNewThisRun: discovered.size - knownBefore,
       tracklistsKnownTotal: discovered.size,
+      backfill: crawl.backfill ?? null,
     })
   }
 
@@ -768,9 +791,11 @@ export async function syncOne(
       const tracks = parsed.tracks
       // Zero rows is the fingerprint of a captcha shell, not a set — never queue from it.
       if (tracks.length === 0) return null
-      // Decoy names (see DecoySignal) do not matter here: only the row count,
-      // the ID count and the last cue are used, and those stay real. Logged so
-      // the sync's view of the poisoning is on record too.
+      // Decoy names (see DecoySignal) do not matter for queueing: only the row
+      // count, the ID count and the last cue are used, and those stay real.
+      // They do matter for the stored track list (below), which drops names
+      // from any page it cannot trust. Logged so the sync's view of the
+      // poisoning is on record too.
       if (parsed.decoy.suspected) log.warn('sync.mkvid_decoy_page', { slug: sub.slug, setUrl, named: parsed.decoy.named, mismatched: parsed.decoy.mismatched })
       const idedCount = tracks.filter((t) => !t.isUnidentified).length
       if (mkvidRequireFull && idedCount < tracks.length) {
@@ -788,7 +813,18 @@ export async function syncOne(
         trackCount: tracks.length,
         idedCount,
       })
-      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount })
+      // The per-track list mkvid draws from — on first queueing, and on every
+      // recheck so requests queued before lists were stored get one. Names
+      // only survive a page that passes the decoy check (lib/mkvid.ts
+      // mkvidTracksTrusted); a failure here must not cost the queueing.
+      let tracksSaved: string
+      try {
+        tracksSaved = await saveMkvidTracks(env, setUrl, parsed)
+      } catch (e) {
+        tracksSaved = 'failed'
+        log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+      }
+      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount, tracksSaved, tracksTrusted: mkvidTracksTrusted(parsed.decoy) })
       return r === 'queued' ? `queued for mkvid (${source.kind})` : `mkvid request already exists (${source.kind})`
     } catch (e) {
       log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })

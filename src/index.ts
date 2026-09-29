@@ -5,6 +5,7 @@ import { likesRoute, likesHandler } from './routes/likes'
 import { likedSongsRoute, likedSongsHandler } from './routes/liked-songs'
 import { subscriptionsApp } from './routes/subscriptions'
 import { mkvidApp } from './routes/mkvid'
+import { MkvidClaimBody, MkvidClaimResponse } from './schemas'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 import { backfillCombined, syncAll, syncPendingOnly } from './lib/sync'
@@ -49,6 +50,22 @@ app.route('/subscriptions', subscriptionsApp)
 // MKVID_TOKEN inside the sub-app, so like /subscriptions it must be skipped by
 // the API_TOKEN wildcard gate below.
 app.route('/mkvid', mkvidApp)
+// Documented here only (the sub-app is plain Hono), so mkvid's side has a
+// published contract for the claim, track list included.
+app.openAPIRegistry.registerPath({
+  method: 'post',
+  path: '/mkvid/claim',
+  summary: 'Claim the next set for mkvid to render and upload (bearer MKVID_TOKEN)',
+  request: {
+    body: {
+      required: false,
+      content: { 'application/json': { schema: MkvidClaimBody } },
+    },
+  },
+  responses: {
+    200: { description: 'The claimed request with its track list, or null.', content: { 'application/json': { schema: MkvidClaimResponse } } },
+  },
+})
 
 // Bearer-gate everything else, including /openapi.json and /doc. Skip
 // /subscriptions/* and /mkvid/* — a naive wildcard would double-gate those

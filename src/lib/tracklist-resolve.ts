@@ -1,5 +1,5 @@
 import type { Env, ParsedTrack } from '../types'
-import { fetchTracklist, fetchMediaLinks, DecoyTracklistError, type MediaLinks } from './tracklists1001'
+import { fetchTracklist, fetchMediaLinks, DecoyTracklistError, type MediaLinks, type PageRow } from './tracklists1001'
 import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
 import { fetchOptsFromEnv } from './upstream1001'
@@ -17,12 +17,19 @@ import { fetchOptsFromEnv } from './upstream1001'
  */
 export const TRACKLIST_CV = {
   // 3: 2026-09-26, so the decoy pages cached before the detector existed age out.
-  tracklist: 3, // parsed tracklist page → { tracks, setAppleLink, setYoutubeLink, setSoundcloudLink }
+  // 4: 2026-09-28, entries carry `rows` (anonymous "ID - ID" rows included) for /now-playing.
+  tracklist: 4, // parsed tracklist page → { tracks, rows, setAppleLink, setYoutubeLink, setSoundcloudLink }
   medialink: 1, // per-track Apple/YouTube links
 } as const
 
 export type CachedTracklist = {
   tracks: ParsedTrack[]
+  /**
+   * Every page row, anonymous "ID - ID" rows included (ScrapedTracklist.rows).
+   * Only /now-playing reads it, to end a track's slot where an anonymous row
+   * starts. Absent on entries written before it existed.
+   */
+  rows?: PageRow[]
   setAppleLink: string | null
   setYoutubeLink: string | null
   setSoundcloudLink: string | null
@@ -62,6 +69,7 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   if (result.tracks.length > 0) {
     const value: CachedTracklist = {
       tracks: result.tracks,
+      rows: result.rows,
       setAppleLink: result.setAppleLink,
       setYoutubeLink: result.setYoutubeLink,
       setSoundcloudLink: result.setSoundcloudLink,

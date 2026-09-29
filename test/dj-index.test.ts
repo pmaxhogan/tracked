@@ -134,12 +134,138 @@ describe('parseSetYouTubeId', () => {
   })
 })
 
+describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () => {
+  // Page 1 of /dj/adam-beyer/ and the first infinite-scroll answer for it, as
+  // served on 2026-09-28 (the logged-in username in the page header is
+  // scrubbed to acct2-user). Sometime between 2026-07-08 and 2026-07-28 the
+  // site dropped `iScrollParams.dj` from the page; the scroll list is now a
+  // `div.sDiv#sDivTracklists[data-type][data-id]` and framework.js posts
+  // type/idScrollObject/subtype/count/pos/id. Against the old parser every
+  // DJ stopped at the 15 sets page 1 renders (stopReason `no_pagination`).
+  const page1 = readFileSync(resolve(__dirname, 'fixtures/dj-adam-beyer-page1.html'), 'utf-8')
+  const ajax1 = readFileSync(resolve(__dirname, 'fixtures/dj-adam-beyer-ajax-pos15.json'), 'utf-8')
+
+  it('follows the infinite scroll past the 15 sets on page 1', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
+    fwt.mockResolvedValueOnce(new Response(ajax1, { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    fwt.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, end: true, data: '' }), { status: 200 }))
+
+    const r = await crawlDjIndex('adam-beyer', { maxPages: 5 })
+
+    expect(r.artistName).toBe('Adam Beyer')
+    expect(r.tracklistUrls).toHaveLength(25)
+    expect(r.tracklistUrls[0]).toBe(
+      `${ORIGIN}/tracklist/28bww6l1/adam-beyer-drumcode-radio-843-resistance-amnesia-ibiza-spain-2026-09-16-2026-09-25.html`,
+    )
+    expect(r.tracklistUrls[15]).toContain('/tracklist/2kmzbyst/')
+    expect(r.tracklistUrls[24]).toContain('/tracklist/wjqu951/')
+    expect(r.stopReason).toBe('end')
+    // The request framework.js builds for the first scroll step.
+    const body1 = new URLSearchParams((fwt.mock.calls[0]![1]!.body as URLSearchParams).toString())
+    expect(Object.fromEntries(body1)).toEqual({
+      width: '1920',
+      type: 'artist',
+      idScrollObject: 'q43lgd',
+      subtype: 'tracklists',
+      count: '10',
+      pos: '15',
+      id: 'hj0myf1',
+    })
+    // Second step continues from the last row of the first answer.
+    const body2 = new URLSearchParams((fwt.mock.calls[1]![1]!.body as URLSearchParams).toString())
+    expect(body2.get('pos')).toBe('25')
+    expect(body2.get('id')).toBe('wjqu951')
+  })
+
+  it('spends no scroll request when page 1 already shows a known set (the daily steady state)', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
+    const known = new Set([`${ORIGIN}/tracklist/18pcnb11/adam-beyer-drumcode-radio-837-2026-08-14.html`])
+
+    const r = await crawlDjIndex('adam-beyer', { maxPages: 5, knownUrls: known })
+
+    expect(fwt).not.toHaveBeenCalled()
+    expect(r.stopReason).toBe('known')
+    expect(r.tracklistUrls).toHaveLength(15)
+    expect(r.tail).toEqual({ pos: 15, id: 'hj0myf1' })
+  })
+
+  it('stops the head walk at the first scroll step that reaches a known set', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
+    fwt.mockResolvedValueOnce(new Response(ajax1, { status: 200 }))
+    const known = new Set([
+      `${ORIGIN}/tracklist/wjqu951/adam-beyer-drumcode-radio-807-2026-01-16.html`,
+    ])
+
+    const r = await crawlDjIndex('adam-beyer', { maxPages: 5, knownUrls: known })
+
+    expect(fwt).toHaveBeenCalledTimes(1)
+    expect(r.stopReason).toBe('known')
+    expect(r.tracklistUrls).toHaveLength(25)
+    expect(r.tail).toEqual({ pos: 25, id: 'wjqu951' })
+  })
+
+  it('backfills a bounded number of steps from a stored cursor and reports where to resume', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
+    fh.mockReset()
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
+    // Head walk: page 1 is all known → no head step. Backfill: 1 step allowed.
+    fwt.mockResolvedValueOnce(new Response(ajax1, { status: 200 }))
+    const known = new Set(parseDjIndex(page1).tracklistUrls)
+
+    const r = await crawlDjIndex('adam-beyer', {
+      knownUrls: known,
+      backfill: { from: { pos: 15, id: 'hj0myf1' }, maxSteps: 1 },
+    })
+
+    expect(fwt).toHaveBeenCalledTimes(1)
+    const body = new URLSearchParams((fwt.mock.calls[0]![1]!.body as URLSearchParams).toString())
+    expect(body.get('pos')).toBe('15')
+    expect(body.get('id')).toBe('hj0myf1')
+    expect(r.backfill).toEqual({ steps: 1, added: 10, cursor: { pos: 25, id: 'wjqu951' }, done: false })
+    expect(r.tracklistUrls).toHaveLength(25)
+  })
+
+  it('marks the backfill done at the end of the list, and keeps the cursor when a step fails', async () => {
+    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
+    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
+    const known = new Set(parseDjIndex(page1).tracklistUrls)
+
+    fh.mockReset()
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
+    fwt.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, end: true, data: '' }), { status: 200 }))
+    const done = await crawlDjIndex('adam-beyer', { knownUrls: known, backfill: { from: { pos: 905, id: 'zzz' }, maxSteps: 3 } })
+    expect(done.backfill).toEqual({ steps: 1, added: 0, cursor: null, done: true })
+
+    fh.mockReset()
+    fwt.mockReset()
+    fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
+    fwt.mockResolvedValueOnce(new Response('<html>captcha</html>', { status: 401 }))
+    const failed = await crawlDjIndex('adam-beyer', { knownUrls: known, backfill: { from: { pos: 45, id: 'abc' }, maxSteps: 3 } })
+    expect(failed.backfill).toEqual({ steps: 0, added: 0, cursor: { pos: 45, id: 'abc' }, done: false })
+  })
+})
+
 describe('crawlDjIndex', () => {
   /**
-   * Build a page-1 HTML containing the necessary pagination keys: an H1, a
-   * set of .oItm rows (each with a data-id and an inner anchor to a tracklist
-   * URL), and the inline `iScrollParams.dj = '...'` script. Without all
-   * three, crawlDjIndex degrades to no_pagination.
+   * Build a page-1 HTML in the post-July-2026 markup: an H1, and the
+   * `div.sDiv#sDivTracklists[data-type][data-id]` scroll list holding .oItm
+   * rows (each with a data-id and an inner anchor to a tracklist URL).
+   * Without the scroll div and rows, crawlDjIndex degrades to no_pagination.
    */
   function page1Html(opts: {
     artist?: string
@@ -152,7 +278,7 @@ describe('crawlDjIndex', () => {
           `<div class="bItm action oItm" data-id="${it.dataId}"><a href="${it.href}">x</a></div>`,
       )
       .join('')
-    return `<h1 class="titleNameH1">${opts.artist ?? 'Test'}</h1>${items}<script>iScrollParams.dj = '${opts.djId ?? 'abc123'}';</script>`
+    return `<h1 id="pageTitle">Tracklists By ${opts.artist ?? 'Test'}</h1><div class="sDiv " id="sDivTracklists" data-type="artist" data-title="Tracklists By" data-id="${opts.djId ?? 'abc123'}">${items}</div>`
   }
 
   function ajaxResponse(body: object): Response {
@@ -208,8 +334,9 @@ describe('crawlDjIndex', () => {
     const init1 = ajaxCalls[0]![1]!
     expect(init1.method).toBe('POST')
     const body1 = (init1.body as URLSearchParams).toString()
-    expect(body1).toContain('type=overview')
-    expect(body1).toContain('dj=80q82k2')
+    expect(body1).toContain('type=artist')
+    expect(body1).toContain('idScrollObject=80q82k2')
+    expect(body1).toContain('subtype=tracklists')
     expect(body1).toContain('pos=2') // 2 items shown after page 1
     expect(body1).toContain('id=d2') // last data-id from page 1
     // Second AJAX call's cursor advances using the previous chunk's data.
@@ -221,7 +348,7 @@ describe('crawlDjIndex', () => {
   it('degrades to no_pagination when page 1 lacks pagination keys', async () => {
     const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
-    // No iScrollParams script and no .oItm data-ids → can't paginate.
+    // No scroll div and no .oItm data-ids → can't paginate.
     fh.mockResolvedValueOnce({
       html: '<h1>Test</h1><a href="/tracklist/x/y.html">x</a>',
       state: { cookie: '' },

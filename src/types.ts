@@ -20,9 +20,9 @@ export type Env = {
   MKVID_REQUIRE_FULL_TRACKLIST?: string
   /** Seconds after which a claimed-but-unreported mkvid request is handed out again (default 10800 = 3 h). */
   MKVID_CLAIM_TTL_SECONDS?: string
-  /** Max requests handed to mkvid per YouTube quota day (midnight Pacific) on its own Google project, mkvid-uploads (default 6; each upload costs 1 600 of its 10 000 units). `0` pauses. */
+  /** Max requests handed to mkvid per YouTube quota day (midnight Pacific) on its own Google project, mkvid-uploads (default 24, of the project's 100 uploads/day; uploads no longer spend the 10 000-unit general pool). `0` pauses. */
   MKVID_DAILY_CLAIM_CAP?: string
-  /** Same, for uploads mkvid makes through the sync's project, tracked-youtube, once its own is used up (default 0 = never). */
+  /** Same, for uploads mkvid makes through the sync's project, tracked-youtube, once its own is used up (default 6, so 30/day in total). `0` = never. */
   MKVID_SHARED_DAILY_CLAIM_CAP?: string
   YOUTUBE_API_KEY: string
   /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
@@ -77,8 +77,22 @@ export type ParsedTrack = {
    * playing version may differ. null when the row is fully ID'd or fully unidentified.
    */
   idStatus: string | null
-  /** True if this row is a "w/" sibling of the previous row (mashup-linked position). */
+  /**
+   * True if this row is a "w/" sibling of the previous row in this list: a track
+   * played on top of it (mashup, acapella, tracks played together). 1001tl marks
+   * it with the row class `con` and "w/" in place of the number. False for the
+   * first row, and for a `con` row whose base row was dropped (anonymous
+   * "ID - ID" rows carry no microdata and are not parsed), since the row before
+   * it in this list is then not its base.
+   */
   isMashupLinked: boolean
+  /**
+   * The row's own cue, as opposed to `startSeconds`, which on a "w/" row is the
+   * cue it shares with its base (1001tl files it as ids[1+] of the base's
+   * cueValuesEntry). Equal to `startSeconds` on every non-linked row; on a
+   * linked row, the cue printed on the row itself, or null when it has none.
+   */
+  ownStartSeconds: number | null
 }
 
 export type ResponseTrack = {

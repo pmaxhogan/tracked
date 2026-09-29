@@ -27,7 +27,12 @@ export type SelectionResult = {
   picked: ResponseTrack[]
   /** True if any picked track is unidentified (caller may set status). */
   anyUnidentified: boolean
+  /** True when the current group starts with an anonymous "ID - ID" row. */
+  currentAnonymous: boolean
 }
+
+/** A track, or an anonymous "ID - ID" page row (no name, no id page) when `anonymous` is set. */
+type SelectableTrack = ParsedTrack & { anonymous?: boolean }
 
 /**
  * Return the currently-playing group plus the immediately-previous and
@@ -52,14 +57,18 @@ export type SelectionResult = {
  *    interpolated starts in [lastCuedStart, setEndSeconds] when
  *    setEndSeconds is provided, so playback past the last cue still resolves
  *    to a plausible track instead of pinning forever on the last cued one.
+ *  - anonymous "ID - ID" rows (`anonymous: true`, passed only when cued) bound
+ *    the slot before them like any row. In the response an anonymous row
+ *    stands for its group only when nothing named is in it: a named "w/" row on
+ *    top of one is the only thing known to be playing, so it alone is shown.
  */
 export function selectCurrent(
-  tracks: ParsedTrack[],
+  tracks: SelectableTrack[],
   currentSeconds: number,
   setEndSeconds: number | null = null,
 ): SelectionResult {
   const groups = groupByMashup(tracks)
-  if (groups.length === 0) return { picked: [], anyUnidentified: false }
+  if (groups.length === 0) return { picked: [], anyUnidentified: false, currentAnonymous: false }
 
   // Effective starts: real cue when present, evenly-spaced interpolated cue
   // for trailing uncued groups when setEndSeconds is known. Used by both
@@ -82,7 +91,7 @@ export function selectCurrent(
     }
   }
 
-  const picked: ParsedTrack[] = []
+  const picked: SelectableTrack[] = []
   const currentMembers = new Set<ParsedTrack>()
 
   if (currentIdx === -1) {
@@ -103,7 +112,9 @@ export function selectCurrent(
     if (next) picked.push(...next)
   }
 
-  const response: ResponseTrack[] = picked.map((t) => {
+  // An anonymous row gives way to any named row of its group.
+  const shown = picked.filter((t) => !t.anonymous || !groupOf(groups, t).some((m) => !m.anonymous))
+  const response: ResponseTrack[] = shown.map((t) => {
     const dur = durations.get(t) ?? null
     return {
       title: t.title,
@@ -125,8 +136,13 @@ export function selectCurrent(
 
   return {
     picked: response,
-    anyUnidentified: picked.some((t) => currentMembers.has(t) && t.isUnidentified),
+    anyUnidentified: shown.some((t) => currentMembers.has(t) && t.isUnidentified),
+    currentAnonymous: currentIdx >= 0 && groups[currentIdx]!.some((t) => t.anonymous),
   }
+}
+
+function groupOf(groups: SelectableTrack[][], t: SelectableTrack): SelectableTrack[] {
+  return groups.find((g) => g.includes(t)) ?? [t]
 }
 
 /**
@@ -216,8 +232,8 @@ function computeDurations(
   return out
 }
 
-function groupByMashup(tracks: ParsedTrack[]): ParsedTrack[][] {
-  const groups: ParsedTrack[][] = []
+function groupByMashup<T extends ParsedTrack>(tracks: T[]): T[][] {
+  const groups: T[][] = []
   for (const t of tracks) {
     const last = groups[groups.length - 1]
     // Merge into the previous group when (a) 1001tl marks the row as a

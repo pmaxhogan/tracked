@@ -50,6 +50,7 @@ function track(startSeconds: number | null, opts: Partial<ParsedTrack> = {}): Pa
     isUnidentified: opts.isUnidentified ?? false,
     idStatus: opts.idStatus ?? null,
     isMashupLinked: opts.isMashupLinked ?? false,
+    ownStartSeconds: opts.ownStartSeconds ?? startSeconds,
   }
 }
 

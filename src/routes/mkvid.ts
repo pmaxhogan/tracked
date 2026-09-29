@@ -5,7 +5,9 @@
  *
  *   POST /mkvid/claim     { accounts?: ['primary'|'shared'…] } → { request } (null when nothing is queued / claimable)
  *                         `accounts` = the Google projects mkvid can upload through right now (default ['primary']);
- *                         the request carries the `account` it was handed out for
+ *                         the request carries the `account` it was handed out for, and the set's
+ *                         `tracks` [{ cueSeconds, artist, title, artworkUrl, isId, layered }] + `tracksTrusted`
+ *                         (names only from a page that passed the decoy check; [] + false when none is stored)
  *   POST /mkvid/job       { id, jobId }                       attach mkvid's job id (informational)
  *   POST /mkvid/complete  { id, videoId, videoUrl?, privacy?, jobId? }
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
@@ -18,13 +20,15 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../types'
 import { mkvidAuth } from '../middleware/auth'
+import { MkvidClaimBody } from '../schemas'
 import { getAccessToken, GoogleOAuthRefreshFailed } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
 import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, failMkvidRequest, mkvidAccountUsage, recordMkvidPoll } from '../lib/mkvid'
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/
 
-const ClaimBody = z.object({ accounts: z.array(z.enum(['primary', 'shared'])).max(2).optional() })
+// The shape is published in the OpenAPI spec (src/index.ts), response included.
+const ClaimBody = MkvidClaimBody
 const JobBody = z.object({ id: z.string().uuid(), jobId: z.string().min(1).max(100) })
 const CompleteBody = z.object({
   id: z.string().uuid(),

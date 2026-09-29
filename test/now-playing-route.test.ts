@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 import { app } from '../src/index'
 import type { Env, ParsedTrack } from '../src/types'
 import { fakeKV } from './helpers/fake-kv'
@@ -33,7 +36,7 @@ vi.mock('../src/lib/itunes', () => ({ lookupAppleLink: vi.fn(async () => null) }
 import { resolveVideo } from '../src/lib/youtube'
 import { searchByTitle, searchByYouTubeUrl } from '../src/lib/tracklists1001'
 import { resolveTracklistPage } from '../src/lib/tracklist-resolve'
-import { DecoyTracklistError } from '../src/lib/tracklists1001'
+import { DecoyTracklistError, parseTracklist } from '../src/lib/tracklists1001'
 
 const SET_URL = 'https://www.1001tracklists.com/tracklist/2u10c9r9/mau-p-panorama-festival-italy-2026-08-16.html'
 const SET_TITLE = 'Mau P @ Panorama Festival, Italy 2026-08-16'
@@ -50,6 +53,7 @@ const track = (startSeconds: number, artist: string, title: string): ParsedTrack
   isUnidentified: false,
   idStatus: null,
   isMashupLinked: false,
+  ownStartSeconds: startSeconds,
 })
 
 function makeEnv(): Env {
@@ -182,5 +186,100 @@ describe('POST /now-playing — 1001tracklists serving decoy track data', () => 
     expect(body.tracklistUrl).toBe(SET_URL)
     expect(body.message).toMatch(/decoy/)
     expect(body.message).toMatch(/24 of 25/)
+  })
+})
+
+// Anonymous "ID - ID" rows carry no microdata, so they are not in `tracks`.
+// Without them the named track before one kept its slot until the next named
+// cue, and /now-playing answered with it while the unidentified track played.
+// The real fixtures have none, so these tests insert one into a real page.
+describe('POST /now-playing — an anonymous "ID - ID" row is playing', () => {
+  const page = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-maxstyler.html'), 'utf8')
+  const plain = parseTracklist(SET_URL, page)
+  // Rows 4 and 5 of the page (trRow4, trRow5), both named and cued.
+  const before = plain.tracks[3]!
+  const after = plain.tracks[4]!
+  const CUE = Math.round((before.startSeconds! + after.startSeconds!) / 2)
+  const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+
+  /** The page with an anonymous row (and optionally a named "w/" row on it) inserted before trRow5. */
+  function edited(opts: { cued: boolean; layeredNamed?: boolean }): string {
+    const anon =
+      `<div id="tlp_999" class="tlpTog bItm tlpItem trRow99" data-id="999"><div id="tlp999_content" class="fontL"><span class="trackValue notranslate redTxt">ID - ID</span></div>` +
+      (opts.cued ? `<div id="cue_999" class="cue noWrap action mt5">${mmss(CUE)}</div>` : '') +
+      `</div>`
+    const partner = opts.layeredNamed
+      ? `<div id="tlp_998" class="tlpTog bItm tlpItem trRow99 con" data-id="998"><span class="fontXL" title="played together with previous track"> w/ </span><div id="tlp998_content" class="fontL"><meta itemprop="name" content="Partner - Acapella"><meta itemprop="byArtist" content="Partner"><span class="trackValue">Partner - Acapella</span></div></div>`
+      : ''
+    const at = page.search(/<div[^>]*class="tlpTog bItm tlpItem trRow5"/)
+    expect(at).toBeGreaterThan(0)
+    const cue = opts.cued
+      ? `<script>cueValuesEntry = {}; cueValuesEntry.seconds = ${CUE}; cueValuesEntry.ids = []; cueValuesEntry.ids[0] = 'tlp999_content';${opts.layeredNamed ? " cueValuesEntry.ids[1] = 'tlp998_content';" : ''}</script>`
+      : ''
+    return page.slice(0, at) + anon + partner + page.slice(at) + cue
+  }
+
+  function serve(html: string) {
+    const p = parseTracklist(SET_URL, html)
+    ;(resolveTracklistPage as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+      tracks: p.tracks,
+      rows: p.rows,
+      setAppleLink: null,
+      setYoutubeLink: null,
+      setSoundcloudLink: null,
+    }))
+    return p
+  }
+
+  async function ask(currentSeconds: number) {
+    const env = makeEnv()
+    await seedTracklistVideo(env)
+    const body = (await (await post(env, { videoUrl: `https://youtu.be/${VIDEO_ID}`, currentSeconds, videoDurationSeconds: 4500 })).json()) as any
+    await new Promise((r) => setTimeout(r, 0)) // the audit row is written after the response
+    const row = await env.DB.prepare('SELECT record FROM now_playing_audit ORDER BY id DESC').first<{ record: string }>()
+    return { body, audit: JSON.parse(row!.record) }
+  }
+
+  it('answers unidentified with the anonymous row as the current track, and ends the previous slot at its cue', async () => {
+    const p = serve(edited({ cued: true }))
+    expect(p.tracks).toEqual(plain.tracks) // tracks / counts unchanged
+    const { body, audit } = await ask(CUE + 10)
+    expect(body.status).toBe('unidentified')
+    const current = body.tracks.filter((t: any) => t.isCurrent)
+    expect(current).toEqual([
+      expect.objectContaining({ artist: 'ID', title: 'ID', isUnidentified: true, startSeconds: CUE, trackUrl: null, artworkUrl: null, appleLink: null, youtubeLink: null }),
+    ])
+    const prev = body.tracks.find((t: any) => t.title === before.title)
+    expect(prev).toMatchObject({ isCurrent: false, durationSeconds: CUE - before.startSeconds! })
+    expect(body.tracks.find((t: any) => t.title === after.title)).toMatchObject({ isCurrent: false })
+    expect(audit.status).toBe('unidentified')
+    expect(audit.select).toMatchObject({ currentFromAnonymousRow: true, anonymousRowCount: 1, trackCount: plain.tracks.length })
+  })
+
+  it('before the anonymous cue, the previous track is current and named as before', async () => {
+    serve(edited({ cued: true }))
+    const { body, audit } = await ask(CUE - 10)
+    expect(body.status).toBe('ok')
+    expect(body.tracks.filter((t: any) => t.isCurrent).map((t: any) => t.title)).toEqual([before.title])
+    expect(audit.select.currentFromAnonymousRow).toBe(false)
+  })
+
+  it('a named "w/" row on the anonymous row is reported as the current track', async () => {
+    serve(edited({ cued: true, layeredNamed: true }))
+    const { body, audit } = await ask(CUE + 10)
+    expect(body.status).toBe('ok')
+    expect(body.tracks.filter((t: any) => t.isCurrent)).toEqual([expect.objectContaining({ artist: 'Partner', title: 'Acapella', startSeconds: CUE, isUnidentified: false })])
+    expect(body.tracks.some((t: any) => t.title === 'ID' && t.artist === 'ID')).toBe(false)
+    expect(audit.select).toMatchObject({ currentFromAnonymousRow: true })
+  })
+
+  it('an anonymous row without a cue of its own changes nothing', async () => {
+    serve(page)
+    const base = await ask(CUE + 10)
+    serve(edited({ cued: false }))
+    const withAnon = await ask(CUE + 10)
+    expect(withAnon.body).toEqual(base.body)
+    expect(withAnon.body.tracks.filter((t: any) => t.isCurrent).map((t: any) => t.title)).toEqual([before.title])
+    expect(withAnon.audit.select.currentFromAnonymousRow).toBe(false)
   })
 })

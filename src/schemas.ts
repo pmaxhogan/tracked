@@ -119,7 +119,7 @@ export const TracklistTrackSchema = z
     soundcloudLink: z.string().nullable().openapi({ description: 'SoundCloud widget-player URL — plays free (with ads) in the browser and is downloadable by yt-dlp without cookies. Always null when resolveLinks is false or the track has no SoundCloud source.' }),
     isUnidentified: z.boolean().openapi({ description: 'True only when the playing track is fully anonymous (e.g. "Cave Studio - ID"). Partial-ID variants set idStatus instead and keep their base-track fields.' }),
     idStatus: z.string().nullable().openapi({ example: 'ID Remix', description: 'Non-null when this row is a partial-ID variant of a known base track ("ID Remix", "ID Edit", ...). The artist/title/links describe the BASE track; the playing version may differ.' }),
-    isMashupLinked: z.boolean().openapi({ description: 'True when this row is a "w/" mashup sibling of the previous row (shares its cue position).' }),
+    isMashupLinked: z.boolean().openapi({ description: 'True when this row is a "w/" mashup sibling of the previous row (shares its cue position). False on the first row, and when the row it was played with is an anonymous "ID - ID" row (those are not listed).' }),
     youtubeLiked: z.boolean().nullable().openapi({ description: 'Whether the connected YouTube account has liked the youtubeLink video. null when not connected, no youtubeLink, or the lookup failed.' }),
   })
   .openapi('TracklistTrack')
@@ -200,3 +200,61 @@ export const LikedSongsResponse = z
     items: z.array(LikedSongSchema),
   })
   .openapi('LikedSongsResponse')
+
+// ─── /mkvid/claim (mkvid's work queue; bearer MKVID_TOKEN, not API_TOKEN) ───
+
+export const MkvidClaimBody = z
+  .object({
+    accounts: z.array(z.enum(['primary', 'shared'])).max(2).optional().openapi({
+      description: 'Accounts mkvid can upload through right now; default ["primary"]. The primary fills first, then the shared one.',
+    }),
+  })
+  .openapi('MkvidClaimBody')
+
+export const MkvidTrackSchema = z
+  .object({
+    cueSeconds: z.number().int().nullable().openapi({
+      example: 754,
+      description: 'Cue on the tracklist, seconds from the start of the set; null when the row is not cued. On a layered row, only a cue printed on that row itself (null when it has none: start it with its base track).',
+    }),
+    artist: z.string().nullable().openapi({ example: 'Matroda', description: 'null for an anonymous "ID" artist, and for every row when tracksTrusted is false.' }),
+    title: z.string().nullable().openapi({ example: 'Bad Habit', description: 'null for an anonymous "ID" title, and for every row when tracksTrusted is false.' }),
+    artworkUrl: z.string().nullable().openapi({ description: '300×300 album art (Beatport / SoundCloud CDN) when the row has any. Real even on a decoy page.' }),
+    isId: z.boolean().openapi({
+      description:
+        'The playing track is unidentified on 1001tracklists: an anonymous "ID - ID" row (then artist, title and artworkUrl are always null; show "ID") or a named artist with an "ID" title. NOT reliable when tracksTrusted is false: a decoy page shows a random 15–35% of identified rows as "ID - ID", so on an untrusted list isId=true may be a known track.',
+    }),
+    layered: z.boolean().openapi({
+      description:
+        'A 1001tracklists "w/" row: plays on top of the previous track in this list (mashup, acapella over an instrumental, tracks played together) rather than replacing it. Its base is the nearest earlier row with layered=false; several layered rows in a row share one base. Never true on the first row. Real even when tracksTrusted is false (it comes from the page layout, not the names).',
+    }),
+  })
+  .openapi('MkvidTrack')
+
+export const MkvidClaimedRequest = z
+  .object({
+    id: z.string().uuid(),
+    slug: z.string(),
+    setUrl: z.string(),
+    artistName: z.string().nullable(),
+    setTitle: z.string().nullable(),
+    setDate: z.string().nullable(),
+    source: z.enum(['soundcloud', 'hearthis']),
+    sourceUrl: z.string(),
+    lastCueSeconds: z.number().int().nullable(),
+    trackCount: z.number().int().nullable(),
+    idedCount: z.number().int().nullable(),
+    account: z.enum(['primary', 'shared']).openapi({ description: 'Google Cloud project to upload through: primary = mkvid-uploads, shared = tracked-youtube.' }),
+    attempts: z.number().int(),
+    tracks: z.array(MkvidTrackSchema).max(300).openapi({ description: 'The set\'s track list: every row of the page in order, anonymous "ID - ID" rows included (at most 300 rows); [] when none is stored.' }),
+    tracksTrusted: z.boolean().openapi({
+      description:
+        'true only when the list came from a page that passed the decoy check with evidence (≥3 rows compared, none contradicting itself). Since ~2026-09-22 1001tracklists serves our accounts pages with real cues/artwork and randomized names, and shows a random 15–35% of identified rows as "ID - ID"; an untrusted list carries no names, and its isId cannot be believed (cueSeconds, artworkUrl and layered still can). false when the list is empty.',
+    }),
+  })
+  .passthrough()
+  .openapi('MkvidClaimedRequest')
+
+export const MkvidClaimResponse = z
+  .object({ request: MkvidClaimedRequest.nullable().openapi({ description: 'null when nothing is claimable (queue empty, daily cap reached, no account offered).' }) })
+  .openapi('MkvidClaimResponse')

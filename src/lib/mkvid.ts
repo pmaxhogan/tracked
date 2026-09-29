@@ -49,22 +49,32 @@ export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
 /** A retryable failure waits this long × attempts before it can be claimed again. */
 const RETRY_BACKOFF_SECONDS = 6 * 60 * 60
 /**
- * mkvid uploads through two Google Cloud projects, each with its own 10 000-unit
- * YouTube quota day, and a `videos.insert` costs 1 600 of them:
+ * mkvid uploads through two Google Cloud projects. Since September 2026 (checked
+ * with gcloud on both) YouTube meters uploads apart from everything else: each
+ * project gets 100 `videos.insert` calls a day in their own bucket, and an
+ * upload no longer spends any of the 10 000-unit general pool. So the upload
+ * itself is cheap; what an mkvid video still costs is the two playlist inserts
+ * the Worker makes on `completeMkvidRequest` (artist + combined, 50 units each)
+ * — and those are always billed to the sync's project, tracked-youtube, because
+ * they use the Worker's own OAuth token, whichever account uploaded.
  *   - `primary` — mkvid's own project (mkvid-uploads). Nothing else spends
- *     there, so six uploads (9 600) fit.
- *   - `shared` — the sync's project (tracked-youtube), which also pays for
- *     every playlist insert (50 each, ~2 000/day in steady state, far more
- *     while a backfill runs). Off unless MKVID_SHARED_DAILY_CLAIM_CAP says
- *     otherwise; three is the most it can carry without starving the sync.
+ *     there; 24 of its 100 uploads a day.
+ *   - `shared` — the sync's project (tracked-youtube). 6 of its 100 uploads,
+ *     taken only once the primary is full or disconnected, so a lost primary
+ *     client still leaves the queue moving.
+ * 30 videos a day = ~3 000 general-pool units on tracked-youtube. Measured
+ * there over 8 days before the raise: 1 053–1 559 units/day, ~900 of them for
+ * the 9 videos then allowed, so the sync itself is ~150–650 — the total lands
+ * near 3 200–3 700, and even the combined backfill's own ceiling (80 inserts,
+ * 4 000 units, lib/combined-playlist.ts) on top stays under 8 000 of 10 000.
  * A claim fills the primary account first and spills to the shared one.
  */
 export type MkvidAccount = 'primary' | 'shared'
 export const MKVID_ACCOUNTS: readonly MkvidAccount[] = ['primary', 'shared']
 /** The Google Cloud project behind each account — what the panel shows. */
 export const MKVID_ACCOUNT_LABELS: Record<MkvidAccount, string> = { primary: 'mkvid-uploads', shared: 'tracked-youtube' }
-export const DEFAULT_DAILY_CLAIM_CAP = 6
-export const DEFAULT_SHARED_DAILY_CLAIM_CAP = 0
+export const DEFAULT_DAILY_CLAIM_CAP = 24
+export const DEFAULT_SHARED_DAILY_CLAIM_CAP = 6
 /** The YouTube Data API quota resets at midnight Pacific, not UTC. */
 const QUOTA_TZ = 'America/Los_Angeles'
 
@@ -241,6 +251,108 @@ export function lastCueSeconds(tracks: ReadonlyArray<Pick<ParsedTrack, 'startSec
     if (t.startSeconds !== null && (max === null || t.startSeconds > max)) max = t.startSeconds
   }
   return max
+}
+
+// ─── track list handed to mkvid ─────────────────────────────────────────────
+
+/**
+ * One tracklist row as `/mkvid/claim` sends it, for mkvid to draw per-track
+ * titles and artwork. `artist`/`title` are null for an anonymous ("ID") part
+ * and for every row of an untrusted list; `isId` = the playing track itself is
+ * unidentified. `layered` = a 1001tl "w/" row: plays on top of the row before
+ * it rather than replacing it; its `cueSeconds` is its own printed cue, or null
+ * when it has none (mkvid then starts it with its base). Never true on row 0.
+ */
+export type MkvidTrack = { cueSeconds: number | null; artist: string | null; title: string | null; artworkUrl: string | null; isId: boolean; layered: boolean }
+export type MkvidTrackList = { tracks: MkvidTrack[]; tracksTrusted: boolean }
+/** Sets run to ~150 rows; anything past this is not a set, and keeps a claim response bounded (~60 KB). */
+export const MKVID_MAX_TRACKS = 300
+
+/**
+ * Whether the names on a parsed page can be shown. Since ~2026-09-22
+ * 1001tracklists serves our accounts decoy pages: real cues, ids and artwork,
+ * randomized names (see DecoySignal in lib/tracklists1001.ts). Stricter than
+ * `looksLikeDecoy`, which needs a majority of contradicting rows to *refuse* a
+ * page: to *trust* one, at least three rows must have been compared and not
+ * one of them may contradict itself (a real page agrees on every row).
+ */
+export function mkvidTracksTrusted(d: { named: number; mismatched: number; suspected: boolean }): boolean {
+  return !d.suspected && d.named >= 3 && d.mismatched === 0
+}
+
+const nameOrNull = (s: string | null | undefined): string | null => {
+  const t = (s ?? '').trim()
+  return t && t !== 'ID' ? t : null
+}
+
+/** Parsed rows → the wire format. Names only survive on a trusted list; cues and artwork are real even on a decoy page. */
+export function toMkvidTracks(tracks: ReadonlyArray<ParsedTrack & { anonymous?: boolean }>, trusted: boolean): MkvidTrack[] {
+  return tracks.slice(0, MKVID_MAX_TRACKS).map((t, i) => {
+    const layered = i > 0 && t.isMashupLinked
+    return {
+      // A "w/" row's startSeconds is its base's cue; send only a cue of its own.
+      cueSeconds: layered ? (t.ownStartSeconds ?? null) : t.startSeconds,
+      // An anonymous "ID - ID" row has nothing to show but "ID" (mkvid draws it with the set art).
+      artist: trusted && !t.anonymous ? nameOrNull(t.artist) : null,
+      title: trusted && !t.anonymous ? nameOrNull(t.title) : null,
+      artworkUrl: t.anonymous ? null : t.artworkUrl,
+      isId: t.anonymous || t.isUnidentified,
+      layered,
+    }
+  })
+}
+
+/**
+ * Store the track list of a queued set's page (sync: first queueing and every
+ * recheck). Keyed by the request, so a set that is not queued stores nothing.
+ * A trusted list is never replaced by an untrusted one — the next fetch may
+ * well be a decoy — but an untrusted one is upgraded as soon as a clean page
+ * turns up, and a trusted one refreshed (1001tl users add IDs over time).
+ */
+export async function saveMkvidTracks(
+  env: Env,
+  setUrl: string,
+  // `rows`, not `tracks`: every page row, anonymous "ID - ID" rows included (ScrapedTracklist.rows).
+  parsed: { rows: ReadonlyArray<ParsedTrack & { anonymous?: boolean }>; decoy: { named: number; mismatched: number; suspected: boolean } },
+): Promise<'saved' | 'kept' | 'no_request' | 'empty'> {
+  if (parsed.rows.length === 0) return 'empty'
+  const db = dbOf(env)
+  const req = await db.prepare('SELECT id FROM mkvid_requests WHERE set_url = ?').bind(setUrl).first<{ id: string }>()
+  if (!req) return 'no_request'
+  const trusted = mkvidTracksTrusted(parsed.decoy)
+  const tracks = toMkvidTracks(parsed.rows, trusted)
+  const r = await db
+    .prepare(
+      `INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(request_id) DO UPDATE SET
+         tracks = excluded.tracks, track_count = excluded.track_count, trusted = excluded.trusted,
+         named = excluded.named, mismatched = excluded.mismatched, scraped_at = excluded.scraped_at
+       WHERE excluded.trusted >= mkvid_request_tracks.trusted`,
+    )
+    .bind(req.id, JSON.stringify(tracks), tracks.length, trusted ? 1 : 0, parsed.decoy.named, parsed.decoy.mismatched, nowSeconds())
+    .run()
+  return (r.meta.changes ?? 0) > 0 ? 'saved' : 'kept'
+}
+
+/**
+ * The stored list for a request; empty and untrusted when there is none or it
+ * cannot be read — including before migration 0006 is applied, so a claim
+ * never fails over the list.
+ */
+export async function getMkvidTracks(env: Env, requestId: string): Promise<MkvidTrackList> {
+  let row: { tracks: string; trusted: number } | null
+  try {
+    row = await dbOf(env)
+      .prepare('SELECT tracks, trusted FROM mkvid_request_tracks WHERE request_id = ?')
+      .bind(requestId)
+      .first<{ tracks: string; trusted: number }>()
+  } catch {
+    return { tracks: [], tracksTrusted: false }
+  }
+  const tracks = parseJson<MkvidTrack[] | null>(row?.tracks ?? null, null)
+  if (!row || !Array.isArray(tracks)) return { tracks: [], tracksTrusted: false }
+  return { tracks, tracksTrusted: Number(row.trusted) === 1 && tracks.length > 0 }
 }
 
 // ─── queue rows ─────────────────────────────────────────────────────────────
@@ -701,11 +813,15 @@ function claimTtl(env: Env): number {
  * whose set has meanwhile gained a video on 1001tracklists is marked
  * `superseded` and skipped. Returns null when there is nothing to do.
  */
-export async function claimMkvidRequest(env: Env, log: Logger, accounts: readonly MkvidAccount[] = ['primary']): Promise<MkvidRequest | null> {
+export async function claimMkvidRequest(env: Env, log: Logger, accounts: readonly MkvidAccount[] = ['primary']): Promise<MkvidClaim | null> {
   const { request, outcome } = await claimNext(env, log, accounts)
   await recordMkvidPoll(env, outcome, accounts)
-  return request
+  if (!request) return null
+  return { ...request, ...(await getMkvidTracks(env, request.id)) }
 }
+
+/** What `/mkvid/claim` hands out: the request plus its track list (empty + untrusted when none is stored). */
+export type MkvidClaim = MkvidRequest & MkvidTrackList
 
 /**
  * `accounts` is what mkvid can upload with right now (a configured client

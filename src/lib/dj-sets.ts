@@ -2,6 +2,7 @@ import type { Env } from '../types'
 import { crawlDjIndex } from './dj-index'
 import { fetchOptsFromEnv } from './upstream1001'
 import { loadSubState } from './sync'
+import { loadDjBackfill } from './sync-store'
 import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
 
@@ -18,7 +19,7 @@ import type { Logger } from './log'
  */
 
 /** Cache-key version — bump when DjSets' shape or derivation changes. */
-const CV = 1
+const CV = 2
 const cacheKey = (slug: string) => `djsets:v${CV}:${slug}`
 
 export type DjSetSummary = {
@@ -41,6 +42,12 @@ export type DjSets = {
   crawledAt: number
   pagesWalked: number
   stopReason: string
+  /**
+   * False while older sets may still be missing: the daily cron's backfill
+   * has not yet reached the end of this DJ's 1001tracklists list. The page
+   * says so instead of presenting `sets.length` as the DJ's total.
+   */
+  listingComplete: boolean
 }
 
 /**
@@ -100,14 +107,17 @@ export async function getDjSets(
     log.info('cache.miss', { key })
   }
 
+  // Known sets first, so the crawl only walks down to them: a profile view
+  // for a DJ already in the database costs page 1 and no scroll request.
+  // Deeper history is the daily cron's backfill, never a page view's.
+  const [state, backfill] = await Promise.all([loadSubState(env, slug), loadDjBackfill(env, slug)])
   const crawl = await crawlDjIndex(slug, {
     ...fetchOptsFromEnv(env, log),
-    // The profile page is interactive — stay well inside the fetch budget.
     deadlineMs: Date.now() + 20_000,
-    maxPages: 100,
+    maxPages: 2,
+    knownUrls: new Set(state?.discoveredTracklistUrls ?? []),
   })
 
-  const state = await loadSubState(env, slug)
   const seen = new Set(crawl.tracklistUrls)
   const urls = [...crawl.tracklistUrls]
   for (const u of state?.discoveredTracklistUrls ?? []) {
@@ -125,6 +135,7 @@ export async function getDjSets(
     crawledAt: Math.floor(Date.now() / 1000),
     pagesWalked: crawl.pagesWalked,
     stopReason: crawl.stopReason,
+    listingComplete: crawl.stopReason === 'end' || backfill?.done === true,
   }
 
   // Don't cache a failed crawl that the sync state couldn't cover either —

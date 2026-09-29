@@ -2082,14 +2082,14 @@ ${BAN_HISTORY_HTML}
     // The heartbeat is rewritten at most every 10 min, so only a longer silence means anything.
     const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
     if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
-    if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'MKVID_DAILY_CLAIM_CAP (and MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Set MKVID_DAILY_CLAIM_CAP to 6 (or delete the secret) to resume.'];
+    if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'MKVID_DAILY_CLAIM_CAP (and MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Set MKVID_DAILY_CLAIM_CAP to 24 (or delete the secret) to resume.'];
     // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
     if (c.claimed) return ['ok', 'Rendering ' + c.claimed + ' set' + (c.claimed === 1 ? '' : 's') + ' now', used + '/' + cap + ' of today’s uploads used.'];
     if (silent) return ['bad', poll ? 'mkvid last polled ' + relTime(new Date(poll.at * 1000).toISOString()) : 'mkvid has not polled yet', 'It normally polls every minute. Check the mkvid container on the NAS and that it can reach this Worker (TRACKED_URL / TRACKED_TOKEN).'];
     if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
     if (poll.outcome === 'not_connected') return ['bad', 'mkvid has no YouTube account connected', 'Its token expired or was revoked. Open mkvid.maxhogan.dev and connect YouTube again.'];
     if (!c.pending) return ['ok', 'Queue empty', 'Nothing is waiting for mkvid.'];
-    if (eff.used >= eff.cap || poll.outcome === 'capped') return ['wait', 'Today’s ' + eff.cap + ' upload' + (eff.cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each upload costs 1 600 of a project’s 10 000 units).' + idleNote];
+    if (eff.used >= eff.cap || poll.outcome === 'capped') return ['wait', 'Today’s ' + eff.cap + ' upload' + (eff.cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each project allows 100 uploads a day; the caps here keep it to 30 in total).' + idleNote];
     return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.' + idleNote];
   }
 
@@ -2821,7 +2821,10 @@ ${BAN_BANNER_HTML}
       document.title = 'tracked — ' + (data.artistName || slug);
       $subBadge.hidden = !data.subscribed;
       const src = data.source === 'state' ? 'from sync state (crawl unavailable)' : 'crawled ' + fmtWhen(data.crawledAt);
-      $counts.textContent = (data.sets || []).length + ' set' + (data.sets && data.sets.length === 1 ? '' : 's') + ' · ' + src;
+      // Until the daily backfill reaches the end of the DJ's list, the count is
+      // "sets found so far", not the DJ's total on 1001tracklists.
+      const partial = data.listingComplete === false ? ' found so far — listing may be incomplete (older sets are backfilled 10 a day)' : '';
+      $counts.textContent = (data.sets || []).length + ' set' + (data.sets && data.sets.length === 1 ? '' : 's') + partial + ' · ' + src;
       renderSets(data.sets || []);
     } catch (e) {
       $error.textContent = 'request failed: ' + (e && e.message ? e.message : e);
