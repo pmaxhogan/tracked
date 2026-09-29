@@ -15,6 +15,8 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { attachYoutubeLiked } from '../lib/liked-status'
 import { findMkvidUploadByTitle } from '../lib/mkvid'
 import { findTracklistUrlByVideoId } from '../lib/sync-store'
+import { SEARCH_URL_CV, refreshTracklistPage } from '../lib/tracklist-purge'
+import { cacheAgeSeconds } from '../lib/tracklist-cache'
 
 export const nowPlayingRoute = createRoute({
   method: 'post',
@@ -54,7 +56,7 @@ const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId
  */
 const CV = {
   yt: 1, // YouTube resolve → { videoId, matchTitle }
-  searchUrl: 2, // 1001tl search by YouTube URL — v2: rejects the site's text-search fallback (multi-hyphen video ids)
+  searchUrl: SEARCH_URL_CV, // 1001tl search by YouTube URL — v2: rejects the site's text-search fallback (multi-hyphen video ids); shared with the purge-by-video lookup
   searchTitle: 3, // 1001tl search by title — v3: dates/episode codes tokenized, query-coverage floor (v2 under-scored dated titles)
   apple: 1, // iTunes Apple-link fallback
   // NB: the `tracklist` (parsed page) and `medialink` (per-track links) cache
@@ -324,8 +326,11 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   // written before `rows` existed).
   let selectable: Array<ParsedTrack & { anonymous?: boolean }>
   let setAppleLink: string | null = null
+  // Age of the cached list the answer comes from (`refresh: true` purges and refetches first).
+  let cache: Res['cache'] = null
   try {
-    const scraped = await resolveTracklistPage(env, tracklistUrl, log)
+    const scraped = body.refresh ? await refreshTracklistPage(env, tracklistUrl, log) : await resolveTracklistPage(env, tracklistUrl, log)
+    cache = { fetchedAt: scraped.fetchedAt ?? null, ageSeconds: cacheAgeSeconds(scraped), ttlSeconds: scraped.ttlSeconds ?? null, refreshed: !!body.refresh }
     parsedTracks = scraped.tracks
     selectable = scraped.rows
       ? keepRows(scraped.rows, (r) => !r.anonymous || (!r.isMashupLinked && r.startSeconds !== null))
@@ -390,7 +395,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   })
   if (sel.picked.length === 0) {
     log.warn('phase.select.empty', { currentSeconds: body.currentSeconds, totalTracks: parsedTracks.length })
-    return respond('no_tracklist', { videoUrl, tracklistUrl })
+    return respond('no_tracklist', { videoUrl, tracklistUrl, cache })
   }
 
   // Phase 5 — enrich with deep links
@@ -408,7 +413,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   const tracks = await attachYoutubeLiked(env, enriched, log)
 
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
-  const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks } satisfies Res
+  const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks, cache } satisfies Res
   log.info('req.end', { status, totalMs: Date.now() - tStart, counters: log.counters, response: payload })
   bgAudit({ status })
   return c.json(payload, 200)

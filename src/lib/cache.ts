@@ -1,10 +1,10 @@
 export const TTL = {
   YT_VIDEO: 60 * 60 * 24 * 30,
-  /** 1001tl pages turn over fast on new listings — keep both the search
-   *  mapping and the parsed tracklist short so newly-added tracklists and
-   *  newly-IDed tracks show up without a long stale window. */
+  /** 1001tl search results turn over fast on new listings — keep the search
+   *  mapping short so newly-added tracklists show up without a long stale
+   *  window. The parsed tracklist's TTL depends on the list (3 d / 6 h), see
+   *  lib/tracklist-cache.ts. */
   TRACKLIST_SEARCH: 60 * 60 * 2,
-  TRACKLIST_PAGE: 60 * 60 * 2,
   MEDIALINK: 60 * 60 * 24 * 30,
   APPLE: 60 * 60 * 24 * 90,
   /** Durable audit record of each /now-playing call, keyed `np:<epochMs>:<reqId>`.
