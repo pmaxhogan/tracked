@@ -19,6 +19,11 @@ vi.mock('../src/lib/youtube-playlists', async () => {
   const actual = await vi.importActual<typeof import('../src/lib/youtube-playlists')>('../src/lib/youtube-playlists')
   return { ...actual, findPlaylistByTitle: vi.fn(), createPlaylist: vi.fn(), listPlaylistVideoIds: vi.fn(), addVideoToPlaylist: vi.fn(), removeVideoFromPlaylist: vi.fn() }
 })
+// The full-recording gate (W6) looks page videos up with videos.list: no network.
+vi.mock('../src/lib/video-meta', async () => {
+  const actual = await vi.importActual<typeof import('../src/lib/video-meta')>('../src/lib/video-meta')
+  return { ...actual, getVideoMeta: vi.fn(async () => new Map()) }
+})
 import { crawlDjIndex, djScrollStep, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-index'
 import { findPlaylistByTitle, listPlaylistVideoIds } from '../src/lib/youtube-playlists'
 
