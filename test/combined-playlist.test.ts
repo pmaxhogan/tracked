@@ -13,6 +13,7 @@ import {
   type PlaylistSource,
 } from '../src/lib/combined-playlist'
 import { makeLogger } from '../src/lib/log'
+import { recordRemoved, savePlaylistMembers } from '../src/lib/playlist-blocklist'
 
 // Same stubbing strategy as sync.test.ts: the YouTube client is mocked so the
 // merge logic (union → diff → bounded insert) is a deterministic unit test.
@@ -165,6 +166,19 @@ describe('mergeIntoCombinedPlaylist', () => {
     expect(await env.CACHE.get('yt:plvids:PLcombined', 'json')).toEqual({
       videoIds: ['alreadyIn12', 'aOnly123456', 'bOnly123456'],
     })
+  })
+
+  it('never puts back a video the owner took out (blocked, or gone since the last complete listing)', async () => {
+    const env = makeEnv()
+    await saveCombinedState(env, { playlistId: 'PLcombined' })
+    await recordRemoved(env, { playlistId: 'PLcombined', videoId: 'blocked1234', slug: null, setUrl: null, reason: 'owner' })
+    await savePlaylistMembers(env, 'PLcombined', new Set(['alreadyIn12', 'leftSince12']))
+    seedPlaylists({ PLcombined: ['alreadyIn12'], PLa: ['alreadyIn12', 'blocked1234', 'leftSince12', 'aOnly123456'] })
+
+    const r = await mergeIntoCombinedPlaylist(env, 'tok', [source('a', 'PLa')], { log })
+
+    expect(addedVideos()).toEqual([['PLcombined', 'aOnly123456']])
+    expect(r).toMatchObject({ missingTotal: 1, inserted: 1, pending: 0 })
   })
 
   it('inserts a video shared by two artists exactly once', async () => {
