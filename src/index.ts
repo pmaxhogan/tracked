@@ -17,6 +17,7 @@ import { runKvMigrationTickSafely } from './lib/kv-import'
 import { pruneNowPlayingAudit } from './lib/now-playing-audit'
 import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
+import { runPlaylistHygiene } from './lib/playlist-hygiene'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
 // which is not the `{ error, message }` shape every route documents. Normalise
@@ -152,6 +153,8 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       } catch (e) {
         log.error('cron.combined_backfill_threw', errorFields(e))
       }
+      // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
+      await runPlaylistHygiene(env, log)
     })(),
   )
 }

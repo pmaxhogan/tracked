@@ -85,6 +85,8 @@ import {
   type PlaylistSource,
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
+import { pickSetVideo, rejectionNote } from './playlist-hygiene'
+import { combinedRefuses } from './playlist-blocklist'
 import { parseTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
@@ -671,6 +673,7 @@ export async function syncOne(
     const handle = await openCombinedOnce()
     if (!handle) return 'unavailable'
     try {
+      if (await combinedRefuses(env, handle.playlistId, videoId, handle.videoIds)) return 'unavailable'
       const status = await addToCombined(env, handle, videoId, accessToken, log)
       if (status === 'added') {
         log.info('sync.combined_added', { slug: sub.slug, videoId, playlistId: handle.playlistId })
@@ -846,7 +849,9 @@ export async function syncOne(
       // Write-through: the phone button then serves this list from cache.
       await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new')
       foundVia = setFetched.via
-      const videoId = parseSetYouTubeId(setFetched.html)
+      // Full-recording rule + never-re-add list (lib/playlist-hygiene.ts): a turned-down video counts as none.
+      const pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
+      const videoId = pick.videoId
       foundVideoId = videoId
       await noteFetched(setUrl, setFetched, videoId)
       if (videoId) {
@@ -882,7 +887,7 @@ export async function syncOne(
           setUrl,
           fingerprint: youtubeFingerprint(setFetched.html),
         })
-        const note = await maybeQueueForMkvid(setUrl, setFetched.html)
+        const note = [pick.rejected ? rejectionNote(pick.rejected) : null, await maybeQueueForMkvid(setUrl, setFetched.html)].filter(Boolean).join('; ')
         auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
       }
       processed.add(setUrl)
@@ -980,7 +985,7 @@ export async function syncOne(
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
       await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck')
-      const videoId = parseSetYouTubeId(setFetched.html)
+      const { videoId } = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
       const checkedAt = nowSeconds()
       await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null)
       if (!prev || prev.videoId === undefined) {

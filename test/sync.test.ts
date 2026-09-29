@@ -57,7 +57,17 @@ vi.mock('../src/lib/youtube-playlists', async () => {
   }
 })
 
+// The full-recording gate (lib/playlist-hygiene.ts) looks every page video up
+// with videos.list; no network here. An empty answer = rules needing duration
+// or orientation do not apply, so the sync behaves as before.
+vi.mock('../src/lib/video-meta', async () => {
+  const actual = await vi.importActual<typeof import('../src/lib/video-meta')>('../src/lib/video-meta')
+  return { ...actual, getVideoMeta: vi.fn(async () => new Map()) }
+})
+
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-index'
+import { getVideoMeta } from '../src/lib/video-meta'
+import { recordRemoved } from '../src/lib/playlist-blocklist'
 import {
   addVideoToPlaylist,
   createPlaylist,
@@ -1722,5 +1732,73 @@ describe('tracklist cache write-through from sync fetches', () => {
 
     expect(r.stats.tracklistsProcessed).toBe(1)
     expect(await env.CACHE.get(KEY)).toBeNull()
+  })
+})
+
+describe('full-recording gate inside a sync (lib/playlist-hygiene.ts)', () => {
+  const soundcloudPage = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-maxstyler.html'), 'utf8')
+  const setUrl = 'https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html'
+  const withMkvid = () => ({ ...makeEnv(), MKVID_TOKEN: 'mk' }) as Env
+  /** videos.list answer for one id: a 10-minute clip of a 76-minute set (cues past 1 h, SoundCloud 76 min). */
+  const clipMeta = (id: string) => new Map([[id, { videoId: id, durationSeconds: 600, embedWidth: 1280, embedHeight: 720, privacy: 'public', uploadStatus: 'processed', alive: true, fetchedAt: 0 }]])
+
+  it('never adds a video that is not a full recording; the set goes to mkvid instead', async () => {
+    const env = withMkvid()
+    mockCrawl([setUrl], 'Max Styler')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Max Styler (1001tklists)' })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'home-proxy', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('clip0000001')
+    ;(getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(clipMeta('clip0000001'))
+
+    await syncOne(env, sub, 'tok')
+
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.tracklistVideos![setUrl]!.videoId).toBeNull()
+    expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe('pending')
+    const rows = await playlistAdditions(env)
+    expect(rows[0]!.record.status).toBe('no_youtube')
+    expect(rows[0]!.record.message).toMatch(/^not added: clip0000001 video is more than 5 min shorter than the last cue .*; queued for mkvid \(soundcloud\)$/)
+  })
+
+  it('a recheck never swaps an mkvid render for a rejected page video', async () => {
+    const env = withMkvid()
+    await saveSubState(env, sub.slug, { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: [setUrl], processedTracklistUrls: [setUrl], tracklistVideos: { [setUrl]: stale('mkvidRender') } })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('clip0000001')
+    ;(getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(clipMeta('clip0000001'))
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect((await loadSubState(env, sub.slug))!.tracklistVideos![setUrl]!.videoId).toBe('mkvidRender')
+  })
+
+  it('a recheck never re-adds a video removed from the artist playlist', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: ['https://x/tracklist/a'], processedTracklistUrls: ['https://x/tracklist/a'], tracklistVideos: { 'https://x/tracklist/a': stale(null) } })
+    await recordRemoved(env, { playlistId: 'PL', videoId: 'ownerGone01', slug: sub.slug, setUrl: 'https://x/tracklist/a', reason: 'owner' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('ownerGone01')
+
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect((await loadSubState(env, sub.slug))!.tracklistVideos!['https://x/tracklist/a']!.videoId).toBeNull()
+  })
+
+  it('the live mirror skips a video the owner took out of the combined playlist', async () => {
+    const env = makeEnv()
+    mockCrawl(['https://x/tracklist/a'])
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockImplementation(async (title: string) =>
+      title === 'All tracked artists (1001tklists)' ? { id: 'PLcombined', title } : { id: 'PLartist', title },
+    )
+    await recordRemoved(env, { playlistId: 'PLcombined', videoId: 'goodVid0001', slug: null, setUrl: null, reason: 'owner' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('goodVid0001')
+
+    await syncOne(env, sub, 'tok')
+
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual(['PLartist'])
+    expect((await playlistAdditions(env))[0]!.record.combinedStatus).toBe('unavailable')
   })
 })

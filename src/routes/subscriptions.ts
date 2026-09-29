@@ -58,6 +58,7 @@ import {
   testPayload,
 } from '../lib/web-push'
 import { ALERTS_ROW_HTML, BAN_BANNER_HTML, BAN_CSS, BAN_HISTORY_HTML, BAN_JS, SW_JS } from './ban-ui'
+import { hygieneApp } from './playlist-hygiene'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -82,6 +83,9 @@ subscriptionsApp.onError((e, c) => {
   log.error('subs.unhandled_throw', errorFields(e))
   return c.json({ error: 'internal', ...errorFields(e) }, 500)
 })
+
+// /removed page, removal log + undo, remove-and-replace (routes/playlist-hygiene.ts). Behind cfAccess above.
+subscriptionsApp.route('/', hygieneApp)
 
 subscriptionsApp.get('/', (c) => {
   // The page bundles its own JS inline. no-store keeps browsers from
@@ -2662,6 +2666,22 @@ ${BAN_BANNER_HTML}
     viewer.href = '/subscriptions/tracklist?url=' + encodeURIComponent(set.url);
     viewer.textContent = 'Open in viewer';
     links.appendChild(viewer);
+    // Remove and replace (routes/playlist-hygiene.ts): out of both playlists now, never re-added, queued for mkvid.
+    const rr = document.createElement('button');
+    rr.className = 'ghost'; rr.textContent = 'Remove & replace video';
+    rr.title = 'Take this set\\'s video out of the playlists for good and render one from its audio instead';
+    rr.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (!confirm('Remove this set\\'s video from the playlists and never re-add it?')) return;
+      rr.disabled = true;
+      try {
+        const r = await fetch('/subscriptions/api/set/remove-replace', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ slug, url: set.url }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
+        rr.textContent = 'Removed ' + d.videoId + ' — ' + d.mkvid;
+      } catch (e) { rr.textContent = 'Remove failed: ' + (e && e.message ? e.message : e); rr.disabled = false; }
+    });
+    links.appendChild(rr);
     body.appendChild(links);
 
     const ul = document.createElement('ul');

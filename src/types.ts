@@ -24,6 +24,10 @@ export type Env = {
   MKVID_DAILY_CLAIM_CAP?: string
   /** Same, for uploads mkvid makes through the sync's project, tracked-youtube, once its own is used up (default 6, so 30/day in total). `0` = never. */
   MKVID_SHARED_DAILY_CLAIM_CAP?: string
+  /** Playlist sweep (lib/playlist-hygiene.ts): TRUE unless "0"/"false"/"no"/"off" — rejected videos are only reported, not removed. */
+  PLAYLIST_SWEEP_DRY_RUN?: string
+  /** Playlist sweep: max playlistItems.delete calls per UTC day (50 quota units each; default 40). */
+  PLAYLIST_SWEEP_DAILY_REMOVALS?: string
   YOUTUBE_API_KEY: string
   /**
    * tlpool, the NAS browser pool (lib/pool.ts): base URL through the
