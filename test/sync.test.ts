@@ -1657,7 +1657,7 @@ describe('tracklist cache write-through from sync fetches', () => {
   const KEY = 'tl:v4:18kll1h1'
   const fx = (name: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
   const serve = (name: string) =>
-    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: fx(name), via: 'home-proxy', state: { cookie: '' } })
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: fx(name), via: 'pool', state: { cookie: '' }, accountId: 'acct-1', exitLabel: 'exit-a', fetchedAt: new Date().toISOString() })
 
   it('a new-set fetch fills the parsed-list cache, so the phone button after it costs no request', async () => {
     const env = makeEnv()
@@ -1701,7 +1701,9 @@ describe('tracklist cache write-through from sync fetches', () => {
     ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
     serve('tracklist-maxstyler.html') // 2 ID rows → the short TTL
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    // A 2024 set with a video is past the age bands' "never" line, so the
+    // recheck comes from the scheduler's selection (as a verify fetch does).
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, selection: { newUrls: [], recheckUrls: [REAL] } })
 
     expect(r.stats.tracklistsRechecked).toBe(1)
     const v = JSON.parse((await env.CACHE.get(KEY))!)

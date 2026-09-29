@@ -2,6 +2,7 @@ import type { Env } from '../types'
 import { fetchTracklist, fetchMediaLinks, DecoyTracklistError, type MediaLinks, type FetchTracklistOpts } from './tracklists1001'
 import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
+import type { PoolPriority } from './pool'
 import { fetchOptsFromEnv } from './upstream1001'
 import {
   TRACKLIST_CACHE_VERSION,
@@ -32,11 +33,8 @@ export const TRACKLIST_CV = {
   medialink: 1, // per-track Apple/YouTube links
 } as const
 
-/**
- * Fetch priority (spec: phone, new, verify, recheck, backfill). The pool
- * client (W4) reads it from the fetch options; the current cascade ignores it.
- */
-export type FetchPriority = 'phone' | 'new' | 'verify' | 'recheck' | 'backfill'
+/** Fetch priority (spec: phone, new, verify, recheck, backfill), handed to tlpool. */
+export type FetchPriority = PoolPriority
 
 export type ResolveTracklistOpts = {
   /** Skip the cache read and fetch now (the purge path). The result is still written. */
@@ -69,9 +67,7 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   } else {
     log.info('cache.bypass', { key, reason: 'force' })
   }
-  // A typed variable, not an object literal: `priority` is not in the
-  // cascade's option type yet (the pool client adds it).
-  const fetchOpts: FetchTracklistOpts & { priority: FetchPriority } = { ...fetchOptsFromEnv(env, log), priority: opts.priority ?? 'phone' }
+  const fetchOpts: FetchTracklistOpts = fetchOptsFromEnv(env, log, { priority: opts.priority ?? 'phone' })
   const { result } = await fetchTracklist(tracklistUrl, fetchOpts)
   const written = await cacheParsedTracklist(env, tracklistUrl, result, log, { source: 'resolve' })
   if (written.cached) return written.value

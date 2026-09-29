@@ -31,7 +31,7 @@ import { app } from '../src/index'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
-const PROXY = 'https://proxy.example'
+const POOL = 'https://tlpool.example'
 // habstrakt: 31 rows, every one identified, set date 2024-11-11.
 const FULL_URL = 'https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-1001tracklists-x-dj-lovers-club-pres.-waterways-amsterdam-dance-event-netherlands-2024-11-11.html'
 const FULL_SLUG = '18kll1h1'
@@ -40,19 +40,19 @@ const PARTIAL_URL = 'https://www.1001tracklists.com/tracklist/1pmwyfn1/max-style
 const VIDEO_ID = '79n8BaQAL2Q'
 
 function makeEnv(over: Partial<Env> = {}): Env {
-  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 'tasker', YOUTUBE_API_KEY: 'k', HOME_PROXY_URL: PROXY, HOME_PROXY_TOKEN: 'tok', ...over } as Env
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 'tasker', YOUTUBE_API_KEY: 'k', TLPOOL_URL: POOL, TLPOOL_TOKEN: 'tok', ...over } as Env
 }
 
-/** The forwarder answers every 1001tl fetch with `html`; returns the list of upstream calls. */
-function proxyServes(html: string) {
+/** tlpool answers every 1001tl fetch with `html`; returns the list of pool calls. */
+function poolServes(html: string) {
   const calls: string[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.startsWith(PROXY)) {
+      if (url.startsWith(POOL)) {
         calls.push(url)
-        return new Response(html, { status: 200, headers: { 'x-proxy-route': 'direct', 'x-proxy-egress': 'direct', 'x-proxy-upstream-status': '200', 'x-proxy-attempts': 'direct/acct-1:ok', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' } })
+        return Response.json({ status: 200, finalUrl: url, html, accountId: 'acct-1', exitLabel: 'exit-a', fetchedAt: new Date().toISOString(), bytes: html.length })
       }
       throw new Error(`unexpected fetch ${url}`)
     }),
@@ -142,7 +142,7 @@ describe('resolveTracklistPage TTL selection', () => {
   it('writes a fully identified old set for 3 days', async () => {
     const env = makeEnv()
     const ttls = ttlSpy(env)
-    proxyServes(fx('tracklist-habstrakt.html'))
+    poolServes(fx('tracklist-habstrakt.html'))
     const r = await resolveTracklistPage(env, FULL_URL, log)
     expect(r.tracks).toHaveLength(31)
     expect(ttls[tracklistCacheKey(FULL_SLUG)]).toBe(TRACKLIST_TTL.FULL)
@@ -152,7 +152,7 @@ describe('resolveTracklistPage TTL selection', () => {
   it('writes a list with ID rows for 6 hours', async () => {
     const env = makeEnv()
     const ttls = ttlSpy(env)
-    proxyServes(fx('tracklist-maxstyler.html'))
+    poolServes(fx('tracklist-maxstyler.html'))
     await resolveTracklistPage(env, PARTIAL_URL, log)
     expect(ttls[tracklistCacheKey('1pmwyfn1')]).toBe(TRACKLIST_TTL.SHORT)
   })
@@ -162,14 +162,14 @@ describe('resolveTracklistPage TTL selection', () => {
     vi.setSystemTime(new Date('2024-11-12T10:00:00Z'))
     const env = makeEnv()
     const ttls = ttlSpy(env)
-    proxyServes(fx('tracklist-habstrakt.html'))
+    poolServes(fx('tracklist-habstrakt.html'))
     await resolveTracklistPage(env, FULL_URL, log)
     expect(ttls[tracklistCacheKey(FULL_SLUG)]).toBe(TRACKLIST_TTL.SHORT)
   })
 
   it('serves the second call from cache; force refetches', async () => {
     const env = makeEnv()
-    const calls = proxyServes(fx('tracklist-habstrakt.html'))
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
     await resolveTracklistPage(env, FULL_URL, log)
     await resolveTracklistPage(env, FULL_URL, log)
     expect(calls).toHaveLength(1)
@@ -207,7 +207,7 @@ async function seedStaleEntry(env: Env) {
 describe('POST /tracklist/purge (bearer)', () => {
   let calls: string[]
   beforeEach(() => {
-    calls = proxyServes(fx('tracklist-habstrakt.html'))
+    calls = poolServes(fx('tracklist-habstrakt.html'))
   })
 
   it('is behind the API_TOKEN bearer', async () => {
@@ -277,7 +277,7 @@ describe('POST /tracklist/purge (bearer)', () => {
     await seedStaleEntry(env)
     const before = await env.CACHE.get(tracklistCacheKey(FULL_SLUG))
     const oldFetchedAt = JSON.parse(before!).fetchedAt
-    proxyServes(fx('tracklist-decoy-dcr839.html'))
+    poolServes(fx('tracklist-decoy-dcr839.html'))
     const res = await bearer(env, '/tracklist/purge', { url: FULL_URL })
     expect(res.status).toBe(502)
     expect(await res.json() as any).toMatchObject({ error: 'decoy', stale: true, fetchedAt: oldFetchedAt })
@@ -288,7 +288,7 @@ describe('POST /tracklist/purge (bearer)', () => {
     const env = makeEnv()
     await seedStaleEntry(env)
     const before = await env.CACHE.get(tracklistCacheKey(FULL_SLUG))
-    proxyServes(fx('tracklist-neptune.html'))
+    poolServes(fx('tracklist-neptune.html'))
     const res = await bearer(env, '/tracklist/purge', { url: FULL_URL })
     expect(res.status).toBe(502)
     expect(await res.json() as any).toMatchObject({ error: 'upstream_error', stale: true })
@@ -309,7 +309,7 @@ describe('POST /tracklist/purge (bearer)', () => {
 
   it('a failure with nothing cached answers stale: false', async () => {
     const env = makeEnv()
-    proxyServes(fx('tracklist-decoy-dcr839.html'))
+    poolServes(fx('tracklist-decoy-dcr839.html'))
     const res = await bearer(env, '/tracklist/purge', { url: FULL_URL })
     expect(await res.json() as any).toMatchObject({ error: 'decoy', stale: false, fetchedAt: null })
     expect(await env.CACHE.get(tracklistCacheKey(FULL_SLUG))).toBeNull()
@@ -322,7 +322,7 @@ describe('POST /subscriptions/api/tracklist/purge (Cloudflare Access)', () => {
     app.request('http://x/subscriptions/api/tracklist/purge', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }, env)
 
   it('rejects a request without an Access token, and does not take the API bearer instead', async () => {
-    const calls = proxyServes(fx('tracklist-habstrakt.html'))
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
     const env = makeEnv(ACCESS as Partial<Env>)
     expect((await post(env, { url: FULL_URL })).status).toBe(401)
     expect((await post(env, { url: FULL_URL }, { Authorization: 'Bearer tasker' })).status).toBe(401)
@@ -330,7 +330,7 @@ describe('POST /subscriptions/api/tracklist/purge (Cloudflare Access)', () => {
   })
 
   it('purges and refetches for an Access-authenticated caller', async () => {
-    const calls = proxyServes(fx('tracklist-habstrakt.html'))
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' } as Partial<Env>)
     await seedStaleEntry(env)
     const res = await post(env, { url: FULL_URL })
@@ -340,7 +340,7 @@ describe('POST /subscriptions/api/tracklist/purge (Cloudflare Access)', () => {
   })
 
   it('the viewer API reports the cache age the Refresh button shows', async () => {
-    proxyServes(fx('tracklist-habstrakt.html'))
+    poolServes(fx('tracklist-habstrakt.html'))
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' } as Partial<Env>)
     await seedStaleEntry(env)
     const res = await app.request('http://x/subscriptions/api/tracklist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: FULL_URL }) }, env)
@@ -362,7 +362,7 @@ describe('/now-playing cache age and refresh flag', () => {
   const np = (env: Env, extra: Record<string, unknown> = {}) => bearer(env, '/now-playing', { videoUrl: VIDEO_ID, currentSeconds: 60, ...extra })
 
   it('reports the age of the cached list without fetching', async () => {
-    const calls = proxyServes(fx('tracklist-habstrakt.html'))
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
     const env = makeEnv()
     await seedTracklistRow(env, FULL_URL, VIDEO_ID)
     await seedStaleEntry(env)
@@ -374,7 +374,7 @@ describe('/now-playing cache age and refresh flag', () => {
   })
 
   it('refresh: true purges and refetches before picking the track', async () => {
-    const calls = proxyServes(fx('tracklist-habstrakt.html'))
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
     const env = makeEnv()
     await seedTracklistRow(env, FULL_URL, VIDEO_ID)
     await seedStaleEntry(env)
@@ -388,7 +388,7 @@ describe('/now-playing cache age and refresh flag', () => {
   })
 
   it('refresh: true whose refetch fails answers upstream_error with cache.stale and keeps the old list', async () => {
-    proxyServes(fx('tracklist-decoy-dcr839.html'))
+    poolServes(fx('tracklist-decoy-dcr839.html'))
     const env = makeEnv()
     await seedTracklistRow(env, FULL_URL, VIDEO_ID)
     await seedStaleEntry(env)
