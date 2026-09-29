@@ -28,6 +28,8 @@ import { makeLogger } from '../src/lib/log'
 import { UpstreamPausedError, UpstreamUnavailableError } from '../src/lib/upstream1001'
 import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
 import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
+import { TRACKLIST_TTL } from '../src/lib/tracklist-cache'
+import { resolveTracklistPage } from '../src/lib/tracklist-resolve'
 
 // Stub the network-touching primitives so syncOne becomes a deterministic
 // orchestrator test. This is the most important behavior to lock down: state
@@ -1646,5 +1648,77 @@ describe('pool priorities and explicit selections', () => {
     const state = (await loadSubState(env, sub.slug))!
     expect(state.failureCounts).toEqual({})
     expect(state.processedTracklistUrls).toEqual([])
+  })
+})
+
+describe('tracklist cache write-through from sync fetches', () => {
+  // A real-shaped set URL: the cache is keyed by its /tracklist/<slug>/ id.
+  const REAL = 'https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-1001tracklists-x-dj-lovers-club-pres.-waterways-amsterdam-dance-event-netherlands-2024-11-11.html'
+  const KEY = 'tl:v4:18kll1h1'
+  const fx = (name: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
+  const serve = (name: string) =>
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: fx(name), via: 'home-proxy', state: { cookie: '' } })
+
+  it('a new-set fetch fills the parsed-list cache, so the phone button after it costs no request', async () => {
+    const env = makeEnv()
+    mockCrawl([REAL], 'Habstrakt')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'Habstrakt (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    serve('tracklist-habstrakt.html')
+
+    await syncOne(env, sub, 'tok')
+
+    const v = JSON.parse((await env.CACHE.get(KEY))!)
+    expect(v.tracks).toHaveLength(31)
+    expect(v).toMatchObject({ tracklistUrl: REAL, setDate: '2024-11-11', ttlSeconds: TRACKLIST_TTL.FULL })
+    expect(Date.now() - Date.parse(v.fetchedAt)).toBeLessThan(60_000)
+
+    // The phone path now reads the entry; any network call would throw.
+    const net = vi.fn(async () => {
+      throw new Error('no network expected')
+    })
+    vi.stubGlobal('fetch', net)
+    try {
+      const r = await resolveTracklistPage(env, REAL, makeLogger({ task: 'test' }))
+      expect(r.tracks).toHaveLength(31)
+      expect(net).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('a recheck fetch writes through too', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, {
+      playlistId: 'PLartist',
+      artistName: 'X',
+      discoveredTracklistUrls: [REAL],
+      processedTracklistUrls: [REAL],
+      tracklistVideos: { [REAL]: stale('vidA1234567') },
+    })
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLcombined', title: 'All tracked artists (1001tklists)' })
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set(['vidA1234567']))
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    serve('tracklist-maxstyler.html') // 2 ID rows → the short TTL
+
+    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+
+    expect(r.stats.tracklistsRechecked).toBe(1)
+    const v = JSON.parse((await env.CACHE.get(KEY))!)
+    expect(v.tracks).toHaveLength(30)
+    expect(v.ttlSeconds).toBe(TRACKLIST_TTL.SHORT)
+  })
+
+  it('a decoy or empty page from the sync is never cached, and the set is still processed', async () => {
+    const env = makeEnv()
+    mockCrawl([REAL], 'Habstrakt')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'Habstrakt (1001tklists)' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    serve('tracklist-decoy-dcr839.html')
+
+    const r = await syncOne(env, sub, 'tok')
+
+    expect(r.stats.tracklistsProcessed).toBe(1)
+    expect(await env.CACHE.get(KEY)).toBeNull()
   })
 })

@@ -39,6 +39,7 @@ import {
 } from '../lib/sync'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist } from '../lib/tracklist-resolve'
+import { purgeAndRefetch, resolvePurgeTarget } from '../lib/tracklist-purge'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
@@ -173,6 +174,8 @@ subscriptionsApp.post('/api/tracklist', async (c) => {
       setSoundcloudLink: full.setSoundcloudLink,
       trackCount: full.tracks.length,
       tracks: full.tracks,
+      fetchedAt: full.fetchedAt,
+      cacheAgeSeconds: full.cacheAgeSeconds,
     })
   } catch (e) {
     if (e instanceof IPBlockedError) {
@@ -186,6 +189,18 @@ subscriptionsApp.post('/api/tracklist', async (c) => {
     log.error('subs.tracklist.throw', { tracklistUrl, ...errorFields(e) })
     return c.json({ error: 'upstream_error', message: `1001 scrape: ${(e as Error).message}` }, 502)
   }
+})
+
+// "Refresh track list" on the viewer: purge the cached list and refetch it now
+// (lib/tracklist-purge.ts, same as the bearer POST /tracklist/purge).
+subscriptionsApp.post('/api/tracklist/purge', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.tracklist_purge', by: c.get('cfAccessEmail') })
+  const body = (await c.req.json().catch(() => null)) as { url?: unknown; slug?: unknown; videoId?: unknown } | null
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const target = await resolvePurgeTarget(c.env, { url: str(body?.url), slug: str(body?.slug), videoId: str(body?.videoId) })
+  if (!target.ok) return c.json({ error: target.error, message: target.message }, target.status)
+  const r = await purgeAndRefetch(c.env, target.tracklistUrl, log)
+  return r.ok ? c.json(r.summary) : c.json({ error: r.error, message: r.message, stale: r.stale, fetchedAt: r.fetchedAt }, r.status)
 })
 
 /**
@@ -2173,6 +2188,10 @@ const TRACKLIST_PAGE_HTML = /* html */ `<!doctype html>
   a.pill:hover { border-color: var(--accent); color: var(--accent); }
   a.pill.sc:hover { border-color: #ff5500; color: #ff5500; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
+  .cachebar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.75rem; margin: -0.4rem 0 1rem; color: var(--muted); font-size: 0.82rem; }
+  button.refresh { padding: 0.3rem 0.65rem; font: inherit; font-size: 0.82rem; background: transparent; color: var(--accent); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+  button.refresh:disabled { opacity: 0.5; cursor: progress; }
+  .cachebar .result.bad { color: var(--danger); }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
 ${BAN_CSS}
 </style>
@@ -2188,6 +2207,11 @@ ${BAN_BANNER_HTML}
   </form>
   <div id="error" class="error" role="alert"></div>
   <div id="setmeta" class="setmeta" hidden></div>
+  <div id="cachebar" class="cachebar" hidden>
+    <span id="cache-age"></span>
+    <button type="button" id="refresh" class="refresh">Refresh track list</button>
+    <span id="refresh-result" class="result" role="status"></span>
+  </div>
   <ul id="tracks"></ul>
   <div id="empty" class="empty" hidden></div>
   <footer>Signed in as <span id="who"></span></footer>
@@ -2201,6 +2225,21 @@ ${BAN_BANNER_HTML}
   const $setmeta = document.getElementById('setmeta');
   const $tracks = document.getElementById('tracks');
   const $empty = document.getElementById('empty');
+  const $cachebar = document.getElementById('cachebar');
+  const $cacheAge = document.getElementById('cache-age');
+  const $refresh = document.getElementById('refresh');
+  const $refreshResult = document.getElementById('refresh-result');
+  let currentUrl = null;
+
+  function fmtAge(sec) {
+    if (sec == null) return 'cached list, age unknown';
+    if (sec < 90) return 'fetched just now';
+    const m = Math.round(sec / 60);
+    if (m < 90) return 'fetched ' + m + ' min ago';
+    const h = Math.round(sec / 3600);
+    if (h < 48) return 'fetched ' + h + ' h ago';
+    return 'fetched ' + Math.round(sec / 86400) + ' days ago';
+  }
 
   // Static, data-free SVG for the YouTube glyph — safe to inject as innerHTML.
   const YT_SVG = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="#FF0000" d="M23 7.5a3 3 0 0 0-2.1-2.1C19 5 12 5 12 5s-7 0-8.9.4A3 3 0 0 0 1 7.5 31 31 0 0 0 .6 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1C5 19 12 19 12 19s7 0 8.9-.4a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.4 12 31 31 0 0 0 23 7.5Z"/><path fill="#fff" d="M9.8 15.5v-7l6 3.5-6 3.5Z"/></svg>';
@@ -2235,6 +2274,8 @@ ${BAN_BANNER_HTML}
     }
     parts.forEach((p) => $setmeta.appendChild(p));
     $setmeta.hidden = false;
+    $cacheAge.textContent = fmtAge(data.cacheAgeSeconds);
+    $cachebar.hidden = false;
 
     for (const t of (data.tracks || [])) {
       const li = document.createElement('li');
@@ -2316,6 +2357,7 @@ ${BAN_BANNER_HTML}
   }
 
   async function load(url) {
+    currentUrl = url;
     $error.textContent = '';
     $empty.hidden = true;
     $btn.disabled = true;
@@ -2332,6 +2374,8 @@ ${BAN_BANNER_HTML}
       if (!r.ok) {
         $tracks.innerHTML = '';
         $setmeta.hidden = true;
+        $cachebar.hidden = !currentUrl;
+        $cacheAge.textContent = '';
         $error.textContent = (data.message || data.error || ('failed (' + r.status + ')'));
         return;
       }
@@ -2355,9 +2399,40 @@ ${BAN_BANNER_HTML}
     e.preventDefault();
     const url = $url.value.trim();
     if (!url) return;
+    $refreshResult.textContent = '';
     // Reflect the loaded set in the address bar so it can be shared/bookmarked.
     try { history.replaceState({}, '', location.pathname + '?url=' + encodeURIComponent(url)); } catch {}
     load(url);
+  });
+
+  // Purge the cached list and fetch it again now (costs one upstream fetch),
+  // then reload the view from the fresh cache entry.
+  $refresh.addEventListener('click', async () => {
+    if (!currentUrl) return;
+    $refresh.disabled = true;
+    $refreshResult.className = 'result';
+    $refreshResult.textContent = 'Refreshing…';
+    try {
+      const r = await fetch('/subscriptions/api/tracklist/purge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ url: currentUrl }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $refreshResult.className = 'result bad';
+        $refreshResult.textContent = 'Refresh failed: ' + (d.message || d.error || ('HTTP ' + r.status)) + (d.stale ? ' — still showing the list ' + fmtAge(d.fetchedAt ? Math.round((Date.now() - Date.parse(d.fetchedAt)) / 1000) : null) : '');
+        return;
+      }
+      $refreshResult.textContent = 'Refreshed: ' + d.rowCount + ' rows, ' + d.identifiedCount + ' of ' + d.trackCount + ' identified';
+      await load(currentUrl);
+    } catch (e) {
+      $refreshResult.className = 'result bad';
+      $refreshResult.textContent = 'Refresh failed: ' + (e && e.message ? e.message : e);
+    } finally {
+      $refresh.disabled = false;
+    }
   });
 
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';

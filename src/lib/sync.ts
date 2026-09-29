@@ -86,6 +86,7 @@ import {
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
 import { parseTracklist } from './tracklists1001'
+import { cacheTracklistFromHtml } from './tracklist-cache'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
@@ -842,6 +843,8 @@ export async function syncOne(
       const fetchOpts = setFetchOpts(setUrl, 'new')
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
+      // Write-through: the phone button then serves this list from cache.
+      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new')
       foundVia = setFetched.via
       const videoId = parseSetYouTubeId(setFetched.html)
       foundVideoId = videoId
@@ -976,6 +979,7 @@ export async function syncOne(
       const fetchOpts = setFetchOpts(setUrl, 'recheck')
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
+      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck')
       const videoId = parseSetYouTubeId(setFetched.html)
       const checkedAt = nowSeconds()
       await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null)
