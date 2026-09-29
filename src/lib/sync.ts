@@ -80,6 +80,8 @@ import {
   type PlaylistSource,
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
+import { pickSetVideo, rejectionNote } from './playlist-hygiene'
+import { combinedRefuses } from './playlist-blocklist'
 import { parseTracklist } from './tracklists1001'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
@@ -727,6 +729,7 @@ export async function syncOne(
     const handle = await openCombinedOnce()
     if (!handle) return 'unavailable'
     try {
+      if (await combinedRefuses(env, handle.playlistId, videoId, handle.videoIds)) return 'unavailable'
       const status = await addToCombined(env, handle, videoId, accessToken, log)
       if (status === 'added') {
         log.info('sync.combined_added', { slug: sub.slug, videoId, playlistId: handle.playlistId })
@@ -899,7 +902,9 @@ export async function syncOne(
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
       foundVia = setFetched.via
-      const videoId = parseSetYouTubeId(setFetched.html)
+      // Full-recording rule + never-re-add list (lib/playlist-hygiene.ts): a turned-down video counts as none.
+      const pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
+      const videoId = pick.videoId
       foundVideoId = videoId
       if (videoId) {
         videoIdsFound += 1
@@ -934,7 +939,7 @@ export async function syncOne(
           setUrl,
           fingerprint: youtubeFingerprint(setFetched.html),
         })
-        const note = await maybeQueueForMkvid(setUrl, setFetched.html)
+        const note = [pick.rejected ? rejectionNote(pick.rejected) : null, await maybeQueueForMkvid(setUrl, setFetched.html)].filter(Boolean).join('; ')
         auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
       }
       processed.add(setUrl)
@@ -1028,7 +1033,7 @@ export async function syncOne(
     try {
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
-      const videoId = parseSetYouTubeId(setFetched.html)
+      const { videoId } = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
       const checkedAt = nowSeconds()
       if (!prev || prev.videoId === undefined) {
         // Unknown baseline: record what the page has now, change nothing.

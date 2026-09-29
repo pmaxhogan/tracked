@@ -55,6 +55,14 @@ vi.mock('../src/lib/youtube-playlists', async () => {
   }
 })
 
+// The full-recording gate (lib/playlist-hygiene.ts) looks every page video up
+// with videos.list; no network here. An empty answer = rules needing duration
+// or orientation do not apply, so the sync behaves as before.
+vi.mock('../src/lib/video-meta', async () => {
+  const actual = await vi.importActual<typeof import('../src/lib/video-meta')>('../src/lib/video-meta')
+  return { ...actual, getVideoMeta: vi.fn(async () => new Map()) }
+})
+
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-index'
 import {
   addVideoToPlaylist,

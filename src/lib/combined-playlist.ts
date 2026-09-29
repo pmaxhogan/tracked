@@ -46,6 +46,7 @@ import {
   removeVideoFromPlaylist,
 } from './youtube-playlists'
 import { errorFields, type Logger } from './log'
+import { combinedSkipIds } from './playlist-blocklist'
 
 export const COMBINED_PLAYLIST_TITLE = 'All tracked artists (1001tklists)'
 export const COMBINED_PLAYLIST_DESCRIPTION =
@@ -355,7 +356,9 @@ export async function mergeIntoCombinedPlaylist(
   const perRun = opts.maxInsertsPerRun ?? MAX_INSERTS_PER_RUN
   const deadline = Date.now() + (opts.deadlineMs ?? BACKFILL_DEADLINE_MS)
 
-  const { missing, sourcesRead, sourcesFailed } = await collectMissing(env, handle, sources, accessToken, log, unavailable)
+  // Plus what the owner took out (lib/playlist-blocklist.ts): never put back.
+  const skip = new Set([...unavailable, ...(await combinedSkipIds(env, handle.playlistId, handle.videoIds))])
+  const { missing, sourcesRead, sourcesFailed } = await collectMissing(env, handle, sources, accessToken, log, skip)
   log.info('combined.backfill.start', {
     trigger: opts.trigger ?? null,
     playlistId: handle.playlistId,
