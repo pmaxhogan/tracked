@@ -87,7 +87,6 @@ import {
 import { makeLogger, errorFields, type Logger } from './log'
 import { parseTracklist } from './tracklists1001'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
-import { isVerified } from './verification'
 import {
   failureRowsSince,
   flushPlaylistAdditions,
@@ -768,7 +767,7 @@ export async function syncOne(
         tracksSaved = 'failed'
         log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
       }
-      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount, tracksSaved, tracksTrusted: mkvidTracksTrusted(parsed.decoy, await isVerified(env, setUrl)) })
+      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount: tracks.length, idedCount, tracksSaved, tracksTrusted: mkvidTracksTrusted(parsed.decoy) })
       return r === 'queued' ? `queued for mkvid (${source.kind})` : `mkvid request already exists (${source.kind})`
     } catch (e) {
       log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
