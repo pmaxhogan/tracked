@@ -34,8 +34,8 @@ export type SubState = {
    * Union over time of every tracklist URL we've ever seen on this DJ's
    * paginated index. The DJ index uses JS infinite-scroll, so a single
    * fetch only sees the 15 newest sets; `crawlDjIndex` walks the scroll
-   * endpoint down to the first known set on each run, and the daily cron's
-   * backfill (cursor in SUBS KV, `loadDjBackfill`) reaches older history.
+   * endpoint down to the first known set on each run, and the scheduler's
+   * paced backfill (cursor in SUBS KV, `loadDjBackfill`) reaches older history.
    */
   discoveredTracklistUrls?: string[]
   processedTracklistUrls: string[]

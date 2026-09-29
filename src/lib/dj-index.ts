@@ -168,9 +168,9 @@ function decodeEntities(s: string): string {
 //
 // Response: { success: true, data: '<10 more .oItm rows>', subType } while
 // there is more; `end`, `message` or `success:false` mean stop; `captcha`
-// asks for a human check (we stop, never solve it). Measured 2026-09-28: the
-// endpoint answers the same rows to an anonymous request as to a logged-in
-// one, so it is called direct (no forwarder account spent on it).
+// asks for a human check (we stop, never solve it). Like every
+// 1001tracklists request it goes through tlpool (kind `dj`) and counts
+// against an account's budget (quest decision 11).
 const O_ITM_DATA_ID_RE = /<div[^>]*\boItm\b[^>]*\bdata-id="([^"]+)"/g
 const SDIV_TAG_RE = /<div\b[^>]*\bclass="[^"]*\bsDiv\b[^"]*"[^>]*>/g
 const AJAX_URL = `${ORIGIN}/ajax/get_data.php`

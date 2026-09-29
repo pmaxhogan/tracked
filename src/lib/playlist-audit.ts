@@ -62,7 +62,7 @@ export type PlaylistAdditionRecord = {
    * why a combined miss never fails the set. null on rows with no video.
    */
   combinedStatus: CombinedAdditionStatus | null
-  /** Which scrape path served the set page — `home-proxy` / `unlocker` / `direct` — or `mkvid` for an upload mkvid delivered. */
+  /** Which scrape path served the set page — `pool` since 2026-09-29 (`home-proxy` / `unlocker` / `direct` on older rows) — or `mkvid` for an upload mkvid delivered. */
   via: string | null
   /** What kicked off the run, e.g. `cron.daily`, `manual.one`. */
   trigger: string | null

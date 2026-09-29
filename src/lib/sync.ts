@@ -147,9 +147,8 @@ const SYNC_DEADLINE_MS = 25_000
  */
 export const RECHECK_INTERVAL_SECONDS = DEFAULT_POOL_SETTINGS.recheck.unknownAgeIntervalHours * 60 * 60
 // Rechecks are cheaper than first-time processing (a changed video is rare,
-// so almost none of them touch the YouTube API), but each is still a page
-// fetch through the home proxy / BrightData. Bounded per run so a mass
-// invalidation drains over a few ticks instead of hammering 1001tracklists.
+// so almost none of them touch the YouTube API), but each is still a
+// budgeted page view in the pool. Bounds a manual run's recheck window.
 const DEFAULT_MAX_RECHECKS_PER_RUN = 20
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
@@ -523,12 +522,16 @@ export async function syncOne(
   // few minutes, and skipping saves ~14 AJAX hops per sub).
   const discovered = new Set<string>(state.discoveredTracklistUrls ?? [])
   let artistName: string
-  if (opts.skipDjCrawl) {
+  // A manual run's crawl costs page views too: page 1 is charged to its
+  // budget, and a spent budget skips the crawl.
+  const crawlBudgetOk = opts.skipDjCrawl || takeFetch(opts.fetchBudget)
+  if (opts.skipDjCrawl || !crawlBudgetOk) {
     artistName = state.artistName ?? prettifySlug(sub.slug)
     log.info('sync.skip_crawl', {
       slug: sub.slug,
       artistName,
       tracklistsKnownTotal: discovered.size,
+      ...(crawlBudgetOk ? {} : { reason: 'fetch_budget_spent' }),
     })
   } else {
     // Head walk only. The DJ's older history is the scheduler's paced
@@ -904,11 +907,10 @@ export async function syncOne(
         continue
       }
       if (isStopTheBatchError(e)) {
-        // A block (or a broken route: forwarder down and the paid fallback
-        // serving Cloudflare shells) is not the set's fault: every remaining
-        // set would fail the same way, and each attempt from a banned IP keeps
-        // the ban fresh. Stop the run here, charge nothing, and let the next
-        // tick (after the cooldown) pick up exactly where we left off.
+        // A pause, a pool refusal (budget spent, captcha pending) or a broken
+        // route is not the set's fault: every remaining set would fail the
+        // same way. Stop the run here, charge nothing, and let a later tick
+        // pick up exactly where we left off.
         stopReason = stopReasonFor(e)
         stoppedBy = { reason: stopReason, retryAfterSeconds: retryAfterOf(e) }
         log.error('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
@@ -919,7 +921,7 @@ export async function syncOne(
       // every tick. Blocks and route faults never reach this branch (see
       // above), so a URL is only abandoned for failures that are actually
       // about that URL — a real 404, a page that parses to zero tracks, a
-      // Cloudflare shell served while the forwarder itself was healthy.
+      // 5xx from the site itself.
       const fc = (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
       const abandon = fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })

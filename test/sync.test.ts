@@ -1479,11 +1479,13 @@ describe('manual-run fetch budget (the pool paces, a button press is still bound
     mockCrawl([], null)
     const r = await resyncAll(env)
     expect(r.invalidated.map((x) => x.slug).sort()).toEqual(['alpha', 'beta'])
-    // Three fetches across BOTH DJs, not three per DJ: beta (older run) takes
-    // the whole budget and alpha waits for the scheduler.
-    expect(fetch1001Html).toHaveBeenCalledTimes(3)
+    // Three page views across BOTH DJs, not three per DJ: beta (older run)
+    // takes the whole budget — its DJ page, then two sets — and alpha waits
+    // for the scheduler.
+    expect(crawlDjIndex).toHaveBeenCalledTimes(1)
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
     expect(r.results.map((x) => x.slug)).toEqual(['beta'])
-    expect((await loadSubState(env, 'beta'))!.processedTracklistUrls).toHaveLength(3)
+    expect((await loadSubState(env, 'beta'))!.processedTracklistUrls).toHaveLength(2)
     expect((await loadSubState(env, 'alpha'))!.processedTracklistUrls).toHaveLength(0)
   })
 
@@ -1491,10 +1493,15 @@ describe('manual-run fetch budget (the pool paces, a button press is still bound
     const env = makeEnv()
     await twoSubs(env, 5, [200, 100])
     mockCrawl([], null)
-    const budget = newFetchBudget(2)
+    const budget = newFetchBudget(3)
     await syncOne(env, { slug: 'alpha', sourceUrl: 'https://www.1001tracklists.com/dj/alpha/', addedAt: 0 }, 'tok', { trigger: 'manual.one', fetchBudget: budget })
+    // The DJ page is one of the three.
+    expect(crawlDjIndex).toHaveBeenCalledTimes(1)
     expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect(budget).toMatchObject({ spent: 2, remaining: 0 })
+    expect(budget).toMatchObject({ spent: 3, remaining: 0 })
+    // A spent budget skips the crawl too.
+    await syncOne(env, { slug: 'alpha', sourceUrl: 'https://www.1001tracklists.com/dj/alpha/', addedAt: 0 }, 'tok', { trigger: 'manual.one', fetchBudget: budget })
+    expect(crawlDjIndex).toHaveBeenCalledTimes(1)
   })
 
   it('manualFetchBudget comes from the pool settings (default 10); newFetchBudget clamps garbage', async () => {
