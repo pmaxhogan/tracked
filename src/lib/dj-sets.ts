@@ -109,10 +109,12 @@ export async function getDjSets(
 
   // Known sets first, so the crawl only walks down to them: a profile view
   // for a DJ already in the database costs page 1 and no scroll request.
-  // Deeper history is the daily cron's backfill, never a page view's.
+  // Deeper history is the scheduler's paced backfill, never a page view's.
   const [state, backfill] = await Promise.all([loadSubState(env, slug), loadDjBackfill(env, slug)])
   const crawl = await crawlDjIndex(slug, {
-    ...fetchOptsFromEnv(env, log),
+    // The owner is waiting on the page, but it is not the phone button: `new`,
+    // so it never eats the phone's reserved share in tlpool.
+    ...fetchOptsFromEnv(env, log, { priority: 'new' }),
     deadlineMs: Date.now() + 20_000,
     maxPages: 2,
     knownUrls: new Set(state?.discoveredTracklistUrls ?? []),

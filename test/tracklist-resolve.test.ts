@@ -6,28 +6,30 @@ import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import type { Env } from '../src/types'
 import { makeLogger } from '../src/lib/log'
-import { resolveTracklistPage, TRACKLIST_CV } from '../src/lib/tracklist-resolve'
+import { resolveTrackMediaLinks, resolveTracklistPage, TRACKLIST_CV } from '../src/lib/tracklist-resolve'
 import { DecoyTracklistError } from '../src/lib/tracklists1001'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
-const PROXY = 'https://proxy.example'
+const POOL = 'https://tlpool.example'
 const TL = 'https://www.1001tracklists.com/tracklist/1pqq0hst/adam-beyer-drumcode-839.html'
 
 function makeEnv(): Env {
-  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', HOME_PROXY_URL: PROXY, HOME_PROXY_TOKEN: 'tok' } as Env
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', TLPOOL_URL: POOL, TLPOOL_TOKEN: 'tok' } as Env
 }
 
-/** The forwarder answers every 1001tl fetch with `html` on the direct route. */
-function proxyServes(html: string) {
+/** tlpool answers every 1001tl fetch with `html` (or with `error` when given). */
+function proxyServes(html: string, error?: string) {
   const calls: string[] = []
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const url = String(input)
       calls.push(url)
-      if (url.startsWith(PROXY)) {
-        return new Response(html, { status: 200, headers: { 'x-proxy-route': 'direct', 'x-proxy-egress': 'direct', 'x-proxy-upstream-status': '200', 'x-proxy-attempts': 'direct/acct1:ok', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' } })
+      if (url === `${POOL}/fetch`) {
+        const req = JSON.parse(String(init.body))
+        const body = error ? { error, retryAfterSeconds: 60 } : { status: 200, finalUrl: req.url, html, accountId: 'acct-1', exitLabel: 'x', fetchedAt: new Date().toISOString(), bytes: html.length }
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
       }
       throw new Error(`unexpected fetch ${url}`)
     }),
@@ -65,5 +67,20 @@ describe('resolveTracklistPage', () => {
     expect((err as DecoyTracklistError).mismatched).toBe(24)
     expect((err as DecoyTracklistError).named).toBe(25)
     expect(await env.CACHE.list({ prefix: 'tl:' })).toMatchObject({ keys: [] })
+  })
+})
+
+describe('resolveTrackMediaLinks', () => {
+  it('caches links the pool served, but never a refusal', async () => {
+    const env = makeEnv()
+    proxyServes('', 'budget_exhausted')
+    const refused = await resolveTrackMediaLinks(env, '909720', makeLogger({ task: 'test' }))
+    expect(refused).toEqual({ appleLink: null, youtubeLink: null, soundcloudLink: null })
+    expect(await env.CACHE.get(`ml:v${TRACKLIST_CV.medialink}:909720`)).toBeNull()
+    vi.unstubAllGlobals()
+    proxyServes(fx('medialink-909720.json'))
+    const ok = await resolveTrackMediaLinks(env, '909720', makeLogger({ task: 'test' }))
+    expect(ok.appleLink ?? ok.youtubeLink).toBeTruthy()
+    expect(await env.CACHE.get(`ml:v${TRACKLIST_CV.medialink}:909720`)).not.toBeNull()
   })
 })

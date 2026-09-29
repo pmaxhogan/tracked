@@ -1,9 +1,7 @@
 import { parse, type HTMLElement } from 'node-html-parser'
 import type { ParsedTrack } from '../types'
-import { fetchWithTimeout, type ChallengeState } from './fetch'
-import { fetchViaUnlocker } from './unlocker'
-import { fetch1001, type Fetch1001Opts as CascadeOpts } from './upstream1001'
-import { tryConsumeBrightdata } from './ban-state'
+import type { ChallengeState } from './fetch'
+import { fetch1001, isStopTheBatchError, type Fetch1001Opts as CascadeOpts } from './upstream1001'
 import { parseSetYouTubeId } from './dj-index'
 import type { Logger } from './log'
 import { parseTime } from './timestamp'
@@ -22,21 +20,16 @@ const SOURCE = {
 
 export type SearchResult = { tracklistUrl: string } | { tracklistUrl: null }
 
-/**
- * Route options for the two search POSTs. Same cascade as tracklist pages
- * (home forwarder → BrightData within budget → direct from the Worker); the
- * direct leg stays enabled because search worked from Worker IPs before the
- * forwarder existed and still does when nothing is blocked.
- */
-export type SearchOpts = Omit<CascadeOpts, 'method' | 'form' | 'accept' | 'unlockerAttempts' | 'allowDirect'>
+/** Route options for the two search POSTs: through the pool, kind `search` (lib/upstream1001.ts). */
+export type SearchOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
 
 async function search1001(form: Record<string, string>, opts: SearchOpts): Promise<{ html: string; state: ChallengeState; via: string }> {
   const r = await fetch1001(`${ORIGIN}/search/result.php`, {
     ...opts,
+    kind: 'search',
     method: 'POST',
     form,
     headers: { Referer: `${ORIGIN}/search/result.php`, ...(opts.headers ?? {}) },
-    unlockerAttempts: 1,
   })
   return { html: r.html, state: r.state, via: r.via }
 }
@@ -458,41 +451,29 @@ export class DecoyTracklistError extends Error {
   }
 }
 
-export type FetchTracklistOpts = Omit<CascadeOpts, 'method' | 'form' | 'accept' | 'unlockerAttempts'>
+export type FetchTracklistOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
 
 /**
- * Scrape a tracklist page through the shared cascade (lib/upstream1001.ts):
- * home forwarder (residential IP, then its tailnet pool) → BrightData within
- * the daily budget (two attempts, because its exit IP rotates and a CF shell
- * on the first often clears on the second) → direct from the Worker.
- *
- * A forwarder response that parses to zero tracks falls through to the next
- * route; a BrightData/direct result is returned as-is (with diagnostics) so
- * the caller can decide. Throws `UpstreamPausedError` while fetching is
- * paused after every route was blocked, `IPBlockedError` / 
- * `CloudflareChallengeError` when the last route itself failed that way.
+ * Scrape a tracklist page through the pool (lib/upstream1001.ts, kind `set`)
+ * and parse it. A page that parses to zero tracks is returned as-is (with
+ * diagnostics logged) so the caller can decide. Throws `UpstreamPausedError`
+ * while fetching is paused or the pool refuses on purpose,
+ * `UpstreamUnavailableError` when the pool cannot serve, `IPBlockedError` if
+ * a block page gets through.
  */
 export async function fetchTracklist(
   tracklistUrl: string,
   opts: FetchTracklistOpts = {},
-): Promise<{ result: ScrapedTracklist; state: ChallengeState; via: string }> {
+): Promise<{ result: ScrapedTracklist; state: ChallengeState; via: string; accountId?: string; fetchedAt?: string }> {
   const log = opts.log
-  log?.info('1001scrape.start', {
-    tracklistUrl,
-    viaHomeProxy: !!(opts.homeProxyUrl && opts.homeProxyToken),
-    viaUnlocker: !!opts.brightdataApiKey,
-  })
+  log?.info('1001scrape.start', { tracklistUrl, priority: opts.priority ?? 'phone' })
   const start = Date.now()
-  const r = await fetch1001(tracklistUrl, {
-    ...opts,
-    unlockerAttempts: 2,
-    accept: (html) => parseTracklist(tracklistUrl, html).tracks.length > 0,
-  })
+  const r = await fetch1001(tracklistUrl, { ...opts, kind: 'set' })
   const result = parseTracklist(tracklistUrl, r.html)
   log?.info('1001scrape.parsed', {
     tracklistUrl,
     via: r.via,
-    egress: r.proxy?.egress ?? null,
+    accountId: r.accountId,
     htmlBytes: r.html.length,
     trackCount: result.tracks.length,
     unidentifiedCount: result.tracks.filter((t) => t.isUnidentified).length,
@@ -506,14 +487,14 @@ export async function fetchTracklist(
     log?.error('1001scrape.decoy', {
       tracklistUrl,
       via: r.via,
-      egress: r.proxy?.egress ?? null,
-      account: r.proxy?.account ?? null,
+      accountId: r.accountId,
+      exitLabel: r.exitLabel,
       named: result.decoy.named,
       mismatched: result.decoy.mismatched,
       sample: result.tracks.slice(0, 3).map((t) => `${t.artist} - ${t.title} @ ${t.trackUrl?.split('/track/')[1]?.split('/index')[0] ?? '?'}`),
     })
   }
-  return { result, state: r.state, via: r.via }
+  return { result, state: r.state, via: r.via, accountId: r.accountId, fetchedAt: r.fetchedAt }
 }
 
 /**
@@ -888,163 +869,49 @@ type MedialinkResponse = {
   more?: Array<{ source: string; idLink: string; type?: string }>
 }
 
-export type FetchMediaLinksOpts = {
-  state?: ChallengeState
-  log?: Logger
-  /** When set, the fallback path is enabled: if a direct CF→1001tl fetch
-   *  fails or times out, race a longer direct retry against a BrightData
-   *  call (different IP, no captcha needed for the JSON endpoint — it just
-   *  works from non-CF IPs). */
-  brightdataApiKey?: string
-  /** CACHE KV — charges each BrightData call against the daily budget (lib/ban-state.ts). */
-  cacheKv?: KVNamespace
-  brightdataDailyCap?: string
-}
+/** Pool options for a medialink lookup (kind `medialink`, counted against the account budget like a page view). */
+export type FetchMediaLinksOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
 
 /**
- * Resolve per-track Apple Music + YouTube links from 1001tl's medialink
- * AJAX. Strategy:
+ * Resolve per-track Apple Music + YouTube (+ SoundCloud) links from 1001tl's
+ * medialink AJAX, through the pool like every other 1001tracklists request.
  *
- *   1. **Direct fetch with a 2s timeout.** Most calls succeed in ~150ms.
- *   2. On timeout/transport failure, race a longer direct retry against a
- *      BrightData fetch via Promise.any. Whichever returns first wins.
- *
- * Background: medialink calls from Cloudflare Worker IPs occasionally hit
- * CF-edge 522s after ~19s — a single stuck call was blocking the whole
- * Worker invocation for 20s. Failing fast at 2s + a second-IP retry both
- * fixes the slow-tail and increases reliability.
+ * Never throws: a lookup that fails comes back as no links with `failed:
+ * true`, so a caller that caches (lib/tracklist-resolve.ts) can skip caching
+ * a failure — a pool refusal must not poison the entry for its TTL.
  */
-export async function fetchMediaLinks(mediaItemId: string, state?: ChallengeState, log?: Logger): Promise<{ result: MediaLinks; state: ChallengeState }>
-export async function fetchMediaLinks(mediaItemId: string, opts: FetchMediaLinksOpts): Promise<{ result: MediaLinks; state: ChallengeState }>
 export async function fetchMediaLinks(
   mediaItemId: string,
-  stateOrOpts?: ChallengeState | FetchMediaLinksOpts,
-  maybeLog?: Logger,
-): Promise<{ result: MediaLinks; state: ChallengeState }> {
-  const opts: FetchMediaLinksOpts = stateOrOpts && 'cookie' in stateOrOpts
-    ? { state: stateOrOpts, log: maybeLog }
-    : (stateOrOpts ?? {})
+  opts: FetchMediaLinksOpts = {},
+): Promise<{ result: MediaLinks; state: ChallengeState; failed?: boolean }> {
   const log = opts.log
   const url = `${ORIGIN}/ajax/get_medialink.php?idObject=5&idItem=${encodeURIComponent(mediaItemId)}`
   log?.info('medialink.start', { mediaItemId })
-
-  // Attempt 1: direct, 2s deadline.
-  try {
-    const result = await fetchMediaLinksDirect(mediaItemId, url, opts.state, 2000, log, 'direct.first')
-    return { result, state: opts.state ?? { cookie: '' } }
-  } catch (e) {
-    log?.warn('medialink.direct_first_failed', {
-      mediaItemId,
-      error: e instanceof Error ? e.message : String(e),
-      willRace: !!opts.brightdataApiKey,
-    })
-  }
-
-  // Attempt 2: race a longer direct retry against BrightData.
-  const racers: Promise<MediaLinks>[] = [
-    fetchMediaLinksDirect(mediaItemId, url, opts.state, 8000, log, 'direct.retry'),
-  ]
-  if (opts.brightdataApiKey) {
-    const budget = opts.cacheKv
-      ? await tryConsumeBrightdata({ CACHE: opts.cacheKv, SUBS: opts.cacheKv, BRIGHTDATA_DAILY_CAP: opts.brightdataDailyCap }, log)
-      : { ok: true }
-    if (budget.ok) racers.push(fetchMediaLinksViaUnlocker(mediaItemId, url, opts.brightdataApiKey, log))
-    else log?.warn('medialink.brightdata_over_budget', { mediaItemId })
-  }
-  try {
-    const result = await Promise.any(racers)
-    return { result, state: opts.state ?? { cookie: '' } }
-  } catch (e) {
-    // Promise.any throws AggregateError when all racers reject.
-    log?.error('medialink.all_failed', {
-      mediaItemId,
-      racerCount: racers.length,
-      errors: e instanceof AggregateError ? e.errors.map((er) => (er instanceof Error ? er.message : String(er))) : [String(e)],
-    })
-    return { result: { ...NO_LINKS }, state: opts.state ?? { cookie: '' } }
-  }
-}
-
-async function fetchMediaLinksDirect(
-  mediaItemId: string,
-  url: string,
-  state: ChallengeState | undefined,
-  timeoutMs: number,
-  log: Logger | undefined,
-  phase: string,
-): Promise<MediaLinks> {
-  const cookieHeader: Record<string, string> = state?.cookie ? { Cookie: state.cookie } : {}
   const start = Date.now()
-  let res: Response
   try {
-    res = await fetchWithTimeout(url, {
-      timeoutMs,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept: 'application/json,text/javascript,*/*;q=0.01',
-        'X-Requested-With': 'XMLHttpRequest',
-        Referer: ORIGIN + '/',
-        ...cookieHeader,
-      },
+    const r = await fetch1001(url, {
+      ...opts,
+      kind: 'medialink',
+      headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json,text/javascript,*/*;q=0.01', Referer: ORIGIN + '/', ...(opts.headers ?? {}) },
     })
+    return { result: parseAndLog(mediaItemId, r.html, log, start), state: { cookie: '' } }
   } catch (e) {
-    log?.warn('medialink.transport_throw', { mediaItemId, phase, error: e instanceof Error ? e.message : String(e), ms: Date.now() - start })
-    throw e
+    log?.[isStopTheBatchError(e) ? 'warn' : 'error']('medialink.failed', { mediaItemId, error: e instanceof Error ? e.message : String(e), ms: Date.now() - start })
+    return { result: { ...NO_LINKS }, state: { cookie: '' }, failed: true }
   }
-  return parseAndLog(mediaItemId, res, await res.text(), log, phase, start)
 }
 
-async function fetchMediaLinksViaUnlocker(
-  mediaItemId: string,
-  url: string,
-  apiKey: string,
-  log: Logger | undefined,
-): Promise<MediaLinks> {
-  const start = Date.now()
-  const r = await fetchViaUnlocker(url, apiKey, log)
-  if (r.status !== 200 || !r.html) {
-    log?.warn('medialink.unlocker_non_ok', { mediaItemId, status: r.status, errorCode: r.errorCode, ms: Date.now() - start })
-    throw new Error(`unlocker medialink ${r.status}: ${r.errorCode ?? r.errorMessage ?? ''}`)
-  }
-  let json: MedialinkResponse
-  try {
-    json = JSON.parse(r.html)
-  } catch {
-    log?.warn('medialink.unlocker_parse_failed', { mediaItemId, body: r.html.slice(0, 500), ms: Date.now() - start })
-    throw new Error('unlocker medialink JSON parse failed')
-  }
-  const result = parseMediaLinks(json)
-  log?.info('medialink.unlocker_done', {
-    mediaItemId,
-    appleLink: result.appleLink,
-    youtubeLink: result.youtubeLink,
-    soundcloudLink: result.soundcloudLink,
-    ms: Date.now() - start,
-  })
-  return result
-}
-
-function parseAndLog(
-  mediaItemId: string,
-  res: Response,
-  text: string,
-  log: Logger | undefined,
-  phase: string,
-  start: number,
-): MediaLinks {
+function parseAndLog(mediaItemId: string, text: string, log: Logger | undefined, start: number): MediaLinks {
   let json: MedialinkResponse
   try {
     json = JSON.parse(text)
   } catch {
-    log?.warn('medialink.parse_failed', { mediaItemId, phase, status: res.status, body: text.slice(0, 500), ms: Date.now() - start })
-    throw new Error(`medialink parse_failed (${phase}) status=${res.status}`)
+    log?.warn('medialink.parse_failed', { mediaItemId, body: text.slice(0, 500), ms: Date.now() - start })
+    throw new Error('medialink parse_failed')
   }
   const result = parseMediaLinks(json)
   log?.info('medialink.done', {
     mediaItemId,
-    phase,
-    status: res.status,
     success: json.success,
     sourcesData: (json.data ?? []).map((d) => d.source),
     sourcesMore: (json.more ?? []).map((m) => m.source),

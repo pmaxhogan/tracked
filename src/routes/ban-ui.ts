@@ -64,7 +64,6 @@ export const BAN_BANNER_HTML = /* html */ `
     </div>
     <div class="ban-actions">
       <a id="ban-captcha" class="ban-btn primary" href="${UNBLOCK_URL}" target="_blank" rel="noopener noreferrer">Open the captcha ↗</a>
-      <button id="ban-probe" class="ban-btn" type="button">I solved it — re-probe now</button>
       <button id="ban-enable" class="ban-btn" type="button" hidden>Enable notifications</button>
       <button id="ban-dismiss" class="ban-btn subtle" type="button" hidden>Dismiss</button>
     </div>
@@ -101,7 +100,7 @@ export const BAN_JS = /* js */ `
   const page = document.body.dataset.banPage || 'other';
   const $ = (id) => document.getElementById(id);
   const $banner = $('ban-banner'), $title = $('ban-title'), $sub = $('ban-sub'), $foot = $('ban-foot'), $icon = $('ban-icon');
-  const $probe = $('ban-probe'), $enable = $('ban-enable'), $dismiss = $('ban-dismiss');
+  const $enable = $('ban-enable'), $dismiss = $('ban-dismiss');
   const $aState = $('alerts-state'), $aEnable = $('alerts-enable'), $aTest = $('alerts-test'), $aMsg = $('alerts-msg');
   const $route = $('ban-route'), $devices = $('ban-devices'), $eps = $('ban-episodes'), $refresh = $('ban-refresh'), $simulate = $('ban-simulate');
   const UNBLOCK_URL = ${JSON.stringify(UNBLOCK_URL)};
@@ -125,15 +124,13 @@ export const BAN_JS = /* js */ `
     if (pause) {
       $icon.textContent = '⛔';
       $title.innerHTML = '1001tracklists is blocking every tracked account — fetching is paused' + (simulated ? '<span class="ban-badge">simulated</span>' : '');
-      $sub.innerHTML = 'Even a freshly logged-in session (the proxy re-logins through the egress pool automatically) came back with the block page' + (ip ? ' (last shown IP' + ip + ')' : '') + '. The sync stops hitting 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b>, then tries once more. BrightData used today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b>. The block sticks to the proxy\\'s own session cookies, so solving the captcha in your browser does not reach them — <b>press re-probe</b>: the proxy logs every parked account in fresh and retries. If even those fresh sessions are blocked, the accounts are rate-limited and only time clears it.';
+      $sub.innerHTML = 'Nothing is fetched from 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b> (' + esc(pause.reason) + '). The pool (tlpool) owns accounts, budgets and captchas; this switch stops the Worker from asking it at all. Clear it from here once you want fetching back.';
     } else {
       $icon.textContent = '🚫';
       $title.innerHTML = '1001tracklists is blocking the tracked sessions' + (ip ? ' (last shown IP' + ip + ')' : '') + (simulated ? '<span class="ban-badge">simulated</span>' : '');
-      const pool = home.poolTotal == null ? ' The proxy is re-logging in through the egress pool and failing over between accounts (details in the ban history below).' : home.poolTotal > 0 ? ' The proxy re-logins through the egress pool (<b>' + home.poolHealthy + '/' + home.poolTotal + '</b> buckets healthy) and fails over between its accounts, so fetches usually keep flowing; the block itself lifts when a fresh session gets through or a human solves the captcha.' : ' No egress pool is configured, so the proxy cannot get a fresh session: fetches are failing.';
-      const next = home.until ? ' The proxy re-tries the direct route hourly (next around <b>' + esc(fmtTime(home.until)) + '</b>).' : '';
-      $sub.innerHTML = 'Blocked since <b>' + esc(fmtTime(home.since)) + '</b> (' + esc(ago(home.since)) + ').' + pool + next + ' If it does not clear on its own, <b>press re-probe</b>: the proxy logs every parked account in fresh and retries (the block sticks to its session cookies, so solving the captcha in your browser does not reach them).';
+      $sub.innerHTML = 'Opened ' + esc(fmtTime(home.since)) + ' (' + esc(ago(home.since)) + '). Account health, captchas and budgets live in the pool now; dismiss this once it is handled.';
     }
-    $dismiss.hidden = !simulated;
+    $dismiss.hidden = false;
     $dismiss.textContent = simulated ? 'Dismiss simulated ban' : 'Dismiss';
     $banner.hidden = false;
   }
@@ -149,34 +146,6 @@ export const BAN_JS = /* js */ `
       return s;
     } catch { return null; }
   }
-
-  if ($probe) $probe.addEventListener('click', async () => {
-    $probe.disabled = true; const orig = $probe.textContent; $probe.textContent = 'Probing the direct route…'; $foot.textContent = '';
-    try {
-      const r = await api('/api/ban/probe', { method: 'POST' });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { $foot.textContent = 'Probe failed: ' + (d.error || r.status) + (d.message ? ' — ' + d.message : ''); return; }
-      // The forwarder answers a block with a forced fresh login (and gives
-      // every other parked account one too), so the relogin field says what actually
-      // happened rather than leaving the reader to guess.
-      const healed = Array.isArray(d.healed) ? d.healed : [];
-      const healedNote = healed.length ? ' Other accounts: ' + healed.map(function (h) { return h.account + ' ' + (h.kind === 'ok' ? (h.relogin === 'recovered' ? 'recovered with a fresh login' : 'fine') : h.kind === 'ip_blocked' ? (h.relogin === 'still_blocked' ? 'fresh login blocked too' : h.relogin === 'failed' ? 'login failed' : h.relogin === 'retry_error' ? 'retry died in transport' : 'still blocked') : h.kind); }).join(', ') + '.' : '';
-      const acct = d.account ? ' as ' + d.account : '';
-      if (d.cleared) { $foot.textContent = '✅ Direct route works again' + acct + (d.sessionReissued ? ' (fresh login)' : '') + ' — ban cleared.' + healedNote; }
-      else if (d.probe === 'ip_blocked') {
-        const why = d.relogin === 'still_blocked' ? ' A freshly logged-in session was blocked too, so this is a rate limit on the account, not a stale cookie: only time clears it.'
-          : d.relogin === 'failed' ? ' The fresh login itself failed (see the forwarder log); the account is benched for a few minutes, press again after that.'
-          : d.relogin === 'retry_error' ? ' A fresh session was issued but the retry died in transport (see the forwarder log); press again.'
-          : d.relogin === 'skipped' ? ' The forwarder skipped the fresh login (re-login cooldown) — it is running a pre-0.4.1 build; redeploy it.'
-          : '';
-        $foot.textContent = '❌ Still blocked' + acct + (d.blockedIp ? ' (page named ' + d.blockedIp + ')' : '') + '.' + why + healedNote;
-      }
-      else if (d.probe === 'ok') { $foot.textContent = '✅ Direct route is fine' + acct + (d.sessionReissued ? ' (fresh login)' : '') + '.' + healedNote; }
-      else { $foot.textContent = 'Probe result: ' + (d.probe || 'unknown') + (d.error ? ' — ' + d.error : '') + healedNote; }
-      await refresh(page === 'main');
-    } catch (e) { $foot.textContent = 'Probe failed: ' + (e && e.message || e); }
-    finally { $probe.disabled = false; $probe.textContent = orig; }
-  });
 
   if ($dismiss) $dismiss.addEventListener('click', async () => {
     $dismiss.disabled = true;
@@ -260,21 +229,8 @@ export const BAN_JS = /* js */ `
   // ── main page: live route + history ─────────────────────────────────────
   function renderRoute(s) {
     if (!$route) return;
-    const p = s.proxy;
     const parts = [];
-    if (!s.homeProxyConfigured) parts.push('<span class="bad">Home proxy not configured</span> (HOME_PROXY_URL / HOME_PROXY_TOKEN).');
-    else if (!p) parts.push('Home proxy: <span class="bad">unreachable</span>' + (s.proxyError ? ' <span class="mono">' + esc(s.proxyError) + '</span>' : '') + '.');
-    else {
-      parts.push('Home proxy v' + esc(p.version || '?') + ': direct route ' + (p.direct && p.direct.blocked ? '<span class="bad">BLOCKED</span> until ' + esc(fmtTime(p.direct.blockedUntil)) : '<span class="ok">ok</span>') + ', pool <b>' + p.poolHealthy + '/' + p.poolTotal + '</b> healthy' + (p.counters ? ' · served direct ' + p.counters.directOk + ', pool ' + p.counters.poolOk + ', blocked direct ' + p.counters.directBlocked + ' / pool ' + p.counters.poolBlocked + ' since restart' : '') + '.');
-      const blockedMembers = (p.pool || []).filter((m) => m.blocked).map((m) => m.label);
-      if (blockedMembers.length) parts.push('Blocked buckets: <span class="mono">' + esc(blockedMembers.join(', ')) + '</span>.');
-      if (Array.isArray(p.accounts) && p.accounts.length) {
-        const acct = p.accounts.map((a) => '<span class="mono">' + esc(a.label) + '</span> ' + (a.healthy ? '<span class="ok">ok</span>' : a.blocked ? '<span class="bad">parked</span> until ' + esc(fmtTime(a.blockedUntil)) : '<span class="bad">benched</span>') + ' (' + a.okCount + ' ok, ' + a.blockedCount + ' blocked)').join(' · ');
-        parts.push('Accounts <b>' + p.accountsHealthy + '/' + p.accountsTotal + '</b> healthy: ' + acct + '.' + (p.sessionStats ? ' Re-logins ' + p.sessionStats.reissued + ', failovers ' + p.sessionStats.failovers + ' since restart.' : ''));
-      }
-    }
-    parts.push('BrightData today: <b>' + s.brightdata.used + '/' + s.brightdata.cap + '</b> calls' + (s.brightdata.used >= s.brightdata.cap ? ' <span class="bad">(budget spent)</span>' : '') + '.');
-    if (s.brightdataPolicyBlock) parts.push('<span class="bad">BrightData refuses 1001tracklists by policy</span> until <b>' + esc(fmtTime(s.brightdataPolicyBlock.until)) + '</b> — not asked until then (' + esc(s.brightdataPolicyBlock.reason.slice(0, 120)) + ').');
+    parts.push(s.poolConfigured ? 'Route: <span class="ok">tlpool</span> (the NAS browser pool).' : '<span class="bad">tlpool not configured</span> (TLPOOL_URL / TLPOOL_TOKEN): nothing can be fetched from 1001tracklists.');
     if (s.pause) parts.push('<span class="bad">Paused</span> until ' + esc(fmtTime(s.pause.until)) + ' (' + esc(s.pause.reason) + ').');
     $route.innerHTML = parts.join(' ');
   }

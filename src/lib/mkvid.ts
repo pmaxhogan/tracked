@@ -36,6 +36,7 @@ import { addToCombined, flushCombined, openCombinedPlaylist, type CombinedAdditi
 import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds } from './playlist-cache'
 import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
+import { isVerified } from './verification'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
@@ -271,13 +272,16 @@ export const MKVID_MAX_TRACKS = 300
 /**
  * Whether the names on a parsed page can be shown. Since ~2026-09-22
  * 1001tracklists serves our accounts decoy pages: real cues, ids and artwork,
- * randomized names (see DecoySignal in lib/tracklists1001.ts). Stricter than
- * `looksLikeDecoy`, which needs a majority of contradicting rows to *refuse* a
- * page: to *trust* one, at least three rows must have been compared and not
- * one of them may contradict itself (a real page agrees on every row).
+ * randomized names (see DecoySignal in lib/tracklists1001.ts). Two gates:
+ *   - the list must be VERIFIED (lib/verification.ts, quest decision 2: a
+ *     second fetch >= 2 h later by a different pool account agreed on every
+ *     row) — `verified`, and
+ *   - the page itself must pass the strict in-page check: at least three rows
+ *     compared and not one of them contradicting itself (stricter than
+ *     `looksLikeDecoy`, which needs a majority to *refuse* a page).
  */
-export function mkvidTracksTrusted(d: { named: number; mismatched: number; suspected: boolean }): boolean {
-  return !d.suspected && d.named >= 3 && d.mismatched === 0
+export function mkvidTracksTrusted(d: { named: number; mismatched: number; suspected: boolean }, verified: boolean): boolean {
+  return verified && !d.suspected && d.named >= 3 && d.mismatched === 0
 }
 
 const nameOrNull = (s: string | null | undefined): string | null => {
@@ -305,6 +309,9 @@ export function toMkvidTracks(tracks: ReadonlyArray<ParsedTrack & { anonymous?: 
 /**
  * Store the track list of a queued set's page (sync: first queueing and every
  * recheck). Keyed by the request, so a set that is not queued stores nothing.
+ * Trusted = verified (see mkvidTracksTrusted): the sync records the fetch in
+ * lib/verification.ts before calling this, so the fetch that verifies a list
+ * is the one that upgrades the stored copy.
  * A trusted list is never replaced by an untrusted one — the next fetch may
  * well be a decoy — but an untrusted one is upgraded as soon as a clean page
  * turns up, and a trusted one refreshed (1001tl users add IDs over time).
@@ -319,7 +326,7 @@ export async function saveMkvidTracks(
   const db = dbOf(env)
   const req = await db.prepare('SELECT id FROM mkvid_requests WHERE set_url = ?').bind(setUrl).first<{ id: string }>()
   if (!req) return 'no_request'
-  const trusted = mkvidTracksTrusted(parsed.decoy)
+  const trusted = mkvidTracksTrusted(parsed.decoy, await isVerified(env, setUrl))
   const tracks = toMkvidTracks(parsed.rows, trusted)
   const r = await db
     .prepare(

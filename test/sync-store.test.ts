@@ -12,7 +12,6 @@ import {
   slugsReferencingVideo,
   findTracklistUrlByVideoId,
   stateToFields,
-  subWorkCounts,
   type SubState,
 } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
@@ -174,26 +173,6 @@ describe('sync-store: legacy KV import', () => {
 })
 
 describe('sync-store: queries', () => {
-  it('subWorkCounts counts pending and due-for-recheck sets per DJ', async () => {
-    const env = makeEnv()
-    const interval = 5 * 86400
-    await saveSubState(env, 'a', {
-      discoveredTracklistUrls: ['p1', 'p2', 'done-fresh', 'done-stale', 'done-never', 'gone'],
-      processedTracklistUrls: ['done-fresh', 'done-stale', 'done-never', 'gone'],
-      abandonedTracklistUrls: ['gone'],
-      tracklistVideos: {
-        'done-fresh': { videoId: 'v', checkedAt: NOW },
-        'done-stale': { videoId: 'v', checkedAt: NOW - interval - 1 },
-      },
-    })
-    await saveSubState(env, 'b', { discoveredTracklistUrls: ['x'], processedTracklistUrls: ['x'], tracklistVideos: { x: { videoId: null, checkedAt: NOW } } })
-    const counts = await subWorkCounts(env, interval, NOW)
-    expect(counts).toEqual([
-      { slug: 'a', pending: 2, due: 2 },
-      { slug: 'b', pending: 0, due: 0 },
-    ])
-  })
-
   it('invalidateSubTracklists marks processed sets due (keeping the video), un-abandons and resets failures', async () => {
     const env = makeEnv()
     await saveSubState(env, 's', full)

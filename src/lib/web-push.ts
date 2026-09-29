@@ -35,7 +35,7 @@ export type StoredPushSubscription = {
   failCount: number
 }
 
-export type PushKind = 'ban_start' | 'ban_clear' | 'test'
+export type PushKind = 'ban_start' | 'ban_clear' | 'test' | 'pool_challenge' | 'pool_account'
 
 /** What the service worker receives (as JSON) and turns into a Notification. */
 export type PushPayload = {
