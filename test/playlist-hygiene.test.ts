@@ -517,3 +517,52 @@ describe('routes', () => {
     expect((await post({ slug: SLUG, url: setUrl(2) })).status).toBe(404)
   })
 })
+
+describe('a cleared set loads as "no video", due now (the seam to the recheck and mkvid)', () => {
+  it('after the live sweep and after the comparison', async () => {
+    const { loadSubState, dueRechecks } = await import('../src/lib/sync')
+    const env = makeEnv()
+    await seedSub(env)
+    await seedSet(env, setUrl(1), 'notc0000001', { pos: 0 })
+    await seedSet(env, setUrl(2), 'ownr0000001', { pos: 1 })
+    await seedSet(env, setUrl(3), 'keep0000001', { pos: 2 })
+    await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+    await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
+    listing({ [PL]: ['keep0000001'] })
+    await comparePlaylists(env, 'tok', { log })
+
+    const state = (await loadSubState(env, SLUG))!
+    expect(state.tracklistVideos![setUrl(1)]!.videoId).toBeNull()
+    expect(state.tracklistVideos![setUrl(2)]!.videoId).toBeNull()
+    expect(state.tracklistVideos![setUrl(3)]!.videoId).toBe('keep0000001')
+    expect(dueRechecks(state).sort()).toEqual([setUrl(1), setUrl(2)].sort())
+  })
+})
+
+describe("mkvid's own videos (W7 interface)", () => {
+  it('the sweep never judges a video mkvid uploaded, whatever the row says', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedSet(env, setUrl(1), 'mkUp0000001')
+    await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+    await env.DB.prepare(
+      "INSERT INTO mkvid_requests (id, slug, set_url, source, source_url, status, video_id, created_at, updated_at) VALUES ('r1', ?, ?, 'soundcloud', 'u', 'done', 'mkUp0000001', 0, 0)",
+    ).bind(SLUG, setUrl(1)).run()
+    const r = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
+    expect(r.candidates).toBe(0)
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+  })
+
+  it('the comparison does not count a video replaced by delete-and-recreate as an owner removal (and copes without the table)', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedSet(env, setUrl(1), 'oldR0000001')
+    listing({ [PL]: [] })
+    await env.DB.exec('CREATE TABLE mkvid_old_videos (video_id TEXT PRIMARY KEY, set_url TEXT)')
+    await env.DB.prepare('INSERT INTO mkvid_old_videos (video_id, set_url) VALUES (?, ?)').bind('oldR0000001', setUrl(1)).run()
+    const [r] = await comparePlaylists(env, 'tok', { log })
+    expect(r).toMatchObject({ status: 'ok', expected: 0, missing: 0 })
+    expect(await removals(env)).toHaveLength(0)
+    expect((await row(env, setUrl(1)))!.video_id).toBe('oldR0000001')
+  })
+})

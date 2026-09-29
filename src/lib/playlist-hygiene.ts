@@ -360,6 +360,32 @@ function clearSetVideoStmt(db: D1Database, slug: string, videoId: string, setUrl
     : db.prepare('UPDATE tracklists SET video_id = NULL, video_source = NULL, video_known = 1, checked_at = 0 WHERE slug = ? AND video_id = ?').bind(slug, videoId)
 }
 
+// ─── mkvid's own videos ─────────────────────────────────────────────────────
+
+/**
+ * Videos W7's "delete and recreate" replaced and took out of the playlists
+ * itself (table `mkvid_old_videos`, migration 0009 on that branch). Their
+ * absence is not an owner removal. Guarded: the table may not exist yet.
+ */
+export async function mkvidReplacedIds(env: Env, log?: Logger): Promise<Set<string>> {
+  try {
+    const res = await dbOf(env).prepare('SELECT video_id FROM mkvid_old_videos').all<{ video_id: string }>()
+    return new Set(res.results.map((r) => r.video_id).filter(Boolean))
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (!/no such table/i.test(msg)) log?.warn('hygiene.mkvid_old_videos_unreadable', errorFields(e))
+    return new Set()
+  }
+}
+
+/** Every video mkvid uploaded (current, superseded or replaced): full renders by construction, never swept. */
+export async function mkvidUploadedIds(env: Env, log?: Logger): Promise<Set<string>> {
+  const res = await dbOf(env).prepare('SELECT video_id FROM mkvid_requests WHERE video_id IS NOT NULL').all<{ video_id: string }>()
+  const out = new Set(res.results.map((r) => r.video_id))
+  for (const id of await mkvidReplacedIds(env, log)) out.add(id)
+  return out
+}
+
 // ─── sweep ──────────────────────────────────────────────────────────────────
 
 const SWEEP_DELETES_PREFIX = 'hygiene:sweep:deletes:'
@@ -419,7 +445,8 @@ export async function runRemovalSweep(
       .all<AddedRow>()
   ).results
   const overrides = await overriddenIds(env)
-  const candidates = rows.filter((r) => !overrides.has(r.video_id))
+  const mkvidOwn = await mkvidUploadedIds(env, log)
+  const candidates = rows.filter((r) => !overrides.has(r.video_id) && !mkvidOwn.has(r.video_id))
   const used = await sweepDeletesUsed(env, nowMs)
   const result: SweepResult = {
     dryRun: settings.dryRun,
@@ -677,9 +704,12 @@ export async function comparePlaylists(
   const db = dbOf(env)
   const subs = (await db.prepare('SELECT slug, playlist_id FROM sub_sync WHERE playlist_id IS NOT NULL').all<{ slug: string; playlist_id: string }>()).results
   const rows = (await db.prepare('SELECT slug, url, video_id FROM tracklists WHERE video_id IS NOT NULL').all<{ slug: string; url: string; video_id: string }>()).results
+  // Taken out by mkvid's delete-and-recreate itself: not the owner's doing.
+  const replaced = await mkvidReplacedIds(env, log)
   const bySlug = new Map<string, Map<string, string[]>>()
   const allExpected = new Map<string, string[]>()
   for (const r of rows) {
+    if (replaced.has(r.video_id)) continue
     if (!bySlug.has(r.slug)) bySlug.set(r.slug, new Map())
     const m = bySlug.get(r.slug)!
     m.set(r.video_id, [...(m.get(r.video_id) ?? []), r.url])
