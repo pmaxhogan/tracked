@@ -44,6 +44,8 @@ import {
   MKVID_MAX_TRACKS,
 } from '../src/lib/mkvid'
 import { parseTracklist } from '../src/lib/tracklists1001'
+import { noteSetFetch } from '../src/lib/verification'
+import { DEFAULT_POOL_SETTINGS } from '../src/lib/pool-settings'
 import { MkvidClaimResponse } from '../src/schemas'
 import { loadSubState, saveSubState } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
@@ -690,16 +692,19 @@ describe('panel list: filters and paging', () => {
 describe('track list for mkvid', () => {
   const tl = (name: string) => parseTracklist(`https://www.1001tracklists.com/tracklist/x/${name}`, fixture(name))
 
-  it('trusts a page only when enough rows were checked and none contradicts itself', () => {
-    expect(mkvidTracksTrusted({ named: 25, mismatched: 0, suspected: false })).toBe(true)
-    expect(mkvidTracksTrusted({ named: 3, mismatched: 0, suspected: false })).toBe(true)
+  it('trusts a page only when the list is verified, enough rows were checked and none contradicts itself', () => {
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 0, suspected: false }, true)).toBe(true)
+    expect(mkvidTracksTrusted({ named: 3, mismatched: 0, suspected: false }, true)).toBe(true)
     // Too few rows to judge, or any contradiction at all, or a suspected decoy: not trusted.
-    expect(mkvidTracksTrusted({ named: 2, mismatched: 0, suspected: false })).toBe(false)
-    expect(mkvidTracksTrusted({ named: 0, mismatched: 0, suspected: false })).toBe(false)
-    expect(mkvidTracksTrusted({ named: 25, mismatched: 1, suspected: false })).toBe(false)
-    expect(mkvidTracksTrusted({ named: 25, mismatched: 24, suspected: true })).toBe(false)
-    expect(mkvidTracksTrusted(tl('tracklist-matroda.html').decoy)).toBe(true)
-    expect(mkvidTracksTrusted(tl('tracklist-decoy-dcr839.html').decoy)).toBe(false)
+    expect(mkvidTracksTrusted({ named: 2, mismatched: 0, suspected: false }, true)).toBe(false)
+    expect(mkvidTracksTrusted({ named: 0, mismatched: 0, suspected: false }, true)).toBe(false)
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 1, suspected: false }, true)).toBe(false)
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 24, suspected: true }, true)).toBe(false)
+    expect(mkvidTracksTrusted(tl('tracklist-matroda.html').decoy, true)).toBe(true)
+    expect(mkvidTracksTrusted(tl('tracklist-decoy-dcr839.html').decoy, true)).toBe(false)
+    // Unverified (decision 2): never trusted, however clean the page looks.
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 0, suspected: false }, false)).toBe(false)
+    expect(mkvidTracksTrusted(tl('tracklist-matroda.html').decoy, false)).toBe(false)
   })
 
   it('a trusted page keeps names, cues, artwork and the ID flag', () => {
@@ -794,6 +799,12 @@ describe('track list for mkvid', () => {
     expect(await saveMkvidTracks(env, input.setUrl, decoy)).toBe('saved')
     expect(await getMkvidTracks(env, id)).toEqual({ tracks: toMkvidTracks(decoy.rows, false), tracksTrusted: false })
     expect((await getMkvidTracks(env, id)).tracks).toHaveLength(41) // anonymous rows included
+    // A clean page of a list that is not VERIFIED yet stays untrusted (quest decision 2)...
+    expect(await saveMkvidTracks(env, input.setUrl, real)).toBe('saved')
+    expect((await getMkvidTracks(env, id)).tracksTrusted).toBe(false)
+    // ...until a second account confirms the same rows at least 2 h later.
+    await noteSetFetch(env, { setUrl: input.setUrl, parsed: real, accountId: 'acct-1', fetchedAt: NOW - 3 * 3600, settings: DEFAULT_POOL_SETTINGS, pool: null })
+    expect((await noteSetFetch(env, { setUrl: input.setUrl, parsed: real, accountId: 'acct-2', fetchedAt: NOW, settings: DEFAULT_POOL_SETTINGS, pool: null })).outcome).toBe('verified')
     expect(await saveMkvidTracks(env, input.setUrl, real)).toBe('saved')
     const stored = await getMkvidTracks(env, id)
     expect(stored).toEqual({ tracks: toMkvidTracks(real.rows, true), tracksTrusted: true })

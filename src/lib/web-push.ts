@@ -10,8 +10,8 @@
  * A 404/410 from the push service means the browser unsubscribed — the record
  * is dropped so we stop paying for dead endpoints.
  *
- * Used by lib/ban-state.ts for the "1001tracklists blocked your home IP, go
- * solve the captcha" alert (once at ban start, once when it clears) and by the
+ * Used by lib/pool-events.ts for tlpool's "captcha waiting" / "account
+ * flagged" pushes, by lib/ban-state.ts for the pause banner's alert (once at ban start, once when it clears) and by the
  * admin page's "Send test notification" button.
  */
 
@@ -35,7 +35,7 @@ export type StoredPushSubscription = {
   failCount: number
 }
 
-export type PushKind = 'ban_start' | 'ban_clear' | 'test'
+export type PushKind = 'ban_start' | 'ban_clear' | 'test' | 'pool_challenge' | 'pool_account'
 
 /** What the service worker receives (as JSON) and turns into a Notification. */
 export type PushPayload = {

@@ -25,16 +25,14 @@ export type Env = {
   /** Same, for uploads mkvid makes through the sync's project, tracked-youtube, once its own is used up (default 6, so 30/day in total). `0` = never. */
   MKVID_SHARED_DAILY_CLAIM_CAP?: string
   YOUTUBE_API_KEY: string
-  /** Optional. When set, tracklist page GETs route through Bright Data Web Unlocker. */
-  BRIGHTDATA_API_KEY?: string
-  /** Optional. When both are set, tracklist GETs try a residential-IP forwarder
-   *  (e.g. cloudflared → Node script on a NAS) before falling back to BrightData. */
-  HOME_PROXY_URL?: string
-  HOME_PROXY_TOKEN?: string
-  /** Optional. Max BrightData Web Unlocker calls per UTC day across all paths (default 333 ≈ $15/mo at $1.50 per 1k). */
-  BRIGHTDATA_DAILY_CAP?: string
-  /** 1001tracklists page fetches per cron tick PER HEALTHY FORWARDER ACCOUNT (default 20); the tick budget is this × the accounts the forwarder reports healthy. */
-  TL_FETCHES_PER_TICK?: string
+  /**
+   * tlpool, the NAS browser pool (lib/pool.ts): base URL through the
+   * cloudflared tunnel. Every 1001tracklists request goes through it; while
+   * unset, nothing is fetched from 1001tracklists at all.
+   */
+  TLPOOL_URL?: string
+  /** Bearer for tlpool, in both directions: the Worker → POST /fetch, and tlpool → POST /pool/events. */
+  TLPOOL_TOKEN?: string
   /** Web Push (VAPID) identity for the admin page's IP-ban alerts. Generate with `node scripts/gen-vapid-keys.mjs`. */
   VAPID_PUBLIC_KEY?: string
   VAPID_PRIVATE_KEY?: string

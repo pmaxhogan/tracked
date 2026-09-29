@@ -22,8 +22,10 @@
  * **Recheck contract.** A set's YouTube recording on 1001tracklists is not
  * final: the first video attached is often a phone recording, replaced by an
  * official upload days later. So "resolved" is not "done" — every processed
- * tracklist is re-fetched once its record in `state.tracklistVideos` is older
- * than `RECHECK_INTERVAL_SECONDS`. A recheck compares the video the page has
+ * tracklist is re-fetched when it is due — by set age (quest decision 13,
+ * lib/pool-settings.ts): the scheduler (lib/fetch-scheduler.ts) keeps a
+ * jittered due time per set; a manual run uses the same intervals against
+ * `state.tracklistVideos`. A recheck compares the video the page has
  * now against the one recorded then:
  *   - same video, or the page lost its video → nothing changes (a set that
  *     drops its recording keeps the one already in the playlist)
@@ -37,18 +39,21 @@
  *     removed it by hand", and the second must stick.
  * Rechecks that change nothing write no audit row — see lib/playlist-audit.ts.
  *
- * **Quota contract.** Caps `maxSetsPerRun` (default 30) per subscription per
- * run to keep Bright Data spend and YouTube quota bounded. New subscriptions
- * with deep histories backfill across multiple cron ticks; users who want
- * "now" can hit the manual sync endpoint repeatedly.
+ * **Fetch contract.** Every 1001tracklists page comes from tlpool, the NAS
+ * browser pool (lib/pool.ts), which owns the budget. The cron no longer runs
+ * batches: the scheduler hands syncOne an explicit `selection` of one or two
+ * URLs at a time with their pool priority. Manual button runs keep the old
+ * windows, bounded by `manualMaxFetches` (lib/pool-settings.ts).
  */
 
 import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
-import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUnavailableError } from './upstream1001'
-import { flushBanTally, isPaused } from './ban-state'
-import { fetchHomeProxyStatus } from './homeProxy'
+import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUnavailableError, type Fetch1001Opts, type Via } from './upstream1001'
+import { isPaused } from './ban-state'
+import type { PoolPriority } from './pool'
+import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
+import { recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
 
 import { getAccessToken } from './google-oauth'
 import {
@@ -92,13 +97,10 @@ import {
 import {
   invalidateSubTracklists,
   listSubSync,
-  loadDjBackfill,
   loadSubState,
-  saveDjBackfill,
   requeueTracklists,
   saveSubState,
   slugsReferencingVideo,
-  subWorkCounts,
   type SubState,
   type TracklistVideo,
 } from './sync-store'
@@ -114,15 +116,18 @@ function stopReasonFor(e: unknown): string {
   return `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
 }
 
+/** The pool error behind a stop, if it said when to come back. */
+function retryAfterOf(e: unknown): number | null {
+  const r = (e as { retryAfterSeconds?: unknown } | null)?.retryAfterSeconds
+  return typeof r === 'number' && Number.isFinite(r) ? r : null
+}
+
 const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 const playlistDescription = (artistName: string) =>
   `Every set ${artistName} has a YouTube recording for on 1001tracklists.`
-// Per-set scrape via home proxy is ~250 ms; via BrightData ~3–4 s. 30 sets
-// fits in ~8 s home-proxy / 25 s BrightData (deadline-bound either way).
-// Big enough that a 145-set first-time backfill is ~5 cron ticks instead
-// of 15, but small enough to keep YouTube quota usage bounded — at 50
-// quota per insert, 30 inserts × 4 subs = 6 000 of the daily 10 000.
+// Upper bound on a manual run's new-set window; the fetch budget
+// (manualMaxFetches) is what really binds now.
 const DEFAULT_MAX_SETS_PER_RUN = 30
 // DJ-index head walk: page 1 plus at most 3 infinite-scroll steps (10 sets
 // each), stopping at the first page that shows an already-known set — which
@@ -130,30 +135,19 @@ const DEFAULT_MAX_SETS_PER_RUN = 30
 // costs no scroll request at all. A brand-new subscription gets its newest
 // 45 sets here; older history comes from the backfill below.
 const DEFAULT_MAX_DJ_PAGES = 4
-/**
- * Scroll steps (10 sets each) the *daily* cron spends per DJ walking further
- * into its history, resuming from a cursor in SUBS KV. Every set found this
- * way becomes one tracklist-page fetch through the forwarder accounts, so
- * this is what bounds the backfill's load on 1001tracklists: ≤10 new sets per
- * DJ per day. A 1,000-set DJ takes ~100 days; raise it to go faster.
- */
-export const DJ_BACKFILL_STEPS_PER_DAY = 1
 // Hard wall-clock deadline so we save state and return cleanly before
 // Cloudflare kills the worker. Workers' fetch event budget is ~30 s; we
 // leave headroom for network I/O on the response itself.
 const SYNC_DEADLINE_MS = 25_000
 /**
- * How long a processed tracklist's resolved video is trusted before the set
- * page is fetched again to see whether 1001tracklists swapped the recording.
- * Five days: official uploads typically land within a week of the phone
- * recording, and at ~150 sets per DJ this is ~30 re-fetches per DJ per day,
- * trickled through the 5-minute cron.
+ * The recheck interval of a set whose date cannot be read from its URL (the
+ * default `recheck.unknownAgeIntervalHours`). Dated sets follow the age bands
+ * of quest decision 13 (lib/pool-settings.ts).
  */
-export const RECHECK_INTERVAL_SECONDS = 5 * 24 * 60 * 60
+export const RECHECK_INTERVAL_SECONDS = DEFAULT_POOL_SETTINGS.recheck.unknownAgeIntervalHours * 60 * 60
 // Rechecks are cheaper than first-time processing (a changed video is rare,
-// so almost none of them touch the YouTube API), but each is still a page
-// fetch through the home proxy / BrightData. Bounded per run so a mass
-// invalidation drains over a few ticks instead of hammering 1001tracklists.
+// so almost none of them touch the YouTube API), but each is still a
+// budgeted page view in the pool. Bounds a manual run's recheck window.
 const DEFAULT_MAX_RECHECKS_PER_RUN = 20
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
@@ -165,8 +159,9 @@ export function pendingTracklistUrls(state: SubState): string[] {
 }
 
 /**
- * Processed tracklists whose recorded video is older than the recheck
- * interval (or that have no record at all). Order follows
+ * Processed tracklists whose recorded video is older than their recheck
+ * interval by set age (or that have no record at all; a set too old to
+ * recheck — decision 13's "never" — is never due here). Order follows
  * `processedTracklistUrls`, which is discovery order — newest sets first —
  * so the sets most likely to have had their recording swapped are rechecked
  * first when the per-run cap binds.
@@ -176,22 +171,29 @@ export function dueRecheckUrls(
   abandoned: ReadonlySet<string>,
   tracklistVideos: Record<string, TracklistVideo>,
   now = nowSeconds(),
+  settings: PoolSettings = DEFAULT_POOL_SETTINGS,
 ): string[] {
   const out: string[] = []
   for (const u of processed) {
     if (abandoned.has(u)) continue
     const entry = tracklistVideos[u]
-    if (!entry || now - entry.checkedAt >= RECHECK_INTERVAL_SECONDS) out.push(u)
+    if (!entry) {
+      out.push(u)
+      continue
+    }
+    const interval = recheckIntervalSeconds(settings, setAgeDays(setDateFromUrl(u), now), { noGoodVideo: !entry.videoId })
+    if (interval !== null && now - entry.checkedAt >= interval) out.push(u)
   }
   return out
 }
 
-export function dueRechecks(state: SubState, now = nowSeconds()): string[] {
+export function dueRechecks(state: SubState, now = nowSeconds(), settings: PoolSettings = DEFAULT_POOL_SETTINGS): string[] {
   return dueRecheckUrls(
     state.processedTracklistUrls,
     new Set(state.abandonedTracklistUrls ?? []),
     state.tracklistVideos ?? {},
     now,
+    settings,
   )
 }
 
@@ -215,12 +217,26 @@ export type SyncOpts = {
   maxSetsPerRun?: number
   /**
    * Skip the DJ-page crawl entirely and process pending tracklists from
-   * `state.discoveredTracklistUrls`. Used by the frequent "drain pending"
-   * cron — we don't need to re-discover new sets on every 5-minute tick
-   * (the daily 06:00 UTC cron does that), and skipping the crawl saves
-   * the page-1 round-trip through the forwarder per sub.
+   * `state.discoveredTracklistUrls`. The scheduler's set items do this;
+   * discovery is its own item (lib/fetch-scheduler.ts).
    */
   skipDjCrawl?: boolean
+  /**
+   * Exactly which sets to fetch (the scheduler): `newUrls` must be pending,
+   * `recheckUrls` processed. Replaces the run's own todo and recheck windows.
+   * Absent = a manual run: the pending window and the sets due by age.
+   */
+  selection?: { newUrls: string[]; recheckUrls: string[] }
+  /**
+   * Pool priority for every fetch of this run. Absent = by kind: a pending
+   * set's first fetch is `new` (or `backfill` when older than
+   * `newSetMaxAgeDays`), a recheck is `recheck`, the DJ crawl is `new`.
+   */
+  priority?: PoolPriority
+  /** Accounts the fetches must not use (verification second fetch). */
+  excludeAccounts?: string[]
+  /** Settings to use (the scheduler passes the ones it read); read from KV when absent. */
+  settings?: PoolSettings
   /** Cap how many already-processed tracklists we re-fetch to look for a swapped video. */
   maxRechecksPerRun?: number
   /**
@@ -232,49 +248,18 @@ export type SyncOpts = {
   /**
    * Shared, mutable budget of 1001tracklists page fetches for this whole run
    * (all subs). Each set fetch / recheck decrements it; when it hits zero the
-   * loops stop and the remaining work waits for the next tick. This is the
-   * pacing that keeps the account under 1001tl's rate limit — the 2026-09-10
-   * resync drove ~360 fetches in 11 minutes and got the account banned.
-   * `syncAll`/`syncPendingOnly` create one from `TL_FETCHES_PER_TICK`.
+   * loops stop. Only manual runs need it now (tlpool paces everything, but a
+   * button press should still not queue hundreds of fetches): see
+   * `manualFetchBudget`. The scheduler passes an explicit selection instead.
    */
   fetchBudget?: FetchBudget
 }
 
-export type FetchBudget = { remaining: number; limit: number; spent: number; perAccount: number; accounts: number }
+export type FetchBudget = { remaining: number; limit: number; spent: number }
 
-export const DEFAULT_TL_FETCHES_PER_TICK = 20
-
-/**
- * One tick's worth of 1001tl page fetches: `TL_FETCHES_PER_TICK` (default 20)
- * *per healthy account* on the forwarder. Three healthy accounts → 60 a tick;
- * one parked → 40, automatically. 1001tl's limit is per account, so this keeps
- * each account at the same rate no matter how many there are.
- */
-export function newFetchBudget(env: Env, healthyAccounts = 1): FetchBudget {
-  const raw = Number(env.TL_FETCHES_PER_TICK)
-  const perAccount = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_TL_FETCHES_PER_TICK
-  const accounts = Math.max(1, Math.floor(healthyAccounts) || 1)
-  const limit = perAccount * accounts
-  return { remaining: limit, limit, spent: 0, perAccount, accounts }
-}
-
-/**
- * How many 1001tl accounts the forwarder can serve from right now, read from
- * its /status once per tick. Anything short of a clear answer — no forwarder
- * configured, unreachable, old forwarder without accounts — is treated as 1
- * (the pre-multi-account throughput), never more.
- */
-export async function healthyAccountCount(env: Env, log: Logger): Promise<number> {
-  if (!env.HOME_PROXY_URL || !env.HOME_PROXY_TOKEN) return 1
-  try {
-    const st = await fetchHomeProxyStatus(env.HOME_PROXY_URL, env.HOME_PROXY_TOKEN)
-    const n = typeof st.accountsHealthy === 'number' ? st.accountsHealthy : 1
-    log.info('sync.forwarder_accounts', { accountsHealthy: st.accountsHealthy ?? null, accountsTotal: st.accountsTotal ?? null, poolHealthy: st.poolHealthy ?? null })
-    return Math.max(1, n)
-  } catch (e) {
-    log.warn('sync.forwarder_status_unavailable', { ...errorFields(e) })
-    return 1
-  }
+export function newFetchBudget(limit: number): FetchBudget {
+  const n = Math.max(0, Math.floor(limit) || 0)
+  return { remaining: n, limit: n, spent: 0 }
 }
 
 /** Take one fetch from the budget; false when it is spent. */
@@ -321,6 +306,10 @@ export type SyncOneResult = {
     /** Processed tracklists still due for a recheck after this run. */
     rechecksPending: number
   }
+  /** Set when a pool refusal / pause stopped the run early (charged nothing). */
+  stoppedBy?: { reason: string; retryAfterSeconds: number | null }
+  /** Why the DJ-page crawl stopped, when this run crawled. */
+  crawlStopReason?: string
 }
 
 const EMPTY_STATS: SyncOneResult['stats'] = {
@@ -349,8 +338,8 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
   }
   const allSubs = await listSubscriptions(env)
   const subs = orderByLastRun(allSubs, await lastRunMap(env))
-  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env, await healthyAccountCount(env, log))
-  log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit, perAccount: fetchBudget.perAccount, accounts: fetchBudget.accounts })
+  const fetchBudget = opts.fetchBudget ?? (await manualFetchBudget(env, log))
+  log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit })
   const results: SyncOneResult[] = []
   if (await pausedForRun(env, log, 'sync')) return { results, paused: true }
   for (const sub of subs) {
@@ -379,18 +368,18 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
     fetchesSpent: fetchBudget.spent,
     fetchBudget: fetchBudget.limit,
   })
-  await flushBanTally(env, true)
   return { results }
 }
 
 /**
- * The fetch budget a manual run (panel button) gets: sized exactly like the
- * cron's, `TL_FETCHES_PER_TICK` per account the forwarder reports healthy.
- * Every entry point that calls syncOne outside the cron must pass one —
- * without a budget takeFetch() always says yes.
+ * The fetch budget a manual run (panel button) gets: `manualMaxFetches` from
+ * the pool settings (default 10). Every entry point that calls syncOne outside
+ * the scheduler must pass one — without a budget takeFetch() always says yes.
  */
-export async function manualFetchBudget(env: Env, log: Logger): Promise<FetchBudget> {
-  return newFetchBudget(env, await healthyAccountCount(env, log))
+export async function manualFetchBudget(env: Env, log?: Logger): Promise<FetchBudget> {
+  const budget = newFetchBudget((await getPoolSettings(env)).manualMaxFetches)
+  log?.info('sync.manual_fetch_budget', { limit: budget.limit })
+  return budget
 }
 
 /**
@@ -414,70 +403,6 @@ export async function resyncAll(
   const fetchBudget = opts.fetchBudget ?? (await manualFetchBudget(env, log))
   const r = await syncAll(env, { ...opts, log, trigger: opts.trigger ?? 'manual.resync', fetchBudget })
   return { ...r, invalidated }
-}
-
-/**
- * Drain pending tracklists across every subscription without re-discovering
- * new sets. Used by the frequent (every-N-min) cron to chip away at large
- * backfills — manual sync handles only one batch, this handler keeps going
- * automatically until pending hits zero. The same tick also drains due
- * rechecks (processed sets whose video record is older than
- * `RECHECK_INTERVAL_SECONDS`), which is how the 5-day re-fetch cadence is
- * actually met: the daily sync alone would fall behind on a deep catalogue.
- *
- * Subs with nothing pending, nothing due, or no prior discovery state are
- * skipped; the daily 06:00 UTC sync handles initial discovery for them.
- */
-export async function syncPendingOnly(env: Env, opts: SyncOpts = {}): Promise<{ results: SyncOneResult[]; paused?: boolean }> {
-  const log = opts.log ?? makeLogger({ task: 'sync.pending' })
-  if (await pausedForRun(env, log, 'sync.pending')) return { results: [], paused: true }
-  const subs = await listSubscriptions(env)
-  // One aggregate query instead of hydrating every DJ's state: a sub is a
-  // candidate when it has unprocessed sets or processed sets whose record is
-  // older than the recheck interval (or has none).
-  const counts = new Map((await subWorkCounts(env, RECHECK_INTERVAL_SECONDS)).map((c) => [c.slug, c] as const))
-  const unordered: Subscription[] = subs.filter((sub) => {
-    const c = counts.get(sub.slug)
-    return !!c && (c.pending > 0 || c.due > 0)
-  })
-  const candidates = orderByLastRun(unordered, await lastRunMap(env))
-  if (candidates.length === 0) {
-    log.info('sync.pending.nothing_to_do', { totalSubs: subs.length })
-    return { results: [] }
-  }
-  const fetchBudget = opts.fetchBudget ?? newFetchBudget(env, await healthyAccountCount(env, log))
-  log.info('sync.pending.start', { totalSubs: subs.length, candidatesWithPending: candidates.length, fetchBudget: fetchBudget.limit, perAccount: fetchBudget.perAccount, accounts: fetchBudget.accounts })
-  const tokenInfo = await getAccessToken(env)
-  if (!tokenInfo) {
-    log.error('sync.pending.no_oauth_tokens')
-    throw new Error('YouTube account not connected')
-  }
-  const results: SyncOneResult[] = []
-  for (const sub of candidates) {
-    if (fetchBudget.remaining <= 0) {
-      log.info('sync.fetch_budget_exhausted', { slug: sub.slug, spent: fetchBudget.spent, limit: fetchBudget.limit, candidatesLeft: candidates.length - results.length })
-      break
-    }
-    try {
-      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, skipDjCrawl: true, fetchBudget })
-      results.push(r)
-    } catch (e) {
-      log.error('sync.pending.sub_threw', { slug: sub.slug, ...errorFields(e) })
-    }
-  }
-  log.info('sync.pending.done', {
-    candidatesProcessed: results.length,
-    candidatesWithPending: candidates.length,
-    fetchesSpent: fetchBudget.spent,
-    fetchBudget: fetchBudget.limit,
-    totalAdded: results.reduce((a, r) => a + r.stats.videoIdsAdded, 0),
-    totalStillPending: results.reduce((a, r) => a + r.stats.tracklistsPending, 0),
-    totalRechecked: results.reduce((a, r) => a + r.stats.tracklistsRechecked, 0),
-    totalReplaced: results.reduce((a, r) => a + r.stats.videosReplaced, 0),
-    totalRechecksPending: results.reduce((a, r) => a + r.stats.rechecksPending, 0),
-  })
-  await flushBanTally(env, true)
-  return { results }
 }
 
 // ─── Combined "all tracked artists" playlist ────────────────────────────────
@@ -579,7 +504,17 @@ export async function syncOne(
     (state.processedTracklistUrls.length > 0
       ? await seedTracklistVideosFromAudit(env, sub.slug, new Set(state.processedTracklistUrls), log)
       : {})
-  const fetchOpts = fetchOptsFromEnv(env, log)
+  const settings = opts.settings ?? (await getPoolSettings(env))
+  const fetchOpts = fetchOptsFromEnv(env, log, opts.excludeAccounts?.length ? { excludeAccounts: opts.excludeAccounts } : {})
+  /** Pool options for one set fetch: the run's priority, else by kind (see SyncOpts.priority). */
+  const setFetchOpts = (setUrl: string, phase: 'new' | 'recheck'): Fetch1001Opts => ({
+    ...fetchOpts,
+    kind: 'set',
+    priority: opts.priority ?? (phase === 'recheck' ? 'recheck' : firstFetchClass(settings, setAgeDays(setDateFromUrl(setUrl), nowSeconds()))),
+  })
+  /** Verification + next due time for a fetched set page, before anything reads them (lib/fetch-scheduler.ts). */
+  const noteFetched = (setUrl: string, f: { html: string; accountId?: string; fetchedAt?: string }, videoId: string | null) =>
+    recordSetFetch(env, { setUrl, html: f.html, videoId, accountId: f.accountId, fetchedAt: f.fetchedAt, settings, pool: fetchOpts.pool ?? null, log })
 
   // 1. Discover tracklists. Either crawl the DJ index (the fresh-discovery
   // path, used by the daily cron + initial manual syncs) OR skip the crawl
@@ -588,32 +523,39 @@ export async function syncOne(
   // few minutes, and skipping saves ~14 AJAX hops per sub).
   const discovered = new Set<string>(state.discoveredTracklistUrls ?? [])
   let artistName: string
-  if (opts.skipDjCrawl) {
+  let crawlStopReason: string | undefined
+  // A manual run's crawl costs page views too: page 1 is charged to its
+  // budget, and a spent budget skips the crawl.
+  const crawlBudgetOk = opts.skipDjCrawl || takeFetch(opts.fetchBudget)
+  if (opts.skipDjCrawl || !crawlBudgetOk) {
     artistName = state.artistName ?? prettifySlug(sub.slug)
     log.info('sync.skip_crawl', {
       slug: sub.slug,
       artistName,
       tracklistsKnownTotal: discovered.size,
+      ...(crawlBudgetOk ? {} : { reason: 'fetch_budget_spent' }),
     })
   } else {
-    // Only the daily discovery run digs into a DJ's history; button presses
-    // and the 5-minute ticks never spend backfill requests.
-    const backfillPrev = opts.trigger === 'cron.daily' ? await loadDjBackfill(env, sub.slug) : null
-    const wantBackfill = opts.trigger === 'cron.daily' && !backfillPrev?.done
+    // Head walk only. The DJ's older history is the scheduler's paced
+    // backfill (one step at a time, priority backfill); it resumes from the
+    // scroll keys this crawl leaves behind.
     const crawl = await crawlDjIndex(sub.slug, {
       ...fetchOpts,
+      priority: opts.priority ?? 'new',
       maxPages: DEFAULT_MAX_DJ_PAGES,
       deadlineMs: deadline,
       knownUrls: new Set(discovered),
-      ...(wantBackfill ? { backfill: { from: backfillPrev?.cursor ?? null, maxSteps: DJ_BACKFILL_STEPS_PER_DAY } } : {}),
     })
     artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
+    crawlStopReason = crawl.stopReason
     // Union with previously-discovered URLs — earlier pages may have failed
     // to fetch this run but we don't want to lose them from the todo set.
     const knownBefore = discovered.size
     for (const u of crawl.tracklistUrls) discovered.add(u)
-    if (crawl.backfill && (crawl.backfill.steps > 0 || crawl.backfill.done || !backfillPrev)) {
-      await saveDjBackfill(env, sub.slug, { cursor: crawl.backfill.cursor, done: crawl.backfill.done, at: nowSeconds() })
+    try {
+      await rememberDjScrollKeys(env, sub.slug, crawl)
+    } catch (e) {
+      log.warn('sync.remember_scroll_keys_failed', { slug: sub.slug, ...errorFields(e) })
     }
     log.info('sync.dj_parsed', {
       slug: sub.slug,
@@ -682,7 +624,7 @@ export async function syncOne(
   const abandoned = new Set(state.abandonedTracklistUrls ?? [])
   const failureCounts: Record<string, number> = { ...(state.failureCounts ?? {}) }
   const allUrls = [...discovered]
-  const todo = allUrls
+  const todo = (opts.selection ? opts.selection.newUrls.filter((u) => discovered.has(u)) : allUrls)
     .filter((u) => !processed.has(u) && !abandoned.has(u))
     .slice(0, maxSets)
   log.info('sync.todo_window', {
@@ -700,6 +642,7 @@ export async function syncOne(
   let setsAbandonedThisRun = 0
   /** Set when a block/pause stopped the run early; recorded as lastError and skips the recheck window. */
   let stopReason: string | null = null
+  let stoppedBy: SyncOneResult['stoppedBy']
   let setsRechecked = 0
   let videosReplaced = 0
   // Artist-playlist membership changed (insert or removal) → write the
@@ -896,11 +839,13 @@ export async function syncOne(
     let foundVideoId: string | null = null
     let foundVia: string | null = null
     try {
+      const fetchOpts = setFetchOpts(setUrl, 'new')
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
       foundVia = setFetched.via
       const videoId = parseSetYouTubeId(setFetched.html)
       foundVideoId = videoId
+      await noteFetched(setUrl, setFetched, videoId)
       if (videoId) {
         videoIdsFound += 1
         if (!existingVideoIds.has(videoId)) {
@@ -965,12 +910,12 @@ export async function syncOne(
         continue
       }
       if (isStopTheBatchError(e)) {
-        // A block (or a broken route: forwarder down and the paid fallback
-        // serving Cloudflare shells) is not the set's fault: every remaining
-        // set would fail the same way, and each attempt from a banned IP keeps
-        // the ban fresh. Stop the run here, charge nothing, and let the next
-        // tick (after the cooldown) pick up exactly where we left off.
+        // A pause, a pool refusal (budget spent, captcha pending) or a broken
+        // route is not the set's fault: every remaining set would fail the
+        // same way. Stop the run here, charge nothing, and let a later tick
+        // pick up exactly where we left off.
         stopReason = stopReasonFor(e)
+        stoppedBy = { reason: stopReason, retryAfterSeconds: retryAfterOf(e) }
         log.error('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
         break
       }
@@ -979,7 +924,7 @@ export async function syncOne(
       // every tick. Blocks and route faults never reach this branch (see
       // above), so a URL is only abandoned for failures that are actually
       // about that URL — a real 404, a page that parses to zero tracks, a
-      // Cloudflare shell served while the forwarder itself was healthy.
+      // 5xx from the site itself.
       const fc = (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
       const abandon = fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })
@@ -1001,7 +946,9 @@ export async function syncOne(
   // 5. Recheck processed tracklists whose recorded video is stale (see the
   // module doc for the contract). Runs after the new-set window so a backfill
   // is never starved by rechecks; the deadline guards both.
-  const rechecksDue = dueRecheckUrls(processed, abandoned, tracklistVideos)
+  const rechecksDue = opts.selection
+    ? opts.selection.recheckUrls.filter((u) => processed.has(u) && !abandoned.has(u))
+    : dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings)
   const rechecks = stopReason ? [] : rechecksDue.slice(0, maxRechecks)
   if (rechecksDue.length > 0) {
     log.info('sync.recheck_window', {
@@ -1026,10 +973,12 @@ export async function syncOne(
     const tSet = Date.now()
     const prev = tracklistVideos[setUrl]
     try {
+      const fetchOpts = setFetchOpts(setUrl, 'recheck')
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
       const videoId = parseSetYouTubeId(setFetched.html)
       const checkedAt = nowSeconds()
+      await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null)
       if (!prev || prev.videoId === undefined) {
         // Unknown baseline: record what the page has now, change nothing.
         tracklistVideos[setUrl] = { videoId, checkedAt }
@@ -1121,6 +1070,7 @@ export async function syncOne(
     } catch (e) {
       if (isStopTheBatchError(e)) {
         stopReason = stopReasonFor(e)
+        stoppedBy = { reason: stopReason, retryAfterSeconds: retryAfterOf(e) }
         log.error('sync.recheck_batch_stopped_blocked', { slug: sub.slug, setUrl, setsRechecked, ...errorFields(e) })
         break
       }
@@ -1172,9 +1122,9 @@ export async function syncOne(
       videosReplaced,
       via:
         viaSeen.size === 0
-          ? 'direct'
+          ? 'pool'
           : viaSeen.size === 1
-            ? ([...viaSeen][0] as 'home-proxy' | 'home-proxy-pool' | 'unlocker' | 'direct')
+            ? ([...viaSeen][0] as Via)
             : 'mixed',
     },
   }
@@ -1204,8 +1154,10 @@ export async function syncOne(
       combinedVideoIdsAdded: combined.handle?.inserted ?? 0,
       tracklistsRechecked: setsRechecked,
       videosReplaced,
-      rechecksPending: dueRecheckUrls(processed, abandoned, tracklistVideos).length,
+      rechecksPending: dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings).length,
     },
+    ...(stoppedBy ? { stoppedBy } : {}),
+    ...(crawlStopReason ? { crawlStopReason } : {}),
   }
 }
 

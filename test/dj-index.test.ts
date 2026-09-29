@@ -1,20 +1,34 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { vi } from 'vitest'
-import { crawlDjIndex, parseDjIndex, parseSetYouTubeId } from '../src/lib/dj-index'
+import { vi, beforeEach } from 'vitest'
+import { crawlDjIndex, djScrollStep, parseDjIndex, parseSetYouTubeId } from '../src/lib/dj-index'
 
-// crawlDjIndex internally fetches page 1 via fetch1001Html (home-proxy /
-// unlocker / direct cascade) and then drives /ajax/get_data.php via direct
-// POST. We stub both for unit tests.
-vi.mock('../src/lib/fetch', async () => {
-  const actual = await vi.importActual<typeof import('../src/lib/fetch')>('../src/lib/fetch')
-  return { ...actual, fetchHtml: vi.fn(), fetchWithTimeout: vi.fn() }
-})
-vi.mock('../src/lib/unlocker', () => ({ fetchViaUnlocker: vi.fn() }))
-vi.mock('../src/lib/homeProxy', () => ({ fetchViaHomeProxy: vi.fn() }))
-
-import { fetchHtml, fetchWithTimeout } from '../src/lib/fetch'
+// crawlDjIndex fetches page 1 and every /ajax/get_data.php scroll step
+// through the pool (lib/upstream1001.ts -> lib/pool.ts). A fake pool
+// (injected fetcher) dispatches page reads to `fh` and the XHR POSTs to `fwt`,
+// so each test scripts the site's answers.
+const fh = vi.fn()
+const fwt = vi.fn()
+const poolRequests: Array<Record<string, any>> = []
+const poolJson = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { 'Content-Type': 'application/json' } })
+const poolFetcher = (async (_u: string, init: RequestInit) => {
+  const req = JSON.parse(String(init.body))
+  poolRequests.push(req)
+  const meta = { finalUrl: req.url, accountId: 'acct-1', exitLabel: 'exit-a', fetchedAt: new Date().toISOString(), bytes: 1 }
+  if (req.method === 'POST') {
+    let res: Response
+    try {
+      res = await fwt(req.url, { method: 'POST', body: new URLSearchParams(req.form) })
+    } catch {
+      return poolJson({ error: 'timeout', retryAfterSeconds: null })
+    }
+    return poolJson({ status: res.status, html: await res.text(), ...meta })
+  }
+  const r = await fh(req.url)
+  return poolJson({ status: 200, html: r.html, ...meta })
+}) as unknown as typeof fetch
+const pool = { url: 'https://pool.test', token: 't', fetchImpl: poolFetcher }
 
 const ORIGIN = 'https://www.1001tracklists.com'
 
@@ -146,15 +160,13 @@ describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () =>
   const ajax1 = readFileSync(resolve(__dirname, 'fixtures/dj-adam-beyer-ajax-pos15.json'), 'utf-8')
 
   it('follows the infinite scroll past the 15 sets on page 1', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
     fwt.mockResolvedValueOnce(new Response(ajax1, { status: 200, headers: { 'Content-Type': 'application/json' } }))
     fwt.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, end: true, data: '' }), { status: 200 }))
 
-    const r = await crawlDjIndex('adam-beyer', { maxPages: 5 })
+    const r = await crawlDjIndex('adam-beyer', { pool, maxPages: 5 })
 
     expect(r.artistName).toBe('Adam Beyer')
     expect(r.tracklistUrls).toHaveLength(25)
@@ -182,14 +194,12 @@ describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () =>
   })
 
   it('spends no scroll request when page 1 already shows a known set (the daily steady state)', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
     const known = new Set([`${ORIGIN}/tracklist/18pcnb11/adam-beyer-drumcode-radio-837-2026-08-14.html`])
 
-    const r = await crawlDjIndex('adam-beyer', { maxPages: 5, knownUrls: known })
+    const r = await crawlDjIndex('adam-beyer', { pool, maxPages: 5, knownUrls: known })
 
     expect(fwt).not.toHaveBeenCalled()
     expect(r.stopReason).toBe('known')
@@ -198,8 +208,6 @@ describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () =>
   })
 
   it('stops the head walk at the first scroll step that reaches a known set', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
@@ -208,7 +216,7 @@ describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () =>
       `${ORIGIN}/tracklist/wjqu951/adam-beyer-drumcode-radio-807-2026-01-16.html`,
     ])
 
-    const r = await crawlDjIndex('adam-beyer', { maxPages: 5, knownUrls: known })
+    const r = await crawlDjIndex('adam-beyer', { pool, maxPages: 5, knownUrls: known })
 
     expect(fwt).toHaveBeenCalledTimes(1)
     expect(r.stopReason).toBe('known')
@@ -217,8 +225,6 @@ describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () =>
   })
 
   it('backfills a bounded number of steps from a stored cursor and reports where to resume', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
@@ -227,6 +233,7 @@ describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () =>
     const known = new Set(parseDjIndex(page1).tracklistUrls)
 
     const r = await crawlDjIndex('adam-beyer', {
+      pool,
       knownUrls: known,
       backfill: { from: { pos: 15, id: 'hj0myf1' }, maxSteps: 1 },
     })
@@ -240,22 +247,20 @@ describe('crawlDjIndex against real 1001tracklists captures (2026-09-28)', () =>
   })
 
   it('marks the backfill done at the end of the list, and keeps the cursor when a step fails', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     const known = new Set(parseDjIndex(page1).tracklistUrls)
 
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
     fwt.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, end: true, data: '' }), { status: 200 }))
-    const done = await crawlDjIndex('adam-beyer', { knownUrls: known, backfill: { from: { pos: 905, id: 'zzz' }, maxSteps: 3 } })
+    const done = await crawlDjIndex('adam-beyer', { pool, knownUrls: known, backfill: { from: { pos: 905, id: 'zzz' }, maxSteps: 3 } })
     expect(done.backfill).toEqual({ steps: 1, added: 0, cursor: null, done: true })
 
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({ html: page1, state: { cookie: '' } })
     fwt.mockResolvedValueOnce(new Response('<html>captcha</html>', { status: 401 }))
-    const failed = await crawlDjIndex('adam-beyer', { knownUrls: known, backfill: { from: { pos: 45, id: 'abc' }, maxSteps: 3 } })
+    const failed = await crawlDjIndex('adam-beyer', { pool, knownUrls: known, backfill: { from: { pos: 45, id: 'abc' }, maxSteps: 3 } })
     expect(failed.backfill).toEqual({ steps: 0, added: 0, cursor: { pos: 45, id: 'abc' }, done: false })
   })
 })
@@ -286,8 +291,6 @@ describe('crawlDjIndex', () => {
   }
 
   it('fetches page 1 and drives /ajax/get_data.php for subsequent pages until end:true', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({
@@ -317,7 +320,7 @@ describe('crawlDjIndex', () => {
       }),
     )
 
-    const r = await crawlDjIndex('lillypalmer')
+    const r = await crawlDjIndex('lillypalmer', { pool })
     expect(r.artistName).toBe('Lilly Palmer')
     expect(r.tracklistUrls).toEqual([
       'https://www.1001tracklists.com/tracklist/a/one.html',
@@ -346,7 +349,6 @@ describe('crawlDjIndex', () => {
   })
 
   it('degrades to no_pagination when page 1 lacks pagination keys', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     // No scroll div and no .oItm data-ids → can't paginate.
     fh.mockResolvedValueOnce({
@@ -354,15 +356,13 @@ describe('crawlDjIndex', () => {
       state: { cookie: '' },
     })
 
-    const r = await crawlDjIndex('x')
+    const r = await crawlDjIndex('x', { pool })
     expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/x/y.html'])
     expect(r.pagesWalked).toBe(1)
     expect(r.stopReason).toBe('no_pagination')
   })
 
   it('stops with no_new when an AJAX chunk introduces only already-seen URLs', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({
@@ -377,14 +377,12 @@ describe('crawlDjIndex', () => {
       }),
     )
 
-    const r = await crawlDjIndex('x')
+    const r = await crawlDjIndex('x', { pool })
     expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/a/one.html'])
     expect(r.stopReason).toBe('no_new')
   })
 
   it('respects maxPages and reports max_pages stopReason', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({
@@ -400,14 +398,12 @@ describe('crawlDjIndex', () => {
       }),
     )
 
-    const r = await crawlDjIndex('x', { maxPages: 3 })
+    const r = await crawlDjIndex('x', { pool, maxPages: 3 })
     expect(r.pagesWalked).toBe(3)
     expect(r.stopReason).toBe('max_pages')
   })
 
   it('honors deadlineMs and reports deadline stopReason', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({
@@ -415,15 +411,13 @@ describe('crawlDjIndex', () => {
       state: { cookie: '' },
     })
     // Deadline already in the past → loop never enters the AJAX phase.
-    const r = await crawlDjIndex('x', { deadlineMs: Date.now() - 1, maxPages: 5 })
+    const r = await crawlDjIndex('x', { pool, deadlineMs: Date.now() - 1, maxPages: 5 })
     expect(r.pagesWalked).toBe(1) // page 1 still happened
     expect(r.stopReason).toBe('deadline')
     expect(fwt).not.toHaveBeenCalled()
   })
 
   it('treats an AJAX failure as fetch_failed and keeps prior pages', async () => {
-    const fh = fetchHtml as unknown as ReturnType<typeof vi.fn>
-    const fwt = fetchWithTimeout as unknown as ReturnType<typeof vi.fn>
     fh.mockReset()
     fwt.mockReset()
     fh.mockResolvedValueOnce({
@@ -431,8 +425,60 @@ describe('crawlDjIndex', () => {
       state: { cookie: '' },
     })
     fwt.mockRejectedValueOnce(new Error('AJAX upstream timeout'))
-    const r = await crawlDjIndex('x')
+    const r = await crawlDjIndex('x', { pool })
     expect(r.tracklistUrls).toEqual(['https://www.1001tracklists.com/tracklist/a/x.html'])
     expect(r.stopReason).toBe('fetch_failed')
+  })
+})
+
+describe('DJ listing requests go through the pool', () => {
+  const page1 = readFileSync(resolve(__dirname, 'fixtures/dj-adam-beyer-page1.html'), 'utf-8')
+  const ajax1 = readFileSync(resolve(__dirname, 'fixtures/dj-adam-beyer-ajax-pos15.json'), 'utf-8')
+  beforeEach(() => {
+    fh.mockReset()
+    fwt.mockReset()
+    poolRequests.length = 0
+  })
+
+  it('page 1 and the head walk are kind dj at the caller priority; the older-sets POST carries its form and XHR headers', async () => {
+    fh.mockResolvedValueOnce({ html: page1 })
+    fwt.mockResolvedValueOnce(new Response(ajax1, { status: 200 }))
+    fwt.mockResolvedValueOnce(new Response(JSON.stringify({ success: true, end: true, data: '' }), { status: 200 }))
+    await crawlDjIndex('adam-beyer', { pool, priority: 'new', maxPages: 5 })
+    expect(poolRequests.map((r) => [r.kind, r.priority, r.method ?? 'GET'])).toEqual([
+      ['dj', 'new', 'GET'],
+      ['dj', 'new', 'POST'],
+      ['dj', 'new', 'POST'],
+    ])
+    expect(poolRequests[1]!.url).toBe('https://www.1001tracklists.com/ajax/get_data.php')
+    expect(poolRequests[1]!.form).toMatchObject({ type: 'artist', idScrollObject: 'q43lgd', pos: '15', id: 'hj0myf1' })
+    expect(poolRequests[1]!.headers).toMatchObject({ 'X-Requested-With': 'XMLHttpRequest', Referer: 'https://www.1001tracklists.com/dj/adam-beyer/index.html' })
+  })
+
+  it('backfill steps inside a crawl are priority backfill', async () => {
+    fh.mockResolvedValueOnce({ html: page1 })
+    fwt.mockResolvedValueOnce(new Response(ajax1, { status: 200 }))
+    const known = new Set(parseDjIndex(page1).tracklistUrls)
+    const r = await crawlDjIndex('adam-beyer', { pool, priority: 'new', knownUrls: known, backfill: { from: { pos: 15, id: 'hj0myf1' }, maxSteps: 1 } })
+    expect(poolRequests.map((x) => x.priority)).toEqual(['new', 'backfill'])
+    expect(r.keys).toEqual({ type: 'artist', idScrollObject: 'q43lgd', subtype: 'tracklists' })
+  })
+
+  it('djScrollStep: one step from stored keys, no page-1 fetch', async () => {
+    fwt.mockResolvedValueOnce(new Response(ajax1, { status: 200 }))
+    const s = await djScrollStep('adam-beyer', { type: 'artist', idScrollObject: 'q43lgd', subtype: 'tracklists' }, { pos: 15, id: 'hj0myf1' }, { pool, priority: 'backfill' })
+    expect(fh).not.toHaveBeenCalled()
+    expect(poolRequests).toHaveLength(1)
+    expect(poolRequests[0]!.priority).toBe('backfill')
+    expect(s!.urls).toHaveLength(10)
+    expect(s!.next).toEqual({ pos: 25, id: 'wjqu951' })
+    expect(s!.end).toBe(false)
+  })
+
+  it('djScrollStep: a captcha-flagged answer is a soft failure (null); a pool refusal throws', async () => {
+    fwt.mockResolvedValueOnce(new Response(JSON.stringify({ captcha: true }), { status: 200 }))
+    expect(await djScrollStep('x', { type: 'artist', idScrollObject: 'q', subtype: 'tracklists' }, { pos: 15, id: 'a' }, { pool })).toBeNull()
+    const refusing = { ...pool, fetchImpl: (async () => poolJson({ error: 'budget_exhausted', retryAfterSeconds: 600 })) as unknown as typeof fetch }
+    await expect(djScrollStep('x', { type: 'artist', idScrollObject: 'q', subtype: 'tracklists' }, { pos: 15, id: 'a' }, { pool: refusing })).rejects.toMatchObject({ name: 'PoolPausedError', code: 'budget_exhausted', retryAfterSeconds: 600 })
   })
 })

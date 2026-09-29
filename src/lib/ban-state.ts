@@ -1,39 +1,33 @@
 /**
- * IP-ban state for the 1001tracklists fetch path.
+ * Pause / ban state for the 1001tracklists fetch path, in the CACHE KV.
  *
- * 1001tracklists rate-limits per IP: after a burst it serves a captcha page
- * (HTTP 403 with an `/info/unblock_ip.html` form) until a human solves it from
- * the blocked IP. The NAS forwarder (`scripts/nas-fetch-proxy.mjs`) detects
- * that on the residential IP and reroutes through its tailnet pool, reporting
- * what it did in `X-Proxy-*` headers. This module turns those reports into
- * durable state in the CACHE KV so that:
+ *   - `ban:pause` is the MASTER SWITCH: while it is set (and its `until` is in
+ *     the future) lib/upstream1001.ts fetches nothing and the scheduler tick
+ *     does nothing. The orchestrator sets and lifts it; the admin page's
+ *     "clear" button lifts it too.
+ *   - `ban:home` + `ban:ep:<invTs>` are the admin banner and its history
+ *     (an episode opened by hand or by the "simulate" test hook), with a Web
+ *     Push when one starts and ends.
  *
- *   - the admin page can show a big red "solve the captcha" banner (`ban:home`)
- *   - a Web Push fires once when a ban starts and once when it clears
- *   - the Worker stops hitting the forwarder for a cooldown once EVERY route
- *     is blocked (`ban:pause`, 1 h — the "1/hr" retry limit), falling back to
- *     BrightData within a daily budget (`ban:bd:<day>`) and otherwise pausing
- *   - each episode is recorded for the admin page's history (`ban:ep:<invTs>`)
+ * Until 2026-09-29 this module also turned the home forwarder's X-Proxy-*
+ * reports into episodes and kept Bright Data's daily budget. Both routes are
+ * gone: tlpool (lib/pool.ts) owns blocks, budgets and captchas now.
  *
  * All writes are best-effort: a KV hiccup here must never fail a fetch.
  */
 
 import type { Env } from '../types'
 import { invertedTs } from './cache'
-import { probeHomeProxy, type HomeProxyProbe, type HomeProxyResult } from './homeProxy'
 import type { Logger } from './log'
 import { banClearPayload, banStartPayload, pushConfigured, sendPushToAll } from './web-push'
 
-/** Worker-side pause after every route is blocked. Mirrors the forwarder's BLOCK_COOLDOWN_MS. */
+/** Default length of a pause set through `setPause` (and of a simulated episode). */
 export const BAN_COOLDOWN_SECONDS = 60 * 60
-export const DEFAULT_BRIGHTDATA_DAILY_CAP = 333
 
 const HOME_KEY = 'ban:home'
 const PAUSE_KEY = 'ban:pause'
 const EPISODE_PREFIX = 'ban:ep:'
-const BRIGHTDATA_PREFIX = 'ban:bd:'
 const EPISODE_TTL_SECONDS = 180 * 24 * 60 * 60
-const BRIGHTDATA_TTL_SECONDS = 3 * 24 * 60 * 60
 
 export type BanSource = 'proxy' | 'probe' | 'simulated'
 
@@ -56,7 +50,8 @@ export type HomeBan = {
 export type Pause = {
   since: string
   until: string
-  reason: 'all_routes_blocked' | 'simulated'
+  /** Free text: 'manual', 'simulated', or whatever the orchestrator wrote. */
+  reason: string
   ip: string | null
 }
 
@@ -68,47 +63,27 @@ export type BanEpisode = {
   ip: string | null
   source: BanSource
   simulated: boolean
-  /** Requests the forwarder served through the pool while this episode was open. */
+  /** Legacy counters from the forwarder era; always 0 on new episodes. */
   poolRequests: number
-  /** BrightData calls made while this episode was open. */
   brightdataRequests: number
-  /** Times the forwarder reported every route blocked. */
   allBlockedHits: number
   clearedBy: 'auto' | 'probe' | 'manual' | null
   pushStart: { sent: number; total: number } | null
   pushClear: { sent: number; total: number } | null
 }
 
-export type BrightdataUsage = { date: string; used: number; cap: number; remaining: number }
-
-/**
- * Bright Data refusing the domain outright (2026-09-26: "Access denied:
- * www.1001tracklists.com is classified as Streaming Media and blocked by
- * Bright Data as it might breach Bright Data usage policy"). A policy answer,
- * not a transient — every further call would be the same refusal, paid for in
- * budget and in 10–20 s of the phone's wait. Parked for a day at a time.
- */
-export type BrightdataPolicyBlock = { since: string; until: string; reason: string }
-
 export type BanStatus = {
   now: string
   home: HomeBan | null
   pause: Pause | null
-  brightdata: BrightdataUsage
-  brightdataPolicyBlock: BrightdataPolicyBlock | null
   episodes: BanEpisode[]
   pushConfigured: boolean
 }
 
 type Kv = Pick<KVNamespace, 'get' | 'put' | 'delete' | 'list'>
-type BanEnv = Pick<Env, 'CACHE' | 'SUBS' | 'BRIGHTDATA_DAILY_CAP' | 'VAPID_PUBLIC_KEY' | 'VAPID_PRIVATE_KEY' | 'VAPID_SUBJECT'>
+type BanEnv = Pick<Env, 'CACHE' | 'SUBS' | 'VAPID_PUBLIC_KEY' | 'VAPID_PRIVATE_KEY' | 'VAPID_SUBJECT'>
 
 const nowIso = () => new Date().toISOString()
-
-// ─── In-isolate tally, flushed into the open episode at most every few seconds
-// (KV allows one write per second per key; a sync run does ~50 fetches in 25 s).
-const tally = { pool: 0, brightdata: 0, allBlocked: 0, lastFlushAt: 0 }
-const FLUSH_INTERVAL_MS = 5000
 
 async function getJson<T>(kv: Kv, key: string): Promise<T | null> {
   try {
@@ -126,7 +101,7 @@ export async function getHomeBan(env: BanEnv): Promise<HomeBan | null> {
   return getJson<HomeBan>(env.CACHE, HOME_KEY)
 }
 
-export async function getPause(env: BanEnv): Promise<Pause | null> {
+export async function getPause(env: Pick<Env, 'CACHE'>): Promise<Pause | null> {
   const p = await getJson<Pause>(env.CACHE, PAUSE_KEY)
   if (!p) return null
   if (Date.parse(p.until) <= Date.now()) {
@@ -138,14 +113,14 @@ export async function getPause(env: BanEnv): Promise<Pause | null> {
 
 let pauseMemo: { at: number; value: Pause | null } | null = null
 /** `getPause` memoised for a few seconds so a 50-set sync loop is one KV read, not fifty. */
-export async function isPaused(env: BanEnv): Promise<Pause | null> {
+export async function isPaused(env: Pick<Env, 'CACHE'>): Promise<Pause | null> {
   if (pauseMemo && Date.now() - pauseMemo.at < 5000) return pauseMemo.value
   const value = await getPause(env)
   pauseMemo = { at: Date.now(), value }
   return value
 }
 
-export async function setPause(env: BanEnv, reason: Pause['reason'], ip: string | null, log?: Logger): Promise<Pause> {
+export async function setPause(env: Pick<Env, 'CACHE'>, reason: Pause['reason'], ip: string | null, log?: Logger): Promise<Pause> {
   const existing = await getPause(env)
   if (existing) return existing
   const since = nowIso()
@@ -156,7 +131,7 @@ export async function setPause(env: BanEnv, reason: Pause['reason'], ip: string 
   return pause
 }
 
-export async function clearPause(env: BanEnv, log?: Logger): Promise<boolean> {
+export async function clearPause(env: Pick<Env, 'CACHE'>, log?: Logger): Promise<boolean> {
   const existing = await getJson<Pause>(env.CACHE, PAUSE_KEY)
   await env.CACHE.delete(PAUSE_KEY).catch(() => {})
   pauseMemo = { at: Date.now(), value: null }
@@ -225,19 +200,13 @@ export async function openEpisode(
   await putEpisode(env, episode)
   log?.error('ban.episode_opened', { key, ip: info.ip, source: info.source, viaPool: info.viaPool, simulated: !!info.simulated })
   try {
-    const push = await sendPushToAll(env as Env, banStartPayload(info.ip, info.viaPool), log)
+    const push = await sendPushToAll(env as unknown as Env, banStartPayload(info.ip, info.viaPool), log)
     episode.pushStart = { sent: push.sent, total: push.total }
     await putEpisode(env, episode)
   } catch (e) {
     log?.warn('ban.push_start_failed', { error: e instanceof Error ? e.message : String(e) })
   }
   return home
-}
-
-async function updateHomeBan(env: BanEnv, home: HomeBan, patch: Partial<HomeBan>): Promise<HomeBan> {
-  const next = { ...home, ...patch, lastSeenAt: nowIso() }
-  await putJson(env.CACHE, HOME_KEY, next)
-  return next
 }
 
 /**
@@ -247,7 +216,6 @@ async function updateHomeBan(env: BanEnv, home: HomeBan, patch: Partial<HomeBan>
 export async function closeEpisode(env: BanEnv, clearedBy: NonNullable<BanEpisode['clearedBy']>, log?: Logger): Promise<BanEpisode | null> {
   const home = await getHomeBan(env)
   if (!home) return null
-  await flushBanTally(env, true)
   const ep = (await getEpisode(env, home.episodeKey)) ?? {
     key: home.episodeKey,
     startedAt: home.since,
@@ -272,7 +240,7 @@ export async function closeEpisode(env: BanEnv, clearedBy: NonNullable<BanEpisod
   await putEpisode(env, ep)
   log?.warn('ban.episode_closed', { key: ep.key, ip: ep.ip, clearedBy, blockedForMs: ep.blockedForMs, poolRequests: ep.poolRequests, brightdataRequests: ep.brightdataRequests })
   try {
-    const push = await sendPushToAll(env as Env, banClearPayload(ep.ip, ep.blockedForMs), log)
+    const push = await sendPushToAll(env as unknown as Env, banClearPayload(ep.ip, ep.blockedForMs), log)
     ep.pushClear = { sent: push.sent, total: push.total }
     await putEpisode(env, ep)
   } catch (e) {
@@ -281,173 +249,11 @@ export async function closeEpisode(env: BanEnv, clearedBy: NonNullable<BanEpisod
   return ep
 }
 
-/**
- * The single hook the fetch cascade calls after every forwarder round-trip.
- * Reads the X-Proxy-* facts off the result and reconciles KV: opens/refreshes
- * the episode when direct is in cooldown, closes it when direct works again,
- * and sets the Worker-side pause when every route is blocked.
- */
-export async function noteProxyResult(env: BanEnv, r: HomeProxyResult, log?: Logger): Promise<void> {
-  try {
-    if (r.route === 'pool') tally.pool++
-    if (r.kind === 'all_blocked') tally.allBlocked++
-    const home = await getHomeBan(env)
-    if (r.directBlocked) {
-      const viaPool = r.route === 'pool' || (r.poolHealthy ?? 0) > 0
-      if (!home) {
-        await openEpisode(env, { ip: r.directBlocked.ip, source: 'proxy', until: r.directBlocked.until, viaPool, poolHealthy: r.poolHealthy, poolTotal: r.poolTotal }, log)
-      } else if (home.until !== r.directBlocked.until || (!home.ip && r.directBlocked.ip) || home.poolHealthy !== r.poolHealthy) {
-        await updateHomeBan(env, home, { until: r.directBlocked.until, ip: home.ip ?? r.directBlocked.ip, poolHealthy: r.poolHealthy, poolTotal: r.poolTotal })
-      }
-    }
-    if (r.kind === 'all_blocked') {
-      await setPause(env, 'all_routes_blocked', r.directBlocked?.ip ?? null, log)
-    } else if (home && !home.simulated && (r.directRecovered || (r.route === 'direct' && (r.kind === 'ok' || r.kind === 'upstream_error')))) {
-      await closeEpisode(env, 'auto', log)
-    }
-    await flushBanTally(env)
-  } catch (e) {
-    log?.warn('ban.note_failed', { error: e instanceof Error ? e.message : String(e) })
-  }
-}
-
-/** Reconcile after an explicit forwarder probe (admin button or the cron's hourly check). */
-export async function recordProbe(env: BanEnv, probe: HomeProxyProbe, by: 'probe' | 'manual', log?: Logger): Promise<{ home: HomeBan | null; cleared: boolean }> {
-  const home = await getHomeBan(env)
-  if (probe.probe === 'ok') {
-    if (home && !home.simulated) {
-      await closeEpisode(env, by === 'manual' ? 'manual' : 'probe', log)
-      return { home: null, cleared: true }
-    }
-    if (!home) await clearPause(env, log)
-    return { home, cleared: false }
-  }
-  if (probe.probe === 'ip_blocked') {
-    const until = probe.direct?.blockedUntil ?? null
-    const ip = probe.blockedIp ?? probe.direct?.blockedIp ?? null
-    if (!home) {
-      const opened = await openEpisode(env, { ip, source: 'probe', until, viaPool: (probe.poolHealthy ?? 0) > 0, poolHealthy: probe.poolHealthy ?? null, poolTotal: probe.poolTotal ?? null }, log)
-      return { home: opened, cleared: false }
-    }
-    const updated = await updateHomeBan(env, home, { until, ip: home.ip ?? ip, poolHealthy: probe.poolHealthy ?? home.poolHealthy, poolTotal: probe.poolTotal ?? home.poolTotal })
-    return { home: updated, cleared: false }
-  }
-  return { home, cleared: false }
-}
-
-/** Fold the in-isolate counters into the open episode (rate-limited unless `force`). */
-export async function flushBanTally(env: BanEnv, force = false): Promise<void> {
-  if (tally.pool === 0 && tally.brightdata === 0 && tally.allBlocked === 0) return
-  if (!force && Date.now() - tally.lastFlushAt < FLUSH_INTERVAL_MS) return
-  const home = await getHomeBan(env)
-  const pool = tally.pool
-  const bd = tally.brightdata
-  const ab = tally.allBlocked
-  tally.pool = 0
-  tally.brightdata = 0
-  tally.allBlocked = 0
-  tally.lastFlushAt = Date.now()
-  if (!home) return
-  const ep = await getEpisode(env, home.episodeKey)
-  if (!ep) return
-  ep.poolRequests += pool
-  ep.brightdataRequests += bd
-  ep.allBlockedHits += ab
-  await putEpisode(env, ep).catch(() => {})
-}
-
-/**
- * Cron hook: when an episode is open but nothing has fetched since the
- * forwarder's cooldown lapsed (quiet backlog, night time), nobody would notice
- * the ban lifting. Probe the forwarder ourselves — at most once per cooldown —
- * so the banner and the all-clear push don't wait for the next real fetch.
- */
-export async function maintainBanState(env: BanEnv & Pick<Env, 'HOME_PROXY_URL' | 'HOME_PROXY_TOKEN'>, log?: Logger): Promise<void> {
-  try {
-    await flushBanTally(env, true)
-    const home = await getHomeBan(env)
-    if (!home || home.simulated) return
-    if (!env.HOME_PROXY_URL || !env.HOME_PROXY_TOKEN) return
-    const now = Date.now()
-    if (home.until && Date.parse(home.until) > now) return
-    if (home.lastCronProbeAt && now - Date.parse(home.lastCronProbeAt) < BAN_COOLDOWN_SECONDS * 1000) return
-    await updateHomeBan(env, home, { lastCronProbeAt: new Date(now).toISOString() })
-    const probe = await probeHomeProxy(env.HOME_PROXY_URL, env.HOME_PROXY_TOKEN)
-    const r = await recordProbe(env, probe, 'probe', log)
-    log?.info('ban.cron_probe', { probe: probe.probe, status: probe.status ?? null, cleared: r.cleared, blockedIp: probe.blockedIp ?? null })
-  } catch (e) {
-    log?.warn('ban.cron_probe_failed', { error: e instanceof Error ? e.message : String(e) })
-  }
-}
-
-// ─── BrightData daily budget ─────────────────────────────────────────────────
-
-export function brightdataCap(env: Pick<Env, 'BRIGHTDATA_DAILY_CAP'>): number {
-  const n = Number(env.BRIGHTDATA_DAILY_CAP)
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_BRIGHTDATA_DAILY_CAP
-}
-
-const utcDay = (d = new Date()) => d.toISOString().slice(0, 10)
-
-export async function brightdataUsage(env: BanEnv): Promise<BrightdataUsage> {
-  const date = utcDay()
-  const used = Number((await env.CACHE.get(`${BRIGHTDATA_PREFIX}${date}`)) ?? 0) || 0
-  const cap = brightdataCap(env)
-  return { date, used, cap, remaining: Math.max(0, cap - used) }
-}
-
-/**
- * Reserve one BrightData request against today's cap. Returns false (and
- * makes no call) when the cap is spent. The counter is a plain KV integer:
- * a concurrent double-count under-charges by one at worst.
- */
-export async function tryConsumeBrightdata(env: BanEnv, log?: Logger): Promise<{ ok: boolean; usage: BrightdataUsage }> {
-  const usage = await brightdataUsage(env)
-  if (usage.used >= usage.cap) {
-    log?.warn('brightdata.budget_exhausted', { ...usage })
-    return { ok: false, usage }
-  }
-  try {
-    await env.CACHE.put(`${BRIGHTDATA_PREFIX}${usage.date}`, String(usage.used + 1), { expirationTtl: BRIGHTDATA_TTL_SECONDS })
-  } catch (e) {
-    log?.warn('brightdata.budget_write_failed', { error: e instanceof Error ? e.message : String(e) })
-  }
-  tally.brightdata++
-  return { ok: true, usage: { ...usage, used: usage.used + 1, remaining: Math.max(0, usage.cap - usage.used - 1) } }
-}
-
-const BRIGHTDATA_POLICY_KEY = 'ban:bd:policy'
-const BRIGHTDATA_POLICY_TTL_SECONDS = 24 * 60 * 60
-
-/** Bright Data's standing refusal of the domain, while it lasts. */
-export async function getBrightdataPolicyBlock(env: BanEnv): Promise<BrightdataPolicyBlock | null> {
-  const v = await env.CACHE.get(BRIGHTDATA_POLICY_KEY, 'json')
-  return (v as BrightdataPolicyBlock | null) ?? null
-}
-
-/**
- * Park the unlocker (see BrightdataPolicyBlock): a day after Bright Data's own
- * policy refusal, or `ttlSeconds` for another standing answer — 1001tracklists
- * serving Bright Data's exits its human-check captcha (401), which no exit
- * rotation gets past (six hours, in the cascade).
- */
-export async function noteBrightdataPolicyBlock(env: BanEnv, reason: string, log?: Logger, ttlSeconds = BRIGHTDATA_POLICY_TTL_SECONDS): Promise<BrightdataPolicyBlock> {
-  const now = Date.now()
-  const block: BrightdataPolicyBlock = { since: new Date(now).toISOString(), until: new Date(now + ttlSeconds * 1000).toISOString(), reason: reason.slice(0, 300) }
-  try {
-    await env.CACHE.put(BRIGHTDATA_POLICY_KEY, JSON.stringify(block), { expirationTtl: Math.max(60, ttlSeconds) })
-  } catch (e) {
-    log?.warn('brightdata.policy_write_failed', { error: e instanceof Error ? e.message : String(e) })
-  }
-  log?.error('brightdata.policy_blocked', { ...block })
-  return block
-}
-
 // ─── Admin surface ───────────────────────────────────────────────────────────
 
 export async function getBanStatus(env: BanEnv, episodeLimit = 10): Promise<BanStatus> {
-  const [home, pause, brightdata, brightdataPolicyBlock, episodes] = await Promise.all([getHomeBan(env), getPause(env), brightdataUsage(env), getBrightdataPolicyBlock(env), listEpisodes(env, episodeLimit)])
-  return { now: nowIso(), home, pause, brightdata, brightdataPolicyBlock, episodes, pushConfigured: pushConfigured(env as Env) }
+  const [home, pause, episodes] = await Promise.all([getHomeBan(env), getPause(env), listEpisodes(env, episodeLimit)])
+  return { now: nowIso(), home, pause, episodes, pushConfigured: pushConfigured(env as unknown as Env) }
 }
 
 /** Admin test hook: open a fake episode (banner + push) that only a manual clear ends. */
@@ -462,11 +268,7 @@ export async function manualClear(env: BanEnv, log?: Logger): Promise<BanEpisode
   return ep
 }
 
-/** Test helper: reset the in-isolate tally between vitest cases. */
+/** Test helper: forget the memoised pause between vitest cases. */
 export function _resetTallyForTests(): void {
-  tally.pool = 0
-  tally.brightdata = 0
-  tally.allBlocked = 0
-  tally.lastFlushAt = 0
   pauseMemo = null
 }

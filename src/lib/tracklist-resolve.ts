@@ -183,9 +183,10 @@ export async function resolveTrackMediaLinks(env: Env, trackId: string, log: Log
   }
   log.counters.cacheMisses++
   log.info('cache.miss', { key })
-  // medialink primary path is direct fetch; brightdata is only the timeout
-  // fallback. Counter is bumped on the actual unlocker call (see lib).
-  const { result } = await fetchMediaLinks(trackId, { log, brightdataApiKey: env.BRIGHTDATA_API_KEY, cacheKv: env.CACHE, brightdataDailyCap: env.BRIGHTDATA_DAILY_CAP })
+  // Through the pool (kind medialink, one budgeted view per call). A failed
+  // lookup is not cached, so a pool refusal cannot poison the entry.
+  const { result, failed } = await fetchMediaLinks(trackId, fetchOptsFromEnv(env, log))
+  if (failed) return result
   await putJson(env.CACHE, key, result, TTL.MEDIALINK)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
   return result

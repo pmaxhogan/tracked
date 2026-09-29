@@ -6,7 +6,7 @@ import type { Env } from '../types'
  * route surface gets its own token so an agent holding LIKED_SONGS_TOKEN
  * can't drive the Tasker routes (and vice versa).
  */
-export function bearerAuthFor(secretName: 'API_TOKEN' | 'LIKED_SONGS_TOKEN' | 'MKVID_TOKEN'): MiddlewareHandler<{ Bindings: Env }> {
+export function bearerAuthFor(secretName: 'API_TOKEN' | 'LIKED_SONGS_TOKEN' | 'MKVID_TOKEN' | 'TLPOOL_TOKEN'): MiddlewareHandler<{ Bindings: Env }> {
   return async (c, next) => {
     const expected = c.env[secretName]
     if (!expected) return c.json({ error: `${secretName} not configured` }, 500)

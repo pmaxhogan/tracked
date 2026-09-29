@@ -4,22 +4,19 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-01-15",
   "observability": { "enabled": true },
-  // Two crons drive the /subscriptions auto-playlist sync:
-  //   - "0 6 * * *"      daily 06:00 UTC: full sync, discovers new sets per DJ
-  //                      via the AJAX scroll endpoint and processes the
-  //                      first batch.
-  //   - "*/5 * * * *"    every 5 min: drain pending only — when a manual
-  //                      sync left ≥1 sub with discoveredTracklistUrls >
-  //                      processedTracklistUrls, this picks up where it
-  //                      left off (skipping the discovery crawl) until the
-  //                      backfill is done. Also re-fetches processed sets
-  //                      whose recorded video is >5 days old, to catch a
-  //                      recording swapped on 1001tracklists (lib/sync.ts,
-  //                      "Recheck contract"). No-op when nothing is due.
+  // Two crons:
+  //   - "*/5 * * * *"    heartbeat: one scheduler tick (src/lib/fetch-scheduler.ts)
+  //                      submits a small random number (default 0-3) of due
+  //                      1001tracklists fetches to tlpool, highest priority
+  //                      first (DJ discovery / new sets, verification second
+  //                      fetches, rechecks by set age, DJ backfill), and stops
+  //                      at the pool's first refusal. tlpool owns budget and
+  //                      pacing; nothing bursts.
+  //   - "0 6 * * *"      daily housekeeping only (audit pruning). DJ discovery
+  //                      is spread around the clock by the scheduler instead.
   // Both then reconcile the combined "All tracked artists" playlist against
-  // the per-artist ones (bounded per run and per day — see
-  // lib/combined-playlist.ts), which is what backfills sets that predate the
-  // combined playlist and a newly added DJ's back catalogue.
+  // the per-artist ones (YouTube only; bounded per run and per day — see
+  // lib/combined-playlist.ts) and send Web Pushes that quiet hours held back.
   "triggers": { "crons": ["0 6 * * *", "*/5 * * * *"] },
   // Queryable state: subscriptions, per-tracklist sync rows, both audit trails,
   // the mkvid queue. Schema in migrations/; apply with `npm run d1:migrate`
@@ -64,11 +61,7 @@
     // Comma-separated list of email addresses allowed to use the mini-app.
     // The CF Access policy should already restrict this, but we double-check
     // here so a misconfigured policy can't grant access.
-    "CF_ACCESS_ALLOWED_EMAILS": "pmaxhogan@gmail.com",
-    // Max Bright Data Web Unlocker calls per UTC day across every 1001tl path
-    // (lib/ban-state.ts). 333 ≈ $15/month at $1.50 per 1k. Not a secret.
-    "BRIGHTDATA_DAILY_CAP": "333",
-    "TL_FETCHES_PER_TICK": "20"
+    "CF_ACCESS_ALLOWED_EMAILS": "pmaxhogan@gmail.com"
   }
   // Secrets (set via `wrangler secret put`):
   //   API_TOKEN                  bearer token Tasker uses
@@ -78,9 +71,8 @@
   //                              A secret overrides the code default: delete it (or set it) when the default changes.
   //   MKVID_SHARED_DAILY_CLAIM_CAP (optional) uploads/day through the sync's project, tracked-youtube, once the first is full (default 6)
   //   YOUTUBE_API_KEY            YouTube Data API v3 key
-  //   BRIGHTDATA_API_KEY         (optional) Bright Data Web Unlocker API key
-  //   HOME_PROXY_URL             (optional) https URL of the residential-IP forwarder
-  //   HOME_PROXY_TOKEN           (optional) bearer required by the forwarder
+  //   TLPOOL_URL                 tlpool (the NAS browser pool) through the tunnel; every 1001tracklists request goes there
+  //   TLPOOL_TOKEN               bearer for tlpool, both directions (Worker → POST /fetch, tlpool → POST /pool/events)
   //   GOOGLE_OAUTH_CLIENT_ID     OAuth client id for YouTube playlist write access
   //   GOOGLE_OAUTH_CLIENT_SECRET matching client secret
   //   VAPID_PUBLIC_KEY           Web Push identity for the admin page's IP-ban alerts

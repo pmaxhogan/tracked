@@ -8,8 +8,10 @@ import { mkvidApp } from './routes/mkvid'
 import { MkvidClaimBody, MkvidClaimResponse } from './schemas'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
-import { backfillCombined, syncAll, syncPendingOnly } from './lib/sync'
-import { maintainBanState } from './lib/ban-state'
+import { backfillCombined } from './lib/sync'
+import { runSchedulerTick } from './lib/fetch-scheduler'
+import { flushDeferredPoolPushes } from './lib/pool-events'
+import { poolEventsApp } from './routes/pool-api'
 import { runKvMigrationTickSafely } from './lib/kv-import'
 import { pruneNowPlayingAudit } from './lib/now-playing-audit'
 import { prunePlaylistAdditions } from './lib/playlist-audit'
@@ -50,6 +52,10 @@ app.route('/subscriptions', subscriptionsApp)
 // MKVID_TOKEN inside the sub-app, so like /subscriptions it must be skipped by
 // the API_TOKEN wildcard gate below.
 app.route('/mkvid', mkvidApp)
+
+// tlpool's webhook (POST /pool/events), gated by TLPOOL_TOKEN inside the
+// sub-app — skipped by the API_TOKEN wildcard gate below, like /mkvid.
+app.route('/pool', poolEventsApp)
 // Documented here only (the sub-app is plain Hono), so mkvid's side has a
 // published contract for the claim, track list included.
 app.openAPIRegistry.registerPath({
@@ -76,6 +82,7 @@ app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   if (path === '/subscriptions' || path.startsWith('/subscriptions/')) return next()
   if (path === '/mkvid' || path.startsWith('/mkvid/')) return next()
+  if (path === '/pool' || path.startsWith('/pool/')) return next()
   return bearerAuth(c, next)
 })
 
@@ -89,41 +96,32 @@ app.doc('/openapi.json', {
 })
 
 /**
- * Cron trigger handler. Configured in wrangler.jsonc → `triggers.crons` with
- * two expressions:
- *   - `0 6 * * *`     daily — full discovery + processing (`syncAll`)
- *   - `*\/5 * * * *`  every 5 min — drain pending only (`syncPendingOnly`):
- *                     unprocessed sets plus rechecks of processed sets whose
- *                     recorded video is >5 days old; fast-skips when nothing
- *                     to do
+ * Cron trigger handler. Configured in wrangler.jsonc → `triggers.crons`:
+ *   - `*\/5 * * * *`  heartbeat — one scheduler tick (lib/fetch-scheduler.ts):
+ *                     a small random number of due 1001tracklists fetches
+ *                     (DJ discovery, new sets, verification second fetches,
+ *                     rechecks by set age, DJ backfill), highest priority
+ *                     first, stopping at the pool's first refusal. tlpool owns
+ *                     budget and pacing; nothing here bursts.
+ *   - `0 6 * * *`     daily housekeeping only (audit pruning). It no longer
+ *                     crawls every DJ at once: discovery is spread around the
+ *                     clock by the scheduler.
  *
- * The frequent drain cron is what continues a backfill after the user
- * triggers a manual sync; they no longer have to keep clicking the button.
+ * Both finish by reconciling the combined "all tracked artists" playlist
+ * (YouTube only, no 1001tracklists traffic), and send any Web Push that quiet
+ * hours held back (lib/pool-events.ts).
  *
- * Both crons finish by reconciling the combined "all tracked artists"
- * playlist. The per-artist sync mirrors each *new* video into it as it goes,
- * but it never revisits a tracklist it already processed — so sets that landed
- * in an artist playlist before the combined playlist existed, and the deep
- * history a newly added artist accumulates over many ticks, can only get there
- * through this reconciliation.
- *
- * `ctx.waitUntil` keeps the worker alive past `scheduled` returning so the
- * sweep can finish even if it crosses CPU-time boundaries on individual subs.
+ * `ctx.waitUntil` keeps the worker alive past `scheduled` returning.
  */
 async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
   const isDaily = event.cron === '0 6 * * *'
-  const log = makeLogger({ task: isDaily ? 'cron.sync_all' : 'cron.sync_pending', cron: event.cron, ts: event.scheduledTime })
+  const log = makeLogger({ task: isDaily ? 'cron.daily' : 'cron.tick', cron: event.cron, ts: event.scheduledTime })
   log.info('cron.start')
   ctx.waitUntil(
     (async () => {
-      const trigger = isDaily ? 'cron.daily' : 'cron.pending'
-      // Keep the IP-ban state honest even when nothing is being fetched: if
-      // the forwarder's cooldown lapsed, probe it so a lifted ban clears the
-      // banner and fires the all-clear push without waiting for traffic.
-      await maintainBanState(env, log)
+      const trigger = isDaily ? 'cron.daily' : 'cron.tick'
       // One-time KV → D1 import, a bounded slice per tick until it reports
-      // done (then a cheap flag check). Runs before the sync so the drain
-      // cron's D1-only candidate query sees every DJ's backlog.
+      // done (then a cheap flag check).
       await runKvMigrationTickSafely(env, log)
       if (isDaily) {
         // D1 has no TTLs: keep both audit trails at the 90-day horizon.
@@ -132,24 +130,21 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         } catch (e) {
           log.warn('cron.audit_prune_threw', errorFields(e))
         }
+      } else {
+        try {
+          const r = await runSchedulerTick(env, { log })
+          log.info('cron.done', { skipped: r.skipped ?? null, drawn: r.drawn, ran: r.items.length, stoppedBy: r.stoppedBy ?? null })
+        } catch (e) {
+          log.error('cron.threw', errorFields(e))
+        }
       }
       try {
-        const r = isDaily
-          ? await syncAll(env, { log, trigger })
-          : await syncPendingOnly(env, { log, trigger })
-        log.info('cron.done', {
-          paused: r.paused ?? false,
-          subs: r.results.length,
-          totalAdded: r.results.reduce((a, x) => a + x.stats.videoIdsAdded, 0),
-          totalStillPending: r.results.reduce((a, x) => a + x.stats.tracklistsPending, 0),
-          totalCombinedAdded: r.results.reduce((a, x) => a + x.stats.combinedVideoIdsAdded, 0),
-        })
+        await flushDeferredPoolPushes(env, { log })
       } catch (e) {
-        log.error('cron.threw', errorFields(e))
+        log.warn('cron.deferred_pushes_threw', errorFields(e))
       }
-      // Separate try/catch: a per-artist sync that blew up (or a YouTube
-      // hiccup mid-sweep) shouldn't stop the combined playlist from catching
-      // up on everything that *did* land.
+      // Separate try/catch: a failed tick shouldn't stop the combined
+      // playlist from catching up on everything that *did* land.
       try {
         log.info('cron.combined_backfill', await backfillCombined(env, { log, trigger }))
       } catch (e) {

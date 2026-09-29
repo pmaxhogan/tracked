@@ -1,15 +1,25 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { fakeD1 } from './helpers/fake-d1'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
-import { fetch1001, fetchOptsFromEnv, UpstreamPausedError, UpstreamUnavailableError, UpstreamHttpError, UpstreamTransportError } from '../src/lib/upstream1001'
-import { fetchTracklist, searchByYouTubeUrl } from '../src/lib/tracklists1001'
+import {
+  fetch1001,
+  fetchOptsFromEnv,
+  isStopTheBatchError,
+  UpstreamHttpError,
+  UpstreamPausedError,
+  UpstreamTransportError,
+  UpstreamUnavailableError,
+} from '../src/lib/upstream1001'
+import { PHONE_MAX_WAIT_SECONDS, PoolPausedError, PoolUnavailableError, poolConfigFromEnv, poolFetch, poolRetestAccount } from '../src/lib/pool'
+import { fetchMediaLinks, fetchTracklist, searchByTitle, searchByYouTubeUrl } from '../src/lib/tracklists1001'
 import { fetch1001Html } from '../src/lib/dj-index'
-import { _resetTallyForTests, getBanStatus, getHomeBan, getPause, setPause } from '../src/lib/ban-state'
-import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
+import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
+import { IPBlockedError } from '../src/lib/fetch'
+import { makeLogger } from '../src/lib/log'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
@@ -17,406 +27,196 @@ const TRACKLIST_HTML = fx('tracklist-matroda.html')
 const BLOCK_HTML = fx('ip-block-tracklist.html')
 const SEARCH_HTML = fx('search-result.html')
 
-const PROXY = 'https://proxy.example'
+const POOL = 'https://tlpool.example'
 const TL = 'https://www.1001tracklists.com/tracklist/abc/def.html'
 
+type Call = { url: string; init: RequestInit; body: Record<string, any> | null }
+
+/** A fake tlpool: `answer` decides each /fetch reply; every request is recorded. */
+function fakePool(answer: (body: Record<string, any>, url: string) => Response | Promise<Response>) {
+  const calls: Call[] = []
+  const fetchImpl = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input)
+    const body = init.body ? JSON.parse(String(init.body)) : null
+    calls.push({ url, init, body })
+    return answer(body ?? {}, url)
+  }) as unknown as typeof fetch
+  return { calls, pool: { url: POOL, token: 'pool-token', fetchImpl } }
+}
+const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } })
+const page = (html: string, extra: Record<string, unknown> = {}) =>
+  json({ status: 200, finalUrl: TL, html, accountId: 'acct-2', exitLabel: 'ifog-3', fetchedAt: '2026-09-29T10:00:00.000Z', bytes: html.length, ...extra })
+
 function makeEnv(overrides: Partial<Env> = {}): Env {
-  return {
-    CACHE: fakeKV(),
-    DB: fakeD1(),
-    SUBS: fakeKV(),
-    API_TOKEN: 't',
-    YOUTUBE_API_KEY: 'k',
-    HOME_PROXY_URL: PROXY,
-    HOME_PROXY_TOKEN: 'tok',
-    ...overrides,
-  } as Env
+  return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', TLPOOL_URL: POOL, TLPOOL_TOKEN: 'pool-token', ...overrides } as Env
 }
 
-type Handler = (url: string, init: RequestInit) => Response | Promise<Response>
-type Calls = Array<{ url: string; init: RequestInit }>
-function routeFetch(handlers: { proxy?: Handler; brightdata?: Handler; direct?: Handler }): Calls {
-  const calls: Calls = []
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
-      const url = String(input)
-      calls.push({ url, init })
-      if (url.startsWith(PROXY)) return handlers.proxy ? handlers.proxy(url, init) : new Response('no proxy handler', { status: 599 })
-      if (url.startsWith('https://api.brightdata.com/')) return handlers.brightdata ? handlers.brightdata(url, init) : new Response('no bd handler', { status: 599 })
-      return handlers.direct ? handlers.direct(url, init) : new Response('no direct handler', { status: 599 })
-    }),
-  )
-  return calls
-}
+beforeEach(() => _resetTallyForTests())
 
-const proxyOk = (html: string, headers: Record<string, string> = {}) =>
-  new Response(html, { status: 200, headers: { 'x-proxy-route': 'direct', 'x-proxy-egress': 'direct', 'x-proxy-upstream-status': '200', 'x-proxy-attempts': 'direct:ok', 'x-proxy-pool-healthy': '19', 'x-proxy-pool-total': '19', ...headers } })
-const POOL_HEADERS = {
-  'x-proxy-route': 'pool',
-  'x-proxy-egress': 'bgp1:18183',
-  'x-proxy-attempts': 'direct:ip_blocked,bgp1:18183:ok',
-  'x-proxy-direct-blocked-until': '2026-09-10T16:00:00.000Z',
-  'x-proxy-direct-blocked-since': '2026-09-10T15:00:00.000Z',
-  'x-proxy-direct-blocked-ip': '68.1.2.3',
-  'x-proxy-pool-healthy': '18',
-}
-const proxyAllBlocked = () =>
-  new Response(BLOCK_HTML, {
-    status: 503,
-    headers: { 'x-proxy-route': 'none', 'x-proxy-all-blocked': '1', 'x-proxy-attempts': 'direct:ip_blocked,bgp1:18180:ip_blocked', 'x-proxy-direct-blocked-until': '2026-09-10T16:00:00.000Z', 'x-proxy-direct-blocked-ip': '68.1.2.3', 'x-proxy-pool-healthy': '0', 'x-proxy-pool-total': '19' },
-  })
-const bdOk = (body: string) => new Response(JSON.stringify({ status_code: 200, headers: {}, body }), { status: 200 })
-
-beforeEach(() => {
-  _resetTallyForTests()
-  vi.useFakeTimers({ toFake: ['Date'] })
-  vi.setSystemTime(new Date('2026-09-10T15:10:00.000Z'))
-})
-afterEach(() => {
-  vi.useRealTimers()
-  vi.unstubAllGlobals()
-})
-
-describe('fetch1001 cascade', () => {
-  it('serves from the forwarder (direct) and touches nothing else', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({ proxy: () => proxyOk(TRACKLIST_HTML) })
-    const r = await fetch1001(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('home-proxy')
-    expect(r.html).toBe(TRACKLIST_HTML)
-    expect(calls.map((c) => c.url)).toEqual([`${PROXY}/?url=${encodeURIComponent(TL)}`])
-    expect(await getHomeBan(env)).toBeNull()
-  })
-
-  it('reports via=home-proxy-pool and opens a ban episode when the forwarder rerouted around a blocked home IP', async () => {
-    const env = makeEnv()
-    routeFetch({ proxy: () => proxyOk(TRACKLIST_HTML, POOL_HEADERS) })
-    const r = await fetch1001(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('home-proxy-pool')
-    expect(r.proxy?.egress).toBe('bgp1:18183')
-    const home = await getHomeBan(env)
-    expect(home).toMatchObject({ ip: '68.1.2.3', until: '2026-09-10T16:00:00.000Z', poolHealthy: 18 })
-    expect(await getPause(env)).toBeNull()
-  })
-
-  it('falls through to BrightData (budgeted) when every forwarder route is blocked, and sets the pause', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd', BRIGHTDATA_DAILY_CAP: '5' })
-    const calls = routeFetch({ proxy: () => proxyAllBlocked(), brightdata: () => bdOk(TRACKLIST_HTML) })
-    const r = await fetch1001(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('unlocker')
-    expect(calls.map((c) => new URL(c.url).host)).toEqual(['proxy.example', 'api.brightdata.com'])
-    expect(await getPause(env)).toMatchObject({ reason: 'all_routes_blocked', ip: '68.1.2.3' })
-    const st = await getBanStatus(env)
-    expect(st.brightdata.used).toBe(1)
-    expect(st.home?.ip).toBe('68.1.2.3')
-  })
-
-  it('throws UpstreamPausedError instead of touching anything once paused and BrightData budget is spent', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd', BRIGHTDATA_DAILY_CAP: '0' })
-    await setPause(env, 'all_routes_blocked', '68.1.2.3')
-    const calls = routeFetch({})
-    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamPausedError)
-    expect(calls).toEqual([])
-  })
-
-  it('while paused with no BrightData, throws UpstreamPausedError without hitting 1001tl directly', async () => {
-    const env = makeEnv()
-    await setPause(env, 'all_routes_blocked', null)
-    const calls = routeFetch({})
-    const err = await fetch1001(TL, fetchOptsFromEnv(env)).catch((e) => e)
-    expect(err).toBeInstanceOf(UpstreamPausedError)
-    expect(err.until).toBe('2026-09-10T16:10:00.000Z')
-    expect(calls).toEqual([])
-  })
-
-  it('all routes blocked and no BrightData → UpstreamPausedError (the batch stops)', async () => {
-    const env = makeEnv()
-    const calls = routeFetch({ proxy: () => proxyAllBlocked() })
-    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamPausedError)
+describe('poolFetch — the tlpool /fetch contract', () => {
+  it('POSTs {url, kind, priority, maxWaitSeconds} with the bearer and returns the page and its opaque account', async () => {
+    const { calls, pool } = fakePool(() => page('<html>ok</html>'))
+    const r = await poolFetch(pool, { url: TL, kind: 'set', priority: 'recheck' })
     expect(calls).toHaveLength(1)
-    expect(await getPause(env)).not.toBeNull()
-  })
-
-  it('a forwarder transport failure still falls through to BrightData, then direct, without any ban state', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    routeFetch({
-      proxy: () => {
-        throw new TypeError('fetch failed')
-      },
-      brightdata: () => bdOk(TRACKLIST_HTML),
-    })
-    const r = await fetch1001(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('unlocker')
-    expect(await getHomeBan(env)).toBeNull()
-    expect(await getPause(env)).toBeNull()
-  })
-
-  it('falls through when the forwarder body fails the accept predicate', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    routeFetch({ proxy: () => proxyOk('<html>no tracks here</html>'), brightdata: () => bdOk(TRACKLIST_HTML) })
-    const r = await fetch1001(TL, { ...fetchOptsFromEnv(env), accept: (html) => html.includes('tlpItem') })
-    expect(r.via).toBe('unlocker')
-  })
-
-  it('BrightData returning the block page surfaces IPBlockedError; a CF shell retries up to unlockerAttempts', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    routeFetch({ proxy: () => proxyAllBlocked(), brightdata: () => bdOk(BLOCK_HTML) })
-    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(IPBlockedError)
-    vi.unstubAllGlobals()
-    const shell = '<html><div id="turnstile-container"></div><script src="challenge-platform"></script></html>'
-    const calls = routeFetch({ proxy: () => proxyAllBlocked(), brightdata: () => bdOk(shell) })
-    // Every forwarder route is blocked AND the paid fallback only serves shells:
-    // that is a route fault, so the batch stops (UpstreamPausedError) instead of
-    // this URL being charged a failure.
-    await expect(fetch1001(TL, { ...fetchOptsFromEnv(env), unlockerAttempts: 2 })).rejects.toBeInstanceOf(UpstreamPausedError)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(2)
-    // Both attempts were charged to today's budget (1 from the first test run above + 2 here).
-    expect((await getBanStatus(env)).brightdata.used).toBe(3)
-  })
-
-  const SHELL = '<html><div id="turnstile-container"></div><script src="challenge-platform"></script></html>'
-  const proxyUpstream = (status: number, html = '<html>1001tl says ' + status + '</html>') =>
-    new Response(html, { status, headers: { 'x-proxy-route': 'direct', 'x-proxy-egress': 'direct', 'x-proxy-upstream-status': String(status), 'x-proxy-attempts': 'direct:ok', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' } })
-
-  it('a real 404 through a healthy forwarder is final: no BrightData, UpstreamHttpError', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({ proxy: () => proxyUpstream(404), brightdata: () => bdOk(TRACKLIST_HTML) })
-    const err = await fetch1001(TL, fetchOptsFromEnv(env)).catch((e) => e)
-    expect(err).toBeInstanceOf(UpstreamHttpError)
-    expect((err as UpstreamHttpError).status).toBe(404)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
-    expect((await getBanStatus(env)).brightdata.used).toBe(0)
-    expect(await getHomeBan(env)).toBeNull()
-  })
-
-  it("the forwarder's own direct transport blip (502 + direct:error) is a plain retryable failure: no BrightData, no ban state", async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({
-      proxy: () => new Response('upstream error: fetch failed', { status: 502, headers: { 'x-proxy-route': 'direct', 'x-proxy-attempts': 'direct:error', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' } }),
-      brightdata: () => bdOk(TRACKLIST_HTML),
-    })
-    const err = await fetch1001(TL, fetchOptsFromEnv(env)).catch((e) => e)
-    expect(err).toBeInstanceOf(UpstreamTransportError)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
-    expect(await getHomeBan(env)).toBeNull()
-    expect(await getPause(env)).toBeNull()
-  })
-
-  it('forwarder 0.4.4: every route died in transport (503 + X-Proxy-Transport-Error) is the same plain retryable failure', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({
-      proxy: () =>
-        new Response(JSON.stringify({ error: 'all_routes_failed', transport: true }), {
-          status: 503,
-          headers: { 'content-type': 'application/json', 'x-proxy-route': 'none', 'x-proxy-transport-error': '1', 'x-proxy-attempts': 'direct:error,bgp1:18183:error,vm1:18180:error', 'x-proxy-pool-healthy': '16', 'x-proxy-pool-total': '18' },
-        }),
-      brightdata: () => bdOk(TRACKLIST_HTML),
-    })
-    const err = await fetch1001(TL, fetchOptsFromEnv(env)).catch((e) => e)
-    expect(err).toBeInstanceOf(UpstreamTransportError)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
-    expect(await getHomeBan(env)).toBeNull()
-    expect(await getPause(env)).toBeNull()
-  })
-
-  it('a pool-served page after a direct transport error is an ordinary success (no ban state)', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({
-      proxy: () =>
-        new Response(TRACKLIST_HTML, {
-          status: 200,
-          headers: { 'x-proxy-route': 'pool', 'x-proxy-egress': 'bgp1:18183', 'x-proxy-upstream-status': '200', 'x-proxy-attempts': 'direct:error,bgp1:18183/acct1:ok', 'x-proxy-direct-unhealthy-until': '2026-09-20T16:00:00.000Z', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' },
-        }),
-      brightdata: () => bdOk(TRACKLIST_HTML),
-    })
-    const r = await fetch1001(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('home-proxy-pool')
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
-    expect(await getHomeBan(env)).toBeNull()
-    expect(await getPause(env)).toBeNull()
-  })
-
-  it('a 5xx from 1001tl through the forwarder still falls through to BrightData', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    routeFetch({ proxy: () => proxyUpstream(503), brightdata: () => bdOk(TRACKLIST_HTML) })
-    const r = await fetch1001(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('unlocker')
-  })
-
-  it('forwarder down + BrightData serving CF shells → UpstreamUnavailableError (stop the batch, charge nothing)', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({
-      proxy: () => {
-        throw new TypeError('fetch failed')
-      },
-      brightdata: () => bdOk(SHELL),
-    })
-    const err = await fetch1001(TL, { ...fetchOptsFromEnv(env), unlockerAttempts: 2 }).catch((e) => e)
-    expect(err).toBeInstanceOf(UpstreamUnavailableError)
-    expect(String(err.message)).toMatch(/forwarder transport/)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(2)
-    expect(await getPause(env)).toBeNull()
-  })
-
-  it('forwarder answering with its own error (bad token) counts as a route fault too', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    routeFetch({ proxy: () => new Response('unauthorized', { status: 401 }), brightdata: () => bdOk(SHELL) })
-    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamUnavailableError)
-  })
-
-  it('forwarder down + BrightData over budget → UpstreamUnavailableError rather than hammering direct', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd', BRIGHTDATA_DAILY_CAP: '1' })
-    const calls = routeFetch({
-      proxy: () => {
-        throw new TypeError('fetch failed')
-      },
-      brightdata: () => bdOk(SHELL),
-      direct: () => new Response(TRACKLIST_HTML, { status: 200 }),
-    })
-    // First call spends the single budgeted attempt on a shell → unavailable.
-    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamUnavailableError)
-    // Second call: over budget with the forwarder still down → unavailable, no direct hit.
-    await expect(fetch1001(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamUnavailableError)
-    // Proxy calls carry the target in their query string; only count the Worker's own egress.
-    expect(calls.filter((c) => c.url.startsWith('https://www.1001tracklists.com')).length).toBe(0)
-  })
-
-  it('a CF shell from BrightData behind a HEALTHY forwarder that merely disliked the page is a plain URL failure', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    routeFetch({ proxy: () => proxyOk('<html>no tracks here</html>'), brightdata: () => bdOk(SHELL) })
-    await expect(fetch1001(TL, { ...fetchOptsFromEnv(env), accept: (html) => html.includes('tlpItem') })).rejects.toBeInstanceOf(CloudflareChallengeError)
-  })
-
-  it('POSTs form fields through the forwarder', async () => {
-    const env = makeEnv()
-    const calls = routeFetch({ proxy: () => proxyOk(SEARCH_HTML) })
-    const r = await fetch1001('https://www.1001tracklists.com/search/result.php', { ...fetchOptsFromEnv(env), method: 'POST', form: { main_search: 'x', search_selection: '9' } })
-    expect(r.via).toBe('home-proxy')
-    const init = calls[0]!.init
-    expect(init.method).toBe('POST')
-    expect(init.body).toBe('main_search=x&search_selection=9')
-  })
-
-  it('falls back to the Worker egress with no forwarder configured (legacy behaviour)', async () => {
-    const env = makeEnv({ HOME_PROXY_URL: undefined, HOME_PROXY_TOKEN: undefined })
-    const calls = routeFetch({ direct: () => new Response(TRACKLIST_HTML, { status: 200 }) })
-    const r = await fetch1001(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('direct')
-    expect(calls[0]!.url).toBe(TL)
-  })
-})
-
-describe('wrappers', () => {
-  it('fetchTracklist parses the forwarder result and reports via/egress', async () => {
-    const env = makeEnv()
-    routeFetch({ proxy: () => proxyOk(TRACKLIST_HTML, POOL_HEADERS) })
-    const r = await fetchTracklist(TL, fetchOptsFromEnv(env))
-    expect(r.result.tracks.length).toBeGreaterThan(0)
-    expect(r.via).toBe('home-proxy-pool')
-  })
-
-  it('fetchTracklist falls through to BrightData when the forwarder page parses to zero tracks', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({ proxy: () => proxyOk('<html><body>nothing</body></html>'), brightdata: () => bdOk(TRACKLIST_HTML) })
-    const r = await fetchTracklist(TL, fetchOptsFromEnv(env))
-    expect(r.via).toBe('unlocker')
-    expect(r.result.tracks.length).toBeGreaterThan(0)
-    expect(calls).toHaveLength(2)
-  })
-
-  it('fetch1001Html uses a single BrightData attempt', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const shell = '<html><div id="turnstile-container"></div><script src="challenge-platform"></script></html>'
-    const calls = routeFetch({ proxy: () => proxyAllBlocked(), brightdata: () => bdOk(shell) })
-    // All forwarder routes blocked + shell from BrightData = route fault → the batch-stopping error.
-    await expect(fetch1001Html(TL, fetchOptsFromEnv(env))).rejects.toBeInstanceOf(UpstreamPausedError)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(1)
-  })
-
-  it('searchByYouTubeUrl goes through the forwarder as a POST and still parses results', async () => {
-    const env = makeEnv()
-    const calls = routeFetch({ proxy: () => proxyOk(SEARCH_HTML) })
-    const { result } = await searchByYouTubeUrl('https://www.youtube.com/watch?v=abcdefghijk', fetchOptsFromEnv(env))
-    expect(calls[0]!.url).toBe(`${PROXY}/?url=${encodeURIComponent('https://www.1001tracklists.com/search/result.php')}`)
+    expect(calls[0]!.url).toBe(`${POOL}/fetch`)
     expect(calls[0]!.init.method).toBe('POST')
-    expect(String(calls[0]!.init.body)).toContain('main_search=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dabcdefghijk')
-    expect('tracklistUrl' in result).toBe(true)
+    expect(new Headers(calls[0]!.init.headers).get('Authorization')).toBe('Bearer pool-token')
+    expect(calls[0]!.body).toEqual({ url: TL, kind: 'set', priority: 'recheck', maxWaitSeconds: 20 })
+    expect(r).toMatchObject({ status: 200, html: '<html>ok</html>', accountId: 'acct-2', exitLabel: 'ifog-3' })
   })
 
-  it('searchByYouTubeUrl keeps the legacy (state, log) signature for direct calls', async () => {
-    routeFetch({ direct: () => new Response(SEARCH_HTML, { status: 200 }) })
-    const { result } = await searchByYouTubeUrl('https://www.youtube.com/watch?v=abcdefghijk', { cookie: '' })
-    expect('tracklistUrl' in result).toBe(true)
+  it('caps a phone fetch at 25 s and passes excludeAccounts / method / form / headers only when set', async () => {
+    const { calls, pool } = fakePool(() => page('x'))
+    await poolFetch(pool, { url: TL, kind: 'search', priority: 'phone', maxWaitSeconds: 90, excludeAccounts: ['acct-1'], method: 'POST', form: { a: '1' }, headers: { Referer: 'r' } })
+    expect(calls[0]!.body).toEqual({ url: TL, kind: 'search', priority: 'phone', maxWaitSeconds: PHONE_MAX_WAIT_SECONDS, excludeAccounts: ['acct-1'], method: 'POST', form: { a: '1' }, headers: { Referer: 'r' } })
+  })
+
+  it('maps budget_exhausted / challenge_pending to a pause (stop the batch) carrying retryAfterSeconds', async () => {
+    for (const error of ['budget_exhausted', 'challenge_pending']) {
+      const { pool } = fakePool(() => json({ error, retryAfterSeconds: 900 }))
+      const e = await poolFetch(pool, { url: TL, kind: 'set', priority: 'new' }).catch((x) => x)
+      expect(e).toBeInstanceOf(PoolPausedError)
+      expect(e).toBeInstanceOf(UpstreamPausedError)
+      expect(e).toMatchObject({ code: error, retryAfterSeconds: 900 })
+      expect(isStopTheBatchError(e)).toBe(true)
+    }
+  })
+
+  it('maps no_healthy_account / blocked / timeout to unavailable (stop the batch, charge nothing)', async () => {
+    for (const error of ['no_healthy_account', 'blocked', 'timeout']) {
+      const { pool } = fakePool(() => json({ error, retryAfterSeconds: 60 }))
+      const e = await poolFetch(pool, { url: TL, kind: 'set', priority: 'new' }).catch((x) => x)
+      expect(e).toBeInstanceOf(PoolUnavailableError)
+      expect(e).toBeInstanceOf(UpstreamUnavailableError)
+      expect(e.code).toBe(error)
+      expect(isStopTheBatchError(e)).toBe(true)
+    }
+  })
+
+  it('pool unreachable, 401 from the pool, garbage, or no config are all unavailable', async () => {
+    const down = { url: POOL, token: 't', fetchImpl: (async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch }
+    await expect(poolFetch(down, { url: TL, kind: 'set', priority: 'new' })).rejects.toMatchObject({ name: 'PoolUnavailableError', code: 'unreachable' })
+    await expect(poolFetch(fakePool(() => json({ error: 'unauthorized' }, 401)).pool, { url: TL, kind: 'set', priority: 'new' })).rejects.toMatchObject({ code: 'unauthorized' })
+    await expect(poolFetch(fakePool(() => new Response('<html>502</html>', { status: 502 })).pool, { url: TL, kind: 'set', priority: 'new' })).rejects.toMatchObject({ code: 'bad_response' })
+    await expect(poolFetch(fakePool(() => json({ error: 'something_new' })).pool, { url: TL, kind: 'set', priority: 'new' })).rejects.toMatchObject({ code: 'bad_response' })
+    await expect(poolFetch(null, { url: TL, kind: 'set', priority: 'new' })).rejects.toMatchObject({ code: 'not_configured' })
+  })
+
+  it('counts every call on the request log', async () => {
+    const log = makeLogger({ test: true })
+    await poolFetch(fakePool(() => page('x')).pool, { url: TL, kind: 'set', priority: 'new' }, log)
+    await poolFetch(fakePool(() => json({ error: 'timeout' })).pool, { url: TL, kind: 'set', priority: 'new' }, log).catch(() => {})
+    expect(log.counters.poolCalls).toBe(2)
+  })
+
+  it('poolRetestAccount posts to /accounts/:id/retest and refuses anything that is not an opaque id', async () => {
+    const { calls, pool } = fakePool(() => json({ ok: true }))
+    expect(await poolRetestAccount(pool, 'acct-7', 'verification mismatch')).toBe(true)
+    expect(calls[0]!.url).toBe(`${POOL}/accounts/acct-7/retest`)
+    expect(calls[0]!.body).toEqual({ reason: 'verification mismatch' })
+    expect(await poolRetestAccount(pool, 'some user@example.com', 'x')).toBe(false)
+    expect(calls).toHaveLength(1)
+    expect(await poolRetestAccount(null, 'acct-7', 'x')).toBe(false)
+  })
+
+  it('poolConfigFromEnv needs both TLPOOL_URL and TLPOOL_TOKEN', () => {
+    expect(poolConfigFromEnv({ TLPOOL_URL: `${POOL}/`, TLPOOL_TOKEN: 'k' })).toEqual({ url: POOL, token: 'k' })
+    expect(poolConfigFromEnv({ TLPOOL_URL: POOL })).toBeNull()
+    expect(poolConfigFromEnv({})).toBeNull()
   })
 })
 
-describe('fetch1001 — 2026-09-26: 1001tracklists 503 pages and Bright Data refusing the domain', () => {
-  const tlErrorPage = () =>
-    new Response('<!DOCTYPE html><html><head><title>1001Tracklists &sdot; The World\'s Leading DJ Tracklist/Playlist Database</title></head><body>error</body></html>', {
-      status: 503,
-      headers: { 'x-proxy-route': 'pool', 'x-proxy-egress': 'vm3:18180', 'x-proxy-upstream-status': '503', 'x-proxy-attempts': 'direct/acct1:503,vm2:18180/acct2:503,vm3:18180/acct3:503', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' },
-    })
-
-  it('retries the forwarder once after a served 5xx before paying for anything', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    let n = 0
-    const calls = routeFetch({ proxy: () => (n++ === 0 ? tlErrorPage() : proxyOk(TRACKLIST_HTML)), brightdata: () => bdOk(TRACKLIST_HTML) })
-    const r = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 })
-    expect(r.via).toBe('home-proxy')
-    expect(calls.filter((c) => c.url.startsWith(PROXY)).length).toBe(2)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(0)
+describe('fetch1001 — the only 1001tracklists route', () => {
+  it('ban:pause is the master switch: nothing is sent to the pool', async () => {
+    const env = makeEnv()
+    await setPause(env, 'manual', null)
+    const { calls, pool } = fakePool(() => page(TRACKLIST_HTML))
+    const e = await fetch1001(TL, { pool, cacheKv: env.CACHE }).catch((x) => x)
+    expect(e).toBeInstanceOf(UpstreamPausedError)
+    expect(isStopTheBatchError(e)).toBe(true)
+    expect(calls).toHaveLength(0)
   })
 
-  it('a 5xx on both tries still falls through to BrightData as before', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({ proxy: () => tlErrorPage(), brightdata: () => bdOk(TRACKLIST_HTML) })
-    const r = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 })
-    expect(r.via).toBe('unlocker')
-    expect(calls.filter((c) => c.url.startsWith(PROXY)).length).toBe(2)
+  it('serves the page via the pool, defaulting to kind set and priority phone', async () => {
+    const env = makeEnv()
+    const { calls, pool } = fakePool(() => page(TRACKLIST_HTML))
+    const r = await fetch1001(TL, { pool, cacheKv: env.CACHE })
+    expect(r).toMatchObject({ via: 'pool', accountId: 'acct-2', exitLabel: 'ifog-3', fetchedAt: '2026-09-29T10:00:00.000Z' })
+    expect(r.html).toBe(TRACKLIST_HTML)
+    expect(calls[0]!.body).toMatchObject({ kind: 'set', priority: 'phone', maxWaitSeconds: 25 })
   })
 
-  it("Bright Data's policy refusal parks the unlocker for a day: the next call never asks it", async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const denied = () =>
-      new Response(JSON.stringify({ status_code: 502, headers: { 'x-brd-error-code': 'proxy_error', 'x-brd-error': 'Access denied: www.1001tracklists.com is classified as Streaming Media and blocked by Bright Data as it might breach Bright Data usage policy.' }, body: '' }), { status: 200 })
-    const calls = routeFetch({ proxy: () => tlErrorPage(), brightdata: denied })
-    const first = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
-    expect(first).toBeInstanceOf(Error)
-    expect(String((first as Error).message)).toMatch(/policy/i)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(1)
-    expect((await getBanStatus(env)).brightdataPolicyBlock).toMatchObject({ reason: expect.stringMatching(/Streaming Media/) })
+  it('a 404/410 from the site is final for the URL; a 5xx is a blip; 401/403/429 is the account, not the URL', async () => {
+    for (const [status, cls] of [
+      [404, UpstreamHttpError],
+      [410, UpstreamHttpError],
+      [503, UpstreamTransportError],
+      [401, UpstreamUnavailableError],
+      [429, UpstreamUnavailableError],
+    ] as const) {
+      const { pool } = fakePool(() => page('<html>err</html>', { status }))
+      const e = await fetch1001(TL, { pool }).catch((x) => x)
+      expect(e, String(status)).toBeInstanceOf(cls)
+    }
+  })
 
-    const before = calls.length
-    const second = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
-    expect(second).toBeInstanceOf(Error)
-    expect(calls.slice(before).filter((c) => c.url.includes('brightdata')).length).toBe(0)
-    expect(String((second as Error).message)).toMatch(/policy/i)
+  it('a block page or a Cloudflare shell that gets through the browser stops the batch instead of charging the URL', async () => {
+    const blocked = await fetch1001(TL, { pool: fakePool(() => page(BLOCK_HTML)).pool }).catch((x) => x)
+    expect(blocked).toBeInstanceOf(IPBlockedError)
+    expect(isStopTheBatchError(blocked)).toBe(true)
+    const shell = '<html><div class="cf-turnstile" data-sitekey="x"></div></html>'
+    const cf = await fetch1001(TL, { pool: fakePool(() => page(shell)).pool }).catch((x) => x)
+    expect(cf).toBeInstanceOf(UpstreamUnavailableError)
+  })
+
+  it('fetchOptsFromEnv wires the pool from TLPOOL_* and the pause from CACHE; overrides win', () => {
+    const env = makeEnv()
+    const o = fetchOptsFromEnv(env, undefined, { priority: 'new' })
+    expect(o.pool).toEqual({ url: POOL, token: 'pool-token' })
+    expect(o.cacheKv).toBe(env.CACHE)
+    expect(o.priority).toBe('new')
+    expect(fetchOptsFromEnv(makeEnv({ TLPOOL_URL: undefined })).pool).toBeNull()
+  })
+
+  it('fetch1001Html passes the account through for verification', async () => {
+    const r = await fetch1001Html(TL, { pool: fakePool(() => page('<html>x</html>')).pool, priority: 'verify', excludeAccounts: ['acct-1'] })
+    expect(r).toMatchObject({ via: 'pool', accountId: 'acct-2', fetchedAt: '2026-09-29T10:00:00.000Z' })
   })
 })
 
-describe('fetch1001 — 1001tracklists answering Bright Data with the human-check captcha', () => {
-  const tlErrorPage = () =>
-    new Response('<html><head><title>1001Tracklists</title></head><body>error</body></html>', {
-      status: 503,
-      headers: { 'x-proxy-route': 'pool', 'x-proxy-egress': 'vm3:18180', 'x-proxy-upstream-status': '503', 'x-proxy-attempts': 'direct/acct1:503,vm3:18180/acct3:503', 'x-proxy-pool-healthy': '18', 'x-proxy-pool-total': '18' },
+describe('each request kind', () => {
+  it('fetchTracklist: kind set, parsed, account logged', async () => {
+    const { calls, pool } = fakePool(() => page(TRACKLIST_HTML))
+    const r = await fetchTracklist(TL, { pool, priority: 'phone' })
+    expect(calls[0]!.body).toMatchObject({ url: TL, kind: 'set', priority: 'phone' })
+    expect(r.via).toBe('pool')
+    expect(r.accountId).toBe('acct-2')
+    expect(r.result.tracks.length).toBeGreaterThan(0)
+  })
+
+  it('search: kind search, a POST with the search form and a Referer', async () => {
+    const { calls, pool } = fakePool(() => page(SEARCH_HTML))
+    await searchByYouTubeUrl('https://www.youtube.com/watch?v=abcdefghijk', { pool })
+    expect(calls[0]!.body).toMatchObject({
+      url: 'https://www.1001tracklists.com/search/result.php',
+      kind: 'search',
+      priority: 'phone',
+      method: 'POST',
+      form: { main_search: 'https://www.youtube.com/watch?v=abcdefghijk', search_selection: '9' },
+      headers: { Referer: 'https://www.1001tracklists.com/search/result.php' },
     })
-  const bdCaptcha = () => new Response(JSON.stringify({ status_code: 401, headers: {}, body: '<html>We need to validate your are real human!</html>' }), { status: 200 })
+    await searchByTitle('Some Set Title', { pool })
+    expect(calls[1]!.body).toMatchObject({ kind: 'search', method: 'POST' })
+  })
 
-  it('parks the unlocker for six hours after a 401, so the next press skips it', async () => {
-    const env = makeEnv({ BRIGHTDATA_API_KEY: 'bd' })
-    const calls = routeFetch({ proxy: () => tlErrorPage(), brightdata: bdCaptcha })
-    const first = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
-    expect(first).toBeInstanceOf(Error)
-    expect(calls.filter((c) => c.url.includes('brightdata')).length).toBe(1)
-    const block = (await getBanStatus(env)).brightdataPolicyBlock
-    expect(block?.reason).toMatch(/captcha/)
-    expect(new Date(block!.until).getTime() - new Date(block!.since).getTime()).toBe(6 * 60 * 60 * 1000)
-
-    const before = calls.length
-    const second = await fetch1001(TL, { ...fetchOptsFromEnv(env), serverErrorRetryDelayMs: 0 }).catch((e) => e)
-    expect(second).toBeInstanceOf(Error)
-    expect(String((second as Error).message)).toMatch(/captcha/)
-    expect(calls.slice(before).filter((c) => c.url.includes('brightdata')).length).toBe(0)
+  it('medialink: kind medialink, JSON parsed; a refusal comes back as failed (not cached by the caller)', async () => {
+    const ml = fx('medialink-909720.json')
+    const { calls, pool } = fakePool(() => page(ml))
+    const ok = await fetchMediaLinks('909720', { pool })
+    expect(calls[0]!.body).toMatchObject({ url: 'https://www.1001tracklists.com/ajax/get_medialink.php?idObject=5&idItem=909720', kind: 'medialink' })
+    expect(ok.failed).toBeUndefined()
+    expect(ok.result.appleLink ?? ok.result.youtubeLink).toBeTruthy()
+    const refused = await fetchMediaLinks('909720', { pool: fakePool(() => json({ error: 'budget_exhausted' })).pool })
+    expect(refused).toMatchObject({ failed: true, result: { appleLink: null, youtubeLink: null, soundcloudLink: null } })
   })
 })

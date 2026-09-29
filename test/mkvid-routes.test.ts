@@ -11,6 +11,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { saveSubState } from '../src/lib/sync-store'
+import { noteSetFetch } from '../src/lib/verification'
+import { DEFAULT_POOL_SETTINGS } from '../src/lib/pool-settings'
 
 vi.mock('../src/lib/youtube-playlists', async () => {
   const actual = await vi.importActual<typeof import('../src/lib/youtube-playlists')>('../src/lib/youtube-playlists')
@@ -114,7 +116,12 @@ describe('/mkvid routes', () => {
     const env = makeEnv()
     const html = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-matroda.html'), 'utf8')
     await enqueueMkvidRequest(env, input)
-    await saveMkvidTracks(env, input.setUrl, parseTracklist(input.setUrl, html))
+    // Names are only trusted from a VERIFIED list (quest decision 2): two accounts, >= 2 h apart, same rows.
+    const parsedPage = parseTracklist(input.setUrl, html)
+    const now = Math.floor(Date.now() / 1000)
+    await noteSetFetch(env, { setUrl: input.setUrl, parsed: parsedPage, accountId: 'acct-1', fetchedAt: now - 3 * 3600, settings: DEFAULT_POOL_SETTINGS, pool: null })
+    await noteSetFetch(env, { setUrl: input.setUrl, parsed: parsedPage, accountId: 'acct-2', fetchedAt: now, settings: DEFAULT_POOL_SETTINGS, pool: null })
+    await saveMkvidTracks(env, input.setUrl, parsedPage)
     const body = await (await post(env, '/mkvid/claim', {})).json()
     const parsed = MkvidClaimResponse.parse(body)
     expect(parsed.request!.tracksTrusted).toBe(true)

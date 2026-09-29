@@ -34,8 +34,8 @@ export type SubState = {
    * Union over time of every tracklist URL we've ever seen on this DJ's
    * paginated index. The DJ index uses JS infinite-scroll, so a single
    * fetch only sees the 15 newest sets; `crawlDjIndex` walks the scroll
-   * endpoint down to the first known set on each run, and the daily cron's
-   * backfill (cursor in SUBS KV, `loadDjBackfill`) reaches older history.
+   * endpoint down to the first known set on each run, and the scheduler's
+   * paced backfill (cursor in SUBS KV, `loadDjBackfill`) reaches older history.
    */
   discoveredTracklistUrls?: string[]
   processedTracklistUrls: string[]
@@ -67,7 +67,8 @@ export type SubState = {
     videoIdsAdded: number
     tracklistsRechecked?: number
     videosReplaced?: number
-    via: 'home-proxy' | 'home-proxy-pool' | 'unlocker' | 'direct' | 'mixed'
+    /** `pool` since 2026-09-29; the others survive in rows written before. */
+    via: 'pool' | 'home-proxy' | 'home-proxy-pool' | 'unlocker' | 'direct' | 'mixed'
   }
 }
 
@@ -357,28 +358,6 @@ export async function importSubStateFromKv(env: Env, slug: string, log?: Logger)
 
 // ─── queries the sync uses instead of loading every blob ────────────────────
 
-export type SubWorkCounts = { slug: string; pending: number; due: number }
-
-/**
- * Per-slug counts of unprocessed sets and processed sets due for a recheck —
- * what the 5-minute cron needs to pick candidates without hydrating every
- * DJ's state. Only slugs with at least one tracklist row appear (a DJ that
- * has never been discovered has nothing to drain).
- */
-export async function subWorkCounts(env: Env, recheckIntervalSeconds: number, now = nowSeconds()): Promise<SubWorkCounts[]> {
-  const db = dbOf(env)
-  const res = await db
-    .prepare(
-      `SELECT slug,
-              SUM(CASE WHEN processed = 0 AND abandoned = 0 THEN 1 ELSE 0 END) AS pending,
-              SUM(CASE WHEN processed = 1 AND abandoned = 0 AND (checked_at IS NULL OR checked_at <= ?) THEN 1 ELSE 0 END) AS due
-       FROM tracklists GROUP BY slug`,
-    )
-    .bind(now - recheckIntervalSeconds)
-    .all<{ slug: string; pending: number; due: number }>()
-  return res.results.map((r) => ({ slug: r.slug, pending: Number(r.pending), due: Number(r.due) }))
-}
-
 /** Slugs (other than `exceptSlug`) with a tracklist currently resolved to `videoId`. */
 export async function slugsReferencingVideo(env: Env, videoId: string, exceptSlug: string): Promise<string[]> {
   const res = await dbOf(env)
@@ -447,8 +426,8 @@ export async function requeueTracklists(env: Env, slug: string, urls: string[]):
 // ─── DJ-index backfill cursor ───────────────────────────────────────────────
 
 /**
- * How far the daily cron has walked into one DJ's 1001tracklists history
- * (see `crawlDjIndex`'s backfill). Kept in SUBS KV rather than D1 so it needs
+ * How far the paced backfill has walked into one DJ's 1001tracklists history
+ * (lib/fetch-scheduler.ts `runDjBackfillStep`). Kept in SUBS KV rather than D1 so it needs
  * no migration; losing it only restarts the walk from page 1's tail (the
  * rows it re-sees are already known, so nothing is fetched twice but the
  * cheap scroll steps). Absent = never started.
@@ -460,6 +439,8 @@ export type DjBackfillState = {
   done: boolean
   /** Unix seconds of the last backfill step. */
   at: number
+  /** Page 1's scroll request keys, so a paced backfill step needs no page-1 fetch (lib/fetch-scheduler.ts). */
+  keys?: { type: string; idScrollObject: string; subtype: string }
 }
 
 const BACKFILL_PREFIX = 'djbackfill:'

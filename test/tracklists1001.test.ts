@@ -3,29 +3,11 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { parseSearchResult, parseSearchResults, parseSearchQueryEcho, parseUrlSearchResult, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData, normalizeTracklistUrl, looksLikeDecoy } from '../src/lib/tracklists1001'
-import { chop, extractChallenge, isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
+import { isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
 import { selectCurrent } from '../src/lib/timestamp'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
-
-describe('challenge', () => {
-  it('chop matches Java String.hashCode for the captured token', () => {
-    expect(chop('d4ff8ib4')).toBe(109070355)
-  })
-
-  it('extracts challenge fields from the interstitial page', () => {
-    const c = extractChallenge(fx('tracklist-neptune.html'))
-    expect(c).not.toBeNull()
-    expect(c!.bChk).toBe(chop('d4ff8ib4'))
-    expect(c!.ts).toBe('1777696559')
-    expect(c!.action).toMatch(/^\/tracklist\/1sy5yvb9\//)
-  })
-
-  it('returns null when the page is not the challenge', () => {
-    expect(extractChallenge(fx('tracklist-matroda.html'))).toBeNull()
-  })
-})
 
 describe('IP block detection', () => {
   it('detects the IP-block search response', () => {
@@ -75,15 +57,8 @@ describe('CF shell detection (looksLikeCfShell)', () => {
     expect(looksLikeCfShell(fx('tracklist-maxstyler.html'))).toBe(false)
   })
 
-  it('also matches the JS interstitial — caller handles that earlier in fetchHtml', () => {
-    // The pre-render JS interstitial happens to share Turnstile-ish markers
-    // and has no tlpItem rows. fetchHtml runs extractChallenge first and
-    // POSTs the chop() solution before looksLikeCfShell ever sees the body,
-    // so this overlap is harmless in production. Documented here to lock the
-    // ordering invariant.
-    const challenge = fx('tracklist-neptune.html')
-    expect(looksLikeCfShell(challenge)).toBe(true)
-    expect(extractChallenge(challenge)).not.toBeNull()
+  it('also matches the JS interstitial page (a browser in tlpool solves that one; a Worker never sees it now)', () => {
+    expect(looksLikeCfShell(fx('tracklist-neptune.html'))).toBe(true)
   })
 
   it('does NOT flag the IP-block page (different gate, handled by isIPBlocked)', () => {

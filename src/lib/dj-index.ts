@@ -17,7 +17,7 @@
  */
 
 import { parse } from 'node-html-parser'
-import { fetchWithTimeout, type ChallengeState } from './fetch'
+import type { ChallengeState } from './fetch'
 import { fetch1001, type Fetch1001Opts as CascadeOpts, type Via } from './upstream1001'
 import type { Logger } from './log'
 
@@ -168,9 +168,9 @@ function decodeEntities(s: string): string {
 //
 // Response: { success: true, data: '<10 more .oItm rows>', subType } while
 // there is more; `end`, `message` or `success:false` mean stop; `captcha`
-// asks for a human check (we stop, never solve it). Measured 2026-09-28: the
-// endpoint answers the same rows to an anonymous request as to a logged-in
-// one, so it is called direct (no forwarder account spent on it).
+// asks for a human check (we stop, never solve it). Like every
+// 1001tracklists request it goes through tlpool (kind `dj`) and counts
+// against an account's budget (quest decision 11).
 const O_ITM_DATA_ID_RE = /<div[^>]*\boItm\b[^>]*\bdata-id="([^"]+)"/g
 const SDIV_TAG_RE = /<div\b[^>]*\bclass="[^"]*\bsDiv\b[^"]*"[^>]*>/g
 const AJAX_URL = `${ORIGIN}/ajax/get_data.php`
@@ -180,7 +180,7 @@ const SCROLL_COUNT = 10
 /** Where the next scroll step starts: rows already shown + the last row's data-id. */
 export type ScrollCursor = { pos: number; id: string }
 
-type ScrollKeys = { type: string; idScrollObject: string; subtype: string }
+export type ScrollKeys = { type: string; idScrollObject: string; subtype: string }
 
 export type DjCrawlStopReason = 'end' | 'known' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed' | 'no_pagination'
 
@@ -194,6 +194,8 @@ export type DjCrawlResult = {
   stopReason: DjCrawlStopReason
   /** Where the head walk left the list (null: end of list reached, or no scroll keys). */
   tail: ScrollCursor | null
+  /** The scroll request keys page 1 carried; stored so a later backfill step needs no page-1 fetch. */
+  keys?: ScrollKeys | null
   /** Present when a backfill was asked for. */
   backfill?: {
     /** Scroll steps spent on the backfill this call. */
@@ -272,7 +274,7 @@ export async function crawlDjIndex(
 
   let page1Html: string
   try {
-    const r = await fetch1001Html(`${ORIGIN}/dj/${slug}/index.html`, opts)
+    const r = await fetch1001Html(`${ORIGIN}/dj/${slug}/index.html`, { ...opts, kind: 'dj' })
     page1Html = r.html
   } catch (e) {
     log?.warn('crawlDjIndex.page1_failed', { slug, error: e instanceof Error ? e.message : String(e) })
@@ -301,30 +303,28 @@ export async function crawlDjIndex(
       rowsOnPage1: rows1.length,
       urlsOnPage1: parsed1.tracklistUrls.length,
     })
-    return { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason: 'no_pagination', tail: null }
+    return { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason: 'no_pagination', tail: null, keys: null }
   }
 
-  const step = async (cursor: ScrollCursor, phase: string, n: number) => {
-    const chunk = await fetchInfiniteScrollChunk({ ...keys, pos: cursor.pos, dataId: cursor.id, refererSlug: slug }, opts)
-    if (!chunk.ok) {
+  const step = async (cursor: ScrollCursor, phase: 'head' | 'backfill', n: number) => {
+    // The backfill is the lowest-priority work there is (decision 12); the
+    // head walk is how new sets are discovered and runs at the caller's.
+    const s = await djScrollStep(slug, keys, cursor, phase === 'backfill' ? { ...opts, priority: 'backfill' } : opts)
+    if (!s) {
       log?.warn('crawlDjIndex.ajax_not_ok', { slug, phase, step: n })
       return null
     }
-    const rows = oItmIds(chunk.dataHtml)
-    const urls = extractTracklistUrls(chunk.dataHtml)
     let added = 0
-    for (const u of urls) {
+    for (const u of s.urls) {
       if (!seenSet.has(u)) {
         seenSet.add(u)
         all.push(u)
         added++
       }
     }
-    const end = chunk.end || rows.length === 0
-    const next: ScrollCursor | null = end ? null : { pos: cursor.pos + rows.length, id: rows[rows.length - 1]! }
-    const reachedKnown = urls.some((u) => known.has(u))
-    log?.info('crawlDjIndex.page_done', { slug, phase, step: n, via: 'ajax', urlsOnPage: urls.length, addedNew: added, end, reachedKnown })
-    return { added, end, next, reachedKnown }
+    const reachedKnown = s.urls.some((u) => known.has(u))
+    log?.info('crawlDjIndex.page_done', { slug, phase, step: n, via: 'ajax', urlsOnPage: s.urls.length, addedNew: added, end: s.end, reachedKnown })
+    return { added, end: s.end, next: s.next, reachedKnown }
   }
 
   // ── Head walk: from the top down to the first known set. ────────────────
@@ -364,7 +364,7 @@ export async function crawlDjIndex(
       }
     }
   }
-  const result: DjCrawlResult = { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason, tail }
+  const result: DjCrawlResult = { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason, tail, keys }
 
   // ── Backfill: a few steps further into the DJ's history. ────────────────
   if (opts.backfill) {
@@ -414,17 +414,42 @@ function extractTracklistUrls(html: string): string[] {
 }
 
 /**
- * POST /ajax/get_data.php with the form-encoded scroll cursor, direct from
- * the Worker. Anonymous requests get the same rows as logged-in ones
- * (2026-09-28), so no forwarder account is spent here; if this starts
- * answering non-JSON / captcha from Cloudflare's egress, the walk stops at
- * what it has (`crawlDjIndex.ajax_*` warnings) rather than retrying.
+ * One infinite-scroll step on its own: rows `cursor.pos`... of the DJ's list,
+ * through the pool (kind `dj`) at the caller's priority. Returns the set URLs
+ * it listed and the next cursor (null at the end), or null when the step
+ * failed softly (non-JSON, captcha flag, unsuccessful answer) - the caller
+ * keeps its cursor and retries later. Pool refusals throw (stop the batch).
+ *
+ * This is the paced DJ backfill's unit of work: the scheduler stores `keys`
+ * and the cursor between steps (lib/fetch-scheduler.ts), so a step costs one
+ * page view and never re-fetches page 1.
+ */
+export async function djScrollStep(
+  slug: string,
+  keys: ScrollKeys,
+  cursor: ScrollCursor,
+  opts: Fetch1001Opts,
+): Promise<{ urls: string[]; end: boolean; next: ScrollCursor | null } | null> {
+  const chunk = await fetchInfiniteScrollChunk({ ...keys, pos: cursor.pos, dataId: cursor.id, refererSlug: slug }, opts)
+  if (!chunk.ok) return null
+  const rows = oItmIds(chunk.dataHtml)
+  const urls = extractTracklistUrls(chunk.dataHtml)
+  const end = chunk.end || rows.length === 0
+  const next: ScrollCursor | null = end ? null : { pos: cursor.pos + rows.length, id: rows[rows.length - 1]! }
+  return { urls, end, next }
+}
+
+/**
+ * POST /ajax/get_data.php with the form-encoded scroll cursor - the site's
+ * "older sets" request - through the pool like every other 1001tracklists
+ * request (it counts against the account budget, decision 11). tlpool sends
+ * `form` as the XHR body; `html` comes back as the raw JSON text.
  */
 async function fetchInfiniteScrollChunk(
   cursor: ScrollKeys & { pos: number; dataId: string; refererSlug: string },
   opts: Fetch1001Opts,
 ): Promise<{ ok: boolean; end: boolean; dataHtml: string }> {
-  const body = new URLSearchParams({
+  const form = {
     width: '1920',
     type: cursor.type,
     idScrollObject: cursor.idScrollObject,
@@ -432,27 +457,21 @@ async function fetchInfiniteScrollChunk(
     count: String(SCROLL_COUNT),
     pos: String(cursor.pos),
     id: cursor.dataId,
-  })
+  }
   const referer = `${ORIGIN}/dj/${cursor.refererSlug}/index.html`
   const start = Date.now()
-  const res = await fetchWithTimeout(AJAX_URL, {
+  const r = await fetch1001(AJAX_URL, {
+    ...opts,
+    kind: 'dj',
     method: 'POST',
-    timeoutMs: 8000,
+    form,
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'X-Requested-With': 'XMLHttpRequest',
       Accept: 'application/json, text/javascript, */*; q=0.01',
       Referer: referer,
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     },
-    body,
   })
-  const text = await res.text()
-  if (!res.ok) {
-    opts.log?.warn('crawlDjIndex.ajax_http_status', { status: res.status, ms: Date.now() - start, body: text.slice(0, 300) })
-    return { ok: false, end: false, dataHtml: '' }
-  }
+  const text = r.html
   let json: { success?: boolean; end?: unknown; data?: string; captcha?: boolean; message?: string }
   try {
     json = JSON.parse(text)
@@ -461,7 +480,7 @@ async function fetchInfiniteScrollChunk(
     return { ok: false, end: false, dataHtml: '' }
   }
   if (json.captcha) {
-    opts.log?.warn('crawlDjIndex.ajax_captcha', { ms: Date.now() - start })
+    opts.log?.warn('crawlDjIndex.ajax_captcha', { ms: Date.now() - start, accountId: r.accountId })
     return { ok: false, end: false, dataHtml: '' }
   }
   // framework.js ends the list on `message` or on any defined `end`.
@@ -473,24 +492,22 @@ async function fetchInfiniteScrollChunk(
   return { ok: true, end, dataHtml: json.success ? (json.data ?? '') : '' }
 }
 
-/** Options for the shared 1001tracklists fetch cascade — see lib/upstream1001.ts. */
-export type Fetch1001Opts = Omit<CascadeOpts, 'method' | 'form' | 'accept' | 'unlockerAttempts'>
+/** Options for the 1001tracklists fetch path - see lib/upstream1001.ts. */
+export type Fetch1001Opts = Omit<CascadeOpts, 'method' | 'form'>
 
 /**
- * Fetch a 1001tracklists page through the shared cascade (home forwarder →
- * BrightData within budget → direct) and return the raw HTML so the caller
- * can apply whatever parser fits. One BrightData attempt only — DJ index
- * pages are less captcha-prone than tracklist pages, and a retry loop here
- * would compound BrightData spend across many pages per cron run.
+ * Fetch a 1001tracklists page through the pool (lib/upstream1001.ts) and
+ * return the raw HTML so the caller can apply whatever parser fits, plus the
+ * opaque account that served it (verification needs it).
  *
- * Throws `UpstreamPausedError` when fetching is deliberately paused (every
- * route blocked) and `IPBlockedError` when the last route was itself blocked;
- * see lib/upstream1001.ts. Callers running a batch should stop on either.
+ * Throws `UpstreamPausedError` while fetching is paused or the pool refuses
+ * on purpose, `UpstreamUnavailableError` when the pool cannot serve; callers
+ * running a batch should stop on either (`isStopTheBatchError`).
  */
 export async function fetch1001Html(
   url: string,
   opts: Fetch1001Opts = {},
-): Promise<{ html: string; via: Via; state: ChallengeState }> {
-  const r = await fetch1001(url, { ...opts, unlockerAttempts: 1 })
-  return { html: r.html, via: r.via, state: r.state }
+): Promise<{ html: string; via: Via; state: ChallengeState; accountId?: string; exitLabel?: string; fetchedAt?: string }> {
+  const r = await fetch1001(url, opts)
+  return { html: r.html, via: r.via, state: r.state, accountId: r.accountId, exitLabel: r.exitLabel, fetchedAt: r.fetchedAt }
 }

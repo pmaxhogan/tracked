@@ -20,8 +20,8 @@ export type RequestCounters = {
   cacheHits: number
   cacheMisses: number
   youtubeApiCalls: number
-  brightdataCalls: number
-  homeProxyCalls: number
+  /** Requests sent to tlpool (lib/pool.ts), refusals included. */
+  poolCalls: number
   itunesCalls: number
 }
 
@@ -37,7 +37,7 @@ export type Logger = {
 }
 
 export function makeLogger(base: Record<string, unknown> = {}, counters?: RequestCounters): Logger {
-  const c = counters ?? { cacheHits: 0, cacheMisses: 0, youtubeApiCalls: 0, brightdataCalls: 0, homeProxyCalls: 0, itunesCalls: 0 }
+  const c = counters ?? { cacheHits: 0, cacheMisses: 0, youtubeApiCalls: 0, poolCalls: 0, itunesCalls: 0 }
   const emit = (level: LogLevel, event: string, fields?: Record<string, unknown>) => {
     const line = { level, event, t: new Date().toISOString(), ...base, ...(fields ?? {}) }
     const out = safeStringify(line)
