@@ -463,10 +463,13 @@ function stubEl(): StubEl {
   return {
     innerHTML: '', textContent: '', value: '', hidden: false, checked: false, disabled: false, className: '', src: '',
     dataset: {}, style: {}, options: [],
-    addEventListener() {}, focus() {}, add() {}, remove() {}, showModal() {}, close() {},
+    handlers: {} as Record<string, (ev: unknown) => unknown>,
+    addEventListener(this: { handlers: Record<string, unknown> }, type: string, fn: unknown) { this.handlers[type] = fn },
+    focus() {}, add() {}, remove() {}, showModal() {}, close() {},
     querySelector: () => stubEl(), querySelectorAll: () => [], closest: () => null,
   }
 }
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)) }
 
 async function runPage(html: string, appl: Appl, env: Env) {
   const els = new Map<string, StubEl>()
@@ -482,7 +485,7 @@ async function runPage(html: string, appl: Appl, env: Env) {
     Option: function (t: string, v: string) { return { text: t, value: v } }, console,
   })
   for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
-  for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0))
+  await settle()
   return els
 }
 
@@ -535,6 +538,35 @@ describe('pool pages: HTML smoke', () => {
     const all = [...els.values()].map((e) => e.innerHTML + e.textContent).join('\n')
     expectNoCredentials(all)
     expect(all).not.toContain(TOKEN)
+  })
+
+  it('the Add account dialog starts a signup and embeds the captcha at the captcha step', async () => {
+    const { fetcher, calls } = fakePool({
+      'GET /status': () => json({ accounts: [] }),
+      'GET /challenges': () => json([]),
+      'POST /accounts': () => json({ challengeId: 'ch-s1', accountId: 'acct-12' }),
+      'GET /challenges/ch-s1': () => json({ id: 'ch-s1', type: 'image', state: 'pending', step: 'awaiting_captcha', reason: 'signup', account: 'acct-12' }),
+    })
+    const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const passive = stubEl(); passive.checked = true; els.set('add-passive', passive)
+    await (els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ passive: true })
+    const steps = els.get('add-steps')!.innerHTML
+    expect(steps).toMatch(/<li class="done">.*Exit assigned/)
+    expect(steps).toMatch(/<li class="cur">.*Waiting for your captcha/)
+    expect(els.get('add-captcha')!.hidden).toBe(false)
+    expect(els.get('add-captcha')!.innerHTML).toContain('cap-img')
+    expect(els.get('add-captcha')!.innerHTML).toContain('autofocus')
+  })
+
+  it('the Add account dialog shows a plain-words error with a retry', async () => {
+    const { fetcher } = fakePool({ 'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json([]), 'POST /accounts': () => json({ error: 'no_free_exit' }, 409) })
+    const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await (els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(els.get('add-msg')!.innerHTML).toContain('The pool is already busy doing that. (no free exit)')
+    expect(els.get('add-retry')!.hidden).toBe(false)
   })
 
   it('the pool page shows a plain-words error when tlpool is down', async () => {

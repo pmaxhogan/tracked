@@ -360,7 +360,7 @@ const CAPTCHA_JS = /* js */ `
       '<img class="cap-img" data-r="img" alt="Captcha image from the pool browser" />' +
       '<div class="cap-tools"><button type="button" class="ghost" data-r="refresh">↻ New screenshot</button></div>' +
       '<form class="cap-form" data-r="form" autocomplete="off">' +
-      '<input data-r="text" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="send" aria-label="Captcha answer" placeholder="Type what you see" required maxlength="200" />' +
+      '<input data-r="text" type="text" autofocus inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="send" aria-label="Captcha answer" placeholder="Type what you see" required maxlength="200" />' +
       '<button type="submit" data-r="submit">Submit answer</button>' +
       '</form>' +
       '<div class="cap-msg" data-r="msg"></div>';
@@ -589,6 +589,9 @@ ${CAPTCHA_JS}
       if (acct && !/^(creating|signup|pending|new)$/.test(acct.state)) { ch = { state: 'solved', step: 'done' }; }
       else return;
     } else if (!r.ok) {
+      // tlpool may only create the challenge record once the form is open: a
+      // 404 in the first 90 s (before any step was seen) means "still starting".
+      if (r.status === 404 && flow.stepIdx < 0 && Date.now() - flow.startedAt < 90000) { $('add-msg').innerHTML = '<div class="muted">Starting…</div>'; return; }
       if (r.status === 404) { failFlow('The pool lost track of this signup. Check the accounts table, then try again.'); return; }
       $('add-msg').innerHTML = '<div class="muted">' + esc(errText(r.data, r.status)) + ' Still trying…</div>';
       return;
@@ -623,7 +626,7 @@ ${CAPTCHA_JS}
     renderSteps(-1, false);
     const r = await api('/accounts', jsonInit('POST', { passive: $('add-passive').checked }));
     if (!r.ok) { flow = { stepIdx: 0 }; failFlow(errText(r.data, r.status)); return; }
-    flow = { challengeId: r.data.challengeId, accountId: r.data.accountId, stepIdx: -1, lastChange: Date.now(), timer: null, captchaShown: false, active: true };
+    flow = { challengeId: r.data.challengeId, accountId: r.data.accountId, stepIdx: -1, lastChange: Date.now(), startedAt: Date.now(), timer: null, captchaShown: false, active: true };
     poll();
     flow.timer = setInterval(poll, 2500);
   }
