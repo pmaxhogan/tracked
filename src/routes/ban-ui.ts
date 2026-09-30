@@ -149,7 +149,7 @@ export const BAN_JS = /* js */ `
 
   if ($dismiss) $dismiss.addEventListener('click', async () => {
     $dismiss.disabled = true;
-    try { await api('/api/ban/clear', { method: 'POST' }); await refresh(page === 'main'); } finally { $dismiss.disabled = false; }
+    try { await api('/api/ban/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await refresh(page === 'main'); } finally { $dismiss.disabled = false; }
   });
 
   // ── Web Push ────────────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ export const BAN_JS = /* js */ `
   if ($aTest) $aTest.addEventListener('click', async () => {
     $aTest.disabled = true; if ($aMsg) $aMsg.textContent = 'sending…';
     try {
-      const r = await api('/api/push/test', { method: 'POST' });
+      const r = await api('/api/push/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { if ($aMsg) $aMsg.textContent = 'test failed: ' + (d.error || r.status); return; }
       if ($aMsg) $aMsg.textContent = d.total === 0 ? 'no devices subscribed yet' : 'sent to ' + d.sent + '/' + d.total + ' device' + (d.total === 1 ? '' : 's') + (d.removed ? ' (' + d.removed + ' stale removed)' : '') + (d.failed ? ' (' + d.failed + ' failed)' : '');
@@ -269,7 +269,7 @@ export const BAN_JS = /* js */ `
   if ($simulate) $simulate.addEventListener('click', async (ev) => {
     ev.preventDefault();
     if (lastStatus && (lastStatus.home || lastStatus.pause)) { alert('A ban is already active.'); return; }
-    await api('/api/ban/simulate', { method: 'POST' });
+    await api('/api/ban/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     await refresh(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });

@@ -130,7 +130,9 @@ describe('pool UI: Cloudflare Access gate', () => {
     const fetchSpy = vi.fn(async () => new Response('{}'))
     vi.stubGlobal('fetch', fetchSpy)
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: undefined, CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'owner@example.com' })
-    const { r, text } = await req(mainApp, path, { method }, env)
+    // A same-origin JSON request (the CSRF guard lets it through), so the Access gate is what answers.
+    const init = method === 'GET' ? { method } : { method, headers: { 'Sec-Fetch-Site': 'same-origin', 'content-type': 'application/json' }, body: '{}' }
+    const { r, text } = await req(mainApp, path, init, env)
     expect(r.status).toBe(401)
     expect(fetchSpy).not.toHaveBeenCalled()
     expectNoLeak(r, text)

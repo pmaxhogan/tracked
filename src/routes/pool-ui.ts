@@ -516,7 +516,7 @@ ${CAPTCHA_JS}
     if (b.dataset.yes) {
       const act = b.dataset.yes;
       b.disabled = true; b.textContent = 'Working…';
-      const r = await api('/accounts/' + encodeURIComponent(id) + '/' + act, { method: 'POST' });
+      const r = await api('/accounts/' + encodeURIComponent(id) + '/' + act, jsonInit('POST', {}));
       if (!r.ok) { box.innerHTML = '<span class="error">' + esc(errText(r.data, r.status)) + '</span> <button type="button" class="ghost small" data-no="1">OK</button>'; return; }
       load();
     }

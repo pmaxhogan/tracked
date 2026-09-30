@@ -134,7 +134,7 @@ describe('POST /pool/events (bearer TLPOOL_TOKEN)', () => {
 
 describe('GET/PUT /subscriptions/api/pool/settings (behind Cloudflare Access)', () => {
   const call = (env: Env, method: string, body?: unknown) =>
-    app.request('http://x/subscriptions/api/pool/settings', { method, headers: { 'Content-Type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }, env)
+    app.request('http://x/subscriptions/api/pool/settings', { method, headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }, env)
 
   it('is gated by Cloudflare Access', async () => {
     const env = await makeEnv({ CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'a@example.com' })

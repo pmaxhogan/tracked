@@ -220,7 +220,7 @@ describe('/mkvid routes', () => {
     const first = (await (await post(env, '/mkvid/claim', {})).json()) as { request: { id: string } }
     await post(env, '/mkvid/fail', { id: first.request.id, error: 'incomplete_recording', permanent: true })
     const ids = Object.fromEntries(await Promise.all(['a', 'b'].map(async (n) => [n, (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id])))
-    expect((await app.request(`http://x/subscriptions/api/mkvid/ban/${ids.b}`, { method: 'POST' }, env)).status).toBe(200)
+    expect((await app.request(`http://x/subscriptions/api/mkvid/ban/${ids.b}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(200)
     await post(env, '/mkvid/claim', {})
 
     const s1 = await panel('?limit=2')
@@ -261,7 +261,7 @@ describe('/mkvid routes', () => {
     for (const [n, d] of [['a', '2026-09-13'], ['b', '2026-09-11'], ['c', '2026-09-05']] as Array<[string, string]>) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: d })
     const ids = Object.fromEntries(await Promise.all(['a', 'b', 'c'].map(async (n) => [n, (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id])))
     const panel = async () => ((await (await app.request('http://x/subscriptions/api/mkvid', {}, env)).json()) as { queue: Array<{ setUrl: string }>; settled: Array<{ status: string }> })
-    const act = (path: string, body?: unknown) => app.request(`http://x/subscriptions/api/mkvid/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }, env)
+    const act = (path: string, body?: unknown) => app.request(`http://x/subscriptions/api/mkvid/${path}`, { method: 'POST', headers: { Origin: 'http://x', 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }, env)
 
     expect((await act(`move/${ids.c}`, { to: 'sideways' })).status).toBe(400)
     const moved = await act(`move/${ids.c}`, { to: 'top' })

@@ -151,7 +151,7 @@ const REMOVED_PAGE_HTML = /* html */ `<!doctype html>
   function when(s) { try { return new Date(s * 1000).toLocaleString(); } catch { return String(s); } }
 
   async function post(url) {
-    const r = await fetch(url, { method: 'POST', credentials: 'same-origin' });
+    const r = await fetch(url, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
     return d;
