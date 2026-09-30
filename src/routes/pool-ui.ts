@@ -11,7 +11,7 @@
  *
  *   GET  /api/pool/status               tlpool GET /status (+ GET /challenges)
  *   GET  /api/pool/accounts             tlpool GET /accounts
- *   POST /api/pool/accounts             tlpool POST /accounts {passive}
+ *   POST /api/pool/accounts             tlpool POST /accounts {passive, exitKind?}
  *   POST /api/pool/accounts/:id/:action tlpool POST /accounts/:id/{rest,retire,retest}
  *   GET  /api/pool/challenges           tlpool GET /challenges
  *   GET  /api/pool/challenges/:id       tlpool GET /challenges/:id
@@ -29,11 +29,13 @@
  * object from a whitelist, so no username, email or password reaches a page.
  */
 import { Hono, type Context } from 'hono'
+import { z } from 'zod'
 import type { Env } from '../types'
 import { cfAccess } from '../middleware/cf-access'
 import { makeLogger, errorFields } from '../lib/log'
 import {
   ACCOUNT_ACTIONS,
+  EXIT_KINDS,
   createPoolAdminClient,
   ID_RE,
   PoolAdminError,
@@ -44,6 +46,9 @@ import {
 } from '../lib/pool-admin-client'
 
 type AppEnv = { Bindings: Env; Variables: { cfAccessEmail: string } }
+
+/** The one optional field the Add account dialog may add: which kind of exit to pin to. */
+const CreateAccountExit = z.enum(EXIT_KINDS).optional()
 
 export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   const app = new Hono<AppEnv>()
@@ -97,12 +102,15 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   app.get('/api/pool/accounts', async (c) => c.json({ accounts: await client(c.env).listAccounts() }))
 
   app.post('/api/pool/accounts', async (c) => {
-    const body = (await c.req.json().catch(() => null)) as { passive?: unknown } | null
+    const body = (await c.req.json().catch(() => null)) as { passive?: unknown; exitKind?: unknown } | null
     if (body !== null && typeof body !== 'object') return c.json({ error: 'invalid', detail: 'body_not_object' }, 400)
     const passive = body?.passive === true
+    const kind = CreateAccountExit.safeParse(body?.exitKind)
+    if (!kind.success) return c.json({ error: 'invalid', detail: 'bad_exit_kind' }, 400)
+    const exitKind = kind.data ?? 'auto'
     const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'pool_ui.create_account', by: c.get('cfAccessEmail') })
-    const r = await client(c.env).createAccount(passive)
-    log.info('pool_ui.account_create_started', { passive, challengeId: r.challengeId, accountId: r.accountId })
+    const r = await client(c.env).createAccount(passive, exitKind)
+    log.info('pool_ui.account_create_started', { passive, exitKind, challengeId: r.challengeId, accountId: r.accountId })
     return c.json(r)
   })
 
@@ -336,7 +344,7 @@ const COMMON_JS = /* js */ `
     invalid: 'That was not accepted.',
     too_many: 'Too many at once. Wait a moment and try again.',
     internal: 'Something went wrong in the Worker.',
-    no_free_exit: 'There is no free exit IP to pin a new account to.',
+    no_free_exit: 'There is no free exit of that type to pin a new account to. Pick another exit type, or free one up.',
     email_timeout: 'The confirmation email never arrived.',
     signup_rejected: '1001tracklists refused the signup form.',
     login_failed: 'The new account could not log in.',
@@ -489,6 +497,7 @@ const POOL_PAGE_HTML = /* html */ `<!doctype html>
   <div class="row"><h2 id="add-title" style="margin:0">Add account</h2><span class="spacer"></span><button id="add-close" type="button" class="ghost small">Close</button></div>
   <div id="add-form">
     <p class="muted" style="font-size:0.88rem">The pool picks a free exit IP, generates the username and password, fills the signup form and confirms the email on its own. You only solve the captcha.</p>
+    <label style="display:block;margin:0.6rem 0"><b>Exit type</b><br><select id="add-exit"><option value="auto" selected>Auto (default)</option><option value="own">Own IP</option><option value="mullvad">Mullvad</option><option value="airvpn">AirVPN</option></select><br><span class="muted" style="font-size:0.82rem">Where the new account's traffic leaves from. Auto lets the pool pick a free exit of any kind.</span></label>
     <label class="switch"><input id="add-passive" type="checkbox" /><span><b>Passive</b> (control group, never used for fetching)<br><span class="muted" style="font-size:0.82rem">Pinned to its own exit and logged in, but never fetches. It shows whether flags come from use or from simply existing.</span></span></label>
     <div class="row" style="margin-top:0.9rem"><span class="spacer"></span><button id="add-create" type="button">Create</button></div>
   </div>
@@ -711,12 +720,16 @@ ${CAPTCHA_JS}
     });
   }
 
+  function exitBody(passive, exit) {
+    return exit && exit !== 'auto' ? { passive, exitKind: exit } : { passive };
+  }
+
   async function create() {
     $('add-create').disabled = true;
     $('add-form').hidden = true; $('add-progress').hidden = false; $('add-retry').hidden = true;
     $('add-msg').innerHTML = '<div class="muted">Starting…</div>';
     renderSteps(-1, false);
-    const r = await api('/accounts', jsonInit('POST', { passive: $('add-passive').checked }));
+    const r = await api('/accounts', jsonInit('POST', exitBody($('add-passive').checked, $('add-exit') && $('add-exit').value)));
     if (!r.ok) { flow = { stepIdx: 0 }; failFlow(errText(r.data, r.status)); return; }
     flow = { challengeId: r.data.challengeId, accountId: r.data.accountId, stepIdx: -1, lastChange: Date.now(), startedAt: Date.now(), poller: null, captchaShown: false, captchaSeen: false, active: true };
     poll();

@@ -29,6 +29,10 @@ import type { Env } from '../types'
 /** The two vars live here, not in `types.ts`, so this file has no shared edits. */
 export type PoolEnv = Env & { TLPOOL_URL?: string; TLPOOL_TOKEN?: string }
 
+/** What the Add account dialog may ask of tlpool's exit picker. */
+export const EXIT_KINDS = ['auto', 'own', 'mullvad', 'airvpn'] as const
+export type ExitKindChoice = (typeof EXIT_KINDS)[number]
+
 export type Fetcher = (input: Request | string, init?: RequestInit) => Promise<Response>
 
 export type PoolErrorCode =
@@ -453,8 +457,10 @@ export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init)
     },
 
     /** Starts the signup flow; tlpool answers the id of the challenge that tracks it. */
-    async createAccount(passive: boolean): Promise<{ challengeId: string; accountId: string | null }> {
-      const j = await json('POST', '/accounts', { body: { passive }, timeoutMs: 30_000 })
+    async createAccount(passive: boolean, exitKind: ExitKindChoice = 'auto'): Promise<{ challengeId: string; accountId: string | null }> {
+      // "auto" is tlpool's default: leave the field out rather than send it.
+      const body = exitKind === 'auto' ? { passive } : { passive, exitKind }
+      const j = await json('POST', '/accounts', { body, timeoutMs: 30_000 })
       const o = isObj(j) ? j : {}
       const challengeId = opaqueId(pick(o, 'challengeId', 'challenge_id', 'challenge', 'id'))
       if (!challengeId) throw new PoolAdminError('bad_response', 503)

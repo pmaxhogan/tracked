@@ -261,6 +261,25 @@ describe('pool UI: accounts and status', () => {
     expectNoCredentials(text)
   })
 
+  it('POST /api/pool/accounts forwards a valid exitKind, omits auto, and rejects anything else', async () => {
+    const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ challengeId: 'ch-x' }) })
+    const appl = mount(fetcher)
+    const post = (body: unknown) => req(appl, '/subscriptions/api/pool/accounts', { method: 'POST', headers: { 'content-type': 'application/json', ...browserHeaders }, body: JSON.stringify(body) })
+    for (const k of ['own', 'mullvad', 'airvpn']) {
+      expect((await post({ exitKind: k })).r.status).toBe(200)
+      expect(calls[calls.length - 1]!.body).toEqual({ passive: false, exitKind: k })
+    }
+    expect((await post({ passive: true, exitKind: 'auto' })).r.status).toBe(200)
+    expect(calls[calls.length - 1]!.body).toEqual({ passive: true })
+    const n = calls.length
+    for (const bad of ['wireguard', '', 5, null, {}]) {
+      const { r, data } = await post({ exitKind: bad })
+      expect(r.status).toBe(400)
+      expect(data).toMatchObject({ error: 'invalid', detail: 'bad_exit_kind' })
+    }
+    expect(calls.length).toBe(n)
+  })
+
   it('POST /api/pool/accounts treats anything but passive:true as false', async () => {
     const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ challenge_id: 'ch-2' }) })
     const { data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts', { method: 'POST', body: JSON.stringify({ passive: 'yes' }), headers: { 'content-type': 'application/json' } })
@@ -575,6 +594,32 @@ describe('pool pages: HTML smoke', () => {
     await (els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
     await settle()
     expect(els.get('add-msg')!.innerHTML).toContain('There is no free exit IP to pin a new account to. no free exit in the registry')
+    expect(els.get('add-retry')!.hidden).toBe(false)
+  })
+
+  it('the Add account dialog has an Exit type select and sends the chosen kind', async () => {
+    const html = POOL_PAGES.POOL_PAGE_HTML
+    expect(html).toContain('<select id="add-exit">')
+    for (const t of ['Auto (default)', 'Own IP', 'Mullvad', 'AirVPN']) expect(html).toContain(t)
+    const { fetcher, calls } = fakePool({
+      'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json([]),
+      'POST /accounts': () => json({ challengeId: 'ch-e1' }),
+      'GET /challenges/ch-e1': () => json({ id: 'ch-e1', type: 'image', state: 'pending', step: 'exit_assigned', reason: 'signup' }),
+    })
+    const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const sel = stubEl(); sel.value = 'mullvad'; els.set('add-exit', sel)
+    await (els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ passive: false, exitKind: 'mullvad' })
+  })
+
+  it('the Add account dialog names a 409 no_free_exit plainly', async () => {
+    const { fetcher } = fakePool({ 'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json([]), 'POST /accounts': () => json({ error: 'no_free_exit', message: 'no free mullvad exit' }, 409) })
+    const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await (els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(els.get('add-msg')!.innerHTML).toContain('There is no free exit of that type')
+    expect(els.get('add-msg')!.innerHTML).toContain('no free mullvad exit')
     expect(els.get('add-retry')!.hidden).toBe(false)
   })
 
