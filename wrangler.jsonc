@@ -37,7 +37,7 @@
       "preview_id": "c13978cb82b249f6b2b8939f92d1dad9"
     },
     {
-      // Durable storage for the /subscriptions mini-app (DJ slugs the user
+      // Durable storage for the /ui mini-app (DJ slugs the user
       // wants tracked). No TTLs; kept separate from CACHE so we never wipe it
       // by mistake. Create with:
       //   npx wrangler kv namespace create SUBS
@@ -53,7 +53,7 @@
   "r2_buckets": [{ "binding": "PAGES", "bucket_name": "tracked-pages" }],
   "vars": {
     // Cloudflare Access team domain (e.g. "yourteam.cloudflareaccess.com").
-    // The /subscriptions/* routes verify the Cf-Access-Jwt-Assertion header
+    // The /ui/* routes verify the Cf-Access-Jwt-Assertion header
     // against this team's JWKS. Leave blank locally and set DEV_BYPASS_CF_ACCESS=1
     // in .dev.vars to skip verification during `wrangler dev`.
     "CF_ACCESS_TEAM_DOMAIN": "pmaxhogan.cloudflareaccess.com",
