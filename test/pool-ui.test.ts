@@ -79,7 +79,7 @@ const SECRET_USER = 'dj_fan_marta88'
 const SECRET_EMAIL = 'marta@owner-domain.example'
 const SECRET_PASS = 'hunter2-p4ss'
 const upstreamAccount = (id: string, extra: Record<string, unknown> = {}) => ({
-  id, state: 'active', passive: false, exit_label: 'ifog-2', exit_kind: 'own', used_today: 12, budget: 30, ramp_day: 3,
+  id, state: 'active', passive: false, exit_label: 'own-2', exit_kind: 'own', used_today: 12, budget: 30, ramp_day: 3,
   last_ok_at: '2026-09-29T10:00:00Z', last_challenge_at: null, flagged: false,
   username: SECRET_USER, email: SECRET_EMAIL, password: SECRET_PASS, cookies: 'session=abc',
   ...extra,
@@ -220,7 +220,7 @@ describe('pool UI: accounts and status', () => {
     expect(calls.map((c) => c.url).sort()).toEqual([`${POOL}/challenges`, `${POOL}/status`])
     calls.forEach(expectAuthed)
     expect(data.status.accounts[0]).toEqual({
-      id: 'acct-1', state: 'active', passive: false, exitLabel: 'ifog-2', exitKind: 'own', usedToday: 12, budget: 30, rampDay: 3,
+      id: 'acct-1', state: 'active', passive: false, exitLabel: 'own-2', exitKind: 'own', usedToday: 12, budget: 30, rampDay: 3,
       lastOkAt: '2026-09-29T10:00:00.000Z', lastChallengeAt: null, flagged: false, flagReason: null, restUntil: null, xhrUsedToday: null, xhrBudget: null,
     })
     expect(data.status.accounts[1]).toMatchObject({ id: 'acct-2', flagged: true, passive: true, flagReason: 'decoy_names' })
@@ -537,7 +537,7 @@ describe('pool pages: HTML smoke', () => {
     const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, appl, makeEnv())
     const accts = els.get('accts')!.innerHTML
     expect(accts).toContain('acct-1')
-    expect(accts).toContain('ifog-2')
+    expect(accts).toContain('own-2')
     expect(accts).toContain('passive')
     expect(accts).toContain('flagged')
     expect(accts).toContain('data-act="retire"')

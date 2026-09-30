@@ -45,7 +45,7 @@ function fakePool(answer: (body: Record<string, any>, url: string) => Response |
 }
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } })
 const page = (html: string, extra: Record<string, unknown> = {}) =>
-  json({ status: 200, finalUrl: TL, html, accountId: 'acct-2', exitLabel: 'ifog-3', fetchedAt: '2026-09-29T10:00:00.000Z', bytes: html.length, ...extra })
+  json({ status: 200, finalUrl: TL, html, accountId: 'acct-2', exitLabel: 'own-3', fetchedAt: '2026-09-29T10:00:00.000Z', bytes: html.length, ...extra })
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', TLPOOL_URL: POOL, TLPOOL_TOKEN: 'pool-token', ...overrides } as Env
@@ -62,7 +62,7 @@ describe('poolFetch — the tlpool /fetch contract', () => {
     expect(calls[0]!.init.method).toBe('POST')
     expect(new Headers(calls[0]!.init.headers).get('Authorization')).toBe('Bearer pool-token')
     expect(calls[0]!.body).toEqual({ url: TL, kind: 'set', priority: 'recheck', maxWaitSeconds: 20 })
-    expect(r).toMatchObject({ status: 200, html: '<html>ok</html>', accountId: 'acct-2', exitLabel: 'ifog-3' })
+    expect(r).toMatchObject({ status: 200, html: '<html>ok</html>', accountId: 'acct-2', exitLabel: 'own-3' })
   })
 
   it('caps a phone fetch at 25 s and passes excludeAccounts / method / form / headers only when set', async () => {
@@ -141,7 +141,7 @@ describe('fetch1001 — the only 1001tracklists route', () => {
     const env = makeEnv()
     const { calls, pool } = fakePool(() => page(TRACKLIST_HTML))
     const r = await fetch1001(TL, { pool, cacheKv: env.CACHE })
-    expect(r).toMatchObject({ via: 'pool', accountId: 'acct-2', exitLabel: 'ifog-3', fetchedAt: '2026-09-29T10:00:00.000Z' })
+    expect(r).toMatchObject({ via: 'pool', accountId: 'acct-2', exitLabel: 'own-3', fetchedAt: '2026-09-29T10:00:00.000Z' })
     expect(r.html).toBe(TRACKLIST_HTML)
     expect(calls[0]!.body).toMatchObject({ kind: 'set', priority: 'phone', maxWaitSeconds: 25 })
   })
