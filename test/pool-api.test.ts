@@ -3,6 +3,7 @@ import { app } from '../src/index'
 import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
+import { updatePoolSettings } from '../src/lib/pool-settings'
 import { flushDeferredPoolPushes, inQuietHours, listPoolEvents, poolEventPushPayload, receivePoolEvent, sanitizePoolEvent, type PoolEvent } from '../src/lib/pool-events'
 import { savePushSubscription } from '../src/lib/web-push'
 
@@ -100,6 +101,16 @@ describe('receivePoolEvent', () => {
     expect(again).toMatchObject({ duplicate: true, push: 'sent' })
     expect(push.sent).toHaveLength(1)
     expect(await listPoolEvents(env)).toHaveLength(1)
+  })
+
+  it('quiet hours come from the pool settings page: moved or switched off, pushes follow', async () => {
+    const env = await makeEnv()
+    const push = pushService()
+    await updatePoolSettings(env, { quietHours: { startHour: 5, endHour: 5 } }) // same hour = never quiet
+    expect((await receivePoolEvent(env, ev({ type: 'account.flagged', accountId: 'acct-5' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('sent')
+    await updatePoolSettings(env, { quietHours: { startHour: 9, endHour: 17 } }) // a daytime window instead
+    expect((await receivePoolEvent(env, ev({ type: 'account.flagged', accountId: 'acct-6' }), { now: DAYTIME, fetchImpl: push.fetchImpl })).push).toBe('quiet_deferred')
+    expect(await flushDeferredPoolPushes(env, { now: DAYTIME, fetchImpl: push.fetchImpl })).toEqual({ sent: 0, expired: 0 })
   })
 
   it('at night: a phone-initiated challenge still pushes; a background one waits for 08:00 and is dropped if it expired', async () => {

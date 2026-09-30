@@ -29,6 +29,7 @@ import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import type { Logger } from './log'
 import { pushConfigured, sendPushToAll, type PushPayload } from './web-push'
+import { getPoolSettings } from './pool-settings'
 
 export const POOL_EVENT_TYPES = ['challenge.created', 'challenge.solved', 'challenge.expired', 'account.flagged', 'account.created'] as const
 export type PoolEventType = (typeof POOL_EVENT_TYPES)[number]
@@ -100,10 +101,16 @@ function hourIn(date: Date, timeZone: string): number {
   return Number(h) % 24
 }
 
-/** 23:00-08:00 America/Chicago (decision 15). */
+/** Default 23:00-08:00 America/Chicago (decision 15); equal hours = never quiet. */
 export function inQuietHours(date: Date = new Date(), timeZone = 'America/Chicago', startHour = 23, endHour = 8): boolean {
   const h = hourIn(date, timeZone)
   return startHour > endHour ? h >= startHour || h < endHour : h >= startHour && h < endHour
+}
+
+/** Quiet hours as set on the pool settings page (lib/pool-settings.ts `quietHours`). */
+export async function quietNow(env: Pick<Env, 'SUBS'>, date: Date = new Date()): Promise<boolean> {
+  const { quietHours } = await getPoolSettings(env)
+  return inQuietHours(date, 'America/Chicago', quietHours.startHour, quietHours.endHour)
 }
 
 /** The push for an event, or null when this event type does not page the owner. */
@@ -156,7 +163,7 @@ export async function receivePoolEvent(
   let push: PushStatus = 'none'
   if (payload) {
     if (!pushConfigured(env)) push = 'not_configured'
-    else if (inQuietHours(now) && !(event.type === 'challenge.created' && event.phoneInitiated)) push = 'quiet_deferred'
+    else if ((await quietNow(env, now)) && !(event.type === 'challenge.created' && event.phoneInitiated)) push = 'quiet_deferred'
     else push = 'sent'
   }
   const ins = await db
@@ -186,7 +193,7 @@ async function deliver(env: Env, rowId: number | null, payload: PushPayload, now
  */
 export async function flushDeferredPoolPushes(env: Env, opts: { log?: Logger; now?: Date; fetchImpl?: typeof fetch } = {}): Promise<{ sent: number; expired: number }> {
   const now = opts.now ?? new Date()
-  if (inQuietHours(now)) return { sent: 0, expired: 0 }
+  if (await quietNow(env, now)) return { sent: 0, expired: 0 }
   const nowSec = Math.floor(now.getTime() / 1000)
   const db = dbOf(env)
   const rows = await db

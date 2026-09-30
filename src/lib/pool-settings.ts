@@ -74,6 +74,15 @@ export const PoolSettingsSchema = z.object({
   }),
   /** 1001tracklists fetches one manual button press (sync / resync) may spend (default 10). */
   manualMaxFetches: z.number().int().min(0).max(200),
+  /**
+   * No Web Push between startHour and endHour, America/Chicago (decision 15:
+   * default 23 to 8). Equal hours = no quiet hours. A captcha the phone button
+   * hit still pushes; others are held and sent when the window ends.
+   */
+  quietHours: z.object({
+    startHour: z.number().int().min(0).max(23),
+    endHour: z.number().int().min(0).max(23),
+  }),
 })
 
 export type PoolSettings = z.infer<typeof PoolSettingsSchema>
@@ -97,6 +106,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   discovery: { intervalHours: 24, jitterHours: 4 },
   backfill: { stepIntervalHours: 24, jitterHours: 6 },
   manualMaxFetches: 10,
+  quietHours: { startHour: 23, endHour: 8 },
 }
 
 type Plain = Record<string, unknown>

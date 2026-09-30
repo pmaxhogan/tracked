@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { Hono } from 'hono'
+import { poolSettingsApp } from '../src/routes/pool-api'
+import type { PoolSettings } from '../src/lib/pool-settings'
 import vm from 'node:vm'
 import { app as mainApp } from '../src/index'
 import { createPoolUiApp, POOL_PAGES } from '../src/routes/pool-ui'
@@ -602,31 +604,59 @@ describe('pool pages: HTML smoke', () => {
     expect(w).not.toContain('Submit answer')
   })
 
-  it('the settings page fills tlpool limits and tolerates the scheduler route being absent (404)', async () => {
+  /** The UI next to W4's real settings routes, as index.ts mounts them. */
+  function withSettingsApi(fetcher: Fetcher) {
+    const appl = mount(fetcher)
+    appl.route('/subscriptions/api/pool', poolSettingsApp)
+    return appl
+  }
+
+  it('the settings page fills tlpool limits and the scheduler settings from the real /api/pool/settings shape', async () => {
     const { fetcher } = fakePool({ 'GET /settings': () => json({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.1, imagePolicy: 'block' }) })
-    const els = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, mount(fetcher), makeEnv())
+    const els = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, withSettingsApi(fetcher), makeEnv())
     expect(els.get('budget')!.value).toBe(30)
     expect(els.get('ramp2')!.value).toBe(20)
     expect(els.get('share')!.value).toBe(10)
-    expect(els.get('sch-err')!.textContent).toContain('Not available yet')
-    expect(els.get('sch-save')!.disabled).toBe(true)
+    expect(els.get('sch-err')!.textContent).toBe('')
+    expect(els.get('sch-save')!.disabled).toBe(false)
+    const rows = els.get('sch-rows')!.innerHTML
+    expect(rows).toContain('data-k="intervalHours" value="12"') // 0-2 d: 12 h
+    expect(rows).toContain('data-k="maxAgeDays" value="180"')
+    expect(els.get('beyond')!.value).toBe('') // never
+    expect(els.get('over180')!.value).toBe(2160)
+    expect(els.get('quiet-start')!.value).toBe(23)
+    expect(els.get('quiet-end')!.value).toBe(8)
+    expect(els.get('prios')!.innerHTML).toContain('Verification second fetches')
   })
 
-  it('the settings page renders the recheck schedule when the scheduler route answers', async () => {
+  it('saving the settings page stores quiet hours and the schedule in the shape W4 validates, and a reload shows them', async () => {
     const { fetcher } = fakePool({ 'GET /settings': () => json({ budgetPerDay: 30 }) })
-    const appl = mount(fetcher)
-    // Stand-in for routes/pool-api.ts, mounted next to the UI like index.ts will.
-    appl.get('/subscriptions/api/pool/settings', (c) => c.json({
-      recheck: [{ maxAgeDays: 2, everyHours: 12 }, { maxAgeDays: 7, everyHours: 24 }, { maxAgeDays: 180, everyHours: 720 }, { maxAgeDays: 100000, everyHours: null }],
-      over180Exception: { everyHours: 2160 },
-      priorities: ['phone', 'new', 'verify', 'recheck', 'backfill'],
-    }))
-    const els = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, appl, makeEnv())
-    expect(els.get('sch-rows')!.innerHTML).toContain('value="12"')
-    expect(els.get('sch-rows')!.innerHTML).toContain('placeholder="never" value=""')
-    expect(els.get('over180')!.value).toBe(2160)
-    expect(els.get('prios')!.innerHTML).toContain('Verification second fetches')
+    const env = makeEnv()
+    const appl = withSettingsApi(fetcher)
+    const els = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, appl, env)
+    els.get('quiet-start')!.value = '22' as unknown as string
+    els.get('quiet-end')!.value = '7' as unknown as string
+    els.get('beyond')!.value = '4320' as unknown as string
+    await (els.get('sch')!.handlers as Record<string, (ev: unknown) => Promise<void>>).submit!({ preventDefault() {} })
+    await settle()
     expect(els.get('sch-err')!.textContent).toBe('')
+    expect(els.get('sch-msg')!.textContent).toBe('Saved.')
+    const stored = (await (await appl.request('https://tracked.example/subscriptions/api/pool/settings', {}, env)).json()) as { settings: PoolSettings }
+    expect(stored.settings.quietHours).toEqual({ startHour: 22, endHour: 7 })
+    expect(stored.settings.recheck.beyondIntervalHours).toBe(4320)
+    expect(stored.settings.recheck.bands).toHaveLength(4) // untouched: the stub DOM has no table rows to send
+    const again = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, appl, env)
+    expect(again.get('quiet-start')!.value).toBe(22)
+    expect(again.get('beyond')!.value).toBe(4320)
+  })
+
+  it('an invalid quiet hour is refused with the validator\'s message', async () => {
+    const { fetcher } = fakePool({ 'GET /settings': () => json({ budgetPerDay: 30 }) })
+    const els = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, withSettingsApi(fetcher), makeEnv())
+    els.get('quiet-start')!.value = '25' as unknown as string
+    await (els.get('sch')!.handlers as Record<string, (ev: unknown) => Promise<void>>).submit!({ preventDefault() {} })
+    await settle()
+    expect(els.get('sch-err')!.textContent).toContain('quietHours.startHour')
   })
 })
 

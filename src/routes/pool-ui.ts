@@ -20,8 +20,9 @@
  *   GET  /api/pool/challenges/:id/live/* tlpool GET /challenges/:id/live/* (noVNC + websocket)
  *   GET|PUT /api/pool/limits            tlpool GET|PUT /settings
  *
- * `/api/pool/settings` (the recheck schedule and priority order) belongs to
- * `routes/pool-api.ts`; the settings page only calls it.
+ * `/api/pool/settings` (the recheck schedule, priority order and quiet hours;
+ * shape: lib/pool-settings.ts PoolSettings) belongs to `routes/pool-api.ts`;
+ * the settings page only calls it.
  *
  * The Worker is the only thing holding TLPOOL_TOKEN; the browser only ever
  * talks to these routes. `lib/pool-admin-client.ts` rebuilds every upstream
@@ -771,17 +772,19 @@ const SETTINGS_PAGE_HTML = /* html */ `<!doctype html>
     <div class="field"><label>Ramp for new accounts</label><div class="row"><span>Day 1</span><input id="ramp1" type="number" min="0" max="1000" step="1" /><span>Day 2</span><input id="ramp2" type="number" min="0" max="1000" step="1" /><span class="muted">then the full budget</span></div><span class="hint">Default 10, then 20.</span></div>
     <div class="field"><label for="share">Reserved for the phone button</label><div class="row"><input id="share" type="number" min="0" max="90" step="1" /><span>% of each day's budget</span></div></div>
     <div class="field"><label for="images">First-party images</label><select id="images"><option value="block">Block</option><option value="allow">Allow</option></select><span class="hint">Video, ads and ad scripts are always blocked.</span></div>
-    <div class="field"><label>Quiet hours</label><span>No pushes 23:00 to 08:00, America/Chicago.</span><span class="hint">Fixed for now; not stored in either settings store.</span></div>
     <div class="row"><span id="lim-msg" class="muted"></span><span class="spacer"></span><button id="lim-save" type="submit">Save</button></div>
   </form>
 
   <h2>Recheck schedule</h2>
   <form id="sch" class="card" autocomplete="off">
     <div id="sch-err" class="error"></div>
-    <p class="muted" style="font-size:0.85rem;margin-top:0">How often a set is fetched again, by its age. Leave "every" empty for never.</p>
+    <p class="muted" style="font-size:0.85rem;margin-top:0">How often a set is fetched again, by its age.</p>
     <table class="sched"><thead><tr><th>Sets up to (days old)</th><th>Every (hours)</th><th></th></tr></thead><tbody id="sch-rows"></tbody></table>
     <div class="row" style="margin:0.5rem 0 0.9rem"><button id="sch-add" type="button" class="ghost small">+ Add row</button></div>
-    <div class="field"><label for="over180">Older sets without a good video or with ID rows: every (hours)</label><input id="over180" type="number" min="1" step="1" /><span class="hint">Default 2160 (90 days).</span></div>
+    <div class="field"><label for="beyond">Older than the last row: every (hours)</label><input id="beyond" type="number" min="1" step="1" placeholder="never" /><span class="hint">Empty = never (the default).</span></div>
+    <div class="field"><label for="over180">Older sets without a good video or with ID rows: every (hours)</label><input id="over180" type="number" min="1" step="1" placeholder="never" /><span class="hint">Default 2160 (90 days).</span></div>
+    <h2 style="margin-top:0.5rem">Quiet hours</h2>
+    <div class="field"><label>No pushes from / until (hour, America/Chicago)</label><div class="row"><input id="quiet-start" type="number" min="0" max="23" step="1" /><span>until</span><input id="quiet-end" type="number" min="0" max="23" step="1" /></div><span class="hint">Default 23 until 8. The same hour twice = no quiet hours. A captcha the phone button hit still pushes; the rest wait for the morning.</span></div>
     <h2 style="margin-top:0.5rem">Priority order</h2>
     <p class="muted" style="font-size:0.85rem;margin-top:0">When the budget runs short, earlier ones go first.</p>
     <div id="prios"></div>
@@ -823,67 +826,72 @@ ${COMMON_JS}
     loadLimits();
   });
 
-  // ── recheck schedule + priorities, via /api/pool/settings (scheduler) ──
+  // ── recheck schedule, priorities, quiet hours, via /api/pool/settings ──
+  // The stored shape is lib/pool-settings.ts PoolSettings; PUT deep-merges a
+  // partial document, and arrays (bands, order) replace.
   const PRIO_WORDS = { phone: 'Phone button', new: 'New sets', verify: 'Verification second fetches', recheck: 'Routine rechecks', backfill: 'DJ backfill' };
   let sched = null;
-  function rowHtml(r) {
-    return '<tr><td><input type="number" min="1" step="1" data-k="maxAgeDays" value="' + esc(r.maxAgeDays ?? '') + '" /></td>' +
-      '<td><input type="number" min="1" step="1" data-k="everyHours" placeholder="never" value="' + esc(r.everyHours ?? '') + '" /></td>' +
+  function rowHtml(b) {
+    return '<tr><td><input type="number" min="1" step="1" data-k="maxAgeDays" value="' + esc(b.maxAgeDays ?? '') + '" /></td>' +
+      '<td><input type="number" min="1" step="1" data-k="intervalHours" value="' + esc(b.intervalHours ?? '') + '" /></td>' +
       '<td><button type="button" class="ghost small" data-del="1" aria-label="Remove row">✕</button></td></tr>';
   }
   function renderSched() {
-    $('sch-rows').innerHTML = (sched.recheck || []).map(rowHtml).join('');
-    $('over180').value = sched.over180Exception && sched.over180Exception.everyHours != null ? sched.over180Exception.everyHours : '';
+    $('sch-rows').innerHTML = sched.recheck.bands.map(rowHtml).join('');
+    $('beyond').value = sched.recheck.beyondIntervalHours ?? '';
+    $('over180').value = sched.recheck.beyondExceptionIntervalHours ?? '';
+    $('quiet-start').value = sched.quietHours ? sched.quietHours.startHour : '';
+    $('quiet-end').value = sched.quietHours ? sched.quietHours.endHour : '';
     renderPrios();
   }
   function renderPrios() {
-    const p = sched.priorities || [];
-    $('prios').innerHTML = p.map((name, i) => '<div class="prio"><span class="n">' + (i + 1) + '.</span><span class="name">' + esc(PRIO_WORDS[name] || name) + '</span>' +
+    const p = sched.priorities.order;
+    $('prios').innerHTML = '<div class="prio"><span class="n">0.</span><span class="name">' + esc(PRIO_WORDS.phone) + '</span><span class="muted">always first (its share is reserved in the pool)</span></div>' +
+      p.map((name, i) => '<div class="prio"><span class="n">' + (i + 1) + '.</span><span class="name">' + esc(PRIO_WORDS[name] || name) + '</span>' +
       '<button type="button" class="ghost small" data-up="' + i + '" ' + (i === 0 ? 'disabled' : '') + ' aria-label="Move up">↑</button>' +
       '<button type="button" class="ghost small" data-down="' + i + '" ' + (i === p.length - 1 ? 'disabled' : '') + ' aria-label="Move down">↓</button></div>').join('');
   }
   function readRows() {
     return [...$('sch-rows').querySelectorAll('tr')].map((tr) => {
       const v = (k) => tr.querySelector('[data-k=' + k + ']').value;
-      return { maxAgeDays: v('maxAgeDays') === '' ? null : Number(v('maxAgeDays')), everyHours: v('everyHours') === '' ? null : Number(v('everyHours')) };
+      return { maxAgeDays: v('maxAgeDays') === '' ? null : Number(v('maxAgeDays')), intervalHours: v('intervalHours') === '' ? null : Number(v('intervalHours')) };
     });
   }
+  const numOrNull = (id) => $(id).value === '' || $(id).value == null ? null : Number($(id).value);
   async function loadSched() {
     const r = await fetch('/subscriptions/api/pool/settings', { credentials: 'same-origin' }).catch(() => null);
     if (!r) { $('sch-err').textContent = errText({ error: 'network' }); $('sch-save').disabled = true; return; }
-    if (r.status === 404) { $('sch-err').textContent = 'Not available yet: the scheduler update that stores these settings has not shipped.'; $('sch-save').disabled = true; $('sch-add').disabled = true; return; }
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) { $('sch-err').textContent = errText(d, r.status); $('sch-save').disabled = true; return; }
-    sched = d.settings && typeof d.settings === 'object' && d.settings.recheck ? d.settings : d;
-    if (!Array.isArray(sched.recheck)) sched.recheck = [];
-    if (!Array.isArray(sched.priorities)) sched.priorities = [];
+    if (!r.ok || !d.settings || !d.settings.recheck || !Array.isArray(d.settings.recheck.bands)) { $('sch-err').textContent = errText(d, r.status); $('sch-save').disabled = true; return; }
+    sched = d.settings;
     $('sch-err').textContent = ''; $('sch-save').disabled = false;
     renderSched();
   }
-  $('sch-add').addEventListener('click', () => { if (!sched) return; sched.recheck = readRows(); sched.recheck.push({ maxAgeDays: null, everyHours: null }); renderSched(); });
+  $('sch-add').addEventListener('click', () => { if (!sched) return; sched.recheck.bands = readRows(); sched.recheck.bands.push({ maxAgeDays: null, intervalHours: null }); renderSched(); });
   $('sch').addEventListener('click', (ev) => {
     const b = ev.target.closest('button');
     if (!b || !sched) return;
     if (b.dataset.del) { b.closest('tr').remove(); return; }
-    const p = sched.priorities;
+    const p = sched.priorities.order;
     if (b.dataset.up) { const i = Number(b.dataset.up); [p[i - 1], p[i]] = [p[i], p[i - 1]]; renderPrios(); }
     if (b.dataset.down) { const i = Number(b.dataset.down); [p[i + 1], p[i]] = [p[i], p[i + 1]]; renderPrios(); }
   });
   $('sch').addEventListener('submit', async (ev) => {
-    ev.preventDefault();
+    if (ev && ev.preventDefault) ev.preventDefault();
     if (!sched) return;
     const rows = readRows();
-    if (rows.some((r) => !(r.maxAgeDays > 0))) { $('sch-err').textContent = 'Every row needs an age in days.'; return; }
+    if (rows.some((r) => !(r.maxAgeDays > 0) || !(r.intervalHours > 0))) { $('sch-err').textContent = 'Every row needs an age in days and an interval in hours.'; return; }
     rows.sort((a, b) => a.maxAgeDays - b.maxAgeDays);
-    // Send the whole object back, unknown fields included.
-    const body = { ...sched, recheck: rows, over180Exception: { ...(sched.over180Exception || {}), everyHours: $('over180').value === '' ? null : Number($('over180').value) }, priorities: sched.priorities };
+    const recheck = { beyondIntervalHours: numOrNull('beyond'), beyondExceptionIntervalHours: numOrNull('over180') };
+    if (rows.length) recheck.bands = rows;
+    const body = { recheck, priorities: { order: sched.priorities.order }, quietHours: { startHour: numOrNull('quiet-start'), endHour: numOrNull('quiet-end') } };
     $('sch-save').disabled = true; $('sch-msg').textContent = 'saving…';
     const r = await fetch('/subscriptions/api/pool/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
     $('sch-save').disabled = false;
     const d = r ? await r.json().catch(() => ({})) : { error: 'network' };
-    if (!r || !r.ok) { $('sch-msg').textContent = ''; $('sch-err').textContent = errText(d, r ? r.status : 0); return; }
+    if (!r || !r.ok) { $('sch-msg').textContent = ''; $('sch-err').textContent = d && d.issues ? d.issues.join('; ') : errText(d, r ? r.status : 0); return; }
     $('sch-err').textContent = ''; $('sch-msg').textContent = 'Saved.';
-    loadSched();
+    await loadSched();
   });
 
   loadLimits();
