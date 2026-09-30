@@ -50,11 +50,12 @@ export const POOL_CSS = /* css */ `
   .cap-form input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .cap-form .btn { font-size: 1.15rem; min-height: 3.2rem; }
   .cap-tools { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
+  .cap-live { margin-top: var(--sp-1); }
   .cap-tools .btn { flex: 1; min-height: 2.5rem; }
   .cap-msg { min-height: 1.4em; margin-top: var(--sp-3); font-weight: 600; }
   .cap-msg.ok { color: var(--ok); }
   .cap-msg.bad { color: var(--danger); }
-  .cap-live { width: 100%; height: min(55dvh, 520px); min-height: 320px; border: 1px solid var(--line-strong); border-radius: var(--r-tile); background: #000; }
+  .cap-live { width: 100%; height: min(42dvh, 520px); min-height: 280px; border: 1px solid var(--line-strong); border-radius: var(--r-tile); background: #000; }
   .left { font-variant-numeric: tabular-nums; }
   .left.soon { color: var(--danger); font-weight: 700; }
   .banner { border-radius: var(--r-tile); padding: var(--sp-3) var(--sp-4); margin: var(--sp-3) 0; font-weight: 600; }

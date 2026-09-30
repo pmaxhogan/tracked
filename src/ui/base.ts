@@ -210,6 +210,8 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
   .tk-head { flex-direction: column; }
   .tk-head h1 { font-size: var(--fs-xl); overflow-wrap: anywhere; position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; margin: 0; }
   .tk-head .actions { width: 100%; }
+  .tk-head { gap: 0; margin-bottom: 0; }
+  .tk-head:has(.desc), .tk-head:has(.actions > *) { gap: var(--sp-3); margin-bottom: var(--sp-4); }
   .tk-grid.two, .tk-grid.three { grid-template-columns: 1fr; }
   .tk-drawer, .tk-dialog, .tk-menu { margin: auto 0 0; width: 100%; max-width: 100%; max-height: 85vh; max-height: 85dvh; border-radius: var(--r-card) var(--r-card) 0 0; padding-bottom: calc(var(--sp-4) + env(safe-area-inset-bottom)); }
   .tk-drawer { height: auto; }
