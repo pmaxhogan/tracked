@@ -465,7 +465,7 @@ describe('W7 review: daily cap from the append-only claims log (blocker 1)', () 
       await env.DB.prepare("UPDATE mkvid_requests SET status = 'done', video_id = ?, style = 'static' WHERE id = ?").bind(vid, c.id).run()
     }
     expect((await health(env)).dailyClaims).toBe(2)
-    const bulk = await app.request('http://x/subscriptions/api/mkvid/recreate-old-style', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expect: 2 }) }, env)
+    const bulk = await app.request('http://x/subscriptions/api/mkvid/recreate-old-style', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify({ expect: 2 }) }, env)
     expect(bulk.status).toBe(200)
     // Both rows are pending again, but today's two uploads still count.
     expect((await health(env)).dailyClaims).toBe(2)

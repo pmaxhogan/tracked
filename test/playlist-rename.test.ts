@@ -96,7 +96,7 @@ describe('playlist title fix (seam 8)', () => {
     await env.SUBS.put('oauth:google', JSON.stringify({ accessToken: 'tok', refreshToken: 'r', expiresAt: Math.floor(Date.now() / 1000) + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }))
     const yt = mockYouTube(playlists())
     vi.stubGlobal('fetch', yt.fetcher)
-    const post = (e: Env, body: unknown) => app.request('http://x/subscriptions/api/playlists/fix-titles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, e)
+    const post = (e: Env, body: unknown) => app.request('http://x/subscriptions/api/playlists/fix-titles', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify(body) }, e)
     const dry = await post(env, {})
     expect(dry.status).toBe(200)
     expect(((await dry.json()) as any).fixes).toHaveLength(2)

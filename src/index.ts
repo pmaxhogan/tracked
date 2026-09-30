@@ -55,6 +55,7 @@ app.get('/favicon.ico', (c) => c.body(null, 204))
 // CSRF guard for every state-changing admin API call (middleware/same-origin.ts).
 // Registered before the sub-apps so it runs ahead of their handlers.
 app.use('/subscriptions/api/*', sameOriginJson)
+app.use('/subscriptions/oauth/disconnect', sameOriginJson)
 // Admin pages may not be framed by another site (the captcha page frames its own live view).
 app.use('/subscriptions', noFraming)
 app.use('/subscriptions/*', noFraming)

@@ -94,3 +94,10 @@ describe('the admin pages send what the guard wants', () => {
     if (path === '/subscriptions/pool') expect(scripts).toContain("headers: { 'content-type': 'application/json' }")
   })
 })
+
+describe('the guard also covers POST /subscriptions/oauth/disconnect', () => {
+  it('refuses a cross-site disconnect before it reaches the route', async () => {
+    const r = await call('/subscriptions/oauth/disconnect', { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' })
+    expect(r.status).toBe(403)
+  })
+})
