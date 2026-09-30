@@ -38,7 +38,7 @@ import {
   resyncAll,
 } from '../lib/sync'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
-import { resolveFullTracklist } from '../lib/tracklist-resolve'
+import { resolveFullTracklist, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { purgeAndRefetch, resolvePurgeTarget } from '../lib/tracklist-purge'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
@@ -165,9 +165,12 @@ subscriptionsApp.post('/api/tracklist', async (c) => {
     log.warn('subs.tracklist.bad_url', { url: rawUrl })
     return c.json({ error: 'invalid_url', message: 'not a 1001tracklists tracklist URL' }, 400)
   }
+  // Per-track links are NOT resolved here: each one is a budgeted pool page
+  // view. The viewer asks for them lazily (POST /api/tracklist/links) for the
+  // rows the owner opens, or all at once behind a "Load links" button.
   log.info('subs.tracklist.start', { tracklistUrl })
   try {
-    const full = await resolveFullTracklist(c.env, tracklistUrl, { resolveLinks: true }, log)
+    const full = await resolveFullTracklist(c.env, tracklistUrl, { resolveLinks: false }, log)
     if (full.tracks.length === 0) {
       log.warn('subs.tracklist.empty', { tracklistUrl })
       return c.json({ error: 'upstream_error', message: 'parsed 0 tracks (likely a transient captcha) — try again shortly' }, 502)
@@ -195,6 +198,34 @@ subscriptionsApp.post('/api/tracklist', async (c) => {
     log.error('subs.tracklist.throw', { tracklistUrl, ...errorFields(e) })
     return c.json({ error: 'upstream_error', message: `1001 scrape: ${(e as Error).message}` }, 502)
   }
+})
+
+/** Most track ids one lazy-links request may ask for (the viewer batches "Load links" by this). */
+export const LAZY_LINKS_MAX_IDS = 25
+
+// Lazy per-track links for the viewers: `{ trackIds: ["909720", ...] }` →
+// `{ links: { "909720": { appleLink, youtubeLink, soundcloudLink } } }`.
+// Cached per track id for 30 days; a miss is one pool page view at priority
+// `recheck` (never `phone`: this is the admin page, not someone on the road).
+subscriptionsApp.post('/api/tracklist/links', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.tracklist_links', by: c.get('cfAccessEmail') })
+  const body = (await c.req.json().catch(() => null)) as { trackIds?: unknown } | null
+  const raw = Array.isArray(body?.trackIds) ? body!.trackIds : null
+  if (!raw || raw.length === 0) return c.json({ error: 'missing_track_ids', message: 'trackIds: a non-empty array of numeric 1001tracklists track ids' }, 400)
+  const ids = [...new Set(raw.filter((x): x is string => typeof x === 'string' && /^\d{1,12}$/.test(x)))]
+  if (ids.length !== raw.length && ids.length === 0) return c.json({ error: 'invalid_track_ids', message: 'track ids are numeric strings' }, 400)
+  if (ids.length > LAZY_LINKS_MAX_IDS) return c.json({ error: 'too_many', message: `at most ${LAZY_LINKS_MAX_IDS} track ids per request` }, 400)
+  const links: Record<string, { appleLink: string | null; youtubeLink: string | null; soundcloudLink: string | null }> = {}
+  // One at a time: the pool paces its accounts; a refusal stops the batch.
+  for (const id of ids) {
+    try {
+      links[id] = await resolveTrackMediaLinks(c.env, id, log, 'recheck')
+    } catch (e) {
+      log.warn('subs.tracklist_links.stopped', { id, done: Object.keys(links).length, ...errorFields(e) })
+      return c.json({ links, error: 'upstream_error', message: `stopped after ${Object.keys(links).length} of ${ids.length}: ${(e as Error).message}` }, 502)
+    }
+  }
+  return c.json({ links })
 })
 
 // "Refresh track list" on the viewer: purge the cached list and refetch it now
@@ -2361,6 +2392,7 @@ ${BAN_BANNER_HTML}
   <div id="cachebar" class="cachebar" hidden>
     <span id="cache-age"></span>
     <button type="button" id="refresh" class="refresh">Refresh track list</button>
+    <button type="button" id="load-links" class="refresh" title="Look up Apple Music / YouTube links for every identified track (one page view per track not cached yet)">Load links</button>
     <span id="refresh-result" class="result" role="status"></span>
   </div>
   <ul id="tracks"></ul>
@@ -2407,6 +2439,82 @@ ${BAN_BANNER_HTML}
     if (!(lo.startsWith('http://') || lo.startsWith('https://'))) return false;
     a.href = u; a.target = '_blank'; a.rel = 'noreferrer noopener';
     return true;
+  }
+
+
+  // ── lazy per-track links (POST /subscriptions/api/tracklist/links) ──
+  // Each lookup is one budgeted 1001tracklists page view (cached 30 days), so
+  // nothing is looked up until a row's "links" button or "Load links" is pressed.
+  const linkRows = new WeakMap();
+  const LINKABLE = (t) => !t.isUnidentified && t.trackId && /^\\d+$/.test(t.trackId) && !t.appleLink && !t.youtubeLink && !t.soundcloudLink;
+  async function fetchLinks(ids) {
+    const r = await fetch('/subscriptions/api/tracklist/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ trackIds: ids }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok && !d.links) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
+    return { links: d.links || {}, error: r.ok ? null : (d.message || d.error) };
+  }
+  function applyLinks(b, ml) {
+    const row = linkRows.get(b);
+    if (!row || !ml) return;
+    b.remove();
+    if (!ml.appleLink && !ml.youtubeLink && !ml.soundcloudLink) { const s = document.createElement('span'); s.className = 'muted'; s.textContent = 'no links'; row.actions.appendChild(s); return; }
+    Object.assign(row.t, ml);
+    row.fill(row.actions, row.t);
+  }
+  function lazyLinkButton(t, actions, fill) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'ghost small links-btn'; b.textContent = 'links';
+    b.title = 'Look up Apple Music / YouTube links (one 1001tracklists page view, cached 30 days)';
+    linkRows.set(b, { t, actions, fill });
+    b.addEventListener('click', async (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      b.disabled = true; b.textContent = '…';
+      try { const r = await fetchLinks([t.trackId]); applyLinks(b, r.links[t.trackId]); if (r.error && !r.links[t.trackId]) throw new Error(r.error); }
+      catch (e) { b.disabled = false; b.textContent = 'links'; b.title = 'failed: ' + (e && e.message ? e.message : e); }
+    });
+    return b;
+  }
+  async function loadAllLinks(root, status) {
+    const buttons = [...root.querySelectorAll('button.links-btn')].filter((b) => linkRows.has(b));
+    const byId = new Map();
+    for (const b of buttons) { const id = linkRows.get(b).t.trackId; if (!byId.has(id)) byId.set(id, []); byId.get(id).push(b); }
+    const ids = [...byId.keys()];
+    let done = 0;
+    for (let i = 0; i < ids.length; i += 25) {
+      const chunk = ids.slice(i, i + 25);
+      if (status) status.textContent = 'Loading links ' + done + ' / ' + ids.length + '…';
+      const r = await fetchLinks(chunk);
+      for (const id of chunk) for (const b of byId.get(id)) applyLinks(b, r.links[id]);
+      done += Object.keys(r.links).length;
+      if (r.error) { if (status) status.textContent = 'Links stopped: ' + r.error; return; }
+    }
+    if (status) status.textContent = ids.length ? 'Links loaded for ' + ids.length + ' tracks.' : 'No tracks left to look up.';
+  }
+
+  function fillActions(actions, t) {
+    if (t.youtubeLink) {
+      const a = document.createElement('a');
+      a.className = 'yt';
+      a.title = 'Play on YouTube';
+      a.setAttribute('aria-label', 'Play on YouTube');
+      if (safeHref(a, t.youtubeLink)) { a.innerHTML = YT_SVG; actions.appendChild(a); }
+    }
+    if (t.soundcloudLink) {
+      const a = document.createElement('a');
+      a.className = 'pill sc';
+      a.title = 'Play on SoundCloud (free, ad-supported)';
+      const glyph = document.createElement('span'); glyph.style.display = 'inline-flex'; glyph.innerHTML = SC_SVG;
+      const txt = document.createElement('span'); txt.textContent = 'SoundCloud';
+      if (safeHref(a, t.soundcloudLink)) { a.appendChild(glyph); a.appendChild(txt); actions.appendChild(a); }
+    }
+    if (t.appleLink) {
+      const a = document.createElement('a');
+      a.className = 'pill apple';
+      a.title = 'Open in Apple Music';
+      const glyph = document.createElement('span'); glyph.style.display = 'inline-flex'; glyph.innerHTML = APPLE_SVG;
+      const txt = document.createElement('span'); txt.textContent = 'Apple Music';
+      if (safeHref(a, t.appleLink)) { a.appendChild(glyph); a.appendChild(txt); actions.appendChild(a); }
+    }
   }
 
   function render(data) {
@@ -2477,29 +2585,8 @@ ${BAN_BANNER_HTML}
 
       const actions = document.createElement('div');
       actions.className = 'actions';
-      if (t.youtubeLink) {
-        const a = document.createElement('a');
-        a.className = 'yt';
-        a.title = 'Play on YouTube';
-        a.setAttribute('aria-label', 'Play on YouTube');
-        if (safeHref(a, t.youtubeLink)) { a.innerHTML = YT_SVG; actions.appendChild(a); }
-      }
-      if (t.soundcloudLink) {
-        const a = document.createElement('a');
-        a.className = 'pill sc';
-        a.title = 'Play on SoundCloud (free, ad-supported)';
-        const glyph = document.createElement('span'); glyph.style.display = 'inline-flex'; glyph.innerHTML = SC_SVG;
-        const txt = document.createElement('span'); txt.textContent = 'SoundCloud';
-        if (safeHref(a, t.soundcloudLink)) { a.appendChild(glyph); a.appendChild(txt); actions.appendChild(a); }
-      }
-      if (t.appleLink) {
-        const a = document.createElement('a');
-        a.className = 'pill apple';
-        a.title = 'Open in Apple Music';
-        const glyph = document.createElement('span'); glyph.style.display = 'inline-flex'; glyph.innerHTML = APPLE_SVG;
-        const txt = document.createElement('span'); txt.textContent = 'Apple Music';
-        if (safeHref(a, t.appleLink)) { a.appendChild(glyph); a.appendChild(txt); actions.appendChild(a); }
-      }
+      fillActions(actions, t);
+      if (LINKABLE(t)) actions.appendChild(lazyLinkButton(t, actions, fillActions));
       li.appendChild(actions);
 
       $tracks.appendChild(li);
@@ -2558,6 +2645,14 @@ ${BAN_BANNER_HTML}
 
   // Purge the cached list and fetch it again now (costs one upstream fetch),
   // then reload the view from the fresh cache entry.
+  const $loadLinks = document.getElementById('load-links');
+  if ($loadLinks) $loadLinks.addEventListener('click', async () => {
+    $loadLinks.disabled = true;
+    try { await loadAllLinks($tracks, $refreshResult); }
+    catch (e) { $refreshResult.className = 'result bad'; $refreshResult.textContent = 'Links failed: ' + (e && e.message ? e.message : e); }
+    finally { $loadLinks.disabled = false; }
+  });
+
   $refresh.addEventListener('click', async () => {
     if (!currentUrl) return;
     $refresh.disabled = true;
@@ -2724,6 +2819,56 @@ ${BAN_BANNER_HTML}
     return a;
   }
 
+
+  // ── lazy per-track links (POST /subscriptions/api/tracklist/links) ──
+  // Each lookup is one budgeted 1001tracklists page view (cached 30 days), so
+  // nothing is looked up until a row's "links" button or "Load links" is pressed.
+  const linkRows = new WeakMap();
+  const LINKABLE = (t) => !t.isUnidentified && t.trackId && /^\\d+$/.test(t.trackId) && !t.appleLink && !t.youtubeLink && !t.soundcloudLink;
+  async function fetchLinks(ids) {
+    const r = await fetch('/subscriptions/api/tracklist/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ trackIds: ids }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok && !d.links) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
+    return { links: d.links || {}, error: r.ok ? null : (d.message || d.error) };
+  }
+  function applyLinks(b, ml) {
+    const row = linkRows.get(b);
+    if (!row || !ml) return;
+    b.remove();
+    if (!ml.appleLink && !ml.youtubeLink && !ml.soundcloudLink) { const s = document.createElement('span'); s.className = 'muted'; s.textContent = 'no links'; row.actions.appendChild(s); return; }
+    Object.assign(row.t, ml);
+    row.fill(row.actions, row.t);
+  }
+  function lazyLinkButton(t, actions, fill) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'ghost small links-btn'; b.textContent = 'links';
+    b.title = 'Look up Apple Music / YouTube links (one 1001tracklists page view, cached 30 days)';
+    linkRows.set(b, { t, actions, fill });
+    b.addEventListener('click', async (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      b.disabled = true; b.textContent = '…';
+      try { const r = await fetchLinks([t.trackId]); applyLinks(b, r.links[t.trackId]); if (r.error && !r.links[t.trackId]) throw new Error(r.error); }
+      catch (e) { b.disabled = false; b.textContent = 'links'; b.title = 'failed: ' + (e && e.message ? e.message : e); }
+    });
+    return b;
+  }
+  async function loadAllLinks(root, status) {
+    const buttons = [...root.querySelectorAll('button.links-btn')].filter((b) => linkRows.has(b));
+    const byId = new Map();
+    for (const b of buttons) { const id = linkRows.get(b).t.trackId; if (!byId.has(id)) byId.set(id, []); byId.get(id).push(b); }
+    const ids = [...byId.keys()];
+    let done = 0;
+    for (let i = 0; i < ids.length; i += 25) {
+      const chunk = ids.slice(i, i + 25);
+      if (status) status.textContent = 'Loading links ' + done + ' / ' + ids.length + '…';
+      const r = await fetchLinks(chunk);
+      for (const id of chunk) for (const b of byId.get(id)) applyLinks(b, r.links[id]);
+      done += Object.keys(r.links).length;
+      if (r.error) { if (status) status.textContent = 'Links stopped: ' + r.error; return; }
+    }
+    if (status) status.textContent = ids.length ? 'Links loaded for ' + ids.length + ' tracks.' : 'No tracks left to look up.';
+  }
+
   function trackRow(t) {
     const li = document.createElement('li');
     li.className = 'track';
@@ -2767,8 +2912,18 @@ ${BAN_BANNER_HTML}
     }
     const sc = pill(t.soundcloudLink, 'SoundCloud', 'sc', SC_SVG); if (sc) { sc.title = 'Play on SoundCloud (free, ad-supported)'; actions.appendChild(sc); }
     const ap = pill(t.appleLink, 'Apple Music', 'apple', APPLE_SVG); if (ap) { ap.title = 'Open in Apple Music'; actions.appendChild(ap); }
+    if (LINKABLE(t)) actions.appendChild(lazyLinkButton(t, actions, fillRowActions));
     li.appendChild(actions);
     return li;
+  }
+  function fillRowActions(actions, t) {
+    if (t.youtubeLink) {
+      const a = document.createElement('a');
+      a.className = 'yt'; a.title = 'Play on YouTube'; a.setAttribute('aria-label', 'Play on YouTube');
+      if (safeHref(a, t.youtubeLink)) { a.innerHTML = YT_SVG; actions.appendChild(a); }
+    }
+    const sc = pill(t.soundcloudLink, 'SoundCloud', 'sc', SC_SVG); if (sc) { sc.title = 'Play on SoundCloud (free, ad-supported)'; actions.appendChild(sc); }
+    const ap = pill(t.appleLink, 'Apple Music', 'apple', APPLE_SVG); if (ap) { ap.title = 'Open in Apple Music'; actions.appendChild(ap); }
   }
 
   function renderSetBody(body, head, set, data) {
@@ -2829,12 +2984,23 @@ ${BAN_BANNER_HTML}
       } catch (e) { rr.textContent = 'Remove failed: ' + (e && e.message ? e.message : e); rr.disabled = false; }
     });
     links.appendChild(rr);
+    const ll = document.createElement('button');
+    ll.className = 'ghost'; ll.textContent = 'Load links';
+    ll.title = 'Look up Apple Music / YouTube links for every identified track (one page view per track not cached yet)';
+    const llStatus = document.createElement('span'); llStatus.className = 'muted';
+    links.appendChild(ll); links.appendChild(llStatus);
     body.appendChild(links);
 
     const ul = document.createElement('ul');
     ul.className = 'tracks';
     for (const t of tracks) ul.appendChild(trackRow(t));
     body.appendChild(ul);
+    ll.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      ll.disabled = true;
+      try { await loadAllLinks(ul, llStatus); } catch (e) { llStatus.textContent = 'Links failed: ' + (e && e.message ? e.message : e); }
+      finally { ll.disabled = false; }
+    });
   }
 
   async function loadSetInto(body, head, set) {

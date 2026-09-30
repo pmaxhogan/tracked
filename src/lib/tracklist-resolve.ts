@@ -177,9 +177,12 @@ export async function resolveFullTracklist(
 
 /**
  * Resolve (or serve from cache) the per-track Apple Music + YouTube deep links
- * for a 1001tracklists internal track id. Cached by track id.
+ * for a 1001tracklists internal track id. Cached by track id for 30 days
+ * (TTL.MEDIALINK): one budgeted pool page view per track per month at most.
+ * `priority` is `phone` for /now-playing, `recheck` for the admin viewer's
+ * lazy per-row lookups (nobody on the road is waiting on those).
  */
-export async function resolveTrackMediaLinks(env: Env, trackId: string, log: Logger): Promise<MediaLinks> {
+export async function resolveTrackMediaLinks(env: Env, trackId: string, log: Logger, priority: FetchPriority = 'phone'): Promise<MediaLinks> {
   const key = `ml:v${TRACKLIST_CV.medialink}:${trackId}`
   const cached = await getJson<MediaLinks>(env.CACHE, key)
   if (cached) {
@@ -191,7 +194,7 @@ export async function resolveTrackMediaLinks(env: Env, trackId: string, log: Log
   log.info('cache.miss', { key })
   // Through the pool (kind medialink, one budgeted view per call). A failed
   // lookup is not cached, so a pool refusal cannot poison the entry.
-  const { result, failed } = await fetchMediaLinks(trackId, fetchOptsFromEnv(env, log))
+  const { result, failed } = await fetchMediaLinks(trackId, fetchOptsFromEnv(env, log, { priority }))
   if (failed) return result
   await putJson(env.CACHE, key, result, TTL.MEDIALINK)
   log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
