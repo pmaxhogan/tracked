@@ -123,6 +123,8 @@ describe('pool UI: Cloudflare Access gate', () => {
     ['GET', '/subscriptions/api/pool/challenges/ch-1/image'],
     ['POST', '/subscriptions/api/pool/challenges/ch-1/answer'],
     ['GET', '/subscriptions/api/pool/challenges/ch-1/live/'],
+    ['GET', '/subscriptions/api/pool/challenges/ch-1/live/core/rfb.js'],
+    ['GET', '/subscriptions/api/pool/challenges/ch-1/live/websockify'],
     ['GET', '/subscriptions/api/pool/limits'],
     ['PUT', '/subscriptions/api/pool/limits'],
   ]
@@ -131,7 +133,9 @@ describe('pool UI: Cloudflare Access gate', () => {
     vi.stubGlobal('fetch', fetchSpy)
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: undefined, CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'owner@example.com' })
     // A same-origin JSON request (the CSRF guard lets it through), so the Access gate is what answers.
-    const init = method === 'GET' ? { method } : { method, headers: { 'Sec-Fetch-Site': 'same-origin', 'content-type': 'application/json' }, body: '{}' }
+    const init: RequestInit = method === 'GET'
+      ? { method, ...(path.endsWith('/websockify') ? { headers: { Upgrade: 'websocket', Connection: 'Upgrade', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' } } : {}) }
+      : { method, headers: { 'Sec-Fetch-Site': 'same-origin', 'content-type': 'application/json' }, body: '{}' }
     const { r, text } = await req(mainApp, path, init, env)
     expect(r.status).toBe(401)
     expect(fetchSpy).not.toHaveBeenCalled()
