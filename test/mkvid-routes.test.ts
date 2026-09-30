@@ -113,6 +113,8 @@ describe('/mkvid routes', () => {
     const health = await app.request('http://x/mkvid/health', { headers: { Authorization: 'Bearer mk-secret' } }, env)
     expect(await health.json()).toEqual({
       ok: true,
+      verifiedLists: true,
+      recreateStyle: 'scene',
       counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0, banned: 0 },
       accounts: [{ account: 'primary', label: 'mkvid-uploads', used: 1, cap: 24 }, { account: 'shared', label: 'tracked-youtube', used: 0, cap: 6 }],
       dailyClaims: 1,

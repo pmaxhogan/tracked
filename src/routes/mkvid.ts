@@ -3,7 +3,8 @@
  * own bearer token (`MKVID_TOKEN`) — never the Tasker token — and mounted in
  * src/index.ts *above* the API_TOKEN wildcard gate, which also skips this path.
  *
- *   POST /mkvid/claim     { accounts?: ['primary'|'shared'…] } → { request } (null when nothing is queued / claimable)
+ *   POST /mkvid/claim     { accounts?: ['primary'|'shared'…], style? } → { request } (null when nothing is queued / claimable)
+ *                         `style` = what mkvid renders tracked jobs with; a recreation is only handed out when it is `scene`
  *                         `accounts` = the Google projects mkvid can upload through right now (default ['primary']);
  *                         the request carries the `account` it was handed out for, and the set's
  *                         `tracks` [{ cueSeconds, artist, title, artworkUrl, isId, layered }] + `tracksTrusted`
@@ -18,7 +19,9 @@
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used.
- *   GET  /mkvid/health    → { ok, counts }                    lets mkvid verify its token/config
+ *   GET  /mkvid/health    → { ok, verifiedLists, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
+ *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
+ *                         is retryable; a scene-style mkvid claims nothing until it sees it
  *
  * See lib/mkvid.ts for the lifecycle these drive.
  */
@@ -30,7 +33,7 @@ import { mkvidAuth } from '../middleware/auth'
 import { MkvidClaimBody } from '../schemas'
 import { getAccessToken, GoogleOAuthRefreshFailed } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
-import { deleteOldVideo } from '../lib/mkvid-recreate'
+import { deleteOldVideo, RECREATE_STYLE } from '../lib/mkvid-recreate'
 import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, failMkvidRequest, mkvidAccountUsage, recordMkvidPoll } from '../lib/mkvid'
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/
@@ -69,6 +72,10 @@ mkvidApp.get('/health', async (c) => {
   const accounts = await mkvidAccountUsage(c.env)
   return c.json({
     ok: true,
+    // This Worker hands out verified lists only and treats `unverified_tracklist` as retryable (mkvid's scene style waits for this).
+    verifiedLists: true,
+    // Recreations go only to an mkvid whose claim says this style.
+    recreateStyle: RECREATE_STYLE,
     counts: await countMkvidRequests(c.env),
     accounts,
     dailyClaims: accounts.reduce((n, a) => n + a.used, 0),
@@ -83,7 +90,7 @@ mkvidApp.post('/claim', async (c) => {
   if (!parsed.success) return c.json({ error: 'invalid_request' }, 400)
   const accounts = parsed.data.accounts ?? ['primary']
   try {
-    return c.json({ request: await claimMkvidRequest(c.env, log, accounts) })
+    return c.json({ request: await claimMkvidRequest(c.env, log, accounts, parsed.data.style ?? null) })
   } catch (e) {
     log.error('mkvid.claim_threw', errorFields(e))
     await recordMkvidPoll(c.env, 'error', accounts)
@@ -118,7 +125,7 @@ mkvidApp.post('/complete', async (c) => {
     // A recreation: ask mkvid to delete the old video once this answer is out
     // (the cron retries it if this attempt fails).
     if (r.status === 'done' && r.replacedVideoId) {
-      const job = deleteOldVideo(c.env, r.replacedVideoId, log).catch((e) => log.warn('mkvid.old_video_delete_threw', errorFields(e)))
+      const job = deleteOldVideo(c.env, r.replacedVideoId, log, fetch, { dueOnly: true }).catch((e) => log.warn('mkvid.old_video_delete_threw', errorFields(e)))
       try {
         c.executionCtx.waitUntil(job)
       } catch {
