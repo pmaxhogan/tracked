@@ -52,7 +52,7 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   // Scoped to this app's own paths: a `use('*')` here would also run on every
   // other /subscriptions/* request, since both apps share the mount point.
   for (const p of [
-    '/pool', '/pool/*', '/captcha', '/captcha/*',
+    '/pool', '/pool/*', '/captcha', '/captcha/*', '/accounts',
     '/api/pool/status', '/api/pool/accounts', '/api/pool/accounts/*',
     '/api/pool/challenges', '/api/pool/challenges/*', '/api/pool/limits',
   ]) app.use(p, cfAccess)
@@ -76,6 +76,8 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   app.get('/pool', (c) => page(c, POOL_PAGE_HTML))
   app.get('/pool/settings', (c) => page(c, SETTINGS_PAGE_HTML))
   app.get('/captcha', (c) => page(c, CAPTCHA_LIST_HTML))
+  // Older pushes (flagged account) link here; the accounts live on the pool page.
+  app.get('/accounts', (c) => c.redirect('/subscriptions/pool', 302))
   app.get('/captcha/:id', (c) => {
     const id = c.req.param('id')
     if (!ID_RE.test(id)) return c.text('Not a challenge id', 404)
@@ -126,7 +128,7 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
     const id = c.req.param('id')
     if (!ID_RE.test(id)) return c.json({ error: 'invalid', detail: 'bad_id' }, 400)
     const img = await client(c.env).challengeImage(id, c.req.query('refresh') === '1')
-    return new Response(img.body, { headers: { 'Content-Type': img.contentType, 'Cache-Control': 'no-store' } })
+    return new Response(img.body, { headers: { 'Content-Type': img.contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } })
   })
 
   app.post('/api/pool/challenges/:id/answer', async (c) => {

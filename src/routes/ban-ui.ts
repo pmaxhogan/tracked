@@ -135,16 +135,18 @@ export const BAN_JS = /* js */ `
     $banner.hidden = false;
   }
 
+  let lastHttp = 200;
   async function refresh(live) {
     try {
       const r = await api('/api/ban/status' + (live ? '?live=1' : ''));
+      lastHttp = r.status;
       if (!r.ok) return null;
       const s = await r.json();
       lastStatus = s;
       renderBanner(s);
       if (page === 'main') { renderRoute(s); renderEpisodes(s); renderDevices(s); }
       return s;
-    } catch { return null; }
+    } catch { lastHttp = 0; return null; }
   }
 
   if ($dismiss) $dismiss.addEventListener('click', async () => {
@@ -277,13 +279,31 @@ export const BAN_JS = /* js */ `
   // ── boot ────────────────────────────────────────────────────────────────
   refresh(page === 'main');
   syncPush();
-  setInterval(() => refresh(page === 'main'), 15000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(page === 'main'); });
+  // Status poll: every 15 s while the tab is visible, doubling (to 60 s) on
+  // errors, stopped on 401/403 (Access login expired) and after 15 minutes.
+  const POLL_STARTED = Date.now();
+  let pollTimer = null, pollStopped = false, pollFails = 0, polling = false;
+  function stopPoll(note) { pollStopped = true; if (pollTimer) clearTimeout(pollTimer); pollTimer = null; if (note && $aMsg) $aMsg.textContent = note; }
+  async function pollOnce() {
+    pollTimer = null;
+    if (pollStopped || polling) return;
+    if (Date.now() - POLL_STARTED > 15 * 60000) { stopPoll(page === 'main' ? 'Status refresh stopped after 15 minutes. Reload the page to check again.' : ''); return; }
+    if (document.hidden) return;
+    polling = true;
+    await refresh(page === 'main');
+    polling = false;
+    if (lastHttp === 401 || lastHttp === 403) { stopPoll('Your Cloudflare Access login has expired. Reload the page to sign in again.'); return; }
+    pollFails = lastHttp === 0 || lastHttp >= 500 ? pollFails + 1 : 0;
+    pollTimer = setTimeout(pollOnce, pollFails ? Math.min(15000 * Math.pow(2, pollFails), 60000) : 15000);
+  }
+  pollTimer = setTimeout(pollOnce, 15000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollStopped && !pollTimer && !polling) pollOnce(); });
 })();
 `
 
 /** Served at /subscriptions/sw.js. Turns a push into a Notification; tap opens the payload URL. */
 export const SW_JS = /* js */ `
+const STICKY_KINDS = ['ban_start', 'pool_challenge', 'pool_account', 'playlist_hold'];
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 self.addEventListener('push', (event) => {
@@ -294,7 +314,9 @@ self.addEventListener('push', (event) => {
     body: data.body || '',
     tag: data.tag || 'tracked',
     renotify: true,
-    requireInteraction: data.kind === 'ban_start' || data.requireInteraction === true || /^challenge/.test(data.kind || ''),
+    // Pushes that need the owner stay on screen until tapped: a ban, a captcha
+    // waiting (pool_challenge), a flagged account, a held playlist check.
+    requireInteraction: data.requireInteraction === true || STICKY_KINDS.includes(data.kind) || /challenge/.test(data.kind || ''),
     timestamp: data.ts ? Date.parse(data.ts) : Date.now(),
     data: { url: data.url || '/subscriptions', kind: data.kind || null },
   };

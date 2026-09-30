@@ -42,3 +42,28 @@ export const sameOriginJson: MiddlewareHandler = async (c, next) => {
   }
   return next()
 }
+
+/**
+ * Anti-framing for every admin response under /subscriptions: no other site
+ * (a sibling subdomain included) may frame a page and clickjack a button.
+ * The one exception is the live view (`/subscriptions/api/pool/challenges/:id/live/...`),
+ * which the captcha page itself frames: it may be framed by this origin only.
+ * A 101 websocket upgrade is passed through untouched.
+ */
+export const LIVE_VIEW_PATH = /^\/subscriptions\/api\/pool\/challenges\/[A-Za-z0-9_-]{1,64}\/live(\/|$)/
+
+export const noFraming: MiddlewareHandler = async (c, next) => {
+  await next()
+  if (c.res.status === 101) return
+  const live = LIVE_VIEW_PATH.test(new URL(c.req.url).pathname)
+  try {
+    c.res.headers.set('X-Frame-Options', live ? 'SAMEORIGIN' : 'DENY')
+    if (!c.res.headers.has('Content-Security-Policy')) c.res.headers.set('Content-Security-Policy', live ? "frame-ancestors 'self'" : "frame-ancestors 'none'")
+  } catch {
+    // Immutable headers (a response passed straight through): rebuild it once.
+    const res = new Response(c.res.body, c.res)
+    res.headers.set('X-Frame-Options', live ? 'SAMEORIGIN' : 'DENY')
+    res.headers.set('Content-Security-Policy', live ? "frame-ancestors 'self'" : "frame-ancestors 'none'")
+    c.res = res
+  }
+}

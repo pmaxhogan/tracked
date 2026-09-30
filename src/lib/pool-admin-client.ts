@@ -62,6 +62,9 @@ export class PoolAdminError extends Error {
 }
 
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+/** Live-view sub-paths proxied to tlpool: the page, its websocket, noVNC's core/ and vendor/ modules. */
+export const LIVE_PATH_RE = /^(?:|websockify|(?:core|vendor)\/[A-Za-z0-9._\-/]+\.(?:js|mjs|json))$/
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 export const ACCOUNT_ACTIONS = ['rest', 'retire', 'retest'] as const
 export type AccountAction = (typeof ACCOUNT_ACTIONS)[number]
 
@@ -481,7 +484,8 @@ export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init)
     async challengeImage(id: string, refresh = false): Promise<{ body: ReadableStream | null; contentType: string }> {
       const r = await raw('GET', `/challenges/${seg(id)}/image${refresh ? '?refresh=1' : ''}`, { timeoutMs: 20_000, headers: { Accept: 'image/png,image/*' } })
       const ct = (r.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
-      if (!ct.startsWith('image/')) throw new PoolAdminError('bad_response', 503)
+      // Raster screenshots only: an SVG could carry script when opened directly.
+      if (!IMAGE_TYPES.has(ct)) throw new PoolAdminError('bad_response', 503)
       return { body: r.body, contentType: ct }
     },
 
@@ -533,6 +537,8 @@ export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init)
     async live(id: string, subpath: string, search: string, req: Request): Promise<Response> {
       if (!configured) throw new PoolAdminError('pool_not_configured', 503)
       if (!/^[A-Za-z0-9._\-/]*$/.test(subpath) || subpath.split('/').some((p) => p === '..')) throw new PoolAdminError('invalid', 400, 'bad_path')
+      // Only what tlpool's live page needs: the page itself, its websocket and the noVNC modules it imports.
+      if (!LIVE_PATH_RE.test(subpath)) throw new PoolAdminError('not_found', 404, 'not_a_live_view_file')
       const headers = new Headers()
       for (const h of LIVE_REQ_HEADERS) {
         const v = req.headers.get(h)
@@ -562,7 +568,13 @@ export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init)
         const v = r.headers.get(h)
         if (v) out.set(h, v)
       }
+      // The page is HTML; a module is script or JSON. Anything else (an HTML file
+      // among the assets, an SVG) is refused rather than served on this origin.
+      const ct = (r.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
+      const allowed = subpath === '' ? ct === 'text/html' : ct === 'text/javascript' || ct === 'application/javascript' || ct === 'application/json'
+      if (r.status < 300 && !allowed) throw new PoolAdminError('bad_response', 503, 'live_view_type')
       out.set('Cache-Control', 'no-store')
+      out.set('X-Content-Type-Options', 'nosniff')
       return new Response(r.body, { status: r.status, headers: out })
     },
   }
