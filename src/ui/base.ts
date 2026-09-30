@@ -178,6 +178,8 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
 .tk-tabs a { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 2px; font-size: .68rem; color: var(--muted); text-decoration: none; }
 .tk-tabs a.on { color: var(--accent); font-weight: 700; }
 .tk-tabs svg { width: 20px; height: 20px; }
+.tk-tabs a { position: relative; }
+.tk-tabs .count { position: absolute; top: 3px; left: calc(50% + 5px); min-width: 1.3em; text-align: center; font-size: .62rem; font-weight: 700; line-height: 1.3; padding: 0 4px; border-radius: 999px; background: var(--accent-fill); color: var(--on-accent); }
 .tk-menu { background: var(--card); color: var(--fg); border: 1px solid var(--line-strong); padding: var(--sp-3) var(--sp-4); padding-bottom: calc(var(--sp-3) + env(safe-area-inset-bottom)); box-shadow: var(--shadow-float); }
 .tk-menu a { display: block; padding: 10px 4px; color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--line); }
 .tk-menu .grp { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .08em; color: var(--subtle); font-weight: 600; padding: var(--sp-3) 4px var(--sp-1); }
@@ -206,7 +208,7 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
   .tk-tabs { display: grid; }
   .tk-main { padding: 12px var(--sp-4) calc(72px + env(safe-area-inset-bottom)); }
   .tk-head { flex-direction: column; }
-  .tk-head h1 { font-size: var(--fs-xl); overflow-wrap: anywhere; }
+  .tk-head h1 { font-size: var(--fs-xl); overflow-wrap: anywhere; position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; margin: 0; }
   .tk-head .actions { width: 100%; }
   .tk-grid.two, .tk-grid.three { grid-template-columns: 1fr; }
   .tk-drawer, .tk-dialog, .tk-menu { margin: auto 0 0; width: 100%; max-width: 100%; max-height: 85vh; max-height: 85dvh; border-radius: var(--r-card) var(--r-card) 0 0; padding-bottom: calc(var(--sp-4) + env(safe-area-inset-bottom)); }

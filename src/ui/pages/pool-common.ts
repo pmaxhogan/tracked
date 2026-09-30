@@ -23,6 +23,7 @@ export const POOL_CSS = /* css */ `
   ul.plain li a.open .go { margin-top: var(--sp-2); color: var(--accent); font-weight: 600; }
   .pool-h2 { margin: var(--sp-5) 0 var(--sp-3); }
   .tk-table td.num { white-space: nowrap; }
+  @media (min-width: 700px) { .tk-table td.acts-cell { white-space: nowrap; } .tk-table td.acts-cell .acts { flex-wrap: nowrap; } }
   .tk-table td:not([data-label])::before { content: none; }
   .acts { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
   .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); }
@@ -45,7 +46,7 @@ export const POOL_CSS = /* css */ `
   /* Captcha widget: big touch targets, a phone is the main client. */
   .cap-img { display: block; width: 100%; max-width: 100%; min-height: 4rem; border: 1px solid var(--line-strong); border-radius: var(--r-tile); background: #fff; image-rendering: auto; }
   .cap-form { display: flex; flex-direction: column; gap: var(--sp-3); margin-top: var(--sp-3); }
-  .cap-form input { font: inherit; color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); font-size: 1.6rem; padding: 0.7rem 0.8rem; min-height: 3.4rem; letter-spacing: 0.08em; text-align: center; }
+  .cap-form input:not([type=checkbox]):not([type=radio]), .tk-card .cap-form input:not([type=checkbox]):not([type=radio]), dialog .cap-form input:not([type=checkbox]):not([type=radio]) { font: inherit; color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); font-size: 1.6rem; padding: 0.7rem 0.8rem; min-height: 3.4rem; width: 100%; letter-spacing: 0.08em; text-align: center; }
   .cap-form input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .cap-form .btn { font-size: 1.15rem; min-height: 3.2rem; }
   .cap-tools { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
@@ -53,7 +54,7 @@ export const POOL_CSS = /* css */ `
   .cap-msg { min-height: 1.4em; margin-top: var(--sp-3); font-weight: 600; }
   .cap-msg.ok { color: var(--ok); }
   .cap-msg.bad { color: var(--danger); }
-  .cap-live { width: 100%; height: 70vh; min-height: 22rem; border: 1px solid var(--line-strong); border-radius: var(--r-tile); background: #000; }
+  .cap-live { width: 100%; height: min(55dvh, 520px); min-height: 320px; border: 1px solid var(--line-strong); border-radius: var(--r-tile); background: #000; }
   .left { font-variant-numeric: tabular-nums; }
   .left.soon { color: var(--danger); font-weight: 700; }
   .banner { border-radius: var(--r-tile); padding: var(--sp-3) var(--sp-4); margin: var(--sp-3) 0; font-weight: 600; }
@@ -71,9 +72,12 @@ export const POOL_CSS = /* css */ `
   table.sched td, table.sched th { padding: 6px 6px; border-bottom: 1px solid var(--line); text-align: left; }
   table.sched th { color: var(--muted); font-size: var(--fs-xs); font-weight: 600; }
   table.sched input { width: 5.5rem; }
-  .prio { display: flex; align-items: center; gap: var(--sp-2); padding: 6px 0; border-bottom: 1px solid var(--line); }
-  .prio .n { width: 1.5rem; color: var(--muted); }
-  .prio .name { flex: 1; }
+  .prio { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-2); padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .prio .n { color: var(--muted); }
+  .prio .name { font-weight: 600; }
+  .prio .muted { flex: 1 1 12rem; font-size: var(--fs-sm); }
+  .prio .btn { margin-left: auto; }
+  .prio .btn + .btn { margin-left: 0; }
 `
 
 /** Shared helpers for every pool page. */
