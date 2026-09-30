@@ -43,6 +43,8 @@ export type FullRecordingInput = {
   /** videos.list player.embedWidth / embedHeight (requested with maxWidth). */
   embedWidth: number | null
   embedHeight: number | null
+  /** Apply rule (d). Off unless `REJECT_VERTICAL` is set (lib/playlist-hygiene.ts rejectVerticalEnabled). */
+  rejectVertical?: boolean
 }
 
 export type FullRecordingDecision = { ok: true } | { ok: false; reason: RejectReason; detail: string }
@@ -72,7 +74,7 @@ export function decideFullRecording(i: FullRecordingInput): FullRecordingDecisio
       return { ok: false, reason: 'audio_longer', detail: `audio ${fmt(i.audioMaxSeconds)} > video ${fmt(i.videoSeconds)} + 10:00` }
     }
   }
-  if (isVertical(i.embedWidth, i.embedHeight) === true) {
+  if (i.rejectVertical === true && isVertical(i.embedWidth, i.embedHeight) === true) {
     return { ok: false, reason: 'vertical', detail: `embed ${i.embedWidth}x${i.embedHeight}` }
   }
   return { ok: true }

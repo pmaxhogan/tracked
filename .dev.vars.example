@@ -38,3 +38,7 @@ DEV_BYPASS_CF_ACCESS=1
 # project (default 0 = never; 3 in production).
 # MKVID_DAILY_CLAIM_CAP=6
 # MKVID_SHARED_DAILY_CLAIM_CAP=3
+
+# Optional. "1" turns on the vertical-video rule of the playlist full-recording
+# check. Default off until a known Short and a known 16:9 video are checked live.
+# REJECT_VERTICAL=1

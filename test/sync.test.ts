@@ -68,7 +68,7 @@ vi.mock('../src/lib/video-meta', async () => {
 
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-index'
 import { getVideoMeta } from '../src/lib/video-meta'
-import { recordRemoved } from '../src/lib/playlist-blocklist'
+import { confirmedMembership, recordRemoved } from '../src/lib/playlist-blocklist'
 import {
   addVideoToPlaylist,
   createPlaylist,
@@ -789,6 +789,8 @@ describe('syncOne', () => {
       trigger: 'cron.pending',
     })
     expect(rows[0]!.metadata).toMatchObject({ status: 'replaced', vid: 'officialV12', prev: 'phoneVid123' })
+    // Membership evidence for the comparison (W6 review M1): the confirmed insert is 'in', the sync's own removal 'out'.
+    expect(Object.fromEntries(await confirmedMembership(env, 'PLartist'))).toEqual({ officialV12: 'in', phoneVid123: 'out' })
   })
 
   it('still swaps when the old video was already removed by hand', async () => {
@@ -1032,6 +1034,8 @@ describe('syncOne', () => {
     expect(state.failureCounts).toEqual({})
     expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('phoneVid123')
     expect(await playlistAdditions(env)).toEqual([])
+    // The row still names the old video, which the sync itself took out: the comparison must not read it as the owner's removal.
+    expect((await confirmedMembership(env, 'PLartist')).get('phoneVid123')).toBe('out')
   })
 
   it('leaves a transiently failing recheck due for the next tick', async () => {

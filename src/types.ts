@@ -33,6 +33,8 @@ export type Env = {
   MKVID_SHARED_DAILY_CLAIM_CAP?: string
   /** Playlist sweep (lib/playlist-hygiene.ts): TRUE unless "0"/"false"/"no"/"off" — rejected videos are only reported, not removed. */
   PLAYLIST_SWEEP_DRY_RUN?: string
+  /** "1" turns on the vertical-video rule of the full-recording check (default off until verified live). */
+  REJECT_VERTICAL?: string
   /** Playlist sweep: max playlistItems.delete calls per UTC day (50 quota units each; default 40). */
   PLAYLIST_SWEEP_DAILY_REMOVALS?: string
   YOUTUBE_API_KEY: string

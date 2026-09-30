@@ -26,6 +26,7 @@
  * delete. Only an mkvid that renders `scene` is handed a recreation.
  */
 
+import { markOutOfPlaylist } from './playlist-blocklist'
 import type { Env } from '../types'
 import { dbOf } from './db'
 import { errorFields, type Logger } from './log'
@@ -242,6 +243,7 @@ export async function retireReplacedVideo(
   }
   if (a.playlistVideoIds.has(a.oldVideoId)) {
     removedFromArtist = await removeVideoFromPlaylist(a.playlistId, a.oldVideoId, a.accessToken)
+    await markOutOfPlaylist(env, a.playlistId, a.oldVideoId, 'recreate')
     a.playlistVideoIds.delete(a.oldVideoId)
     await cachePlaylistVideoIds(env, a.playlistId, a.playlistVideoIds)
   }

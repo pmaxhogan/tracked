@@ -84,7 +84,10 @@ hygieneApp.post('/api/set/remove-replace', async (c) => {
   const token = await getAccessToken(c.env)
   if (!token) return c.json({ error: 'youtube_not_connected' }, 409)
   const r = await removeAndReplace(c.env, token.accessToken, { slug, setUrl: url, log })
-  if (!r.ok) return c.json({ error: r.error, message: r.error === 'no_video' ? 'this set has no video in the playlists' : 'set not known to the sync' }, r.error === 'not_found' ? 404 : 409)
+  if (!r.ok) {
+    const message = r.error === 'no_video' ? 'this set has no video in the playlists' : r.error === 'mkvid_video' ? 'the video is an mkvid render; use Delete and recreate instead' : 'set not known to the sync'
+    return c.json({ error: r.error, message }, r.error === 'not_found' ? 404 : 409)
+  }
   return c.json(r)
 })
 
