@@ -123,6 +123,8 @@ describe('pool UI: Cloudflare Access gate', () => {
     ['GET', '/subscriptions/api/pool/challenges/ch-1/image'],
     ['POST', '/subscriptions/api/pool/challenges/ch-1/answer'],
     ['GET', '/subscriptions/api/pool/challenges/ch-1/live/'],
+    ['GET', '/subscriptions/api/pool/challenges/ch-1/live/core/rfb.js'],
+    ['GET', '/subscriptions/api/pool/challenges/ch-1/live/websockify'],
     ['GET', '/subscriptions/api/pool/limits'],
     ['PUT', '/subscriptions/api/pool/limits'],
   ]
@@ -130,7 +132,11 @@ describe('pool UI: Cloudflare Access gate', () => {
     const fetchSpy = vi.fn(async () => new Response('{}'))
     vi.stubGlobal('fetch', fetchSpy)
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: undefined, CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'owner@example.com' })
-    const { r, text } = await req(mainApp, path, { method }, env)
+    // A same-origin JSON request (the CSRF guard lets it through), so the Access gate is what answers.
+    const init: RequestInit = method === 'GET'
+      ? { method, ...(path.endsWith('/websockify') ? { headers: { Upgrade: 'websocket', Connection: 'Upgrade', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' } } : {}) }
+      : { method, headers: { 'Sec-Fetch-Site': 'same-origin', 'content-type': 'application/json' }, body: '{}' }
+    const { r, text } = await req(mainApp, path, init, env)
     expect(r.status).toBe(401)
     expect(fetchSpy).not.toHaveBeenCalled()
     expectNoLeak(r, text)
@@ -215,7 +221,7 @@ describe('pool UI: accounts and status', () => {
     calls.forEach(expectAuthed)
     expect(data.status.accounts[0]).toEqual({
       id: 'acct-1', state: 'active', passive: false, exitLabel: 'ifog-2', exitKind: 'own', usedToday: 12, budget: 30, rampDay: 3,
-      lastOkAt: '2026-09-29T10:00:00.000Z', lastChallengeAt: null, flagged: false, flagReason: null, restUntil: null,
+      lastOkAt: '2026-09-29T10:00:00.000Z', lastChallengeAt: null, flagged: false, flagReason: null, restUntil: null, xhrUsedToday: null, xhrBudget: null,
     })
     expect(data.status.accounts[1]).toMatchObject({ id: 'acct-2', flagged: true, passive: true, flagReason: 'decoy_names' })
     expect(data.status.queueDepth).toBe(12)
@@ -409,7 +415,7 @@ describe('pool UI: tlpool settings (/api/pool/limits)', () => {
   it('GET normalises (percent share becomes a fraction)', async () => {
     const { fetcher, calls } = fakePool({ 'GET /settings': () => json({ budget_per_day: 30, ramp: [10, 20], reserved_phone_share: 15, image_policy: 'block', admin_password: SECRET_PASS }) })
     const { data, text } = await req(mount(fetcher), '/subscriptions/api/pool/limits')
-    expect(data.settings).toEqual({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.15, imagePolicy: 'block' })
+    expect(data.settings).toEqual({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.15, imagePolicy: 'block', xhrBudgetPerDay: null, priorityCeilings: null })
     expectAuthed(calls[0])
     expectNoCredentials(text)
   })
@@ -429,7 +435,7 @@ describe('pool UI: tlpool settings (/api/pool/limits)', () => {
 
   it('PUT rejects bad values before tlpool', async () => {
     const { fetcher, calls } = fakePool({})
-    for (const body of [{ budgetPerDay: -1 }, { budgetPerDay: 2.5 }, { ramp: 'x' }, { reservedPhoneShare: 0.95 }, { imagePolicy: 'Block<>' }, {}, null]) {
+    for (const body of [{ budgetPerDay: -1 }, { budgetPerDay: 2.5 }, { ramp: 'x' }, { reservedPhoneShare: 1.5 }, { budgetPerDay: 0 }, { budgetPerDay: 501 }, { imagePolicy: 'Block<>' }, { imagePolicy: 'sometimes' }, { xhrBudgetPerDay: -1 }, { priorityCeilings: { phone: 0.5 } }, { priorityCeilings: { backfill: 2 } }, {}, null]) {
       const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/limits', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       expect(r.status).toBe(400)
       expect(data.error).toBe('invalid')
@@ -441,10 +447,10 @@ describe('pool UI: tlpool settings (/api/pool/limits)', () => {
 describe('normalisers', () => {
   it('drop every field outside the whitelist', () => {
     const a = normalizeAccount(upstreamAccount('acct-1', { exit: { label: 'x', wgPrivateKey: 'k' } }))!
-    expect(Object.keys(a).sort()).toEqual(['budget', 'exitKind', 'exitLabel', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastOkAt', 'passive', 'rampDay', 'restUntil', 'state', 'usedToday'])
+    expect(Object.keys(a).sort()).toEqual(['budget', 'exitKind', 'exitLabel', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastOkAt', 'passive', 'rampDay', 'restUntil', 'state', 'usedToday', 'xhrBudget', 'xhrUsedToday'])
     expect(JSON.stringify(a)).not.toContain('wgPrivateKey')
     const c = normalizeChallenge(upstreamChallenge('ch-1'))!
-    expect(Object.keys(c).sort()).toEqual(['accountId', 'createdAt', 'error', 'expiresAt', 'id', 'reason', 'state', 'step', 'type'])
+    expect(Object.keys(c).sort()).toEqual(['accountId', 'createdAt', 'error', 'expiresAt', 'id', 'ready', 'reason', 'state', 'step', 'type'])
   })
   it('refuse ids that are not opaque tokens', () => {
     expect(normalizeAccount({ id: '../x' })).toBeNull()
@@ -563,11 +569,12 @@ describe('pool pages: HTML smoke', () => {
   })
 
   it('the Add account dialog shows a plain-words error with a retry', async () => {
-    const { fetcher } = fakePool({ 'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json([]), 'POST /accounts': () => json({ error: 'no_free_exit' }, 409) })
+    // tlpool's real refusal: 409 {error: no_exit_available, message}.
+    const { fetcher } = fakePool({ 'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json([]), 'POST /accounts': () => json({ error: 'no_exit_available', message: 'no free exit in the registry' }, 409) })
     const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
     await (els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
     await settle()
-    expect(els.get('add-msg')!.innerHTML).toContain('The pool is already busy doing that. (no free exit)')
+    expect(els.get('add-msg')!.innerHTML).toContain('There is no free exit IP to pin a new account to. no free exit in the registry')
     expect(els.get('add-retry')!.hidden).toBe(false)
   })
 
@@ -595,13 +602,48 @@ describe('pool pages: HTML smoke', () => {
     expectNoCredentials([...list.values(), ...one.values()].map((e) => e.innerHTML).join())
   })
 
-  it('a checkbox challenge shows the live view instead of an answer box', async () => {
-    const { fetcher } = fakePool({ 'GET /challenges/ch-8': () => json(upstreamChallenge('ch-8', { type: 'checkbox' })) })
-    const one = await runPage(POOL_PAGES.captchaPageHtml('ch-8'), mount(fetcher), makeEnv())
-    const w = one.get('widget')!.innerHTML
+  it('a checkbox challenge shows the live view and a "Done, I clicked it" button, and polls every 3 s until tlpool reports it solved', async () => {
+    let status = 'pending'
+    const { fetcher } = fakePool({ 'GET /challenges/ch-8': () => json(upstreamChallenge('ch-8', { type: 'checkbox', state: undefined, status })) })
+    const pg = await runPageTimed(POOL_PAGES.captchaPageHtml('ch-8'), mount(fetcher), makeEnv())
+    const w = pg.els.get('widget')!.innerHTML
     expect(w).toContain('Tap the checkbox')
-    expect(w).toContain('/subscriptions/api/pool/challenges/ch-8/live/?')
+    expect(w).toContain('/subscriptions/api/pool/challenges/ch-8/live/?path=')
+    expect(w).toContain('Done, I clicked it')
     expect(w).not.toContain('Submit answer')
+    expect(pg.pending().map((t) => t.ms)).toContain(3000)
+    status = 'solved' // the owner clicked the box; tlpool noticed the wall clear by itself
+    await pg.fire(3000)
+    expect(pg.els.get('state')!.innerHTML).toContain('Solved')
+  })
+
+  it('"Done, I clicked it" posts {done: true} and says so when the wall is still up', async () => {
+    const answers: unknown[] = []
+    let verdict: Response = json({ status: 'pending', error: 'the checkbox wall is still up' }, 422)
+    const { fetcher } = fakePool({
+      'GET /challenges/ch-8': () => json(upstreamChallenge('ch-8', { type: 'checkbox' })),
+      'POST /challenges/ch-8/answer': (c) => (answers.push(c.body), verdict),
+    })
+    const root = stubEl()
+    const pg = await runPageTimed(POOL_PAGES.captchaPageHtml('ch-8'), mount(fetcher), makeEnv(), { query: { '[data-r=done]': root } })
+    await (root.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(answers).toEqual([{ done: true }])
+    const msgEl = pg.q['[data-r=msg]']!
+    expect(msgEl.textContent).toContain('Not through yet')
+    verdict = json({ status: 'solved' })
+    await (root.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(msgEl.textContent).toContain('Through')
+  })
+
+  it('the answer route takes {done: true} for a checkbox and at most 64 characters of text', async () => {
+    const { fetcher, calls } = fakePool({ 'POST /challenges/ch-1/answer': () => json({ status: 'solved' }) })
+    const post = (body: unknown) => req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-1/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect((await post({ done: true })).data).toEqual({ outcome: 'solved' })
+    expect(calls[0]!.body).toEqual({ done: true })
+    expect((await post({ text: 'x'.repeat(65) })).r.status).toBe(400)
+    expect(calls).toHaveLength(1)
   })
 
   /** The UI next to W4's real settings routes, as index.ts mounts them. */
@@ -665,5 +707,226 @@ describe('service worker', () => {
     expect(text).toContain('data: { url: data.url')
     expect(text).toContain('self.clients.openWindow(target)')
     expect(text).toMatch(/requireInteraction:.*challenge/)
+  })
+})
+
+// ─── a runPage whose timers, clock and visibility the test drives ───────────
+type Timer = { fn: () => unknown; ms: number; id: number; cleared: boolean }
+async function runPageTimed(html: string, appl: Appl, env: Env, opts: { query?: Record<string, StubEl>; now?: () => number } = {}) {
+  const els = new Map<string, StubEl>()
+  const timers: Timer[] = []
+  const q: Record<string, StubEl> = { ...(opts.query ?? {}) }
+  const visHandlers: Array<() => void> = []
+  let nextId = 1
+  const document = {
+    hidden: false,
+    getElementById: (id: string) => {
+      if (!els.has(id)) {
+        const el = stubEl()
+        // mountCaptcha looks its parts up with querySelector on its root.
+        el.querySelector = ((sel: string) => (q[sel] ??= stubEl())) as never
+        els.set(id, el)
+      }
+      return els.get(id)
+    },
+    querySelector: () => null,
+    addEventListener: (type: string, fn: () => void) => { if (type === 'visibilitychange') visHandlers.push(fn) },
+  }
+  const fetchFromPage = async (path: string, init?: RequestInit) => appl.request(`https://tracked.example${path}`, init, env)
+  const RealDate = Date
+  const FakeDate = opts.now ? class extends RealDate { static now() { return opts.now!() } } : RealDate
+  const ctx = vm.createContext({
+    document, fetch: fetchFromPage, console, Date: FakeDate,
+    setInterval: () => 0, clearInterval() {},
+    setTimeout: (fn: () => unknown, ms: number) => { const t = { fn, ms, id: nextId++, cleared: false }; timers.push(t); return t.id },
+    clearTimeout: (id: number) => { const t = timers.find((x) => x.id === id); if (t) t.cleared = true },
+    Option: function (t: string, v: string) { return { text: t, value: v } },
+  })
+  for (const sc of scriptsOf(html)) vm.runInContext(sc, ctx)
+  await settle()
+  const pending = () => timers.filter((t) => !t.cleared)
+  /** Run (and consume) every pending timer set for `ms`. */
+  async function fire(ms: number) {
+    const due = pending().filter((t) => t.ms === ms)
+    for (const t of due) { t.cleared = true; await t.fn() }
+    await settle()
+    return due.length
+  }
+  async function setHidden(h: boolean) {
+    document.hidden = h
+    for (const f of visHandlers) f()
+    await settle()
+  }
+  return { els, q, timers, pending, fire, setHidden, document }
+}
+
+describe('polling on the pool pages', () => {
+  const statusOnce = () => json({ accounts: [upstreamAccount('acct-1')], queueDepth: 0 })
+
+  it('pauses while the tab is hidden and runs once when it comes back', async () => {
+    const { fetcher, calls } = fakePool({ 'GET /status': statusOnce, 'GET /challenges': () => json({ challenges: [] }) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const before = calls.length
+    pg.document.hidden = true
+    expect(await pg.fire(20000)).toBe(1)
+    expect(calls.length).toBe(before) // hidden: nothing fetched, nothing rescheduled
+    expect(pg.pending().filter((t) => t.ms === 20000)).toHaveLength(0)
+    await pg.setHidden(false)
+    expect(calls.length).toBeGreaterThan(before)
+    expect(pg.pending().some((t) => t.ms === 20000)).toBe(true)
+  })
+
+  it('backs off on errors and stops with "sign in again" on 401/403', async () => {
+    let status = 503
+    const { fetcher } = fakePool({ 'GET /status': () => json({ error: 'busy' }, status), 'GET /challenges': () => json({ challenges: [] }) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await pg.fire(20000)
+    expect(pg.pending().some((t) => t.ms === 40000)).toBe(true) // doubled after one failure
+    await pg.fire(40000)
+    expect(pg.pending().some((t) => t.ms === 60000)).toBe(true) // capped at a minute
+    // The Worker's own Access gate answering 401 (the browser's session expired).
+    const appl = new Hono<{ Bindings: Env }>()
+    appl.get('/subscriptions/api/pool/status', (c) => c.json({ error: 'unauthorized' }, 401))
+    appl.route('/subscriptions', createPoolUiApp({ fetcher }))
+    const pg2 = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, appl, makeEnv())
+    await pg2.fire(20000)
+    expect(pg2.pending().filter((t) => t.ms >= 20000)).toHaveLength(0)
+    expect(pg2.els.get('err')!.textContent).toContain('sign in again')
+    status = 200
+  })
+
+  it('stops for good after 15 minutes', async () => {
+    let clock = Date.now()
+    const { fetcher, calls } = fakePool({ 'GET /status': statusOnce, 'GET /challenges': () => json({ challenges: [] }) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv(), { now: () => clock })
+    clock += 15 * 60000 + 1
+    const before = calls.length
+    await pg.fire(20000)
+    expect(calls.length).toBe(before)
+    expect(pg.pending().filter((t) => t.ms >= 20000)).toHaveLength(0)
+    expect(pg.els.get('err')!.textContent).toContain('15 minutes')
+  })
+
+  it('the add-account poll keeps its stall guard on errors and stops when the dialog closes', async () => {
+    let clock = Date.now()
+    const { fetcher, calls } = fakePool({
+      'GET /status': statusOnce, 'GET /challenges': () => json({ challenges: [] }),
+      'POST /accounts': () => json({ challengeId: 'ch_s1', accountId: 'acct-7' }),
+      'GET /challenges/ch_s1': () => json({ error: 'busy' }, 503),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv(), { now: () => clock })
+    await (pg.els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    clock += 11 * 60000
+    await pg.fire(2500)
+    expect(pg.els.get('add-msg')!.innerHTML).toContain('No progress for 10 minutes')
+    // A fresh flow, then the dialog closes: nothing is polled any more.
+    const pg2 = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await (pg2.els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    await (pg2.els.get('add-dlg')!.handlers as Record<string, () => void>).close!()
+    await settle()
+    const n = calls.length
+    await pg2.fire(2500)
+    expect(calls.filter((c, i) => i >= n && c.url.includes('/challenges/ch_s1'))).toHaveLength(0)
+  })
+})
+
+describe('tlpool as shipped', () => {
+  it('a signup whose form has no captcha never waits at the captcha step; it shows as skipped', async () => {
+    let row: Record<string, unknown> = { id: 'ch_s2', type: 'image', account: 'acct-8', purpose: 'signup', status: 'pending', step: 'form_opened', ready: false, error: null }
+    const { fetcher } = fakePool({
+      'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json({ challenges: [] }),
+      'POST /accounts': () => json({ challengeId: 'ch_s2', accountId: 'acct-8' }),
+      'GET /challenges/ch_s2': () => json(row),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await (pg.els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(pg.els.get('add-captcha')?.innerHTML ?? '').toBe('') // pending but not ready: nothing to answer
+    row = { ...row, status: 'solved', step: 'awaiting_email', ready: false }
+    await pg.fire(2500)
+    const steps = pg.els.get('add-steps')!.innerHTML
+    expect(steps).toContain('No captcha needed')
+    expect(steps).not.toContain('Waiting for your captcha')
+    row = { ...row, step: 'done' }
+    await pg.fire(2500)
+    expect(pg.els.get('add-msg')!.innerHTML).toContain('acct-8 is ready')
+  })
+
+  it('a signup captcha shows once tlpool marks the challenge ready', async () => {
+    const row = { id: 'ch_s3', type: 'image', account: 'acct-9', purpose: 'signup', status: 'pending', step: 'awaiting_captcha', ready: true }
+    const { fetcher } = fakePool({
+      'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json({ challenges: [] }),
+      'POST /accounts': () => json({ challengeId: 'ch_s3', accountId: 'acct-9' }),
+      'GET /challenges/ch_s3': () => json(row),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await (pg.els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(pg.els.get('add-captcha')!.innerHTML).toContain('cap-img')
+  })
+
+  it('reads the real /status shape: warming accounts fetch, queueByPriority, totals.usedToday', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': () => json({
+        accounts: [
+          { id: 'acct-1', state: 'warming', passive: false, exitLabel: 'e1', usedToday: 4, budget: 10, usedXhrToday: 2, xhrBudget: 20 },
+          { id: 'acct-2', state: 'active', passive: false, exitLabel: 'e2', usedToday: 11, budget: 30 },
+        ],
+        queueDepth: 3, queueByPriority: { new: 2, recheck: 1 },
+        totals: { fetchOk: 9, fetchError: 1, pageViews: 99, usedToday: 15, budgetToday: 40, accountsByState: { warming: 1, active: 1 } },
+      }),
+      'GET /challenges': () => json({ challenges: [] }),
+    })
+    const { data } = await req(mount(fetcher), '/subscriptions/api/pool/status')
+    expect(data.status).toMatchObject({ queueDepth: 3, queueByPriority: { new: 2, recheck: 1 }, requestsToday: 15, budgetToday: 40 })
+    expect(data.status.accounts[0]).toMatchObject({ state: 'warming', xhrUsedToday: 2, xhrBudget: 20 })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const stats = pg.els.get('stats')!.innerHTML
+    expect(stats).toContain('15 / 40') // used / budget counts the warming account
+    expect(stats).toContain('2 / 2') // fetching / live
+    expect(pg.els.get('prio')!.innerHTML).toContain('recheck')
+  })
+
+  it('a failed signup shows tlpool\'s plain-words reason', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json({ challenges: [] }),
+      'POST /accounts': () => json({ challengeId: 'ch_s4', accountId: 'acct-4' }),
+      'GET /challenges/ch_s4': () => json({ id: 'ch_s4', status: 'failed', step: 'submitted', error: 'the site rejected the registration form', ready: false }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await (pg.els.get('add-create')!.handlers as Record<string, () => Promise<void>>).click!()
+    await settle()
+    expect(pg.els.get('add-msg')!.innerHTML).toContain('the site rejected the registration form')
+  })
+
+  it('an error tlpool answers with HTTP 200 is still an error (read from the body, not the status)', async () => {
+    const { fetcher } = fakePool({ 'POST /accounts': () => json({ error: 'no_exit_available', message: 'no free exit in the registry' }, 200) })
+    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    expect(r.status).toBe(409)
+    expect(data).toEqual({ error: 'conflict', detail: 'no_exit_available', message: 'no free exit in the registry' })
+  })
+
+  it('an upstream message that could carry an address or secret is dropped', async () => {
+    const { fetcher } = fakePool({ 'GET /accounts': () => json({ error: 'db_locked', message: 'see https://x.example/y' }, 500) })
+    const { data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts')
+    expect(data).toEqual({ error: 'pool_error', detail: 'db_locked' })
+  })
+
+  it('settings: xhrBudgetPerDay and priorityCeilings are read, shown and saved', async () => {
+    const puts: unknown[] = []
+    const settings = { budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.2, imagePolicy: 'allow', xhrBudgetPerDay: 60, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.75 }, minGapSeconds: 35 }
+    const { fetcher } = fakePool({ 'GET /settings': () => json(settings), 'PUT /settings': (c) => (puts.push(c.body), json({ ...settings, ...(c.body as object) })) })
+    const { data } = await req(mount(fetcher), '/subscriptions/api/pool/limits')
+    expect(data.settings).toEqual({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.2, imagePolicy: 'allow', xhrBudgetPerDay: 60, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.75 } })
+    const pg = await runPageTimed(POOL_PAGES.SETTINGS_PAGE_HTML, mount(fetcher), makeEnv())
+    expect(pg.els.get('xhr')!.value).toBe(60)
+    expect(pg.els.get('ceil-backfill')!.value).toBe(75)
+    pg.els.get('xhr')!.value = '80' as never
+    pg.els.get('ceil-backfill')!.value = '50' as never
+    await (pg.els.get('lim')!.handlers as Record<string, (e: unknown) => Promise<void>>).submit!({ preventDefault() {} })
+    await settle()
+    expect(puts[0]).toMatchObject({ xhrBudgetPerDay: 80, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.5 } })
   })
 })

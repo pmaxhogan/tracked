@@ -44,7 +44,7 @@ function poolStub() {
 }
 
 const post = (env: Env, path: string, body: unknown) =>
-  app.request(`http://x${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env)
+  app.request(`http://x${path}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env)
 
 afterEach(() => vi.unstubAllGlobals())
 

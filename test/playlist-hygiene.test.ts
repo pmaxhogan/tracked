@@ -532,7 +532,7 @@ describe('routes', () => {
   it('remove-replace validates input and reports a set without a video', async () => {
     const { app } = await import('../src/index')
     const env = makeEnv()
-    const post = (body: unknown) => app.request('http://x/subscriptions/api/set/remove-replace', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env)
+    const post = (body: unknown) => app.request('http://x/subscriptions/api/set/remove-replace', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env)
     expect((await post({ slug: 'dj' })).status).toBe(400)
     await seedSet(env, setUrl(1), null)
     expect((await post({ slug: SLUG, url: setUrl(1) })).status).toBe(409)

@@ -1314,6 +1314,8 @@ ${BAN_HISTORY_HTML}
       const r = await fetch('/subscriptions/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {
         method: 'POST',
         credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
       });
       const raw = await r.text();
       let data = {};
@@ -1472,7 +1474,7 @@ ${BAN_HISTORY_HTML}
       // One server-side pass on a single shared fetch budget — NOT one
       // request per row: that loop ran every DJ unpaced and got the
       // 1001tracklists accounts banned (twice).
-      const r = await fetch('/subscriptions/api/resync', { method: 'POST', credentials: 'same-origin' });
+      const r = await fetch('/subscriptions/api/resync', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
       const raw = await r.text();
       let data = {};
       try { data = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON body, fall through */ }
@@ -1542,7 +1544,7 @@ ${BAN_HISTORY_HTML}
     if (!confirm('Disconnect this app from your YouTube account?')) return;
     $ytAction.disabled = true;
     try {
-      const r = await fetch('/subscriptions/oauth/disconnect', { method: 'POST', credentials: 'same-origin' });
+      const r = await fetch('/subscriptions/oauth/disconnect', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
       if (!r.ok) { showError('disconnect failed (' + r.status + ')'); return; }
       await loadYouTubeStatus();
     } finally {
@@ -1984,7 +1986,7 @@ ${BAN_HISTORY_HTML}
     const original = $cmbBackfill.textContent;
     $cmbBackfill.textContent = 'Backfilling…';
     try {
-      const r = await fetch('/subscriptions/api/combined/backfill', { method: 'POST', credentials: 'same-origin' });
+      const r = await fetch('/subscriptions/api/combined/backfill', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         if (r.status === 412 && data.error === 'youtube_reauth_required') { showReauthError(); loadYouTubeStatus(); return; }
@@ -2196,7 +2198,7 @@ ${BAN_HISTORY_HTML}
     const post = async (btn, url, what) => {
       btn.disabled = true;
       try {
-        const resp = await fetch(url, { method: 'POST', credentials: 'same-origin' });
+        const resp = await fetch(url, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (!resp.ok) showError(what + ' failed (' + resp.status + ')');
         await loadMkvid();
       } finally { btn.disabled = false; }
@@ -2212,7 +2214,7 @@ ${BAN_HISTORY_HTML}
     if (retry) retry.addEventListener('click', async () => {
       retry.disabled = true;
       try {
-        const resp = await fetch('/subscriptions/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin' });
+        const resp = await fetch('/subscriptions/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (!resp.ok) showError('retry failed (' + resp.status + ')');
         await loadMkvid();
       } finally { retry.disabled = false; }
@@ -2237,7 +2239,7 @@ ${BAN_HISTORY_HTML}
     b.addEventListener('click', async () => {
       b.disabled = true;
       try {
-        const resp = await fetch('/subscriptions/api/mkvid/old-videos/' + encodeURIComponent(o.videoId) + '/retry', { method: 'POST', credentials: 'same-origin' });
+        const resp = await fetch('/subscriptions/api/mkvid/old-videos/' + encodeURIComponent(o.videoId) + '/retry', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (!resp.ok) showError('delete retry failed (' + resp.status + ')');
         await loadMkvid();
       } finally { b.disabled = false; }
