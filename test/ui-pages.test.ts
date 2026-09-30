@@ -19,6 +19,7 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/captcha/ch-1', 'Captcha'],
   ['/ui/set', 'Set'],
   ['/ui/dj/some-dj', ''],
+  ['/ui/removed', 'Removed videos'],
 ]
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
