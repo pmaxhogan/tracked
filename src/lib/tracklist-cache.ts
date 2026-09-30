@@ -184,7 +184,3 @@ export async function readCachedTracklist(env: Env, slug: string): Promise<Cache
   if (Array.isArray(cached)) return { tracks: cached, setAppleLink: null, setYoutubeLink: null, setSoundcloudLink: null }
   return cached
 }
-
-export async function deleteCachedTracklist(env: Env, slug: string): Promise<void> {
-  await env.CACHE.delete(tracklistCacheKey(slug))
-}

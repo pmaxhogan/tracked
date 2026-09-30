@@ -4,7 +4,7 @@ import type { Env, ParsedTrack, ResponseTrack, Status } from '../types'
 import { resolveVideo, extractVideoId } from '../lib/youtube'
 import { searchByYouTubeUrl, searchByTitle, DecoyTracklistError, keepRows } from '../lib/tracklists1001'
 import { fetchOptsFromEnv } from '../lib/upstream1001'
-import { resolveTracklistPage, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
+import { resolveTracklistPage, resolveTrackMediaLinks, type CachedTracklist } from '../lib/tracklist-resolve'
 import { lookupAppleLink } from '../lib/itunes'
 import { selectCurrent } from '../lib/timestamp'
 import { TTL, getJson, putJson, sha1Hex } from '../lib/cache'
@@ -15,7 +15,7 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { attachYoutubeLiked } from '../lib/liked-status'
 import { findMkvidUploadByTitle } from '../lib/mkvid'
 import { findTracklistUrlByVideoId } from '../lib/sync-store'
-import { SEARCH_URL_CV, RefreshFailedError, refreshTracklistPage } from '../lib/tracklist-purge'
+import { SEARCH_URL_CV, RefreshFailedError, refreshTracklistPage, rememberVideoTracklist } from '../lib/tracklist-purge'
 import { cacheAgeSeconds } from '../lib/tracklist-cache'
 
 export const nowPlayingRoute = createRoute({
@@ -316,6 +316,14 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     return respond('no_video', {}, msg)
   }
   log.info('phase.search.resolved', { tracklistUrl, via: tracklistVia })
+  // Whatever step found it: a purge by this video id then refreshes this same list.
+  if (videoId) {
+    try {
+      await rememberVideoTracklist(env, videoId, tracklistUrl)
+    } catch (e) {
+      log.warn('phase.search.remember_failed', { videoId, ...errorFields(e) })
+    }
+  }
 
   // Phase 3 — scrape the tracklist
   let parsedTracks: ParsedTrack[]
@@ -327,11 +335,34 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   let selectable: Array<ParsedTrack & { anonymous?: boolean }>
   let setAppleLink: string | null = null
   // Age of the cached list the answer comes from (`refresh: true` refetches first;
-  // when that fails the cached list is kept and the answer is the error, stale: true).
+  // when that fails a kept list still answers, stale: true with refreshError).
   let cache: Res['cache'] = null
   try {
-    const scraped = body.refresh ? await refreshTracklistPage(env, tracklistUrl, log) : await resolveTracklistPage(env, tracklistUrl, log)
-    cache = { fetchedAt: scraped.fetchedAt ?? null, ageSeconds: cacheAgeSeconds(scraped), ttlSeconds: scraped.ttlSeconds ?? null, refreshed: !!body.refresh }
+    let scraped: CachedTracklist
+    if (body.refresh) {
+      try {
+        const r = await refreshTracklistPage(env, tracklistUrl, log)
+        scraped = r.list
+        cache = {
+          fetchedAt: scraped.fetchedAt ?? null,
+          ageSeconds: cacheAgeSeconds(scraped),
+          ttlSeconds: scraped.ttlSeconds ?? null,
+          refreshed: r.refreshed,
+          ...(r.cooldownSeconds !== undefined ? { cooldownSeconds: r.cooldownSeconds } : {}),
+          ...(r.dailyCapReached ? { dailyCapReached: true } : {}),
+        }
+      } catch (err) {
+        const kept = err instanceof RefreshFailedError ? err.previous : undefined
+        if (!kept || kept.tracks.length === 0) throw err
+        // Decision 19: the phone serves from cache. The kept list answers; the error rides along.
+        scraped = kept
+        cache = { fetchedAt: kept.fetchedAt ?? null, ageSeconds: cacheAgeSeconds(kept), ttlSeconds: kept.ttlSeconds ?? null, refreshed: false, stale: true, refreshError: (err as Error).message.slice(0, 300) }
+        log.warn('phase.scrape.refresh_failed_served_cache', { tracklistUrl, keptFetchedAt: kept.fetchedAt ?? null, error: (err as Error).message })
+      }
+    } else {
+      scraped = await resolveTracklistPage(env, tracklistUrl, log)
+      cache = { fetchedAt: scraped.fetchedAt ?? null, ageSeconds: cacheAgeSeconds(scraped), ttlSeconds: scraped.ttlSeconds ?? null, refreshed: false }
+    }
     parsedTracks = scraped.tracks
     selectable = scraped.rows
       ? keepRows(scraped.rows, (r) => !r.anonymous || (!r.isMashupLinked && r.startSeconds !== null))

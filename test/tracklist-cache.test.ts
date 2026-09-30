@@ -16,7 +16,8 @@ import {
   tracklistCacheTtl,
 } from '../src/lib/tracklist-cache'
 import { parseTracklist } from '../src/lib/tracklists1001'
-import { SEARCH_URL_CV, searchByUrlCacheKey } from '../src/lib/tracklist-purge'
+import { SEARCH_URL_CV, searchByUrlCacheKey, videoTracklistKey } from '../src/lib/tracklist-purge'
+import { DEFAULT_POOL_SETTINGS, updatePoolSettings } from '../src/lib/pool-settings'
 
 // Per-track link enrichment (medialink + iTunes) is not what these tests are
 // about, and would be a network call: stub it, keep the real page resolver.
@@ -387,25 +388,95 @@ describe('/now-playing cache age and refresh flag', () => {
     expect(JSON.parse((await env.CACHE.get(tracklistCacheKey(FULL_SLUG)))!).tracks).toHaveLength(31)
   })
 
-  it('refresh: true whose refetch fails answers upstream_error with cache.stale and keeps the old list', async () => {
+  it('refresh: true whose refetch fails answers the track from the kept list, with cache.stale and the refresh error (review W5 #3)', async () => {
     poolServes(fx('tracklist-decoy-dcr839.html'))
     const env = makeEnv()
     await seedTracklistRow(env, FULL_URL, VIDEO_ID)
     await seedStaleEntry(env)
     const before = await env.CACHE.get(tracklistCacheKey(FULL_SLUG))
     const body = await (await np(env, { refresh: true })).json() as any
-    expect(body.status).toBe('upstream_error')
-    expect(body.message).toMatch(/decoy/)
+    expect(body.status).not.toBe('upstream_error')
+    expect(body.tracks[0]).toMatchObject({ artist: 'Old', title: 'Stale' })
     expect(body.cache).toMatchObject({ refreshed: false, stale: true, fetchedAt: JSON.parse(before!).fetchedAt })
+    expect(body.cache.refreshError).toMatch(/decoy/)
     expect(body.cache.ageSeconds).toBeGreaterThanOrEqual(5 * 3600 - 5)
     expect(await env.CACHE.get(tracklistCacheKey(FULL_SLUG))).toBe(before)
-    // A plain call afterwards is still served from the kept list.
-    const again = await (await np(env)).json() as any
-    expect(again.tracks[0]).toMatchObject({ artist: 'Old', title: 'Stale' })
+  })
+
+  it('refresh: true whose refetch fails with nothing cached is still upstream_error', async () => {
+    poolServes(fx('tracklist-decoy-dcr839.html'))
+    const env = makeEnv()
+    await seedTracklistRow(env, FULL_URL, VIDEO_ID)
+    const body = await (await np(env, { refresh: true })).json() as any
+    expect(body.status).toBe('upstream_error')
+    expect(body.message).toMatch(/decoy/)
+    expect(body.cache).toMatchObject({ refreshed: false, stale: true, fetchedAt: null })
   })
 
   it('refresh must be a boolean', async () => {
     const env = makeEnv()
     expect((await np(env, { refresh: 'yes' })).status).toBe(400)
+  })
+})
+
+describe('review W5 fixes', () => {
+  it('#1 a second forced refetch of the same set within 120 s answers the cached list without a fetch', async () => {
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
+    const env = makeEnv()
+    const a = await (await bearer(env, '/tracklist/purge', { url: FULL_URL })).json() as any
+    expect(a).toMatchObject({ refreshed: true })
+    const b = await (await bearer(env, '/tracklist/purge', { url: FULL_URL })).json() as any
+    expect(b).toMatchObject({ refreshed: false, trackCount: 31 })
+    expect(b.cooldownSeconds).toBeGreaterThan(0)
+    expect(b.cooldownSeconds).toBeLessThanOrEqual(120)
+    expect(calls).toHaveLength(1)
+    // /now-playing refresh: true is limited the same way.
+    await seedTracklistRow(env, FULL_URL, VIDEO_ID)
+    const n = await (await bearer(env, '/now-playing', { videoUrl: VIDEO_ID, currentSeconds: 60, refresh: true })).json() as any
+    expect(n.cache).toMatchObject({ refreshed: false })
+    expect(n.cache.cooldownSeconds).toBeGreaterThan(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('#1 forced refetches stop at the daily cap (a pool setting); the cached list answers', async () => {
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
+    const env = makeEnv()
+    await updatePoolSettings(env, { forcedRefetch: { cooldownSeconds: 0, dailyCap: 2 } })
+    expect(((await (await bearer(env, '/tracklist/purge', { url: FULL_URL })).json()) as any).refreshed).toBe(true)
+    expect(((await (await bearer(env, '/tracklist/purge', { url: FULL_URL })).json()) as any).refreshed).toBe(true)
+    const third = await (await bearer(env, '/tracklist/purge', { url: FULL_URL })).json() as any
+    expect(third).toMatchObject({ refreshed: false, dailyCapReached: true, trackCount: 31 })
+    expect(calls).toHaveLength(2)
+    expect(DEFAULT_POOL_SETTINGS.forcedRefetch).toEqual({ cooldownSeconds: 120, dailyCap: 40 })
+  })
+
+  it('#2 the phone/viewer/purge path reads the set date from the page, like the sync: an undated URL aired yesterday gets 6 h', async () => {
+    poolServes(fx('tracklist-habstrakt.html')) // fully identified, datePublished 2024-11-11
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2024-11-12T12:00:00Z'))
+    const env = makeEnv()
+    const undated = 'https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-waterways.html'
+    const r = await resolveTracklistPage(env, undated, log)
+    expect(r).toMatchObject({ setDate: '2024-11-11', ttlSeconds: TRACKLIST_TTL.SHORT })
+  })
+
+  it('#4 a purge by video id finds the set /now-playing matched, whichever search step found it', async () => {
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
+    const env = makeEnv()
+    await seedTracklistRow(env, FULL_URL, VIDEO_ID)
+    await (await bearer(env, '/now-playing', { videoUrl: VIDEO_ID, currentSeconds: 60 })).json()
+    expect(JSON.parse((await env.CACHE.get(videoTracklistKey(VIDEO_ID)))!)).toEqual({ tracklistUrl: FULL_URL })
+    // Not a synced set any more, and no URL-search entry: only the phone's mapping knows it.
+    await env.DB.prepare('DELETE FROM tracklists').run()
+    const before = calls.length
+    const res = await bearer(env, '/tracklist/purge', { videoId: VIDEO_ID })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as any).tracklistUrl).toBe(FULL_URL)
+    expect(calls.length).toBe(before + 1)
+  })
+
+  it('#5 deleteCachedTracklist is gone (a purge never deletes before the refetch succeeds)', async () => {
+    const mod = await import('../src/lib/tracklist-cache')
+    expect('deleteCachedTracklist' in mod).toBe(false)
   })
 })

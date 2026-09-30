@@ -24,7 +24,7 @@ export const NowPlayingRequest = z
     refresh: z.boolean().optional().openapi({
       example: false,
       description:
-        'When true, the track list for the resolved set is fetched again right now (same as POST /tracklist/purge) before the current track is picked, and replaces the cached one on success. If the refetch fails the cached list is kept and the answer is upstream_error with cache.stale true. Costs one upstream fetch.',
+        'When true, the track list for the resolved set is fetched again right now (same as POST /tracklist/purge) before the current track is picked, and replaces the cached one on success. If the refetch fails the cached list is kept and the track is picked from it (cache.stale true, cache.refreshError); only with no cached list is the answer upstream_error. A repeat for the same set within 120 s, or beyond 40 forced refetches a day, is answered from the cache (cache.refreshed false with cooldownSeconds or dailyCapReached). Costs one upstream fetch.',
     }),
   })
   .refine((d) => Boolean(d.videoTitle || d.videoUrl), {
@@ -79,7 +79,10 @@ export const TracklistCacheInfo = z
     ageSeconds: z.number().int().nullable().openapi({ example: 5400, description: 'Seconds since fetchedAt (null when unknown).' }),
     ttlSeconds: z.number().int().nullable().openapi({ example: 21600, description: 'How long the entry is cached: 259200 (3 days) when every row is identified, 21600 (6 hours) with ID rows or a set under 2 days old.' }),
     refreshed: z.boolean().openapi({ description: 'True when this request refetched the list (refresh: true) and got a fresh one.' }),
-    stale: z.boolean().optional().openapi({ description: 'True when refresh: true was asked but the refetch failed: the answer carries the error, and fetchedAt/ageSeconds describe the older list that was kept (null when there was none).' }),
+    stale: z.boolean().optional().openapi({ description: 'True when refresh: true was asked but the refetch failed. With a kept list the answer is the normal one picked from that list (fetchedAt/ageSeconds describe it) and refreshError says why; with none it is upstream_error.' }),
+    refreshError: z.string().optional().openapi({ description: 'Why the refetch failed (with stale: true).' }),
+    cooldownSeconds: z.number().int().optional().openapi({ description: 'refresh: true was skipped: this set was refetched less than the cooldown (default 120 s) ago; the cached list answered.' }),
+    dailyCapReached: z.boolean().optional().openapi({ description: "refresh: true was skipped: today's forced refetches (default 40) are used up; the cached list answered." }),
   })
   .openapi('TracklistCacheInfo')
 
@@ -313,6 +316,9 @@ export const TracklistPurgeResponse = z
     identifiedCount: z.number().int().openapi({ description: 'Named rows that are not ID.' }),
     fetchedAt: z.string().nullable(),
     ttlSeconds: z.number().int().nullable().openapi({ description: 'How long the fresh list is cached (259200 or 21600).' }),
+    refreshed: z.boolean().openapi({ description: 'False when the refetch was skipped (per-set cooldown or daily cap, pool settings forcedRefetch) and the cached list answered.' }),
+    cooldownSeconds: z.number().int().optional().openapi({ description: 'Skipped by the per-set cooldown (default 120 s): seconds until this set may be refetched.' }),
+    dailyCapReached: z.boolean().optional().openapi({ description: "Skipped because today's forced refetches (default 40, UTC day) are used up." }),
   })
   .openapi('TracklistPurgeResponse')
 

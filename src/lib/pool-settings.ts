@@ -74,6 +74,16 @@ export const PoolSettingsSchema = z.object({
   }),
   /** 1001tracklists fetches one manual button press (sync / resync) may spend (default 10). */
   manualMaxFetches: z.number().int().min(0).max(200),
+  /**
+   * Forced refetches of one set's list (purge routes, the viewer's Refresh,
+   * /now-playing `refresh: true`): a repeat for the same set within
+   * `cooldownSeconds` (default 120) is answered from the cache, and at most
+   * `dailyCap` (default 40) run per UTC day across all sets.
+   */
+  forcedRefetch: z.object({
+    cooldownSeconds: z.number().int().min(0).max(86400),
+    dailyCap: z.number().int().min(0).max(1000),
+  }),
 })
 
 export type PoolSettings = z.infer<typeof PoolSettingsSchema>
@@ -97,6 +107,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   discovery: { intervalHours: 24, jitterHours: 4 },
   backfill: { stepIntervalHours: 24, jitterHours: 6 },
   manualMaxFetches: 10,
+  forcedRefetch: { cooldownSeconds: 120, dailyCap: 40 },
 }
 
 type Plain = Record<string, unknown>

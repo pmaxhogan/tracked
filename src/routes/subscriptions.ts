@@ -2671,7 +2671,9 @@ ${BAN_BANNER_HTML}
         $refreshResult.textContent = 'Refresh failed: ' + (d.message || d.error || ('HTTP ' + r.status)) + (d.stale ? ' — still showing the list ' + fmtAge(d.fetchedAt ? Math.round((Date.now() - Date.parse(d.fetchedAt)) / 1000) : null) : '');
         return;
       }
-      $refreshResult.textContent = 'Refreshed: ' + d.rowCount + ' rows, ' + d.identifiedCount + ' of ' + d.trackCount + ' identified';
+      $refreshResult.textContent = d.refreshed === false
+        ? (d.dailyCapReached ? 'Not refetched: today's forced refreshes are used up; showing the cached list.' : 'Not refetched: this set was just refreshed; try again in ' + d.cooldownSeconds + ' s.')
+        : 'Refreshed: ' + d.rowCount + ' rows, ' + d.identifiedCount + ' of ' + d.trackCount + ' identified';
       await load(currentUrl);
     } catch (e) {
       $refreshResult.className = 'result bad';

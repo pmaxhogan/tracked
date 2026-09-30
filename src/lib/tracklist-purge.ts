@@ -2,7 +2,8 @@ import type { Env } from '../types'
 import { dbOf } from './db'
 import { IPBlockedError, CloudflareChallengeError } from './fetch'
 import { errorFields, type Logger } from './log'
-import { getJson } from './cache'
+import { getJson, putJson } from './cache'
+import { getPoolSettings } from './pool-settings'
 import { findTracklistUrlByVideoId } from './sync-store'
 import { DecoyTracklistError, normalizeTracklistUrl } from './tracklists1001'
 import { readCachedTracklist, tracklistCacheKey, tracklistSlug, type CachedTracklist } from './tracklist-cache'
@@ -31,6 +32,19 @@ export const SEARCH_URL_CV = 2
 
 export const searchByUrlCacheKey = (videoId: string) => `s1001:v${SEARCH_URL_CV}:${videoId}`
 
+/**
+ * Every YouTube video /now-playing resolved to a set, whichever step found it
+ * (the synced set, the 1001tl URL search or a title search), for 30 days:
+ * `tlv:v1:<videoId>` → `{ tracklistUrl }`. A purge by video id reads it, so it
+ * refreshes exactly the list the phone showed.
+ */
+export const videoTracklistKey = (videoId: string) => `tlv:v1:${videoId}`
+const VIDEO_TRACKLIST_TTL = 30 * 86400
+
+export async function rememberVideoTracklist(env: Env, videoId: string, tracklistUrl: string): Promise<void> {
+  await putJson(env.CACHE, videoTracklistKey(videoId), { tracklistUrl }, VIDEO_TRACKLIST_TTL)
+}
+
 /** Exactly one of these names the tracklist to purge. */
 export type PurgeTarget = { url?: string; slug?: string; videoId?: string }
 
@@ -43,8 +57,9 @@ const SLUG_RE = /^[a-z0-9]{4,16}$/i
 /**
  * Turn the caller's identifier into a tracklist URL, from what tracked already
  * knows: a slug through the cached entry or D1, a YouTube video through the
- * set the sync resolved it to (D1, mkvid uploads included) or the phone's
- * cached 1001tl search. Nothing here asks 1001tracklists: an unknown slug or
+ * set the sync resolved it to (D1, mkvid uploads included), else the set
+ * /now-playing last resolved it to (any search step), else the phone's cached
+ * 1001tl URL search. Nothing here asks 1001tracklists: an unknown slug or
  * video is a 404, not a guess at a URL.
  */
 export async function resolvePurgeTarget(env: Env, t: PurgeTarget): Promise<ResolvedTarget> {
@@ -71,8 +86,9 @@ export async function resolvePurgeTarget(env: Env, t: PurgeTarget): Promise<Reso
     const videoId = extractVideoId(t.videoId)
     if (!videoId) return { ok: false, status: 400, error: 'invalid_video', message: 'not a YouTube video id or URL' }
     const fromDb = await findTracklistUrlByVideoId(env, videoId)
-    const fromSearch = fromDb ? null : (await getJson<{ tracklistUrl: string | null }>(env.CACHE, searchByUrlCacheKey(videoId)))?.tracklistUrl
-    const tracklistUrl = normalizeTracklistUrl(fromDb ?? fromSearch ?? '')
+    const fromPhone = fromDb ? null : (await getJson<{ tracklistUrl: string | null }>(env.CACHE, videoTracklistKey(videoId)))?.tracklistUrl
+    const fromSearch = fromDb || fromPhone ? null : (await getJson<{ tracklistUrl: string | null }>(env.CACHE, searchByUrlCacheKey(videoId)))?.tracklistUrl
+    const tracklistUrl = normalizeTracklistUrl(fromDb ?? fromPhone ?? fromSearch ?? '')
     if (tracklistUrl) return { ok: true, tracklistUrl, via: 'video' }
     return { ok: false, status: 404, error: 'unknown_video', message: `no known tracklist for YouTube video ${videoId}` }
   }
@@ -91,6 +107,12 @@ export type PurgeSummary = {
   fetchedAt: string | null
   /** How long the fresh entry is cached; null when it was not cached (empty parse). */
   ttlSeconds: number | null
+  /** False when the refetch was skipped (cooldown or daily cap) and the cached list answered. */
+  refreshed: boolean
+  /** Set when skipped by the per-set cooldown: seconds until a refetch of this set is allowed. */
+  cooldownSeconds?: number
+  /** Set when skipped because today's forced refetches are used up. */
+  dailyCapReached?: boolean
 }
 
 export type PurgeResult =
@@ -145,16 +167,48 @@ export class RefreshFailedError extends Error {
   }
 }
 
+export type RefreshResult = {
+  list: CachedTracklist
+  /** False when the refetch was skipped and `list` is the cached one (or a plain cached read). */
+  refreshed: boolean
+  cooldownSeconds?: number
+  dailyCapReached?: boolean
+}
+
+const cooldownKey = (slug: string) => `tlrefresh:v1:${slug}`
+const dayKey = (nowMs: number) => `tlrefresh:v1:day:${new Date(nowMs).toISOString().slice(0, 10)}`
+
 /**
  * Fetch the list for `tracklistUrl` again now at priority phone, bypassing the
  * cache read. Success replaces the cached entry. Any failure (paused, blocked,
  * challenge, decoy, empty parse, timeout) KEEPS the old entry and throws
  * RefreshFailedError carrying it. /now-playing's `refresh: true` uses this.
+ *
+ * Limits (pool settings `forcedRefetch`, review W5 #1): a second forced
+ * refetch of the same set within the cooldown, or any beyond the daily cap,
+ * is not made; the cached list answers (`refreshed: false` plus
+ * `cooldownSeconds` or `dailyCapReached`), or a plain cached read when there
+ * is none.
  */
-export async function refreshTracklistPage(env: Env, tracklistUrl: string, log: Logger): Promise<CachedTracklist> {
+export async function refreshTracklistPage(env: Env, tracklistUrl: string, log: Logger, opts: { nowMs?: number } = {}): Promise<RefreshResult> {
+  const nowMs = opts.nowMs ?? Date.now()
   const slug = tracklistSlug(tracklistUrl)
   const previous = await readCachedTracklist(env, slug)
-  log.info('tracklist.refresh', { key: tracklistCacheKey(slug), tracklistUrl, hadEntry: !!previous, previousFetchedAt: previous?.fetchedAt ?? null })
+  const { forcedRefetch } = await getPoolSettings(env)
+  const lastAt = Number((await env.CACHE.get(cooldownKey(slug))) ?? 0) || 0
+  const left = lastAt ? Math.ceil(lastAt / 1000 + forcedRefetch.cooldownSeconds - nowMs / 1000) : 0
+  const usedToday = Number((await env.CACHE.get(dayKey(nowMs))) ?? 0) || 0
+  const skip: Pick<RefreshResult, 'cooldownSeconds' | 'dailyCapReached'> | null =
+    left > 0 ? { cooldownSeconds: left } : usedToday >= forcedRefetch.dailyCap ? { dailyCapReached: true } : null
+  if (skip) {
+    log.warn('tracklist.refresh_skipped', { tracklistUrl, ...skip, usedToday, hadEntry: !!previous })
+    const list = previous && previous.tracks.length > 0 ? previous : await resolveTracklistPage(env, tracklistUrl, log, { priority: 'phone' })
+    return { list, refreshed: false, ...skip }
+  }
+  // Counted before the fetch: a failed refetch still spent a page view.
+  await env.CACHE.put(cooldownKey(slug), String(nowMs), { expirationTtl: Math.max(60, forcedRefetch.cooldownSeconds) })
+  await env.CACHE.put(dayKey(nowMs), String(usedToday + 1), { expirationTtl: 2 * 86400 })
+  log.info('tracklist.refresh', { key: tracklistCacheKey(slug), tracklistUrl, hadEntry: !!previous, previousFetchedAt: previous?.fetchedAt ?? null, usedToday: usedToday + 1 })
   let fresh: CachedTracklist
   try {
     // Writes the entry only for a clean, non-empty parse (cacheParsedTracklist),
@@ -164,14 +218,15 @@ export async function refreshTracklistPage(env: Env, tracklistUrl: string, log: 
     throw new RefreshFailedError(e, previous)
   }
   if (fresh.tracks.length === 0) throw new RefreshFailedError(new EmptyParseError(), previous)
-  return fresh
+  return { list: fresh, refreshed: true }
 }
 
 /** Refresh, summarized for the purge routes; a failure becomes an HTTP answer with the kept entry's age. */
 export async function purgeAndRefetch(env: Env, tracklistUrl: string, log: Logger): Promise<PurgeResult> {
   const slug = tracklistSlug(tracklistUrl)
   try {
-    const fresh = await refreshTracklistPage(env, tracklistUrl, log)
+    const r = await refreshTracklistPage(env, tracklistUrl, log)
+    const fresh = r.list
     const summary: PurgeSummary = {
       tracklistUrl,
       slug,
@@ -180,6 +235,9 @@ export async function purgeAndRefetch(env: Env, tracklistUrl: string, log: Logge
       identifiedCount: fresh.tracks.filter((t) => !t.isUnidentified).length,
       fetchedAt: fresh.fetchedAt ?? null,
       ttlSeconds: fresh.ttlSeconds ?? null,
+      refreshed: r.refreshed,
+      ...(r.cooldownSeconds !== undefined ? { cooldownSeconds: r.cooldownSeconds } : {}),
+      ...(r.dailyCapReached ? { dailyCapReached: true } : {}),
     }
     log.info('tracklist.purge.done', { ...summary })
     return { ok: true, summary }

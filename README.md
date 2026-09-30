@@ -33,7 +33,7 @@ If the caller already knows the YouTube URL, send it directly to skip the YouTub
 }
 ```
 
-**Cache age and forced refresh.** Once a tracklist is resolved, the answer carries `cache: { fetchedAt, ageSeconds, ttlSeconds, refreshed }` — when the parsed list it came from was fetched from 1001tracklists, and how long that entry is kept (see [Tracklist cache](#tracklist-cache-and-purge)). Add `"refresh": true` to the request to fetch that set's list again before the current track is picked (one upstream fetch at priority `phone`; `refreshed: true` in the answer); the fresh list replaces the cached one. If the refetch fails (paused, blocked, challenge, decoy, empty parse, timeout) the cached list is kept and the answer is `status: "upstream_error"` with `cache: { stale: true, fetchedAt, ageSeconds, … }` describing the kept list (`fetchedAt: null` when there was none); a plain call afterwards is still served from it. Meant for a Tasker "force refresh" task when the list looks stale or wrong:
+**Cache age and forced refresh.** Once a tracklist is resolved, the answer carries `cache: { fetchedAt, ageSeconds, ttlSeconds, refreshed }` — when the parsed list it came from was fetched from 1001tracklists, and how long that entry is kept (see [Tracklist cache](#tracklist-cache-and-purge)). Add `"refresh": true` to the request to fetch that set's list again before the current track is picked (one upstream fetch at priority `phone`; `refreshed: true` in the answer); the fresh list replaces the cached one. If the refetch fails (paused, blocked, challenge, decoy, empty parse, timeout) the cached list is kept and the track is picked from it as usual, with `cache: { stale: true, refreshError, fetchedAt, ageSeconds, … }` describing the kept list; only when nothing was cached is the answer `status: "upstream_error"` (`cache.fetchedAt: null`). Forced refetches are limited (pool settings `forcedRefetch`): a repeat for the same set within 120 s, or beyond 40 a day (UTC) across all sets, is answered from the cache with `refreshed: false` and `cooldownSeconds` or `dailyCapReached`. Meant for a Tasker "force refresh" task when the list looks stale or wrong:
 
 ```bash
 curl -sS -X POST https://<worker>/now-playing -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json'   -d '{"videoUrl":"79n8BaQAL2Q","currentSeconds":4595,"refresh":true}'
@@ -170,7 +170,7 @@ The set's date comes from its URL (or, for sync fetches, the page's date meta / 
 
 - `url` — a 1001tracklists tracklist URL;
 - `slug` — the short id in `/tracklist/<slug>/…`, for a set tracked already knows (cached, synced, or queued for mkvid);
-- `videoId` — a YouTube id or URL that maps to a set (synced or mkvid-uploaded, or found by an earlier `/now-playing`).
+- `videoId` — a YouTube id or URL that maps to a set (synced or mkvid-uploaded, or matched by an earlier `/now-playing`, whether by URL or by title search; that mapping is kept 30 days).
 
 ```bash
 curl -sS -X POST https://<worker>/tracklist/purge -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json'   -d '{"slug":"l3uw499"}'

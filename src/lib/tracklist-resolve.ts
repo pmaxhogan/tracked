@@ -72,7 +72,8 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   const { result, html } = await fetchTracklist(tracklistUrl, fetchOpts)
   // The page's media facts (W6's full-recording rule reads them) from every set page fetch.
   await recordPageFacts(env, tracklistUrl, html, log)
-  const written = await cacheParsedTracklist(env, tracklistUrl, result, log, { source: 'resolve' })
+  // With the html, the set date also comes from the page (datePublished / title), as in the sync.
+  const written = await cacheParsedTracklist(env, tracklistUrl, result, log, { source: 'resolve', html })
   if (written.cached) return written.value
   if (written.reason === 'decoy') {
     // Never cache and never serve: the names are randomized (see
