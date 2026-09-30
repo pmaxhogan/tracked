@@ -135,7 +135,7 @@ describe('tlpool contract as built', () => {
     expect(await listPoolEvents(env)).toHaveLength(types.length)
     const pushed = types.filter((type) => poolEventPushPayload(ev({ type, challengeId: 'ch-1', accountId: 'acct-2' })) !== null)
     expect(pushed).toEqual(['challenge.created', 'account.flagged', 'account.retired'])
-    expect(poolEventPushPayload(ev({ type: 'account.retired', accountId: 'acct-2' }))).toMatchObject({ kind: 'pool_account', url: '/subscriptions/pool' })
+    expect(poolEventPushPayload(ev({ type: 'account.retired', accountId: 'acct-2' }))).toMatchObject({ kind: 'pool_account', url: '/ui/pool' })
   })
 
   it('reads contract errors from the body of an HTTP 200 answer (tlpool never answers 502/504)', async () => {

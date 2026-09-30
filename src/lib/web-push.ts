@@ -1,7 +1,7 @@
 /**
  * Web Push (Notifications API) delivery for the admin page.
  *
- * The admin page registers a service worker (`/subscriptions/sw.js`),
+ * The admin page registers a service worker (`/ui/sw.js`),
  * subscribes with our VAPID public key and POSTs the resulting
  * PushSubscription here; we keep one KV record per browser under
  * `push:sub:<id>` in SUBS (durable, no TTL). `sendPushToAll` encrypts a JSON
@@ -199,7 +199,7 @@ export function banClearPayload(ip: string | null, blockedForMs: number | null):
     kind: 'ban_clear',
     title: 'Home IP unblocked at 1001tracklists',
     body: `${ip ? `IP ${ip}` : 'Your home IP'} works again${dur}. Fetches are back on the direct route.`,
-    url: '/subscriptions',
+    url: '/ui/',
     tag: 'tracked-ip-ban',
     ts: new Date().toISOString(),
   }
@@ -210,7 +210,7 @@ export function testPayload(): PushPayload {
     kind: 'test',
     title: 'tracked: test notification',
     body: 'If you can read this, IP-ban alerts will reach this device.',
-    url: '/subscriptions',
+    url: '/ui/',
     tag: 'tracked-test',
     ts: new Date().toISOString(),
   }

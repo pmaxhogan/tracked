@@ -2,7 +2,7 @@ export type Env = {
   CACHE: KVNamespace
   /** R2 bucket tracked-pages: every page tlpool returned (lib/page-store.ts). Optional: unset = nothing is kept. */
   PAGES?: R2Bucket
-  /** Durable list of DJ subscriptions for the /subscriptions mini-app. */
+  /** Durable list of DJ subscriptions for the /ui mini-app. */
   SUBS: KVNamespace
   /**
    * D1 database (schema in `migrations/`): subscriptions, per-tracklist sync
@@ -57,9 +57,9 @@ export type Env = {
   CF_ACCESS_TEAM_DOMAIN?: string
   /** Cloudflare Access application AUD tag (from the Access app config). */
   CF_ACCESS_AUD?: string
-  /** Comma-separated allowlist of emails permitted to use /subscriptions. */
+  /** Comma-separated allowlist of emails permitted to use /ui. */
   CF_ACCESS_ALLOWED_EMAILS?: string
-  /** When "1" / "true", /subscriptions skips CF Access verification — local dev only. */
+  /** When "1" / "true", /ui skips CF Access verification — local dev only. */
   DEV_BYPASS_CF_ACCESS?: string
   /** Google OAuth 2.0 client (for YouTube playlist write access). Set via `wrangler secret put`. */
   GOOGLE_OAUTH_CLIENT_ID?: string

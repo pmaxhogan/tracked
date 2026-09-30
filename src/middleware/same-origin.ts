@@ -1,5 +1,5 @@
 /**
- * CSRF guard for the Cloudflare Access-gated admin API (`/subscriptions/api/*`).
+ * CSRF guard for the Cloudflare Access-gated admin API (`/ui/api/*`).
  *
  * The only credential on those routes is the Access cookie, which the browser
  * attaches to cross-site form posts too (SameSite=None) and to same-site ones
@@ -14,7 +14,7 @@
  *      preflight this Worker never grants.
  * Refusals: 403 `{ error: 'cross_origin' }`, 415 `{ error: 'json_required' }`.
  * Bearer-token routes (Tasker, /mkvid, /pool/events, /tracklist/purge) are
- * outside `/subscriptions/api/` and not affected.
+ * outside `/ui/api/` and not affected.
  */
 import type { MiddlewareHandler } from 'hono'
 
@@ -44,13 +44,13 @@ export const sameOriginJson: MiddlewareHandler = async (c, next) => {
 }
 
 /**
- * Anti-framing for every admin response under /subscriptions: no other site
+ * Anti-framing for every admin response under /ui: no other site
  * (a sibling subdomain included) may frame a page and clickjack a button.
- * The one exception is the live view (`/subscriptions/api/pool/challenges/:id/live/...`),
+ * The one exception is the live view (`/ui/api/pool/challenges/:id/live/...`),
  * which the captcha page itself frames: it may be framed by this origin only.
  * A 101 websocket upgrade is passed through untouched.
  */
-export const LIVE_VIEW_PATH = /^\/subscriptions\/api\/pool\/challenges\/[A-Za-z0-9_-]{1,64}\/live(\/|$)/
+export const LIVE_VIEW_PATH = /^\/ui\/api\/pool\/challenges\/[A-Za-z0-9_-]{1,64}\/live(\/|$)/
 
 export const noFraming: MiddlewareHandler = async (c, next) => {
   await next()

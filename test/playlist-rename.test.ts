@@ -90,13 +90,13 @@ describe('playlist title fix (seam 8)', () => {
     expect((await env.DB.prepare("SELECT artist_name FROM sub_sync WHERE slug = 'habstrakt'").first<{ artist_name: string }>())!.artist_name).toBe('Tracklists By Habstrakt')
   })
 
-  it('POST /subscriptions/api/playlists/fix-titles: Access-gated, dry run by default, answers old and new titles', async () => {
+  it('POST /ui/api/playlists/fix-titles: Access-gated, dry run by default, answers old and new titles', async () => {
     const env = makeEnv()
     await seed(env)
     await env.SUBS.put('oauth:google', JSON.stringify({ accessToken: 'tok', refreshToken: 'r', expiresAt: Math.floor(Date.now() / 1000) + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }))
     const yt = mockYouTube(playlists())
     vi.stubGlobal('fetch', yt.fetcher)
-    const post = (e: Env, body: unknown) => app.request('http://x/subscriptions/api/playlists/fix-titles', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify(body) }, e)
+    const post = (e: Env, body: unknown) => app.request('http://x/ui/api/playlists/fix-titles', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify(body) }, e)
     const dry = await post(env, {})
     expect(dry.status).toBe(200)
     expect(((await dry.json()) as any).fixes).toHaveLength(2)
@@ -109,8 +109,8 @@ describe('playlist title fix (seam 8)', () => {
     const locked = { ...env, DEV_BYPASS_CF_ACCESS: undefined, CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'a@example.com' } as Env
     expect([401, 403]).toContain((await post(locked, {})).status)
     // The main page has the button.
-    const page = await (await app.request('http://x/subscriptions', {}, env)).text()
+    const page = await (await app.request('http://x/ui', {}, env)).text()
     expect(page).toContain('id="fix-titles"')
-    expect(page).toContain('/subscriptions/api/playlists/fix-titles')
+    expect(page).toContain('/ui/api/playlists/fix-titles')
   })
 })

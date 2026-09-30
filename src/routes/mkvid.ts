@@ -112,7 +112,7 @@ mkvidApp.post('/complete', async (c) => {
   let accessToken: string
   try {
     const tok = await getAccessToken(c.env)
-    if (!tok) return c.json({ error: 'youtube_not_connected', message: 'connect a YouTube account at /subscriptions first' }, 503)
+    if (!tok) return c.json({ error: 'youtube_not_connected', message: 'connect a YouTube account at /ui first' }, 503)
     accessToken = tok.accessToken
   } catch (e) {
     if (e instanceof GoogleOAuthRefreshFailed) return c.json({ error: 'youtube_not_connected', message: e.message }, 503)

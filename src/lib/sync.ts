@@ -7,7 +7,7 @@
  *
  * Runs from two triggers (both gated by Cloudflare Access at the route level):
  *   - Cron (`scheduled` worker handler) — daily sweep of every subscription.
- *   - Manual POST `/subscriptions/api/sync[/<slug>]` — opportunistic single
+ *   - Manual POST `/ui/api/sync[/<slug>]` — opportunistic single
  *     run, used for the initial backfill when a subscription is added.
  *
  * **Idempotency contract.** A run may be killed mid-way (CPU limit, transient
@@ -352,7 +352,7 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
   const tokenInfo = await getAccessToken(env)
   if (!tokenInfo) {
     log.error('sync.no_oauth_tokens')
-    throw new Error('YouTube account not connected — visit /subscriptions/oauth/start first')
+    throw new Error('YouTube account not connected — visit /ui/oauth/start first')
   }
   const allSubs = await listSubscriptions(env)
   const subs = orderByLastRun(allSubs, await lastRunMap(env))

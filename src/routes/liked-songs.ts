@@ -56,13 +56,13 @@ export const likedSongsHandler: RouteHandler<typeof likedSongsRoute, { Bindings:
     const tok = await getAccessToken(c.env)
     if (!tok) {
       log.warn('liked_songs.not_connected')
-      return c.json({ error: 'youtube_not_connected', message: 'connect a YouTube account at /subscriptions first' }, 503)
+      return c.json({ error: 'youtube_not_connected', message: 'connect a YouTube account at /ui first' }, 503)
     }
     accessToken = tok.accessToken
   } catch (e) {
     log.error('liked_songs.token_failed', errorFields(e))
     if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
-      return c.json({ error: 'youtube_not_connected', message: 'YouTube refresh token was revoked; reconnect at /subscriptions' }, 503)
+      return c.json({ error: 'youtube_not_connected', message: 'YouTube refresh token was revoked; reconnect at /ui' }, 503)
     }
     if (/not configured/.test((e as Error).message)) {
       return c.json({ error: 'misconfigured', message: (e as Error).message }, 500)

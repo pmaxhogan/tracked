@@ -227,5 +227,5 @@ export function randomState(): string {
 
 export function redirectUriFor(reqUrl: string): string {
   const u = new URL(reqUrl)
-  return `${u.origin}/subscriptions/oauth/callback`
+  return `${u.origin}/ui/oauth/callback`
 }

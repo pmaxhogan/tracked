@@ -68,7 +68,7 @@ export const ResponseTrackSchema = z
     youtubeLiked: z.boolean().nullable().openapi({
       example: false,
       description:
-        'Whether the connected YouTube account (see /subscriptions) has liked the youtubeLink video — i.e. it is in YouTube Music "Liked songs". null when no YouTube account is connected, the track has no youtubeLink, or the rating lookup failed. Toggle with POST /likes.',
+        'Whether the connected YouTube account (see /ui) has liked the youtubeLink video — i.e. it is in YouTube Music "Liked songs". null when no YouTube account is connected, the track has no youtubeLink, or the rating lookup failed. Toggle with POST /likes.',
     }),
   })
   .openapi('ResponseTrack')

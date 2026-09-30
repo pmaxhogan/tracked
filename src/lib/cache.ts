@@ -25,7 +25,7 @@ export const TTL = {
    *  drift is the user manually editing the playlist outside the worker —
    *  6h reconciliation catches that without hammering the quota. */
   PLAYLIST_VIDEO_IDS: 60 * 60 * 6,
-  /** A DJ's crawled set index behind the /subscriptions/dj/<slug> profile
+  /** A DJ's crawled set index behind the /ui/dj/<slug> profile
    *  page. The crawl is a real upstream cost (home-proxy/BrightData page GET
    *  + AJAX pagination hops), and new sets appear at most a few times a week
    *  per DJ — 6 h keeps profile views ~free while staying reasonably fresh.

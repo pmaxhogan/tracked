@@ -54,7 +54,7 @@ type Appl = { request: (input: string, init?: RequestInit, env?: Env) => Respons
 
 function mount(fetcher: Fetcher) {
   const root = new Hono<{ Bindings: Env }>()
-  root.route('/subscriptions', createPoolUiApp({ fetcher }))
+  root.route('/ui', createPoolUiApp({ fetcher }))
   return root
 }
 
@@ -110,23 +110,23 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('pool UI: Cloudflare Access gate', () => {
   const paths: Array<[string, string]> = [
-    ['GET', '/subscriptions/pool'],
-    ['GET', '/subscriptions/pool/settings'],
-    ['GET', '/subscriptions/captcha'],
-    ['GET', '/subscriptions/captcha/ch-1'],
-    ['GET', '/subscriptions/api/pool/status'],
-    ['GET', '/subscriptions/api/pool/accounts'],
-    ['POST', '/subscriptions/api/pool/accounts'],
-    ['POST', '/subscriptions/api/pool/accounts/acct-1/retire'],
-    ['GET', '/subscriptions/api/pool/challenges'],
-    ['GET', '/subscriptions/api/pool/challenges/ch-1'],
-    ['GET', '/subscriptions/api/pool/challenges/ch-1/image'],
-    ['POST', '/subscriptions/api/pool/challenges/ch-1/answer'],
-    ['GET', '/subscriptions/api/pool/challenges/ch-1/live/'],
-    ['GET', '/subscriptions/api/pool/challenges/ch-1/live/core/rfb.js'],
-    ['GET', '/subscriptions/api/pool/challenges/ch-1/live/websockify'],
-    ['GET', '/subscriptions/api/pool/limits'],
-    ['PUT', '/subscriptions/api/pool/limits'],
+    ['GET', '/ui/pool'],
+    ['GET', '/ui/pool/settings'],
+    ['GET', '/ui/captcha'],
+    ['GET', '/ui/captcha/ch-1'],
+    ['GET', '/ui/api/pool/status'],
+    ['GET', '/ui/api/pool/accounts'],
+    ['POST', '/ui/api/pool/accounts'],
+    ['POST', '/ui/api/pool/accounts/acct-1/retire'],
+    ['GET', '/ui/api/pool/challenges'],
+    ['GET', '/ui/api/pool/challenges/ch-1'],
+    ['GET', '/ui/api/pool/challenges/ch-1/image'],
+    ['POST', '/ui/api/pool/challenges/ch-1/answer'],
+    ['GET', '/ui/api/pool/challenges/ch-1/live/'],
+    ['GET', '/ui/api/pool/challenges/ch-1/live/core/rfb.js'],
+    ['GET', '/ui/api/pool/challenges/ch-1/live/websockify'],
+    ['GET', '/ui/api/pool/limits'],
+    ['PUT', '/ui/api/pool/limits'],
   ]
   it.each(paths)('%s %s answers 401 without an Access token, through the real app, and never calls tlpool', async (method, path) => {
     const fetchSpy = vi.fn(async () => new Response('{}'))
@@ -143,18 +143,18 @@ describe('pool UI: Cloudflare Access gate', () => {
   })
 
   it('is mounted in the real app (bypass on) and the main page links to it', async () => {
-    const { r, text } = await req(mainApp, '/subscriptions/pool')
+    const { r, text } = await req(mainApp, '/ui/pool')
     expect(r.status).toBe(200)
     expect(text).toContain('Pool accounts')
-    const main = await req(mainApp, '/subscriptions')
-    expect(main.text).toContain('href="/subscriptions/pool"')
+    const main = await req(mainApp, '/ui')
+    expect(main.text).toContain('href="/ui/pool"')
   })
 })
 
 describe('pool UI: error mapping', () => {
   it('503 pool_not_configured when TLPOOL_URL/TOKEN are unset, without calling out', async () => {
     const { fetcher, calls } = fakePool({})
-    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/status', {}, makeEnv({ TLPOOL_URL: undefined }))
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/status', {}, makeEnv({ TLPOOL_URL: undefined }))
     expect(r.status).toBe(503)
     expect(data).toEqual({ error: 'pool_not_configured' })
     expect(calls).toHaveLength(0)
@@ -162,7 +162,7 @@ describe('pool UI: error mapping', () => {
 
   it('503 pool_unreachable when the fetch throws, and the thrown message (which names the URL) is not echoed', async () => {
     const fetcher: Fetcher = async (u) => { throw new Error(`connect ECONNREFUSED ${String(u)} Bearer ${TOKEN}`) }
-    const { r, text, data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts')
+    const { r, text, data } = await req(mount(fetcher), '/ui/api/pool/accounts')
     expect(r.status).toBe(503)
     expect(data).toEqual({ error: 'pool_unreachable' })
     expectNoLeak(r, text)
@@ -171,7 +171,7 @@ describe('pool UI: error mapping', () => {
   it('upstream 401/403 become 503 pool_auth_failed (a 401 would look like an Access failure)', async () => {
     for (const status of [401, 403]) {
       const { fetcher } = fakePool({ 'GET /status': () => json({ error: 'bad_token' }, status) })
-      const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/status')
+      const { r, data } = await req(mount(fetcher), '/ui/api/pool/status')
       expect(r.status).toBe(503)
       expect(data.error).toBe('pool_auth_failed')
     }
@@ -179,7 +179,7 @@ describe('pool UI: error mapping', () => {
 
   it('upstream 5xx becomes 503 pool_error; an upstream body echoing secrets is not passed through', async () => {
     const { fetcher } = fakePool({ 'GET /accounts': () => json({ error: 'db_locked', message: `token ${TOKEN} at ${POOL}`, username: SECRET_USER }, 500, { 'set-cookie': 'x=1' }) })
-    const { r, text, data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts')
+    const { r, text, data } = await req(mount(fetcher), '/ui/api/pool/accounts')
     expect(r.status).toBe(503)
     expect(data).toEqual({ error: 'pool_error', detail: 'db_locked' })
     expect(r.headers.get('set-cookie')).toBeNull()
@@ -191,7 +191,7 @@ describe('pool UI: error mapping', () => {
     const cases: Array<[number, string]> = [[404, 'not_found'], [409, 'conflict'], [410, 'expired']]
     for (const [status, code] of cases) {
       const { fetcher } = fakePool({ 'GET /challenges/ch-9': () => json({ error: 'Some <b>HTML</b> text' }, status) })
-      const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-9')
+      const { r, data } = await req(mount(fetcher), '/ui/api/pool/challenges/ch-9')
       expect(r.status).toBe(status)
       expect(data).toEqual({ error: code })
     }
@@ -199,7 +199,7 @@ describe('pool UI: error mapping', () => {
 
   it('a non-JSON 200 is bad_response, not a crash', async () => {
     const { fetcher } = fakePool({ 'GET /status': () => new Response('<html>tunnel error</html>', { status: 200 }) })
-    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/status')
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/status')
     expect(r.status).toBe(503)
     expect(data.error).toBe('bad_response')
   })
@@ -215,7 +215,7 @@ describe('pool UI: accounts and status', () => {
       }),
       'GET /challenges': () => json([upstreamChallenge('ch-1')]),
     })
-    const { r, text, data } = await req(mount(fetcher), '/subscriptions/api/pool/status', { headers: browserHeaders })
+    const { r, text, data } = await req(mount(fetcher), '/ui/api/pool/status', { headers: browserHeaders })
     expect(r.status).toBe(200)
     expect(calls.map((c) => c.url).sort()).toEqual([`${POOL}/challenges`, `${POOL}/status`])
     calls.forEach(expectAuthed)
@@ -234,7 +234,7 @@ describe('pool UI: accounts and status', () => {
 
   it('status still answers when only the challenge list fails', async () => {
     const { fetcher } = fakePool({ 'GET /status': () => json({ accounts: [] }), 'GET /challenges': () => json({}, 500) })
-    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/status')
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/status')
     expect(r.status).toBe(200)
     expect(data.challenges).toEqual([])
     expect(data.challengesError).toBe('pool_error')
@@ -242,7 +242,7 @@ describe('pool UI: accounts and status', () => {
 
   it('GET /api/pool/accounts lists without credentials', async () => {
     const { fetcher, calls } = fakePool({ 'GET /accounts': () => json({ accounts: [upstreamAccount('acct-7')] }) })
-    const { r, text, data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts')
+    const { r, text, data } = await req(mount(fetcher), '/ui/api/pool/accounts')
     expect(r.status).toBe(200)
     expect(data.accounts.map((a: { id: string }) => a.id)).toEqual(['acct-7'])
     expectAuthed(calls[0])
@@ -251,7 +251,7 @@ describe('pool UI: accounts and status', () => {
 
   it('POST /api/pool/accounts starts a signup with only {passive}', async () => {
     const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ challengeId: 'ch-new', accountId: 'acct-9', username: SECRET_USER }) })
-    const { r, text, data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts', {
+    const { r, text, data } = await req(mount(fetcher), '/ui/api/pool/accounts', {
       method: 'POST', headers: { 'content-type': 'application/json', ...browserHeaders }, body: JSON.stringify({ passive: true, username: 'injected' }),
     })
     expect(r.status).toBe(200)
@@ -264,7 +264,7 @@ describe('pool UI: accounts and status', () => {
   it('POST /api/pool/accounts forwards a valid exitKind, omits auto, and rejects anything else', async () => {
     const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ challengeId: 'ch-x' }) })
     const appl = mount(fetcher)
-    const post = (body: unknown) => req(appl, '/subscriptions/api/pool/accounts', { method: 'POST', headers: { 'content-type': 'application/json', ...browserHeaders }, body: JSON.stringify(body) })
+    const post = (body: unknown) => req(appl, '/ui/api/pool/accounts', { method: 'POST', headers: { 'content-type': 'application/json', ...browserHeaders }, body: JSON.stringify(body) })
     for (const k of ['own', 'mullvad', 'airvpn']) {
       expect((await post({ exitKind: k })).r.status).toBe(200)
       expect(calls[calls.length - 1]!.body).toEqual({ passive: false, exitKind: k })
@@ -282,14 +282,14 @@ describe('pool UI: accounts and status', () => {
 
   it('POST /api/pool/accounts treats anything but passive:true as false', async () => {
     const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ challenge_id: 'ch-2' }) })
-    const { data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts', { method: 'POST', body: JSON.stringify({ passive: 'yes' }), headers: { 'content-type': 'application/json' } })
+    const { data } = await req(mount(fetcher), '/ui/api/pool/accounts', { method: 'POST', body: JSON.stringify({ passive: 'yes' }), headers: { 'content-type': 'application/json' } })
     expect(calls[0]!.body).toEqual({ passive: false })
     expect(data).toEqual({ challengeId: 'ch-2', accountId: null })
   })
 
   it.each(['rest', 'retire', 'retest'])('POST /api/pool/accounts/:id/%s maps to the lifecycle route', async (action) => {
     const { fetcher, calls } = fakePool({ [`POST /accounts/acct-4/${action}`]: () => json({ account: upstreamAccount('acct-4', { state: 'resting' }) }) })
-    const { r, text, data } = await req(mount(fetcher), `/subscriptions/api/pool/accounts/acct-4/${action}`, { method: 'POST' })
+    const { r, text, data } = await req(mount(fetcher), `/ui/api/pool/accounts/acct-4/${action}`, { method: 'POST' })
     expect(r.status).toBe(200)
     expect(data.ok).toBe(true)
     expect(data.account.state).toBe('resting')
@@ -300,15 +300,15 @@ describe('pool UI: accounts and status', () => {
 
   it('an action with an empty 204 body still succeeds', async () => {
     const { fetcher } = fakePool({ 'POST /accounts/acct-4/rest': () => new Response(null, { status: 204 }) })
-    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts/acct-4/rest', { method: 'POST' })
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/accounts/acct-4/rest', { method: 'POST' })
     expect(r.status).toBe(200)
     expect(data).toEqual({ ok: true, account: null })
   })
 
   it('unknown actions and malformed ids never reach tlpool', async () => {
     const { fetcher, calls } = fakePool({})
-    expect((await req(mount(fetcher), '/subscriptions/api/pool/accounts/acct-4/delete', { method: 'POST' })).r.status).toBe(404)
-    expect((await req(mount(fetcher), '/subscriptions/api/pool/accounts/acct%2F..%2Fsettings/rest', { method: 'POST' })).r.status).toBe(400)
+    expect((await req(mount(fetcher), '/ui/api/pool/accounts/acct-4/delete', { method: 'POST' })).r.status).toBe(404)
+    expect((await req(mount(fetcher), '/ui/api/pool/accounts/acct%2F..%2Fsettings/rest', { method: 'POST' })).r.status).toBe(400)
     expect(calls).toHaveLength(0)
   })
 })
@@ -319,10 +319,10 @@ describe('pool UI: challenges', () => {
       'GET /challenges': () => json({ challenges: [upstreamChallenge('ch-1'), upstreamChallenge('ch-2', { type: 'checkbox' })] }),
       'GET /challenges/ch-3': () => json({ id: 'ch-3', type: 'image', account: 'acct-1', created_at: '2026-09-29T11:00:00Z', step: 'awaiting_captcha', reason: 'signup' }),
     })
-    const list = await req(mount(fetcher), '/subscriptions/api/pool/challenges')
+    const list = await req(mount(fetcher), '/ui/api/pool/challenges')
     expect(list.data.challenges.map((c: { type: string }) => c.type)).toEqual(['image', 'checkbox'])
     expectNoCredentials(list.text)
-    const one = await req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-3')
+    const one = await req(mount(fetcher), '/ui/api/pool/challenges/ch-3')
     expect(one.data.challenge).toMatchObject({ id: 'ch-3', step: 'awaiting_captcha', reason: 'signup', expiresAt: '2026-09-29T13:00:00.000Z', state: 'pending' })
     calls.forEach(expectAuthed)
   })
@@ -330,7 +330,7 @@ describe('pool UI: challenges', () => {
   it('GET image proxies the PNG with no-store, and refresh=1 asks for a new screenshot', async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
     const { fetcher, calls } = fakePool({ 'GET /challenges/ch-1/image': () => new Response(png, { headers: { 'content-type': 'image/png', 'set-cookie': 'tl=1', server: 'uvicorn' } }) })
-    const r = await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/image?refresh=1&t=1', { headers: browserHeaders }, makeEnv())
+    const r = await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/image?refresh=1&t=1', { headers: browserHeaders }, makeEnv())
     expect(r.status).toBe(200)
     expect(r.headers.get('content-type')).toBe('image/png')
     expect(r.headers.get('cache-control')).toBe('no-store')
@@ -344,7 +344,7 @@ describe('pool UI: challenges', () => {
 
   it('an image route that answers something other than an image is bad_response', async () => {
     const { fetcher } = fakePool({ 'GET /challenges/ch-1/image': () => new Response('<html>', { headers: { 'content-type': 'text/html' } }) })
-    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-1/image')
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/challenges/ch-1/image')
     expect(r.status).toBe(503)
     expect(data.error).toBe('bad_response')
   })
@@ -360,7 +360,7 @@ describe('pool UI: challenges', () => {
     ]
     for (const [resp, outcome] of cases) {
       const { fetcher, calls } = fakePool({ 'POST /challenges/ch-1/answer': resp })
-      const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-1/answer', {
+      const { r, data } = await req(mount(fetcher), '/ui/api/pool/challenges/ch-1/answer', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '  xK4p9 ' }),
       })
       expect(r.status).toBe(200)
@@ -372,7 +372,7 @@ describe('pool UI: challenges', () => {
 
   it('an empty answer is rejected before tlpool', async () => {
     const { fetcher, calls } = fakePool({})
-    const { r } = await req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-1/answer', { method: 'POST', body: JSON.stringify({ text: '  ' }), headers: { 'content-type': 'application/json' } })
+    const { r } = await req(mount(fetcher), '/ui/api/pool/challenges/ch-1/answer', { method: 'POST', body: JSON.stringify({ text: '  ' }), headers: { 'content-type': 'application/json' } })
     expect(r.status).toBe(400)
     expect(calls).toHaveLength(0)
   })
@@ -381,9 +381,9 @@ describe('pool UI: challenges', () => {
 describe('pool UI: live view proxy', () => {
   it('/live redirects to /live/ so relative noVNC assets resolve', async () => {
     const { fetcher, calls } = fakePool({})
-    const r = await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live?autoconnect=1', {}, makeEnv())
+    const r = await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/live?autoconnect=1', {}, makeEnv())
     expect(r.status).toBe(302)
-    expect(r.headers.get('location')).toBe('/subscriptions/api/pool/challenges/ch-1/live/?autoconnect=1')
+    expect(r.headers.get('location')).toBe('/ui/api/pool/challenges/ch-1/live/?autoconnect=1')
     expect(calls).toHaveLength(0)
   })
 
@@ -392,7 +392,7 @@ describe('pool UI: live view proxy', () => {
       'GET /challenges/ch-1/live/': () => new Response('<html>novnc</html>', { headers: { 'content-type': 'text/html', 'set-cookie': 'a=b', 'x-internal': POOL } }),
       'GET /challenges/ch-1/live/core/rfb.js': () => new Response('js', { headers: { 'content-type': 'application/javascript' } }),
     })
-    const page = await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/?autoconnect=1', { headers: browserHeaders }, makeEnv())
+    const page = await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/live/?autoconnect=1', { headers: browserHeaders }, makeEnv())
     expect(page.status).toBe(200)
     expect(await page.text()).toBe('<html>novnc</html>')
     expect(page.headers.get('set-cookie')).toBeNull()
@@ -400,7 +400,7 @@ describe('pool UI: live view proxy', () => {
     expect(page.headers.get('cache-control')).toBe('no-store')
     expect(calls[0]!.url).toBe(`${POOL}/challenges/ch-1/live/?autoconnect=1`)
     expectAuthed(calls[0])
-    const asset = await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/core/rfb.js', {}, makeEnv())
+    const asset = await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/live/core/rfb.js', {}, makeEnv())
     expect(asset.status).toBe(200)
     expect(calls[1]!.url).toBe(`${POOL}/challenges/ch-1/live/core/rfb.js`)
   })
@@ -408,7 +408,7 @@ describe('pool UI: live view proxy', () => {
   it('passes a websocket upgrade through with auth and no timeout (101 itself cannot be built outside workerd)', async () => {
     const upstream = new Response(null, { status: 200 })
     const { fetcher, calls } = fakePool({ 'GET /challenges/ch-1/live/websockify': () => upstream })
-    await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/websockify', {
+    await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/live/websockify', {
       headers: { Upgrade: 'websocket', Connection: 'Upgrade', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Protocol': 'binary', ...browserHeaders },
     }, makeEnv())
     const c = calls[0]!
@@ -422,9 +422,9 @@ describe('pool UI: live view proxy', () => {
 
   it('rejects odd sub-paths and maps upstream 404', async () => {
     const { fetcher, calls } = fakePool({})
-    expect((await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/a%2F..%2Fb', {}, makeEnv())).status).toBe(400)
+    expect((await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/live/a%2F..%2Fb', {}, makeEnv())).status).toBe(400)
     expect(calls).toHaveLength(0)
-    const gone = await req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-1/live/vnc.html')
+    const gone = await req(mount(fetcher), '/ui/api/pool/challenges/ch-1/live/vnc.html')
     expect(gone.r.status).toBe(404)
     expectNoLeak(gone.r, gone.text)
   })
@@ -433,7 +433,7 @@ describe('pool UI: live view proxy', () => {
 describe('pool UI: tlpool settings (/api/pool/limits)', () => {
   it('GET normalises (percent share becomes a fraction)', async () => {
     const { fetcher, calls } = fakePool({ 'GET /settings': () => json({ budget_per_day: 30, ramp: [10, 20], reserved_phone_share: 15, image_policy: 'block', admin_password: SECRET_PASS }) })
-    const { data, text } = await req(mount(fetcher), '/subscriptions/api/pool/limits')
+    const { data, text } = await req(mount(fetcher), '/ui/api/pool/limits')
     expect(data.settings).toEqual({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.15, imagePolicy: 'block', xhrBudgetPerDay: null, priorityCeilings: null })
     expectAuthed(calls[0])
     expectNoCredentials(text)
@@ -441,7 +441,7 @@ describe('pool UI: tlpool settings (/api/pool/limits)', () => {
 
   it('PUT validates and forwards only the four known fields', async () => {
     const { fetcher, calls } = fakePool({ 'PUT /settings': (c) => json(c.body) })
-    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/limits', {
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/limits', {
       method: 'PUT', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ budgetPerDay: 25, ramp: [8, 16], reservedPhoneShare: 0.2, imagePolicy: 'allow', token: 'x', exits: ['a'] }),
     })
@@ -455,7 +455,7 @@ describe('pool UI: tlpool settings (/api/pool/limits)', () => {
   it('PUT rejects bad values before tlpool', async () => {
     const { fetcher, calls } = fakePool({})
     for (const body of [{ budgetPerDay: -1 }, { budgetPerDay: 2.5 }, { ramp: 'x' }, { reservedPhoneShare: 1.5 }, { budgetPerDay: 0 }, { budgetPerDay: 501 }, { imagePolicy: 'Block<>' }, { imagePolicy: 'sometimes' }, { xhrBudgetPerDay: -1 }, { priorityCeilings: { phone: 0.5 } }, { priorityCeilings: { backfill: 2 } }, {}, null]) {
-      const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/limits', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const { r, data } = await req(mount(fetcher), '/ui/api/pool/limits', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       expect(r.status).toBe(400)
       expect(data.error).toBe('invalid')
     }
@@ -518,10 +518,10 @@ async function runPage(html: string, appl: Appl, env: Env) {
 
 describe('pool pages: HTML smoke', () => {
   const pages: Array<[string, string]> = [
-    ['/subscriptions/pool', 'Pool accounts'],
-    ['/subscriptions/pool/settings', 'Pool settings'],
-    ['/subscriptions/captcha', 'Captchas'],
-    ['/subscriptions/captcha/ch-1', 'Captcha'],
+    ['/ui/pool', 'Pool accounts'],
+    ['/ui/pool/settings', 'Pool settings'],
+    ['/ui/captcha', 'Captchas'],
+    ['/ui/captcha/ch-1', 'Captcha'],
   ]
   it.each(pages)('%s renders, is no-store, has no credential inputs, and its scripts parse', async (path, heading) => {
     const { fetcher } = fakePool({})
@@ -535,12 +535,12 @@ describe('pool pages: HTML smoke', () => {
     expect(text).not.toMatch(/autocomplete=["']?(username|email|current-password|new-password)/i)
     expect(text).not.toContain(TOKEN)
     for (const s of scriptsOf(text)) expect(() => new vm.Script(s)).not.toThrow()
-    expect(text).toContain('/subscriptions/pool/settings') // nav
+    expect(text).toContain('/ui/pool/settings') // nav
   })
 
   it('the captcha page embeds only a validated id', async () => {
     const { fetcher } = fakePool({})
-    expect((await req(mount(fetcher), '/subscriptions/captcha/%3Cscript%3E')).r.status).toBe(404)
+    expect((await req(mount(fetcher), '/ui/captcha/%3Cscript%3E')).r.status).toBe(404)
     expect(POOL_PAGES.captchaPageHtml('ch-1')).toContain('const ID = "ch-1"')
   })
 
@@ -560,7 +560,7 @@ describe('pool pages: HTML smoke', () => {
     expect(accts).toContain('passive')
     expect(accts).toContain('flagged')
     expect(accts).toContain('data-act="retire"')
-    expect(els.get('chals')!.innerHTML).toContain('/subscriptions/captcha/ch-7')
+    expect(els.get('chals')!.innerHTML).toContain('/ui/captcha/ch-7')
     expect(els.get('stats')!.innerHTML).toContain('41')
     const all = [...els.values()].map((e) => e.innerHTML + e.textContent).join('\n')
     expectNoCredentials(all)
@@ -636,7 +636,7 @@ describe('pool pages: HTML smoke', () => {
     })
     const appl = mount(fetcher)
     const list = await runPage(POOL_PAGES.CAPTCHA_LIST_HTML, appl, makeEnv())
-    expect(list.get('list')!.innerHTML).toContain('/subscriptions/captcha/ch-7')
+    expect(list.get('list')!.innerHTML).toContain('/ui/captcha/ch-7')
     expect(list.get('list')!.innerHTML).toContain('acct-3')
     expect(list.get('list')!.innerHTML).toMatch(/min left/)
     const one = await runPage(POOL_PAGES.captchaPageHtml('ch-7'), appl, makeEnv())
@@ -653,7 +653,7 @@ describe('pool pages: HTML smoke', () => {
     const pg = await runPageTimed(POOL_PAGES.captchaPageHtml('ch-8'), mount(fetcher), makeEnv())
     const w = pg.els.get('widget')!.innerHTML
     expect(w).toContain('Tap the checkbox')
-    expect(w).toContain('/subscriptions/api/pool/challenges/ch-8/live/?path=')
+    expect(w).toContain('/ui/api/pool/challenges/ch-8/live/?path=')
     expect(w).toContain('Done, I clicked it')
     expect(w).not.toContain('Submit answer')
     expect(pg.pending().map((t) => t.ms)).toContain(3000)
@@ -684,7 +684,7 @@ describe('pool pages: HTML smoke', () => {
 
   it('the answer route takes {done: true} for a checkbox and at most 64 characters of text', async () => {
     const { fetcher, calls } = fakePool({ 'POST /challenges/ch-1/answer': () => json({ status: 'solved' }) })
-    const post = (body: unknown) => req(mount(fetcher), '/subscriptions/api/pool/challenges/ch-1/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const post = (body: unknown) => req(mount(fetcher), '/ui/api/pool/challenges/ch-1/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     expect((await post({ done: true })).data).toEqual({ outcome: 'solved' })
     expect(calls[0]!.body).toEqual({ done: true })
     expect((await post({ text: 'x'.repeat(65) })).r.status).toBe(400)
@@ -694,7 +694,7 @@ describe('pool pages: HTML smoke', () => {
   /** The UI next to W4's real settings routes, as index.ts mounts them. */
   function withSettingsApi(fetcher: Fetcher) {
     const appl = mount(fetcher)
-    appl.route('/subscriptions/api/pool', poolSettingsApp)
+    appl.route('/ui/api/pool', poolSettingsApp)
     return appl
   }
 
@@ -724,7 +724,7 @@ describe('pool pages: HTML smoke', () => {
     await settle()
     expect(els.get('sch-err')!.textContent).toBe('')
     expect(els.get('sch-msg')!.textContent).toBe('Saved.')
-    const stored = (await (await appl.request('https://tracked.example/subscriptions/api/pool/settings', {}, env)).json()) as { settings: PoolSettings }
+    const stored = (await (await appl.request('https://tracked.example/ui/api/pool/settings', {}, env)).json()) as { settings: PoolSettings }
     expect(stored.settings.recheck.beyondIntervalHours).toBe(4320)
     expect(stored.settings.recheck.bands).toHaveLength(4) // untouched: the stub DOM has no table rows to send
     const again = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, appl, env)
@@ -747,7 +747,7 @@ describe('pool pages: HTML smoke', () => {
 
 describe('service worker', () => {
   it('opens the URL carried in the push payload on tap and keeps challenge pushes on screen', async () => {
-    const { text } = await req(mainApp, '/subscriptions/sw.js')
+    const { text } = await req(mainApp, '/ui/sw.js')
     expect(text).toContain("addEventListener('notificationclick'")
     expect(text).toContain('data: { url: data.url')
     expect(text).toContain('self.clients.openWindow(target)')
@@ -831,8 +831,8 @@ describe('polling on the pool pages', () => {
     expect(pg.pending().some((t) => t.ms === 60000)).toBe(true) // capped at a minute
     // The Worker's own Access gate answering 401 (the browser's session expired).
     const appl = new Hono<{ Bindings: Env }>()
-    appl.get('/subscriptions/api/pool/status', (c) => c.json({ error: 'unauthorized' }, 401))
-    appl.route('/subscriptions', createPoolUiApp({ fetcher }))
+    appl.get('/ui/api/pool/status', (c) => c.json({ error: 'unauthorized' }, 401))
+    appl.route('/ui', createPoolUiApp({ fetcher }))
     const pg2 = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, appl, makeEnv())
     await pg2.fire(20000)
     expect(pg2.pending().filter((t) => t.ms >= 20000)).toHaveLength(0)
@@ -924,7 +924,7 @@ describe('tlpool as shipped', () => {
       }),
       'GET /challenges': () => json({ challenges: [] }),
     })
-    const { data } = await req(mount(fetcher), '/subscriptions/api/pool/status')
+    const { data } = await req(mount(fetcher), '/ui/api/pool/status')
     expect(data.status).toMatchObject({ queueDepth: 3, queueByPriority: { new: 2, recheck: 1 }, requestsToday: 15, budgetToday: 40 })
     expect(data.status.accounts[0]).toMatchObject({ state: 'warming', xhrUsedToday: 2, xhrBudget: 20 })
     const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
@@ -948,14 +948,14 @@ describe('tlpool as shipped', () => {
 
   it('an error tlpool answers with HTTP 200 is still an error (read from the body, not the status)', async () => {
     const { fetcher } = fakePool({ 'POST /accounts': () => json({ error: 'no_exit_available', message: 'no free exit in the registry' }, 200) })
-    const { r, data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     expect(r.status).toBe(409)
     expect(data).toEqual({ error: 'conflict', detail: 'no_exit_available', message: 'no free exit in the registry' })
   })
 
   it('an upstream message that could carry an address or secret is dropped', async () => {
     const { fetcher } = fakePool({ 'GET /accounts': () => json({ error: 'db_locked', message: 'see https://x.example/y' }, 500) })
-    const { data } = await req(mount(fetcher), '/subscriptions/api/pool/accounts')
+    const { data } = await req(mount(fetcher), '/ui/api/pool/accounts')
     expect(data).toEqual({ error: 'pool_error', detail: 'db_locked' })
   })
 
@@ -963,7 +963,7 @@ describe('tlpool as shipped', () => {
     const puts: unknown[] = []
     const settings = { budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.2, imagePolicy: 'allow', xhrBudgetPerDay: 60, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.75 }, minGapSeconds: 35 }
     const { fetcher } = fakePool({ 'GET /settings': () => json(settings), 'PUT /settings': (c) => (puts.push(c.body), json({ ...settings, ...(c.body as object) })) })
-    const { data } = await req(mount(fetcher), '/subscriptions/api/pool/limits')
+    const { data } = await req(mount(fetcher), '/ui/api/pool/limits')
     expect(data.settings).toEqual({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.2, imagePolicy: 'allow', xhrBudgetPerDay: 60, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.75 } })
     const pg = await runPageTimed(POOL_PAGES.SETTINGS_PAGE_HTML, mount(fetcher), makeEnv())
     expect(pg.els.get('xhr')!.value).toBe(60)

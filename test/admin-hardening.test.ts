@@ -1,7 +1,7 @@
 /**
  * W8 review minors: sticky pushes in the service worker, anti-framing
  * headers, the live-view allowlist, raster-only captcha images, the
- * /subscriptions/accounts link, and the ban banner's poll limits.
+ * /ui/accounts link, and the ban banner's poll limits.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import vm from 'node:vm'
@@ -29,7 +29,7 @@ function fakePool(routes: Record<string, () => Response>) {
 }
 function mount(fetcher: Fetcher) {
   const root = new Hono<{ Bindings: Env }>()
-  root.route('/subscriptions', createPoolUiApp({ fetcher }))
+  root.route('/ui', createPoolUiApp({ fetcher }))
   return root
 }
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)) }
@@ -40,7 +40,7 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('service worker', () => {
   it('keeps captcha, flagged-account, held-playlist and ban pushes on screen until tapped (real payloads)', async () => {
-    const text = await (await mainApp.request('https://tracked.example/subscriptions/sw.js', {}, makeEnv())).text()
+    const text = await (await mainApp.request('https://tracked.example/ui/sw.js', {}, makeEnv())).text()
     const handlers: Record<string, (ev: unknown) => void> = {}
     const shown: boolean[] = []
     const self = {
@@ -59,20 +59,91 @@ describe('service worker', () => {
     push(poolEventPushPayload(flagged.event)!)
     const { playlistHoldPayload } = await import('../src/lib/playlist-hygiene')
     push(playlistHoldPayload('Playlist check held', 'x'))
-    push({ kind: 'test', title: 'Test', body: 'x', url: '/subscriptions', tag: 't', ts: new Date().toISOString() })
+    push({ kind: 'test', title: 'Test', body: 'x', url: '/ui', tag: 't', ts: new Date().toISOString() })
     expect(shown).toEqual([true, true, true, false])
+  })
+})
+
+describe('push payload URLs point under /ui', () => {
+  it('captcha, flagged account and held playlist pushes open the new pages', async () => {
+    const { poolEventPushPayload, sanitizePoolEvent } = await import('../src/lib/pool-events')
+    const ch = sanitizePoolEvent({ type: 'challenge.created', challengeId: 'ch-1', accountId: 'acct-1', challengeType: 'image' })
+    if (!ch.ok) throw new Error(ch.error)
+    expect(poolEventPushPayload(ch.event)!.url).toBe('/ui/captcha/ch-1')
+    const flagged = sanitizePoolEvent({ type: 'account.flagged', accountId: 'acct-2', reason: 'decoys' })
+    if (!flagged.ok) throw new Error(flagged.error)
+    expect(poolEventPushPayload(flagged.event)!.url).toBe('/ui/pool')
+    const { playlistHoldPayload } = await import('../src/lib/playlist-hygiene')
+    expect(playlistHoldPayload('Playlist check held', 'x').url).toBe('/ui/removed')
+  })
+})
+
+describe('old service worker cleanup', () => {
+  it('drops the /subscriptions/ registration and its push subscription, then re-subscribes under /ui/ without a prompt', async () => {
+    const { BAN_JS } = await import('../src/routes/ban-ui')
+    const posts: Array<{ url: string; body: string }> = []
+    const registered: Array<[string, unknown]> = []
+    let oldUnregistered = 0
+    let newUnregistered = 0
+    let oldUnsubscribed = 0
+    let requestPermission = 0
+    const oldReg = {
+      scope: 'https://tracked.example/subscriptions/',
+      pushManager: { getSubscription: async () => ({ endpoint: 'https://push.example/old', unsubscribe: async () => { oldUnsubscribed++; return true } }) },
+      unregister: async () => { oldUnregistered++; return true },
+    }
+    let newSub: { endpoint: string; toJSON: () => object } | null = null
+    const newReg = {
+      scope: 'https://tracked.example/ui/',
+      pushManager: {
+        getSubscription: async () => newSub,
+        subscribe: async () => (newSub = { endpoint: 'https://push.example/new', toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } }) }),
+      },
+      unregister: async () => { newUnregistered++; return true },
+    }
+    const navigator = {
+      userAgent: 'test',
+      serviceWorker: {
+        getRegistrations: async () => [oldReg, newReg],
+        register: async (url: string, opts: unknown) => (registered.push([url, opts]), newReg),
+      },
+    }
+    const Notification = { permission: 'granted', requestPermission: async () => { requestPermission++; return 'granted' } }
+    const window = { isSecureContext: true, PushManager: {}, Notification }
+    const els: Record<string, El> = {}
+    const document = { hidden: false, body: { dataset: { banPage: 'other' } }, getElementById: (id: string) => (els[id] ??= el()), addEventListener() {} }
+    const ctx = vm.createContext({
+      document, navigator, window, Notification, atob, Uint8Array, console, Date,
+      sessionStorage: { getItem: () => '1', setItem() {} },
+      fetch: async (u: string, init?: { method?: string; body?: string }) => {
+        if (init && init.method === 'POST') posts.push({ url: u, body: String(init.body) })
+        if (u === '/ui/api/push/config') return Response.json({ configured: true, publicKey: 'AQAB' })
+        return Response.json({})
+      },
+      setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, alert() {},
+    })
+    vm.runInContext(BAN_JS, ctx)
+    await settle()
+    expect(posts.filter((p) => p.url === '/ui/api/push/unsubscribe')).toEqual([{ url: '/ui/api/push/unsubscribe', body: '{"endpoint":"https://push.example/old"}' }])
+    expect(oldUnsubscribed).toBe(1)
+    expect(oldUnregistered).toBe(1)
+    expect(newUnregistered).toBe(0)
+    expect(registered).toEqual([['/ui/sw.js', { scope: '/ui/' }]])
+    expect(posts.filter((p) => p.url === '/ui/api/push/subscribe')).toHaveLength(1)
+    expect(posts.every((p) => p.url.startsWith('/ui/'))).toBe(true)
+    expect(requestPermission).toBe(0)
   })
 })
 
 describe('framing and content types', () => {
   it('admin pages and API answers refuse framing; the live view may be framed by this origin only', async () => {
     const env = makeEnv()
-    for (const path of ['/subscriptions', '/subscriptions/pool', '/subscriptions/captcha/ch-1', '/subscriptions/pool/settings', '/subscriptions/removed', '/subscriptions/api/pool/settings']) {
+    for (const path of ['/ui', '/ui/pool', '/ui/captcha/ch-1', '/ui/pool/settings', '/ui/removed', '/ui/api/pool/settings']) {
       const r = await mainApp.request(`https://tracked.example${path}`, {}, env)
       expect([path, r.headers.get('x-frame-options'), r.headers.get('content-security-policy')]).toEqual([path, 'DENY', "frame-ancestors 'none'"])
     }
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } })))
-    const live = await mainApp.request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/?path=x', {}, env)
+    const live = await mainApp.request('https://tracked.example/ui/api/pool/challenges/ch-1/live/?path=x', {}, env)
     expect(live.status).toBe(200)
     expect(live.headers.get('x-frame-options')).toBe('SAMEORIGIN')
     expect(live.headers.get('content-security-policy')).toBe("frame-ancestors 'self'")
@@ -85,28 +156,28 @@ describe('framing and content types', () => {
       '/challenges/ch-1/live/vendor/pako/lib/zlib/inflate.js': () => new Response('<html>not js</html>', { headers: { 'content-type': 'text/html' } }),
     })
     for (const sub of ['vnc.html', 'vnc_lite.html', 'app/ui.js', 'core/', 'defaults.json', 'core/x.svg']) {
-      const r = await mount(fetcher).request(`https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/${sub}`, {}, makeEnv())
+      const r = await mount(fetcher).request(`https://tracked.example/ui/api/pool/challenges/ch-1/live/${sub}`, {}, makeEnv())
       expect([sub, r.status]).toEqual([sub, 404])
     }
     expect(calls).toHaveLength(0)
-    expect((await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/core/rfb.js', {}, makeEnv())).status).toBe(200)
+    expect((await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/live/core/rfb.js', {}, makeEnv())).status).toBe(200)
     // A module path that answers HTML is refused, not served on this origin.
-    expect((await mount(fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/live/vendor/pako/lib/zlib/inflate.js', {}, makeEnv())).status).toBe(503)
+    expect((await mount(fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/live/vendor/pako/lib/zlib/inflate.js', {}, makeEnv())).status).toBe(503)
   })
 
   it('the captcha image route passes PNG/JPEG/WebP only, with nosniff', async () => {
     const svg = fakePool({ '/challenges/ch-1/image': () => new Response('<svg onload="x()"/>', { headers: { 'content-type': 'image/svg+xml' } }) })
-    expect((await mount(svg.fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/image', {}, makeEnv())).status).toBe(503)
+    expect((await mount(svg.fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/image', {}, makeEnv())).status).toBe(503)
     const png = fakePool({ '/challenges/ch-1/image': () => new Response(new Uint8Array([137, 80, 78, 71]), { headers: { 'content-type': 'image/png' } }) })
-    const r = await mount(png.fetcher).request('https://tracked.example/subscriptions/api/pool/challenges/ch-1/image', {}, makeEnv())
+    const r = await mount(png.fetcher).request('https://tracked.example/ui/api/pool/challenges/ch-1/image', {}, makeEnv())
     expect(r.status).toBe(200)
     expect(r.headers.get('x-content-type-options')).toBe('nosniff')
   })
 
-  it('/subscriptions/accounts (where flagged-account pushes point) goes to the pool page', async () => {
-    const r = await mainApp.request('https://tracked.example/subscriptions/accounts', {}, makeEnv())
+  it('/ui/accounts (where flagged-account pushes point) goes to the pool page', async () => {
+    const r = await mainApp.request('https://tracked.example/ui/accounts', {}, makeEnv())
     expect(r.status).toBe(302)
-    expect(r.headers.get('location')).toBe('/subscriptions/pool')
+    expect(r.headers.get('location')).toBe('/ui/pool')
   })
 })
 

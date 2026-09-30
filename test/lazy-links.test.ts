@@ -1,6 +1,6 @@
 /**
  * Media link budget (seam 9): the admin viewers never look up per-track links
- * on load. Links come from POST /subscriptions/api/tracklist/links, one row or
+ * on load. Links come from POST /ui/api/tracklist/links, one row or
  * one "Load links" batch at a time, at pool priority `recheck`, cached per
  * track id for 30 days.
  */
@@ -52,7 +52,7 @@ describe('lazy per-track links', () => {
   it('loading a set in the viewer costs one set page and no media link lookup', async () => {
     const env = makeEnv()
     const calls = poolStub()
-    const res = await post(env, '/subscriptions/api/tracklist', { url: SET })
+    const res = await post(env, '/ui/api/tracklist', { url: SET })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { tracks: Array<{ trackId: string | null; appleLink: string | null }> }
     expect(body.tracks.length).toBe(31)
@@ -67,7 +67,7 @@ describe('lazy per-track links', () => {
     const put = env.CACHE.put.bind(env.CACHE)
     env.CACHE.put = (async (k: string, v: string, o?: KVNamespacePutOptions) => ((ttls[k] = o?.expirationTtl), put(k, v, o))) as KVNamespace['put']
 
-    const r1 = await post(env, '/subscriptions/api/tracklist/links', { trackIds: ['909720', '123456'] })
+    const r1 = await post(env, '/ui/api/tracklist/links', { trackIds: ['909720', '123456'] })
     expect(r1.status).toBe(200)
     const d1 = (await r1.json()) as { links: Record<string, { appleLink: string | null; youtubeLink: string | null }> }
     expect(Object.keys(d1.links).sort()).toEqual(['123456', '909720'])
@@ -77,7 +77,7 @@ describe('lazy per-track links', () => {
     expect(ttls['ml:v1:909720']).toBe(30 * 86400)
     expect(TTL.MEDIALINK).toBe(30 * 86400)
 
-    const r2 = await post(env, '/subscriptions/api/tracklist/links', { trackIds: ['909720', '123456'] })
+    const r2 = await post(env, '/ui/api/tracklist/links', { trackIds: ['909720', '123456'] })
     expect(r2.status).toBe(200)
     expect(calls).toHaveLength(2) // both served from cache
   })
@@ -85,17 +85,17 @@ describe('lazy per-track links', () => {
   it('refuses empty, non-numeric and oversized requests without touching the pool', async () => {
     const env = makeEnv()
     const calls = poolStub()
-    expect((await post(env, '/subscriptions/api/tracklist/links', {})).status).toBe(400)
-    expect((await post(env, '/subscriptions/api/tracklist/links', { trackIds: ['../x'] })).status).toBe(400)
-    expect((await post(env, '/subscriptions/api/tracklist/links', { trackIds: Array.from({ length: 26 }, (_, i) => String(1000 + i)) })).status).toBe(400)
+    expect((await post(env, '/ui/api/tracklist/links', {})).status).toBe(400)
+    expect((await post(env, '/ui/api/tracklist/links', { trackIds: ['../x'] })).status).toBe(400)
+    expect((await post(env, '/ui/api/tracklist/links', { trackIds: Array.from({ length: 26 }, (_, i) => String(1000 + i)) })).status).toBe(400)
     expect(calls).toHaveLength(0)
   })
 
   it('both viewers ship the lazy links UI, with the digit regex intact and scripts that parse', async () => {
     const env = makeEnv()
-    for (const path of ['/subscriptions/tracklist', '/subscriptions/dj/habstrakt']) {
+    for (const path of ['/ui/set', '/ui/dj/habstrakt']) {
       const page = await (await app.request(`http://x${path}`, {}, env)).text()
-      expect(page).toContain('/subscriptions/api/tracklist/links')
+      expect(page).toContain('/ui/api/tracklist/links')
       expect(page).toContain('/^\\d+$/.test(t.trackId)') // a template-literal escape slip would leave /^d+$/
       expect(page).toContain('Load links')
       const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)

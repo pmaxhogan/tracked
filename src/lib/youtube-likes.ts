@@ -8,7 +8,7 @@
  *   - videos.getRating      1  (up to 50 ids per call)
  *
  * Scope: `https://www.googleapis.com/auth/youtube` (already granted by the
- * /subscriptions OAuth flow) is one of the three scopes videos.rate accepts —
+ * /ui OAuth flow) is one of the three scopes videos.rate accepts —
  * no re-consent needed.
  */
 import { authedFetch, expectOk } from './youtube-playlists'

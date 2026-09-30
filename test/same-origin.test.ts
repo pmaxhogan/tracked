@@ -15,10 +15,10 @@ function makeEnv(): Env {
 }
 const call = (path: string, init: RequestInit, env = makeEnv()) => app.request(`${ORIGIN}${path}`, init, env)
 // A state-changing admin route with no upstream: 400 on a bad body proves the request got past the guard.
-const ROUTE = '/subscriptions/api/tracklist/links'
+const ROUTE = '/ui/api/tracklist/links'
 
 describe('sameOriginCheck', () => {
-  const req = (method: string, headers: Record<string, string>) => new Request(`${ORIGIN}/subscriptions/api/x`, { method, headers })
+  const req = (method: string, headers: Record<string, string>) => new Request(`${ORIGIN}/ui/api/x`, { method, headers })
   it('lets safe methods through untouched', () => {
     expect(sameOriginCheck(req('GET', {}))).toEqual({ ok: true })
   })
@@ -37,7 +37,7 @@ describe('sameOriginCheck', () => {
   })
 })
 
-describe('the guard on /subscriptions/api/* (real app)', () => {
+describe('the guard on /ui/api/* (real app)', () => {
   it('refuses a cross-site form post before any handler runs', async () => {
     const r = await call(ROUTE, { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'trackIds=1' })
     expect(r.status).toBe(403)
@@ -54,19 +54,19 @@ describe('the guard on /subscriptions/api/* (real app)', () => {
   })
   it('covers every branch\'s admin routes (pool, mkvid, playlist hygiene, pool settings, ban)', async () => {
     for (const [method, path] of <Array<[string, string]>>[
-      ['POST', '/subscriptions/api/pool/accounts/acct-1/retire'],
-      ['POST', '/subscriptions/api/mkvid/recreate/abc'],
-      ['POST', '/subscriptions/api/set/remove-replace'],
-      ['PUT', '/subscriptions/api/pool/settings'],
-      ['POST', '/subscriptions/api/ban/clear'],
-      ['POST', '/subscriptions/api/tracklist/purge'],
+      ['POST', '/ui/api/pool/accounts/acct-1/retire'],
+      ['POST', '/ui/api/mkvid/recreate/abc'],
+      ['POST', '/ui/api/set/remove-replace'],
+      ['PUT', '/ui/api/pool/settings'],
+      ['POST', '/ui/api/ban/clear'],
+      ['POST', '/ui/api/tracklist/purge'],
     ]) {
       const r = await call(path, { method, headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' })
       expect([path, r.status]).toEqual([path, 403])
     }
   })
   it('leaves GETs and the bearer routes alone', async () => {
-    expect((await call('/subscriptions/api/pool/settings', { method: 'GET' })).status).toBe(200)
+    expect((await call('/ui/api/pool/settings', { method: 'GET' })).status).toBe(200)
     // Tasker's bearer route: no Origin, no Sec-Fetch-Site; the bearer gate answers, not the CSRF guard.
     const r = await call('/tracklist/purge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
     expect(r.status).toBe(401)
@@ -74,7 +74,7 @@ describe('the guard on /subscriptions/api/* (real app)', () => {
 })
 
 describe('the admin pages send what the guard wants', () => {
-  const pages = ['/subscriptions', '/subscriptions/tracklist', '/subscriptions/dj/some-dj', '/subscriptions/removed', '/subscriptions/pool', '/subscriptions/pool/settings', '/subscriptions/captcha', '/subscriptions/captcha/ch-1']
+  const pages = ['/ui', '/ui/set', '/ui/dj/some-dj', '/ui/removed', '/ui/pool', '/ui/pool/settings', '/ui/captcha', '/ui/captcha/ch-1']
   it.each(pages)('%s: every POST/PUT/DELETE fetch carries a JSON content type', async (path) => {
     const html = await (await call(path, {})).text()
     const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!).join('\n')
@@ -90,14 +90,14 @@ describe('the admin pages send what the guard wants', () => {
     }
     expect(bad).toEqual([])
     // The scan really sees the fetches (the pool pages build theirs with jsonInit, which sets the type).
-    if (path === '/subscriptions') expect(seen).toBeGreaterThan(2)
-    if (path === '/subscriptions/pool') expect(scripts).toContain("headers: { 'content-type': 'application/json' }")
+    if (path === '/ui') expect(seen).toBeGreaterThan(2)
+    if (path === '/ui/pool') expect(scripts).toContain("headers: { 'content-type': 'application/json' }")
   })
 })
 
-describe('the guard also covers POST /subscriptions/oauth/disconnect', () => {
+describe('the guard also covers POST /ui/oauth/disconnect', () => {
   it('refuses a cross-site disconnect before it reaches the route', async () => {
-    const r = await call('/subscriptions/oauth/disconnect', { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' })
+    const r = await call('/ui/oauth/disconnect', { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' })
     expect(r.status).toBe(403)
   })
 })

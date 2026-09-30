@@ -2,7 +2,7 @@ import type { Env } from '../types'
 import { batchChunked, dbOf } from './db'
 
 /**
- * Storage for the /subscriptions mini-app: the `subscriptions` table in D1
+ * Storage for the /ui mini-app: the `subscriptions` table in D1
  * (one row per DJ slug, `position` preserving the order they were added in).
  *
  * Before D1 the list lived in the SUBS KV namespace as `subs:list` (ordered

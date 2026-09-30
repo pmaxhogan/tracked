@@ -317,10 +317,10 @@ describe('POST /tracklist/purge (bearer)', () => {
   })
 })
 
-describe('POST /subscriptions/api/tracklist/purge (Cloudflare Access)', () => {
+describe('POST /ui/api/tracklist/purge (Cloudflare Access)', () => {
   const ACCESS = { CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'owner@example.com' }
   const post = (env: Env, body: unknown, headers: Record<string, string> = {}) =>
-    app.request('http://x/subscriptions/api/tracklist/purge', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }, env)
+    app.request('http://x/ui/api/tracklist/purge', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }, env)
 
   it('rejects a request without an Access token, and does not take the API bearer instead', async () => {
     const calls = poolServes(fx('tracklist-habstrakt.html'))
@@ -344,14 +344,14 @@ describe('POST /subscriptions/api/tracklist/purge (Cloudflare Access)', () => {
     poolServes(fx('tracklist-habstrakt.html'))
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' } as Partial<Env>)
     await seedStaleEntry(env)
-    const res = await app.request('http://x/subscriptions/api/tracklist', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: JSON.stringify({ url: FULL_URL }) }, env)
+    const res = await app.request('http://x/ui/api/tracklist', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: JSON.stringify({ url: FULL_URL }) }, env)
     expect(res.status).toBe(200)
     const body = await res.json() as any
     expect(body.cacheAgeSeconds).toBeGreaterThanOrEqual(5 * 3600 - 5)
     expect(body.fetchedAt).toEqual(expect.any(String))
-    const page = await (await app.request('http://x/subscriptions/tracklist', {}, env)).text()
+    const page = await (await app.request('http://x/ui/set', {}, env)).text()
     expect(page).toContain('Refresh track list')
-    expect(page).toContain('/subscriptions/api/tracklist/purge')
+    expect(page).toContain('/ui/api/tracklist/purge')
     // The viewer's inline scripts must at least parse.
     const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
     expect(scripts.length).toBeGreaterThan(0)

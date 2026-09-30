@@ -105,7 +105,7 @@ export const BAN_JS = /* js */ `
   const $route = $('ban-route'), $devices = $('ban-devices'), $eps = $('ban-episodes'), $refresh = $('ban-refresh'), $simulate = $('ban-simulate');
   const UNBLOCK_URL = ${JSON.stringify(UNBLOCK_URL)};
 
-  const api = (path, init) => fetch('/subscriptions' + path, { credentials: 'same-origin', ...(init || {}) });
+  const api = (path, init) => fetch('/ui' + path, { credentials: 'same-origin', ...(init || {}) });
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const fmtTime = (iso) => { if (!iso) return '—'; const d = new Date(iso); const sameDay = d.toDateString() === new Date().toDateString(); return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
   const fmtDur = (ms) => { if (ms == null) return '—'; const m = Math.round(ms / 60000); if (m < 60) return m + ' min'; const h = Math.floor(m / 60); return h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : ''); };
@@ -163,7 +163,26 @@ export const BAN_JS = /* js */ `
 
   function b64ToBytes(b64) { const pad = '='.repeat((4 - (b64.length % 4)) % 4); const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/')); const out = new Uint8Array(raw.length); for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i); return out; }
   async function getConfig() { if (pushConfig) return pushConfig; const r = await api('/api/push/config'); pushConfig = r.ok ? await r.json() : { configured: false }; return pushConfig; }
-  async function getReg() { if (swReg) return swReg; swReg = await navigator.serviceWorker.register('/subscriptions/sw.js', { scope: '/subscriptions/' }); return swReg; }
+  async function dropOldRegistrations() {
+    // Before the /ui move the worker lived at /subscriptions/sw.js. Drop it and its push
+    // subscription once, so a device does not end up subscribed twice.
+    if (!navigator.serviceWorker.getRegistrations) return false;
+    let dropped = false;
+    for (const reg of await navigator.serviceWorker.getRegistrations()) {
+      if (!/\\/subscriptions\\/$/.test(reg.scope || '')) continue;
+      try {
+        const old = reg.pushManager && (await reg.pushManager.getSubscription());
+        if (old) {
+          await api('/api/push/unsubscribe', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ endpoint: old.endpoint }) });
+          await old.unsubscribe().catch(() => {});
+          dropped = true;
+        }
+      } catch {}
+      await reg.unregister().catch(() => {});
+    }
+    return dropped;
+  }
+  async function getReg() { if (swReg) return swReg; swReg = await navigator.serviceWorker.register('/ui/sw.js', { scope: '/ui/' }); return swReg; }
 
   function setAlertsUI(state, msg) {
     if ($aState) { $aState.textContent = state.text; $aState.className = 'alerts-state ' + state.cls; }
@@ -194,7 +213,8 @@ export const BAN_JS = /* js */ `
     if (!pushSupported) return;
     const cfg = await getConfig();
     if (!cfg.configured) { setAlertsUI(await pushState(), 'Set VAPID_* secrets on the Worker first.'); return; }
-    const perm = await Notification.requestPermission();
+    // Already granted (the old-worker migration below): no prompt, so no request.
+    const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
     if (perm !== 'granted') { setAlertsUI(await pushState(), perm === 'denied' ? 'Permission denied — allow notifications for this site in the browser.' : ''); return; }
     const reg = await getReg();
     let sub = await reg.pushManager.getSubscription();
@@ -206,7 +226,10 @@ export const BAN_JS = /* js */ `
 
   async function syncPush() {
     try {
+      const hadOld = pushSupported ? await dropOldRegistrations() : false;
       const st = await pushState();
+      // The old worker's subscription was dropped: re-subscribe under /ui/ without a prompt.
+      if (hadOld && !st.sub && Notification.permission === 'granted') { await enablePush(); return; }
       setAlertsUI(st);
       if (st.sub) await sendSubscription(st.sub); // keep the server copy fresh (endpoint rotation)
       // Auto-prompt on the main page: first visit asks right away.
@@ -303,7 +326,7 @@ export const BAN_JS = /* js */ `
 })();
 `
 
-/** Served at /subscriptions/sw.js. Turns a push into a Notification; tap opens the payload URL. */
+/** Served at /ui/sw.js. Turns a push into a Notification; tap opens the payload URL. */
 export const SW_JS = /* js */ `
 const STICKY_KINDS = ['ban_start', 'pool_challenge', 'pool_account', 'playlist_hold'];
 self.addEventListener('install', () => self.skipWaiting());
@@ -320,13 +343,13 @@ self.addEventListener('push', (event) => {
     // waiting (pool_challenge), a flagged account, a held playlist check.
     requireInteraction: data.requireInteraction === true || STICKY_KINDS.includes(data.kind) || /challenge/.test(data.kind || ''),
     timestamp: data.ts ? Date.parse(data.ts) : Date.now(),
-    data: { url: data.url || '/subscriptions', kind: data.kind || null },
+    data: { url: data.url || '/ui/', kind: data.kind || null },
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || '/subscriptions';
+  const url = (event.notification.data && event.notification.data.url) || '/ui/';
   event.waitUntil((async () => {
     const target = new URL(url, self.location.origin).href;
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });

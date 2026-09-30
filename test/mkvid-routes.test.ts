@@ -160,7 +160,7 @@ describe('/mkvid routes', () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1', MKVID_DAILY_CLAIM_CAP: '0', MKVID_SHARED_DAILY_CLAIM_CAP: '0' })
     await enqueueMkvidRequest(env, input)
     expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
-    const r = await app.request('http://x/subscriptions/api/mkvid', {}, env)
+    const r = await app.request('http://x/ui/api/mkvid', {}, env)
     expect(r.status).toBe(200)
     const d = (await r.json()) as { dailyClaimCap: number; dailyClaims: number; quotaResetsAt: number; now: number; lastPoll: { outcome: string } | null; queue: Array<{ setUrl: string }>; settled: unknown[] }
     expect(d).toMatchObject({ enabled: true, dailyClaimCap: 0, dailyClaims: 0, lastPoll: { outcome: 'capped', accounts: ['primary'] }, settled: [], accounts: [{ account: 'primary', cap: 0 }, { account: 'shared', cap: 0 }] })
@@ -190,7 +190,7 @@ describe('/mkvid routes', () => {
       counts: Record<string, number>
       section: string
     }
-    const panel = async (qs: string) => (await (await app.request(`http://x/subscriptions/api/mkvid${qs}`, {}, env)).json()) as Panel
+    const panel = async (qs: string) => (await (await app.request(`http://x/ui/api/mkvid${qs}`, {}, env)).json()) as Panel
     const names = (rows: ReadonlyArray<{ setUrl: string }>) => rows.map((r) => r.setUrl.split('/').pop())
 
     const p1 = await panel('?limit=2')
@@ -222,7 +222,7 @@ describe('/mkvid routes', () => {
     const first = (await (await post(env, '/mkvid/claim', {})).json()) as { request: { id: string } }
     await post(env, '/mkvid/fail', { id: first.request.id, error: 'incomplete_recording', permanent: true })
     const ids = Object.fromEntries(await Promise.all(['a', 'b'].map(async (n) => [n, (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id])))
-    expect((await app.request(`http://x/subscriptions/api/mkvid/ban/${ids.b}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(200)
+    expect((await app.request(`http://x/ui/api/mkvid/ban/${ids.b}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(200)
     await post(env, '/mkvid/claim', {})
 
     const s1 = await panel('?limit=2')
@@ -241,7 +241,7 @@ describe('/mkvid routes', () => {
   it('a filter the panel API does not know is a 400, not an empty list', async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
     for (const qs of ['?status=nope', '?status=pending,nope', '?source=bandcamp', '?account=other', '?section=middle']) {
-      const r = await app.request(`http://x/subscriptions/api/mkvid${qs}`, {}, env)
+      const r = await app.request(`http://x/ui/api/mkvid${qs}`, {}, env)
       expect([qs, r.status]).toEqual([qs, 400])
       expect(await r.json()).toMatchObject({ error: 'invalid_request' })
     }
@@ -262,8 +262,8 @@ describe('/mkvid routes', () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
     for (const [n, d] of [['a', '2026-09-13'], ['b', '2026-09-11'], ['c', '2026-09-05']] as Array<[string, string]>) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: d })
     const ids = Object.fromEntries(await Promise.all(['a', 'b', 'c'].map(async (n) => [n, (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id])))
-    const panel = async () => ((await (await app.request('http://x/subscriptions/api/mkvid', {}, env)).json()) as { queue: Array<{ setUrl: string }>; settled: Array<{ status: string }> })
-    const act = (path: string, body?: unknown) => app.request(`http://x/subscriptions/api/mkvid/${path}`, { method: 'POST', headers: { Origin: 'http://x', 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }, env)
+    const panel = async () => ((await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as { queue: Array<{ setUrl: string }>; settled: Array<{ status: string }> })
+    const act = (path: string, body?: unknown) => app.request(`http://x/ui/api/mkvid/${path}`, { method: 'POST', headers: { Origin: 'http://x', 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }, env)
 
     expect((await act(`move/${ids.c}`, { to: 'sideways' })).status).toBe(400)
     const moved = await act(`move/${ids.c}`, { to: 'top' })

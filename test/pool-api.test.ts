@@ -81,7 +81,7 @@ describe('receivePoolEvent', () => {
     const r = await receivePoolEvent(env, ev({ id: 'e1', type: 'challenge.created', challengeId: 'ch 1'.replace(' ', '-'), accountId: 'acct-2', challengeType: 'checkbox' }), { now: DAYTIME, fetchImpl: push.fetchImpl })
     expect(r).toMatchObject({ duplicate: false, push: 'sent' })
     expect(push.sent).toEqual(['https://push.example/device-1'])
-    expect(poolEventPushPayload(ev({ type: 'challenge.created', challengeId: 'ch-1' }))!.url).toBe('/subscriptions/captcha/ch-1')
+    expect(poolEventPushPayload(ev({ type: 'challenge.created', challengeId: 'ch-1' }))!.url).toBe('/ui/captcha/ch-1')
     const [stored] = await listPoolEvents(env)
     expect(stored).toMatchObject({ type: 'challenge.created', challengeId: 'ch-1', accountId: 'acct-2', pushStatus: 'sent' })
     // Retries of the same event id are stored and pushed once.
@@ -103,8 +103,8 @@ describe('receivePoolEvent', () => {
   })
 
   it('account.flagged links to the accounts page (or the captcha when it names one)', () => {
-    expect(poolEventPushPayload(ev({ type: 'account.flagged', accountId: 'acct-1' }))).toMatchObject({ kind: 'pool_account', url: '/subscriptions/pool' })
-    expect(poolEventPushPayload(ev({ type: 'account.flagged', accountId: 'acct-1', challengeId: 'c2' }))!.url).toBe('/subscriptions/captcha/c2')
+    expect(poolEventPushPayload(ev({ type: 'account.flagged', accountId: 'acct-1' }))).toMatchObject({ kind: 'pool_account', url: '/ui/pool' })
+    expect(poolEventPushPayload(ev({ type: 'account.flagged', accountId: 'acct-1', challengeId: 'c2' }))!.url).toBe('/ui/captcha/c2')
     expect(poolEventPushPayload(ev({ type: 'account.created', accountId: 'acct-1' }))).toBeNull()
   })
 })
@@ -132,9 +132,9 @@ describe('POST /pool/events (bearer TLPOOL_TOKEN)', () => {
   })
 })
 
-describe('GET/PUT /subscriptions/api/pool/settings (behind Cloudflare Access)', () => {
+describe('GET/PUT /ui/api/pool/settings (behind Cloudflare Access)', () => {
   const call = (env: Env, method: string, body?: unknown) =>
-    app.request('http://x/subscriptions/api/pool/settings', { method, headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }, env)
+    app.request('http://x/ui/api/pool/settings', { method, headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }, env)
 
   it('is gated by Cloudflare Access', async () => {
     const env = await makeEnv({ CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'a@example.com' })

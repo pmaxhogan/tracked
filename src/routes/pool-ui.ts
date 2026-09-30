@@ -1,6 +1,6 @@
 /**
- * Admin pages for the tlpool browser pool, and the `/subscriptions/api/pool/*`
- * routes they call. Mounted at `/subscriptions` (in `index.ts`, ahead of the
+ * Admin pages for the tlpool browser pool, and the `/ui/api/pool/*`
+ * routes they call. Mounted at `/ui` (in `index.ts`, ahead of the
  * main subscriptions app), gated by Cloudflare Access like every other admin
  * page, and never by the bearer token.
  *
@@ -55,7 +55,7 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   const client = (env: Env) => createPoolAdminClient(env as PoolEnv, opts.fetcher)
 
   // Scoped to this app's own paths: a `use('*')` here would also run on every
-  // other /subscriptions/* request, since both apps share the mount point.
+  // other /ui/* request, since both apps share the mount point.
   for (const p of [
     '/pool', '/pool/*', '/captcha', '/captcha/*', '/accounts',
     '/api/pool/status', '/api/pool/accounts', '/api/pool/accounts/*',
@@ -82,7 +82,7 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   app.get('/pool/settings', (c) => page(c, SETTINGS_PAGE_HTML))
   app.get('/captcha', (c) => page(c, CAPTCHA_LIST_HTML))
   // Older pushes (flagged account) link here; the accounts live on the pool page.
-  app.get('/accounts', (c) => c.redirect('/subscriptions/pool', 302))
+  app.get('/accounts', (c) => c.redirect('/ui/pool', 302))
   app.get('/captcha/:id', (c) => {
     const id = c.req.param('id')
     if (!ID_RE.test(id)) return c.text('Not a challenge id', 404)
@@ -282,7 +282,7 @@ const POOL_CSS = /* css */ `
   .prio .name { flex: 1; }
 `
 
-const NAV_HTML = /* html */ `<a href="/subscriptions">Subscriptions</a> &nbsp;·&nbsp; <a href="/subscriptions/pool">Pool</a> &nbsp;·&nbsp; <a href="/subscriptions/captcha">Captchas</a> &nbsp;·&nbsp; <a href="/subscriptions/pool/settings">Pool settings</a>`
+const NAV_HTML = /* html */ `<a href="/ui">Subscriptions</a> &nbsp;·&nbsp; <a href="/ui/pool">Pool</a> &nbsp;·&nbsp; <a href="/ui/captcha">Captchas</a> &nbsp;·&nbsp; <a href="/ui/pool/settings">Pool settings</a>`
 
 /** Shared helpers for every pool page. */
 const COMMON_JS = /* js */ `
@@ -290,7 +290,7 @@ const COMMON_JS = /* js */ `
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   async function api(path, init) {
     let r;
-    try { r = await fetch('/subscriptions/api/pool' + path, { credentials: 'same-origin', ...(init || {}) }); }
+    try { r = await fetch('/ui/api/pool' + path, { credentials: 'same-origin', ...(init || {}) }); }
     catch (e) { return { ok: false, status: 0, data: { error: 'network' } }; }
     const data = await r.json().catch(() => ({}));
     return { ok: r.ok, status: r.status, data };
@@ -402,7 +402,7 @@ const COMMON_JS = /* js */ `
 const CAPTCHA_JS = /* js */ `
   function mountCaptcha(root, ch, hooks) {
     hooks = hooks || {};
-    const base = '/subscriptions/api/pool/challenges/' + encodeURIComponent(ch.id);
+    const base = '/ui/api/pool/challenges/' + encodeURIComponent(ch.id);
     if (ch.type === 'checkbox') {
       // tlpool's live page takes only ?path= (the websocket path under our proxy).
       const livePath = base.slice(1) + '/live/websockify';
@@ -551,7 +551,7 @@ ${CAPTCHA_JS}
     if (!open.length) { $('chals').innerHTML = '<div class="empty">None. Nothing is waiting for you.</div>'; return; }
     $('chals').innerHTML = '<ul class="plain">' + open.map((c) => {
       const l = leftText(c.expiresAt);
-      return '<li><div class="row"><a href="/subscriptions/captcha/' + encodeURIComponent(c.id) + '"><b>Solve ' + esc(typeText(c.type)) + '</b></a><span class="spacer"></span><span class="left' + (l.soon ? ' soon' : '') + '">' + esc(l.text) + '</span></div>' +
+      return '<li><div class="row"><a href="/ui/captcha/' + encodeURIComponent(c.id) + '"><b>Solve ' + esc(typeText(c.type)) + '</b></a><span class="spacer"></span><span class="left' + (l.soon ? ' soon' : '') + '">' + esc(l.text) + '</span></div>' +
         '<div class="muted" style="font-size:0.82rem">' + esc(c.accountId || 'no account yet') + ' · ' + esc(reasonText(c.reason)) + ' · since ' + esc(fmtTime(c.createdAt)) + '</div></li>';
     }).join('') + '</ul>';
   }
@@ -776,7 +776,7 @@ ${COMMON_JS}
     if (!open.length) { $('list').innerHTML = '<div class="empty">No pending challenges. Nothing is waiting for you.</div>'; return r; }
     $('list').innerHTML = '<ul class="plain">' + open.map((c) => {
       const l = leftText(c.expiresAt);
-      return '<li><a href="/subscriptions/captcha/' + encodeURIComponent(c.id) + '" style="display:block;text-decoration:none;color:inherit">' +
+      return '<li><a href="/ui/captcha/' + encodeURIComponent(c.id) + '" style="display:block;text-decoration:none;color:inherit">' +
         '<div class="row"><b>' + esc(reasonText(c.reason)) + '</b><span class="spacer"></span><span class="left' + (l.soon ? ' soon' : '') + '">' + esc(l.text) + '</span></div>' +
         '<div class="muted" style="font-size:0.85rem">' + esc(c.accountId || 'no account yet') + ' · ' + esc(typeText(c.type)) + ' · since ' + esc(fmtTime(c.createdAt)) + '</div>' +
         '<div style="margin-top:0.4rem;color:var(--accent);font-weight:600">Solve →</div></a></li>';
@@ -834,7 +834,7 @@ ${CAPTCHA_JS}
     if (watch) watch.stop();
     if (widget) widget.disable();
     if (kind !== 'ok') $('widget').innerHTML = '';
-    $('state').innerHTML = '<div class="banner ' + kind + '">' + esc(text) + '</div><p><a href="/subscriptions/captcha">Other pending captchas</a> · <a href="/subscriptions/pool">Pool</a></p>';
+    $('state').innerHTML = '<div class="banner ' + kind + '">' + esc(text) + '</div><p><a href="/ui/captcha">Other pending captchas</a> · <a href="/ui/pool">Pool</a></p>';
   }
   function applyState() {
     if (ch.state === 'solved') finish('ok', '✓ Solved. The pool browser carries on.');
@@ -989,7 +989,7 @@ ${COMMON_JS}
   }
   const numOrNull = (id) => $(id).value === '' || $(id).value == null ? null : Number($(id).value);
   async function loadSched() {
-    const r = await fetch('/subscriptions/api/pool/settings', { credentials: 'same-origin' }).catch(() => null);
+    const r = await fetch('/ui/api/pool/settings', { credentials: 'same-origin' }).catch(() => null);
     if (!r) { $('sch-err').textContent = errText({ error: 'network' }); $('sch-save').disabled = true; return; }
     const d = await r.json().catch(() => ({}));
     if (!r.ok || !d.settings || !d.settings.recheck || !Array.isArray(d.settings.recheck.bands)) { $('sch-err').textContent = errText(d, r.status); $('sch-save').disabled = true; return; }
@@ -1017,7 +1017,7 @@ ${COMMON_JS}
     const body = { recheck, priorities: { order: sched.priorities.order } };
     if (numOrNull('feed') != null) body.renderFeedPerDay = numOrNull('feed');
     $('sch-save').disabled = true; $('sch-msg').textContent = 'saving…';
-    const r = await fetch('/subscriptions/api/pool/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
+    const r = await fetch('/ui/api/pool/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
     $('sch-save').disabled = false;
     const d = r ? await r.json().catch(() => ({})) : { error: 'network' };
     if (!r || !r.ok) { $('sch-msg').textContent = ''; $('sch-err').textContent = d && d.issues ? d.issues.join('; ') : errText(d, r ? r.status : 0); return; }

@@ -109,16 +109,16 @@ describe('Dismiss (manualClear, POST /api/ban/clear) never lifts ban:pause', () 
     expect((await getBanStatus(env)).pauseDismissed).toBe(false)
   })
 
-  it('the route: POST /subscriptions/api/ban/clear answers and leaves the key', async () => {
+  it('the route: POST /ui/api/ban/clear answers and leaves the key', async () => {
     const { app } = await import('../src/index')
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' } as Partial<Env>)
     await env.CACHE.put('ban:pause', OPERATOR_PAUSE)
     await simulateBan(env)
-    const r = await app.request('https://tracked.example/subscriptions/api/ban/clear', { method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: '{}' }, env)
+    const r = await app.request('https://tracked.example/ui/api/ban/clear', { method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: '{}' }, env)
     expect(r.status).toBe(200)
     expect(await r.json()).toMatchObject({ cleared: true })
     expect(await env.CACHE.get('ban:pause')).toBe(OPERATOR_PAUSE)
-    const st = await (await app.request('https://tracked.example/subscriptions/api/ban/status', {}, env)).json() as { pause: unknown; pauseDismissed: boolean; home: unknown }
+    const st = await (await app.request('https://tracked.example/ui/api/ban/status', {}, env)).json() as { pause: unknown; pauseDismissed: boolean; home: unknown }
     expect(st).toMatchObject({ home: null, pauseDismissed: true })
     expect(st.pause).not.toBeNull()
   })

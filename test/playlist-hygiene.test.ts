@@ -516,23 +516,23 @@ describe('routes', () => {
   it('serve the removed page and API behind Cloudflare Access', async () => {
     const { app } = await import('../src/index')
     const locked = makeEnv({ DEV_BYPASS_CF_ACCESS: undefined, CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'owner@example.com' })
-    for (const [method, path] of [['GET', '/subscriptions/removed'], ['GET', '/subscriptions/api/removals'], ['POST', '/subscriptions/api/set/remove-replace'], ['POST', '/subscriptions/api/removals/1/undo'], ['POST', '/subscriptions/api/hygiene/run?what=sweep']] as const) {
+    for (const [method, path] of [['GET', '/ui/removed'], ['GET', '/ui/api/removals'], ['POST', '/ui/api/set/remove-replace'], ['POST', '/ui/api/removals/1/undo'], ['POST', '/ui/api/hygiene/run?what=sweep']] as const) {
       const r = await app.request(`http://x${path}`, { method }, locked)
       expect([401, 403], path).toContain(r.status)
     }
     expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
     const env = makeEnv()
-    const page = await app.request('http://x/subscriptions/removed', {}, env)
+    const page = await app.request('http://x/ui/removed', {}, env)
     expect(page.status).toBe(200)
     expect(await page.text()).toContain('Removed videos')
-    const api = await app.request('http://x/subscriptions/api/removals', {}, env)
+    const api = await app.request('http://x/ui/api/removals', {}, env)
     expect(await api.json()).toMatchObject({ rows: [], settings: { dryRun: true, dailyRemovals: 40 }, holds: [] })
   })
 
   it('remove-replace validates input and reports a set without a video', async () => {
     const { app } = await import('../src/index')
     const env = makeEnv()
-    const post = (body: unknown) => app.request('http://x/subscriptions/api/set/remove-replace', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env)
+    const post = (body: unknown) => app.request('http://x/ui/api/set/remove-replace', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env)
     expect((await post({ slug: 'dj' })).status).toBe(400)
     await seedSet(env, setUrl(1), null)
     expect((await post({ slug: SLUG, url: setUrl(1) })).status).toBe(409)
@@ -611,8 +611,8 @@ describe('held comparison push (cron wiring)', () => {
   }
   afterEach(() => vi.useRealTimers())
 
-  it('the payload is a playlist_hold push that opens /subscriptions/removed', () => {
-    expect(playlistHoldPayload('Playlist check held', 'x', DAY)).toEqual({ kind: 'playlist_hold', title: 'Playlist check held', body: 'x', url: '/subscriptions/removed', tag: 'playlist-hold', ts: DAY.toISOString() })
+  it('the payload is a playlist_hold push that opens /ui/removed', () => {
+    expect(playlistHoldPayload('Playlist check held', 'x', DAY)).toEqual({ kind: 'playlist_hold', title: 'Playlist check held', body: 'x', url: '/ui/removed', tag: 'playlist-hold', ts: DAY.toISOString() })
   })
 
   it('pushes a held playlist once, at any hour (no quiet hours)', async () => {

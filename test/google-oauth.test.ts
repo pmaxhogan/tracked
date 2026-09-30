@@ -49,9 +49,9 @@ describe('buildAuthUrl', () => {
 })
 
 describe('redirectUriFor', () => {
-  it('extracts origin + appends /subscriptions/oauth/callback', () => {
-    expect(redirectUriFor('https://w.example/subscriptions/oauth/start')).toBe('https://w.example/subscriptions/oauth/callback')
-    expect(redirectUriFor('http://localhost:8787/subscriptions/oauth/start?x=1')).toBe('http://localhost:8787/subscriptions/oauth/callback')
+  it('extracts origin + appends /ui/oauth/callback', () => {
+    expect(redirectUriFor('https://w.example/ui/oauth/start')).toBe('https://w.example/ui/oauth/callback')
+    expect(redirectUriFor('http://localhost:8787/ui/oauth/start?x=1')).toBe('http://localhost:8787/ui/oauth/callback')
   })
 })
 

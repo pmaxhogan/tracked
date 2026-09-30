@@ -7,7 +7,7 @@ import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
 
 /**
- * The set list behind the DJ profile page (`/subscriptions/dj/<slug>`): every
+ * The set list behind the DJ profile page (`/ui/dj/<slug>`): every
  * tracklist we know about for one DJ, with the display metadata that can be
  * derived without opening each set page (title + date live in the URL slug).
  *

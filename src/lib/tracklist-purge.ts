@@ -14,7 +14,7 @@ import { extractVideoId } from './youtube'
 /**
  * Purge one parsed tracklist from the cache and fetch it again right away at
  * priority `phone` (spec decision 20). Behind `POST /tracklist/purge` (bearer),
- * `POST /subscriptions/api/tracklist/purge` (Access, the viewer's "Refresh
+ * `POST /ui/api/tracklist/purge` (Access, the viewer's "Refresh
  * track list" button) and `/now-playing` with `refresh: true`.
  *
  * The refetch happens first, bypassing the cache read; only a clean,

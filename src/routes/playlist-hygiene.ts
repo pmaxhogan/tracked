@@ -1,13 +1,13 @@
 /**
  * Playlist hygiene routes (lib/playlist-hygiene.ts), mounted inside the
- * /subscriptions sub-app, so Cloudflare Access gates every one of them:
+ * /ui sub-app, so Cloudflare Access gates every one of them:
  *
- *   GET  /subscriptions/removed                     what was (or in a dry run would be) removed, and why
- *   GET  /subscriptions/api/removals                the rows behind it, settings, holds
- *   POST /subscriptions/api/removals/:id/undo       re-add (or, for a dry-run row, keep) one video
- *   POST /subscriptions/api/removals/holds/:playlistId/approve   apply a held comparison once
- *   POST /subscriptions/api/hygiene/run?what=compare|sweep       run one step now
- *   POST /subscriptions/api/set/remove-replace      the set card's "remove and replace" button
+ *   GET  /ui/removed                     what was (or in a dry run would be) removed, and why
+ *   GET  /ui/api/removals                the rows behind it, settings, holds
+ *   POST /ui/api/removals/:id/undo       re-add (or, for a dry-run row, keep) one video
+ *   POST /ui/api/removals/holds/:playlistId/approve   apply a held comparison once
+ *   POST /ui/api/hygiene/run?what=compare|sweep       run one step now
+ *   POST /ui/api/set/remove-replace      the set card's "remove and replace" button
  */
 
 import { Hono } from 'hono'
@@ -129,7 +129,7 @@ const REMOVED_PAGE_HTML = /* html */ `<!doctype html>
 <body>
 <main>
   <h1>Removed videos</h1>
-  <p class="lead">Videos the playlist sweep removed (or, in a dry run, would remove) for not being full recordings, and videos found missing from the playlists (removed by hand, or dead) that the sync will never re-add. <a href="/subscriptions">← Subscriptions</a></p>
+  <p class="lead">Videos the playlist sweep removed (or, in a dry run, would remove) for not being full recordings, and videos found missing from the playlists (removed by hand, or dead) that the sync will never re-add. <a href="/ui">← Subscriptions</a></p>
   <div class="bar" id="bar"></div>
   <div id="holds"></div>
   <div id="error" class="error" role="alert"></div>
@@ -170,7 +170,7 @@ const REMOVED_PAGE_HTML = /* html */ `<!doctype html>
       const b = el('button', what === 'compare' ? 'Compare playlists now' : 'Run sweep now');
       b.addEventListener('click', async () => {
         b.disabled = true; $err.textContent = '';
-        try { await post('/subscriptions/api/hygiene/run?what=' + what); await load(); } catch (e) { $err.textContent = e.message; } finally { b.disabled = false; }
+        try { await post('/ui/api/hygiene/run?what=' + what); await load(); } catch (e) { $err.textContent = e.message; } finally { b.disabled = false; }
       });
       $bar.appendChild(b);
     }
@@ -186,7 +186,7 @@ const REMOVED_PAGE_HTML = /* html */ `<!doctype html>
       const b = el('button', 'They really are removed — apply once');
       b.addEventListener('click', async () => {
         b.disabled = true;
-        try { await post('/subscriptions/api/removals/holds/' + encodeURIComponent(h.playlistId) + '/approve'); b.textContent = 'Approved — applies at the next comparison'; } catch (e) { $err.textContent = e.message; b.disabled = false; }
+        try { await post('/ui/api/removals/holds/' + encodeURIComponent(h.playlistId) + '/approve'); b.textContent = 'Approved — applies at the next comparison'; } catch (e) { $err.textContent = e.message; b.disabled = false; }
       });
       p.appendChild(b);
       box.appendChild(p);
@@ -200,7 +200,7 @@ const REMOVED_PAGE_HTML = /* html */ `<!doctype html>
     tr.appendChild(el('td', r.source));
     tr.appendChild(el('td', r.status.replace('_', ' '), 'status-' + r.status));
     const set = el('td');
-    if (r.slug) { const a = el('a', r.slug); a.href = '/subscriptions/dj/' + encodeURIComponent(r.slug); set.appendChild(a); set.appendChild(document.createElement('br')); }
+    if (r.slug) { const a = el('a', r.slug); a.href = '/ui/dj/' + encodeURIComponent(r.slug); set.appendChild(a); set.appendChild(document.createElement('br')); }
     if (r.set_url) set.appendChild(link(r.set_url, (r.set_url.split('/').pop() || r.set_url).replace(/\\.html$/, '')));
     tr.appendChild(set);
     const vid = el('td'); vid.appendChild(link('https://www.youtube.com/watch?v=' + encodeURIComponent(r.video_id), r.video_id)); tr.appendChild(vid);
@@ -214,7 +214,7 @@ const REMOVED_PAGE_HTML = /* html */ `<!doctype html>
       b.title = r.status === 'would_remove' ? 'Never remove this video' : 'Put the video back and never judge it again';
       b.addEventListener('click', async () => {
         b.disabled = true; $err.textContent = '';
-        try { await post('/subscriptions/api/removals/' + r.id + '/undo'); b.replaceWith(el('span', 'undone', 'detail')); } catch (e) { $err.textContent = e.message; b.disabled = false; }
+        try { await post('/ui/api/removals/' + r.id + '/undo'); b.replaceWith(el('span', 'undone', 'detail')); } catch (e) { $err.textContent = e.message; b.disabled = false; }
       });
       act.appendChild(b);
     }
@@ -225,7 +225,7 @@ const REMOVED_PAGE_HTML = /* html */ `<!doctype html>
   async function load(more) {
     $err.textContent = '';
     try {
-      const r = await fetch('/subscriptions/api/removals' + (more && next ? '?before=' + next : ''), { credentials: 'same-origin' });
+      const r = await fetch('/ui/api/removals' + (more && next ? '?before=' + next : ''), { credentials: 'same-origin' });
       const d = await r.json();
       if (!r.ok) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
       labels = d.reasonLabels || {};

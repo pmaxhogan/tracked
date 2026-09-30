@@ -759,12 +759,12 @@ export type Notifier = (title: string, body: string) => Promise<boolean | void>
 
 /**
  * The cron's notifier for a held comparison: a Web Push (kind `playlist_hold`)
- * to every subscribed device, opening /subscriptions/removed, at any hour.
+ * to every subscribed device, opening /ui/removed, at any hour.
  * Returns false when nothing was delivered, so the hold stays un-notified
  * and the next 6-hourly comparison tries again.
  */
 export function playlistHoldPayload(title: string, body: string, now: Date = new Date()): PushPayload {
-  return { kind: 'playlist_hold', title, body, url: '/subscriptions/removed', tag: 'playlist-hold', ts: now.toISOString() }
+  return { kind: 'playlist_hold', title, body, url: '/ui/removed', tag: 'playlist-hold', ts: now.toISOString() }
 }
 
 export function playlistHoldNotifier(env: Env, log?: Logger, fetchImpl?: typeof fetch): Notifier {
@@ -1002,8 +1002,8 @@ export async function comparePlaylists(
   if (unnotified.length > 0 && opts.notify) {
     const title = breaker ? 'Playlist check held: too many removals' : 'Playlist check held'
     const messages = breaker
-      ? [`${runMissing} videos across ${newHolds.length} playlists seem to be gone in one check. Nothing was recorded; review at /subscriptions/removed.`]
-      : unnotified.map((h) => `${h.kind === 'combined' ? 'The combined playlist' : `${h.slug}'s playlist`} seems to have lost ${h.missing} of ${h.expected} videos. Nothing was recorded; review at /subscriptions/removed.`)
+      ? [`${runMissing} videos across ${newHolds.length} playlists seem to be gone in one check. Nothing was recorded; review at /ui/removed.`]
+      : unnotified.map((h) => `${h.kind === 'combined' ? 'The combined playlist' : `${h.slug}'s playlist`} seems to have lost ${h.missing} of ${h.expected} videos. Nothing was recorded; review at /ui/removed.`)
     let allSent = true
     for (const body of messages) {
       try {

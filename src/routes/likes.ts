@@ -31,7 +31,7 @@ export const likesRoute = createRoute({
  * remove it from YouTube Music's "Liked songs". Idempotent: liking an
  * already-liked video (or unliking one that isn't) is a no-op 200.
  *
- * Uses the same OAuth tokens the /subscriptions playlist sync uses. When there
+ * Uses the same OAuth tokens the /ui playlist sync uses. When there
  * are none (never connected, or Google revoked the refresh token) this returns
  * 503 `youtube_not_connected` so the phone can show a "reconnect" toast rather
  * than silently doing nothing.
@@ -53,13 +53,13 @@ export const likesHandler: RouteHandler<typeof likesRoute, { Bindings: Env }> = 
     const tok = await getAccessToken(c.env)
     if (!tok) {
       log.warn('likes.not_connected', { videoId })
-      return c.json({ error: 'youtube_not_connected', message: 'connect a YouTube account at /subscriptions first' }, 503)
+      return c.json({ error: 'youtube_not_connected', message: 'connect a YouTube account at /ui first' }, 503)
     }
     accessToken = tok.accessToken
   } catch (e) {
     log.error('likes.token_failed', { videoId, ...errorFields(e) })
     if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
-      return c.json({ error: 'youtube_not_connected', message: 'YouTube refresh token was revoked; reconnect at /subscriptions' }, 503)
+      return c.json({ error: 'youtube_not_connected', message: 'YouTube refresh token was revoked; reconnect at /ui' }, 503)
     }
     if (/not configured/.test((e as Error).message)) {
       return c.json({ error: 'misconfigured', message: (e as Error).message }, 500)

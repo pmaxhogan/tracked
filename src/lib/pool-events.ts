@@ -3,11 +3,11 @@
  * stored in D1 (`pool_events`, migration 0007) and, for the two that need the
  * owner, turned into a Web Push through lib/web-push.ts:
  *
- *   - `challenge.created` → "captcha waiting", opens /subscriptions/captcha/<id>
+ *   - `challenge.created` → "captcha waiting", opens /ui/captcha/<id>
  *     (the page W8 builds: captcha image + answer box, or the live view for
  *     the checkbox wall)
  *   - `account.flagged`   → "account flagged", opens the captcha page when the
- *     event names a challenge, else /subscriptions/pool (the accounts page)
+ *     event names a challenge, else /ui/pool (the accounts page)
  *
  * Every push is sent immediately, at any hour (owner decision 2026-09-29: no
  * quiet hours). tlpool still holds a challenge for 2 h and then rests the
@@ -100,7 +100,7 @@ export function poolEventPushPayload(ev: PoolEvent, now: Date = new Date()): Pus
       kind: 'pool_challenge',
       title: '1001tracklists captcha waiting',
       body: `${who} hit ${kind}${ev.phoneInitiated ? ' on a phone lookup' : ''}. Tap to solve.${until}`,
-      url: `/subscriptions/captcha/${encodeURIComponent(ev.challengeId)}`,
+      url: `/ui/captcha/${encodeURIComponent(ev.challengeId)}`,
       tag: `tlpool-challenge-${ev.challengeId}`.slice(0, 64),
       ts: now.toISOString(),
     }
@@ -110,7 +110,7 @@ export function poolEventPushPayload(ev: PoolEvent, now: Date = new Date()): Pus
       kind: 'pool_account',
       title: 'Pool account flagged',
       body: `${who} was flagged${ev.reason ? ` (${ev.reason})` : ''}. It rests 72 h, then gets one retest.`,
-      url: ev.challengeId ? `/subscriptions/captcha/${encodeURIComponent(ev.challengeId)}` : '/subscriptions/pool',
+      url: ev.challengeId ? `/ui/captcha/${encodeURIComponent(ev.challengeId)}` : '/ui/pool',
       tag: `tlpool-account-${ev.accountId ?? 'unknown'}`.slice(0, 64),
       ts: now.toISOString(),
     }
@@ -120,7 +120,7 @@ export function poolEventPushPayload(ev: PoolEvent, now: Date = new Date()): Pus
       kind: 'pool_account',
       title: 'Pool account retired',
       body: `${who} was retired${ev.reason ? ` (${ev.reason})` : ''}. Its exit is not reused for 30 days.`,
-      url: '/subscriptions/pool',
+      url: '/ui/pool',
       tag: `tlpool-account-${ev.accountId ?? 'unknown'}`.slice(0, 64),
       ts: now.toISOString(),
     }

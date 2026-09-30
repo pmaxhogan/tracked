@@ -101,7 +101,7 @@ async function queue(env: Env, name: string, opts: { setDate?: string | null; ve
 
 const post = (env: Env, path: string, body?: unknown, token = 'mk-secret') =>
   app.request(`http://x${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }, env)
-const panel = async (env: Env) => (await (await app.request('http://x/subscriptions/api/mkvid', {}, env)).json()) as Record<string, any>
+const panel = async (env: Env) => (await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as Record<string, any>
 
 beforeEach(() => {
   vi.resetAllMocks()
@@ -208,7 +208,7 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(old.id)
 
     // Render now on the recent one.
-    const r = await app.request(`http://x/subscriptions/api/mkvid/render-now/${recent.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)
+    const r = await app.request(`http://x/ui/api/mkvid/render-now/${recent.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)
     expect(r.status).toBe(200)
     expect((await getMkvidRequest(env, recent.id))!.skipIdWait).toBe(true)
     const c = (await claimMkvidRequest(env, log, ['primary'], 'scene'))!
@@ -216,7 +216,7 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     expect(c.tracks.filter((t) => t.isId)).toHaveLength(2)
     // A done request cannot take it.
     await env.DB.prepare("UPDATE mkvid_requests SET status = 'done' WHERE id = ?").bind(old.id).run()
-    expect((await app.request(`http://x/subscriptions/api/mkvid/render-now/${old.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(409)
+    expect((await app.request(`http://x/ui/api/mkvid/render-now/${old.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(409)
   })
 
   it('an undated set waits by its discovery date', async () => {
@@ -258,7 +258,7 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     const ids = p.queue.find((q: any) => q.setUrl.endsWith('ids.html'))
     expect(ids.readiness.until).toBe(setAgeReference(isoDay(NOW - DAY), 0) + ID_WAIT_SECONDS)
     // The page carries the "Render now" / "Delete and recreate" / bulk controls.
-    const html = await (await app.request('http://x/subscriptions', {}, env)).text()
+    const html = await (await app.request('http://x/ui', {}, env)).text()
     for (const s of ['Render now', 'Delete and recreate', 'Recreate all old-style videos', 'waiting for IDs until', 'not verified', 'capped']) expect(html).toContain(s)
   })
 })
@@ -301,15 +301,15 @@ describe('delete and recreate', () => {
     const other = await queue(env, 'other', { setDate: '2025-01-01' }) // pending, oldest date = last in line
     ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set([OLD]))
 
-    const r = await app.request(`http://x/subscriptions/api/mkvid/recreate/${a.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)
+    const r = await app.request(`http://x/ui/api/mkvid/recreate/${a.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)
     expect(await r.json()).toEqual({ ok: true, id: a.id, replacesVideoId: OLD })
     const queued = (await getMkvidRequest(env, a.id))!
     expect(queued).toMatchObject({ status: 'pending', replacesVideoId: OLD, videoId: OLD, attempts: 0 })
     // Behind everything that was waiting.
     expect((await listPendingMkvidRequests(env)).map((x) => x.id)).toEqual([other.id, a.id])
     // Twice is refused; so is a request that is not done.
-    expect((await app.request(`http://x/subscriptions/api/mkvid/recreate/${a.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(409)
-    expect((await app.request('http://x/subscriptions/api/mkvid/recreate/nope', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(404)
+    expect((await app.request(`http://x/ui/api/mkvid/recreate/${a.id}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(409)
+    expect((await app.request('http://x/ui/api/mkvid/recreate/nope', { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(404)
     // /now-playing still finds the (old) upload meanwhile.
     expect(await findMkvidUploadByTitle(env, 'Lilly Palmer @ set')).toMatchObject({ videoId: OLD })
 
@@ -383,7 +383,7 @@ describe('delete and recreate', () => {
     expect(rows[0]).toMatchObject({ state: 'refused', lastError: 'unknown_video: no job uploaded this video' })
     expect(await retryDueOldVideoDeletions(env, log)).toEqual({ tried: 0, deleted: 0 })
     stubMkvid(() => json({ ok: true, outcome: 'deleted' }))
-    const retry = await app.request(`http://x/subscriptions/api/mkvid/old-videos/${OLD}/retry`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)
+    const retry = await app.request(`http://x/ui/api/mkvid/old-videos/${OLD}/retry`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)
     expect(await retry.json()).toMatchObject({ ok: true, oldVideo: { state: 'deleted' } })
   })
 
@@ -434,9 +434,9 @@ describe('delete and recreate', () => {
     const w = await queue(env, 'w', { setDate: '2020-01-01' }) // pending
     expect(await countOldStyleVideos(env)).toBe(2)
     expect((await panel(env)).oldStyleCount).toBe(2)
-    expect(await (await app.request('http://x/subscriptions/api/mkvid/recreate-old-style', {}, env)).json()).toEqual({ count: 2 })
+    expect(await (await app.request('http://x/ui/api/mkvid/recreate-old-style', {}, env)).json()).toEqual({ count: 2 })
 
-    const act = (body: unknown) => app.request('http://x/subscriptions/api/mkvid/recreate-old-style', { method: 'POST', headers: { Origin: 'http://x', 'content-type': 'application/json' }, body: JSON.stringify(body) }, env)
+    const act = (body: unknown) => app.request('http://x/ui/api/mkvid/recreate-old-style', { method: 'POST', headers: { Origin: 'http://x', 'content-type': 'application/json' }, body: JSON.stringify(body) }, env)
     expect((await act({})).status).toBe(400)
     const stale = await act({ expect: 1 })
     expect(stale.status).toBe(409)
@@ -465,7 +465,7 @@ describe('W7 review: daily cap from the append-only claims log (blocker 1)', () 
       await env.DB.prepare("UPDATE mkvid_requests SET status = 'done', video_id = ?, style = 'static' WHERE id = ?").bind(vid, c.id).run()
     }
     expect((await health(env)).dailyClaims).toBe(2)
-    const bulk = await app.request('http://x/subscriptions/api/mkvid/recreate-old-style', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify({ expect: 2 }) }, env)
+    const bulk = await app.request('http://x/ui/api/mkvid/recreate-old-style', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify({ expect: 2 }) }, env)
     expect(bulk.status).toBe(200)
     // Both rows are pending again, but today's two uploads still count.
     expect((await health(env)).dailyClaims).toBe(2)

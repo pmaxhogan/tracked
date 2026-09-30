@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import type { Env } from '../types'
 import { cfAccess } from '../middleware/cf-access'
 import {
@@ -90,22 +90,26 @@ subscriptionsApp.onError((e, c) => {
 // /removed page, removal log + undo, remove-and-replace (routes/playlist-hygiene.ts). Behind cfAccess above.
 subscriptionsApp.route('/', hygieneApp)
 
-subscriptionsApp.get('/', (c) => {
-  // The page bundles its own JS inline. no-store keeps browsers from
-  // serving a stale page after a deploy, which would mean stale UI logic
-  // (e.g. a banner that doesn't auto-refresh).
+/** Serves one admin page. The page bundles its own JS inline; no-store keeps
+ *  browsers from serving a stale page after a deploy, which would mean stale UI
+ *  logic (e.g. a banner that doesn't auto-refresh). */
+export function servePage(c: Context, html: string) {
   c.header('Cache-Control', 'no-store')
-  return c.html(PAGE_HTML)
-})
+  return c.html(html)
+}
+
+subscriptionsApp.get('/', (c) => servePage(c, HOME_HTML))
+// The old main page also answers at the pages it is being split into, so links
+// work while the redesign lands; each route goes when its real page is built.
+for (const p of ['/djs', '/playlists', '/mkvid', '/settings', '/tools']) subscriptionsApp.get(p, (c) => servePage(c, PAGE_HTML))
 
 // Standalone "tracklist viewer" page: paste a 1001tracklists URL, get a clean
 // per-song list with a YouTube icon-link and an Apple Music button when 1001tl
 // has them. Data comes from the CF-Access-gated /api/tracklist below (NOT the
 // bearer-gated /tracklist API route — the browser only holds the Access cookie).
-subscriptionsApp.get('/tracklist', (c) => {
-  c.header('Cache-Control', 'no-store')
-  return c.html(TRACKLIST_PAGE_HTML)
-})
+subscriptionsApp.get('/set', (c) => servePage(c, TRACKLIST_PAGE_HTML))
+// The viewer's old address; keeps the ?url= deep link.
+subscriptionsApp.get('/tracklist', (c) => c.redirect('/ui/set' + new URL(c.req.url).search, 301))
 
 // DJ profile page: every tracklist we know about for one DJ, as expandable
 // cards. Linked from each row of the subscriptions list. The HTML is static —
@@ -528,7 +532,7 @@ subscriptionsApp.get('/api/state/:slug', async (c) => {
 
 // ─── tlpool scheduler settings (routes/pool-api.ts) ─────────────────────────
 
-// GET/PUT /subscriptions/api/pool/settings, behind the same CF Access gate.
+// GET/PUT /ui/api/pool/settings, behind the same CF Access gate.
 subscriptionsApp.route('/api/pool', poolSettingsApp)
 
 // ─── IP-ban state, Web Push, service worker ──────────────────────────────────
@@ -605,7 +609,7 @@ subscriptionsApp.post('/api/push/test', async (c) => {
 
 /**
  * The service worker behind the Notifications API. Same-origin and inside the
- * /subscriptions/ scope, so it rides on the CF Access cookie like the pages.
+ * /ui/ scope, so it rides on the CF Access cookie like the pages.
  */
 subscriptionsApp.get('/sw.js', (c) => {
   c.header('Content-Type', 'application/javascript; charset=utf-8')
@@ -869,7 +873,7 @@ subscriptionsApp.get('/oauth/start', async (c) => {
     httpOnly: true,
     secure: new URL(c.req.url).protocol === 'https:',
     sameSite: 'Lax',
-    path: '/subscriptions/oauth',
+    path: '/ui/oauth',
     maxAge: 60 * 5,
   })
   const url = buildAuthUrl({ clientId: c.env.GOOGLE_OAUTH_CLIENT_ID, redirectUri, state })
@@ -886,15 +890,15 @@ subscriptionsApp.get('/oauth/callback', async (c) => {
   const errParam = url.searchParams.get('error')
 
   // Single-use cookie: clear regardless of outcome.
-  deleteCookie(c, STATE_COOKIE, { path: '/subscriptions/oauth' })
+  deleteCookie(c, STATE_COOKIE, { path: '/ui/oauth' })
 
   if (errParam) {
     log.warn('oauth.callback.provider_error', { error: errParam })
-    return c.redirect(`/subscriptions?yt_error=${encodeURIComponent(errParam)}`, 302)
+    return c.redirect(`/ui/playlists?yt_error=${encodeURIComponent(errParam)}`, 302)
   }
   if (!code || !stateParam || !stateCookie || stateParam !== stateCookie) {
     log.warn('oauth.callback.state_mismatch', { hasCode: !!code, hasState: !!stateParam, hasCookie: !!stateCookie })
-    return c.redirect('/subscriptions?yt_error=state_mismatch', 302)
+    return c.redirect('/ui/playlists?yt_error=state_mismatch', 302)
   }
   if (!c.env.GOOGLE_OAUTH_CLIENT_ID || !c.env.GOOGLE_OAUTH_CLIENT_SECRET) {
     log.error('oauth.callback.misconfigured')
@@ -927,10 +931,10 @@ subscriptionsApp.get('/oauth/callback', async (c) => {
       scope: stored.scope,
       by: c.get('cfAccessEmail'),
     })
-    return c.redirect('/subscriptions?yt=connected', 302)
+    return c.redirect('/ui/playlists?yt=connected', 302)
   } catch (e) {
     log.error('oauth.callback.exchange_failed', errorFields(e))
-    return c.redirect('/subscriptions?yt_error=exchange_failed', 302)
+    return c.redirect('/ui/playlists?yt_error=exchange_failed', 302)
   }
 })
 
@@ -1105,7 +1109,7 @@ ${BAN_CSS}
 <main>
 ${BAN_BANNER_HTML}
   <h1>DJ subscriptions</h1>
-  <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>. &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer →</a> &nbsp;·&nbsp; <a href="/subscriptions/pool">Pool accounts →</a></p>
+  <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>. &nbsp;·&nbsp; <a href="/ui/set">Tracklist viewer →</a> &nbsp;·&nbsp; <a href="/ui/pool">Pool accounts →</a></p>
 ${ALERTS_ROW_HTML}
   <div id="yt" class="yt" hidden>
     <div class="info">
@@ -1245,7 +1249,7 @@ ${BAN_HISTORY_HTML}
     btn.textContent = 'Reconnect YouTube';
     btn.className = 'connect';
     btn.style.marginLeft = '0.5rem';
-    btn.addEventListener('click', () => { window.location.href = '/subscriptions/oauth/start'; });
+    btn.addEventListener('click', () => { window.location.href = '/ui/oauth/start'; });
     $error.appendChild(btn);
   }
 
@@ -1268,7 +1272,7 @@ ${BAN_HISTORY_HTML}
       // The DJ profile page: all of this DJ's tracklists as expandable cards.
       const prof = slug.querySelector('.slug');
       prof.textContent = s.slug;
-      prof.href = '/subscriptions/dj/' + encodeURIComponent(s.slug);
+      prof.href = '/ui/dj/' + encodeURIComponent(s.slug);
       const link = slug.querySelector('a:not(.slug)');
       link.href = s.sourceUrl;
       link.textContent = 'open';
@@ -1311,7 +1315,7 @@ ${BAN_HISTORY_HTML}
     const original = btn.textContent;
     btn.textContent = resync ? 'Resyncing…' : 'Syncing…';
     try {
-      const r = await fetch('/subscriptions/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {
+      const r = await fetch('/ui/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
@@ -1362,7 +1366,7 @@ ${BAN_HISTORY_HTML}
 
   async function load() {
     showError('');
-    const r = await fetch('/subscriptions/api/list', { credentials: 'same-origin' });
+    const r = await fetch('/ui/api/list', { credentials: 'same-origin' });
     if (!r.ok) { showError('failed to load (' + r.status + ')'); return; }
     const data = await r.json();
     render(data.subscriptions || []);
@@ -1372,7 +1376,7 @@ ${BAN_HISTORY_HTML}
     showError('');
     $btn.disabled = true;
     try {
-      const r = await fetch('/subscriptions/api/add', {
+      const r = await fetch('/ui/api/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -1391,7 +1395,7 @@ ${BAN_HISTORY_HTML}
     showError('');
     btn.disabled = true;
     try {
-      const r = await fetch('/subscriptions/api/remove', {
+      const r = await fetch('/ui/api/remove', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -1428,7 +1432,7 @@ ${BAN_HISTORY_HTML}
   const $fixTitles = document.getElementById('fix-titles');
   const $fixOut = document.getElementById('fix-titles-out');
   async function fixTitles(dryRun) {
-    const r = await fetch('/subscriptions/api/playlists/fix-titles', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }) });
+    const r = await fetch('/ui/api/playlists/fix-titles', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }) });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
     return d;
@@ -1474,7 +1478,7 @@ ${BAN_HISTORY_HTML}
       // One server-side pass on a single shared fetch budget — NOT one
       // request per row: that loop ran every DJ unpaced and got the
       // 1001tracklists accounts banned (twice).
-      const r = await fetch('/subscriptions/api/resync', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
+      const r = await fetch('/ui/api/resync', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
       const raw = await r.text();
       let data = {};
       try { data = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON body, fall through */ }
@@ -1521,7 +1525,7 @@ ${BAN_HISTORY_HTML}
   const $ytAction = document.getElementById('yt-action');
 
   async function loadYouTubeStatus() {
-    const r = await fetch('/subscriptions/api/youtube/status', { credentials: 'same-origin' });
+    const r = await fetch('/ui/api/youtube/status', { credentials: 'same-origin' });
     if (!r.ok) { $yt.hidden = true; return; }
     const data = await r.json();
     $yt.hidden = false;
@@ -1536,7 +1540,7 @@ ${BAN_HISTORY_HTML}
       $ytSub.textContent = 'Connect your account to let this app create and update playlists.';
       $ytAction.textContent = 'Sign in with YouTube';
       $ytAction.className = 'connect';
-      $ytAction.onclick = () => { window.location.href = '/subscriptions/oauth/start'; };
+      $ytAction.onclick = () => { window.location.href = '/ui/oauth/start'; };
     }
   }
 
@@ -1544,7 +1548,7 @@ ${BAN_HISTORY_HTML}
     if (!confirm('Disconnect this app from your YouTube account?')) return;
     $ytAction.disabled = true;
     try {
-      const r = await fetch('/subscriptions/oauth/disconnect', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
+      const r = await fetch('/ui/oauth/disconnect', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
       if (!r.ok) { showError('disconnect failed (' + r.status + ')'); return; }
       await loadYouTubeStatus();
     } finally {
@@ -1575,7 +1579,7 @@ ${BAN_HISTORY_HTML}
     yjStatus('fetching…');
     $yjBtn.disabled = true;
     try {
-      const r = await fetch('/subscriptions/api/youtube/video?url=' + encodeURIComponent(input), {
+      const r = await fetch('/ui/api/youtube/video?url=' + encodeURIComponent(input), {
         credentials: 'same-origin',
       });
       const raw = await r.text();
@@ -1702,7 +1706,7 @@ ${BAN_HISTORY_HTML}
         loaded = true;
         detail.innerHTML = '<span class="when">loading…</span>';
         try {
-          const resp = await fetch('/subscriptions/api/audit-detail?key=' + encodeURIComponent(r.key), { credentials: 'same-origin' });
+          const resp = await fetch('/ui/api/audit-detail?key=' + encodeURIComponent(r.key), { credentials: 'same-origin' });
           const data = await resp.json();
           detail.innerHTML = data && data.record ? auditDetailHtml(data.record) : '<span class="warn">detail not found</span>';
         } catch { detail.innerHTML = '<span class="warn">failed to load detail</span>'; loaded = false; }
@@ -1789,7 +1793,7 @@ ${BAN_HISTORY_HTML}
     const params = new URLSearchParams({ limit: '50' });
     if (auditCursor) params.set('cursor', auditCursor);
     try {
-      const r = await fetch('/subscriptions/api/audit?' + params.toString(), { credentials: 'same-origin' });
+      const r = await fetch('/ui/api/audit?' + params.toString(), { credentials: 'same-origin' });
       if (!r.ok) return;
       const data = await r.json();
       auditRecords = auditRecords.concat(data.records || []);
@@ -1860,7 +1864,7 @@ ${BAN_HISTORY_HTML}
         loaded = true;
         detail.innerHTML = '<span class="when">loading…</span>';
         try {
-          const resp = await fetch('/subscriptions/api/playlist-addition-detail?key=' + encodeURIComponent(r.key), { credentials: 'same-origin' });
+          const resp = await fetch('/ui/api/playlist-addition-detail?key=' + encodeURIComponent(r.key), { credentials: 'same-origin' });
           const data = await resp.json();
           detail.innerHTML = data && data.record ? plDetailHtml(data.record) : '<span class="warn">detail not found</span>';
         } catch { detail.innerHTML = '<span class="warn">failed to load detail</span>'; loaded = false; }
@@ -1916,7 +1920,7 @@ ${BAN_HISTORY_HTML}
     const params = new URLSearchParams({ limit: '50' });
     if (plCursor) params.set('cursor', plCursor);
     try {
-      const r = await fetch('/subscriptions/api/playlist-additions?' + params.toString(), { credentials: 'same-origin' });
+      const r = await fetch('/ui/api/playlist-additions?' + params.toString(), { credentials: 'same-origin' });
       if (!r.ok) return;
       const data = await r.json();
       plRecords = plRecords.concat(data.records || []);
@@ -1973,7 +1977,7 @@ ${BAN_HISTORY_HTML}
 
   async function loadCombined() {
     try {
-      const r = await fetch('/subscriptions/api/combined', { credentials: 'same-origin' });
+      const r = await fetch('/ui/api/combined', { credentials: 'same-origin' });
       if (!r.ok) { $cmbBody.innerHTML = '<span class="counts">status unavailable (' + r.status + ')</span>'; return; }
       renderCombined(await r.json());
     } catch { $cmbBody.innerHTML = '<span class="counts">status unavailable</span>'; }
@@ -1986,7 +1990,7 @@ ${BAN_HISTORY_HTML}
     const original = $cmbBackfill.textContent;
     $cmbBackfill.textContent = 'Backfilling…';
     try {
-      const r = await fetch('/subscriptions/api/combined/backfill', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
+      const r = await fetch('/ui/api/combined/backfill', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         if (r.status === 412 && data.error === 'youtube_reauth_required') { showReauthError(); loadYouTubeStatus(); return; }
@@ -2157,7 +2161,7 @@ ${BAN_HISTORY_HTML}
     return '<span class="mk-acts">' + MK_ACTS.map((a) => '<button class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '" title="' + a[2] + '" aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
   }
   async function mkAct(id, act) {
-    const url = act === 'ban' ? '/subscriptions/api/mkvid/ban/' + encodeURIComponent(id) : '/subscriptions/api/mkvid/move/' + encodeURIComponent(id);
+    const url = act === 'ban' ? '/ui/api/mkvid/ban/' + encodeURIComponent(id) : '/ui/api/mkvid/move/' + encodeURIComponent(id);
     const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: act === 'ban' ? '{}' : JSON.stringify({ to: act }) };
     const resp = await fetch(url, init);
     if (!resp.ok) showError((act === 'ban' ? 'ban' : 'move') + ' failed (' + resp.status + ')');
@@ -2204,17 +2208,17 @@ ${BAN_HISTORY_HTML}
       } finally { btn.disabled = false; }
     };
     const renderNow = detail.querySelector('button.render-now');
-    if (renderNow) renderNow.addEventListener('click', () => post(renderNow, '/subscriptions/api/mkvid/render-now/' + encodeURIComponent(r.id), 'render now'));
+    if (renderNow) renderNow.addEventListener('click', () => post(renderNow, '/ui/api/mkvid/render-now/' + encodeURIComponent(r.id), 'render now'));
     const recreate = detail.querySelector('button.recreate');
     if (recreate) recreate.addEventListener('click', () => {
       if (!confirm('Delete and recreate this video? The set is rendered again at the back of the queue; the current video stays up until the new one is in the playlists, then it is deleted from YouTube.')) return;
-      post(recreate, '/subscriptions/api/mkvid/recreate/' + encodeURIComponent(r.id), 'recreate');
+      post(recreate, '/ui/api/mkvid/recreate/' + encodeURIComponent(r.id), 'recreate');
     });
     const retry = detail.querySelector('button.retry');
     if (retry) retry.addEventListener('click', async () => {
       retry.disabled = true;
       try {
-        const resp = await fetch('/subscriptions/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const resp = await fetch('/ui/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (!resp.ok) showError('retry failed (' + resp.status + ')');
         await loadMkvid();
       } finally { retry.disabled = false; }
@@ -2239,7 +2243,7 @@ ${BAN_HISTORY_HTML}
     b.addEventListener('click', async () => {
       b.disabled = true;
       try {
-        const resp = await fetch('/subscriptions/api/mkvid/old-videos/' + encodeURIComponent(o.videoId) + '/retry', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const resp = await fetch('/ui/api/mkvid/old-videos/' + encodeURIComponent(o.videoId) + '/retry', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
         if (!resp.ok) showError('delete retry failed (' + resp.status + ')');
         await loadMkvid();
       } finally { b.disabled = false; }
@@ -2333,7 +2337,7 @@ ${BAN_HISTORY_HTML}
     const sec = section === 'queue' || section === 'settled' ? section : 'all';
     const seq = ++mkSeq;
     try {
-      const r = await fetch('/subscriptions/api/mkvid?' + mkParams(sec).toString(), { credentials: 'same-origin' });
+      const r = await fetch('/ui/api/mkvid?' + mkParams(sec).toString(), { credentials: 'same-origin' });
       if (seq !== mkSeq) return;
       if (!r.ok) { $mkSummary.textContent = 'status unavailable (' + r.status + ')'; return; }
       const d = await r.json();
@@ -2357,10 +2361,10 @@ ${BAN_HISTORY_HTML}
   $mkRecreateOld.addEventListener('click', async () => {
     $mkRecreateOld.disabled = true;
     try {
-      const c = await fetch('/subscriptions/api/mkvid/recreate-old-style', { credentials: 'same-origin' }).then((r) => r.json());
+      const c = await fetch('/ui/api/mkvid/recreate-old-style', { credentials: 'same-origin' }).then((r) => r.json());
       if (!c.count) { showError('no old-style videos to recreate'); return; }
       if (!confirm('Recreate ' + c.count + ' old-style video' + (c.count === 1 ? '' : 's') + '? Each set is rendered again at the back of the queue (they count against the daily cap); every old video stays up until its new one is in the playlists, then it is deleted from YouTube.')) return;
-      const resp = await fetch('/subscriptions/api/mkvid/recreate-old-style', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expect: c.count }) });
+      const resp = await fetch('/ui/api/mkvid/recreate-old-style', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expect: c.count }) });
       if (!resp.ok) showError(resp.status === 409 ? 'the number of old-style videos changed — try again' : 'recreate failed (' + resp.status + ')');
       await loadMkvid();
     } finally { $mkRecreateOld.disabled = false; }
@@ -2454,7 +2458,7 @@ ${BAN_CSS}
 <main>
 ${BAN_BANNER_HTML}
   <h1>Tracklist viewer</h1>
-  <p class="lead">Paste a 1001tracklists tracklist URL to see a clean per-song list with direct YouTube, SoundCloud, and Apple Music links. &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a></p>
+  <p class="lead">Paste a 1001tracklists tracklist URL to see a clean per-song list with direct YouTube, SoundCloud, and Apple Music links. &nbsp;·&nbsp; <a href="/ui">← Subscriptions</a></p>
   <form id="load-form">
     <input id="url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" required autofocus />
     <button type="submit" class="load">Load</button>
@@ -2514,13 +2518,13 @@ ${BAN_BANNER_HTML}
   }
 
 
-  // ── lazy per-track links (POST /subscriptions/api/tracklist/links) ──
+  // ── lazy per-track links (POST /ui/api/tracklist/links) ──
   // Each lookup is one budgeted 1001tracklists page view (cached 30 days), so
   // nothing is looked up until a row's "links" button or "Load links" is pressed.
   const linkRows = new WeakMap();
   const LINKABLE = (t) => !t.isUnidentified && t.trackId && /^\\d+$/.test(t.trackId) && !t.appleLink && !t.youtubeLink && !t.soundcloudLink;
   async function fetchLinks(ids) {
-    const r = await fetch('/subscriptions/api/tracklist/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ trackIds: ids }) });
+    const r = await fetch('/ui/api/tracklist/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ trackIds: ids }) });
     const d = await r.json().catch(() => ({}));
     if (!r.ok && !d.links) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
     return { links: d.links || {}, error: r.ok ? null : (d.message || d.error) };
@@ -2674,7 +2678,7 @@ ${BAN_BANNER_HTML}
     const original = $btn.textContent;
     $btn.textContent = 'Loading…';
     try {
-      const r = await fetch('/subscriptions/api/tracklist', {
+      const r = await fetch('/ui/api/tracklist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -2731,7 +2735,7 @@ ${BAN_BANNER_HTML}
     $refreshResult.className = 'result';
     $refreshResult.textContent = 'Refreshing…';
     try {
-      const r = await fetch('/subscriptions/api/tracklist/purge', {
+      const r = await fetch('/ui/api/tracklist/purge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -2757,7 +2761,7 @@ ${BAN_BANNER_HTML}
 
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
-  // Deep-link support: /subscriptions/tracklist?url=... prefills and auto-loads.
+  // Deep-link support: /ui/set?url=... prefills and auto-loads.
   const pre = new URLSearchParams(location.search).get('url');
   if (pre) { $url.value = pre; load(pre); }
 })();
@@ -2842,7 +2846,7 @@ ${BAN_CSS}
 <main>
 ${BAN_BANNER_HTML}
   <div class="head"><h1 id="dj-name">DJ</h1><span id="dj-sub" class="badge-sub" hidden>subscribed</span></div>
-  <p class="lead"><span id="dj-slug"></span> · <a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> &nbsp;·&nbsp; <a href="/subscriptions">← Subscriptions</a> &nbsp;·&nbsp; <a href="/subscriptions/tracklist">Tracklist viewer</a></p>
+  <p class="lead"><span id="dj-slug"></span> · <a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> &nbsp;·&nbsp; <a href="/ui">← Subscriptions</a> &nbsp;·&nbsp; <a href="/ui/set">Tracklist viewer</a></p>
   <div class="toolbar">
     <span id="counts" class="counts"></span>
     <button id="refresh" class="ghost">Refresh from 1001tracklists</button>
@@ -2854,7 +2858,7 @@ ${BAN_BANNER_HTML}
 </main>
 <script>
 (() => {
-  // The slug comes from the path (/subscriptions/dj/<slug>); nothing
+  // The slug comes from the path (/ui/dj/<slug>); nothing
   // user-controlled is templated into this page server-side.
   const slug = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
 
@@ -2894,13 +2898,13 @@ ${BAN_BANNER_HTML}
   }
 
 
-  // ── lazy per-track links (POST /subscriptions/api/tracklist/links) ──
+  // ── lazy per-track links (POST /ui/api/tracklist/links) ──
   // Each lookup is one budgeted 1001tracklists page view (cached 30 days), so
   // nothing is looked up until a row's "links" button or "Load links" is pressed.
   const linkRows = new WeakMap();
   const LINKABLE = (t) => !t.isUnidentified && t.trackId && /^\\d+$/.test(t.trackId) && !t.appleLink && !t.youtubeLink && !t.soundcloudLink;
   async function fetchLinks(ids) {
-    const r = await fetch('/subscriptions/api/tracklist/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ trackIds: ids }) });
+    const r = await fetch('/ui/api/tracklist/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ trackIds: ids }) });
     const d = await r.json().catch(() => ({}));
     if (!r.ok && !d.links) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
     return { links: d.links || {}, error: r.ok ? null : (d.message || d.error) };
@@ -3039,7 +3043,7 @@ ${BAN_BANNER_HTML}
     const lap = pill(data.setAppleLink, 'Apple Music', 'apple', APPLE_SVG); if (lap) { lap.title = 'Full set on Apple Music'; links.appendChild(lap); }
     const viewer = document.createElement('a');
     viewer.className = 'pill';
-    viewer.href = '/subscriptions/tracklist?url=' + encodeURIComponent(set.url);
+    viewer.href = '/ui/set?url=' + encodeURIComponent(set.url);
     viewer.textContent = 'Open in viewer';
     links.appendChild(viewer);
     // Remove and replace (routes/playlist-hygiene.ts): out of both playlists now, never re-added, queued for mkvid.
@@ -3051,7 +3055,7 @@ ${BAN_BANNER_HTML}
       if (!confirm('Remove this set\\'s video from the playlists and never re-add it?')) return;
       rr.disabled = true;
       try {
-        const r = await fetch('/subscriptions/api/set/remove-replace', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ slug, url: set.url }) });
+        const r = await fetch('/ui/api/set/remove-replace', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ slug, url: set.url }) });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
         rr.textContent = 'Removed ' + d.videoId + ' — ' + d.mkvid;
@@ -3080,7 +3084,7 @@ ${BAN_BANNER_HTML}
   async function loadSetInto(body, head, set) {
     body.innerHTML = '<span class="loading">loading tracklist…</span>';
     try {
-      const r = await fetch('/subscriptions/api/tracklist', {
+      const r = await fetch('/ui/api/tracklist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -3145,7 +3149,7 @@ ${BAN_BANNER_HTML}
     if (refresh) $refresh.textContent = 'Refreshing…';
     if (!$sets.children.length) { $empty.textContent = refresh ? 'Crawling 1001tracklists…' : 'Loading sets…'; $empty.hidden = false; }
     try {
-      const r = await fetch('/subscriptions/api/dj/' + encodeURIComponent(slug) + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
+      const r = await fetch('/ui/api/dj/' + encodeURIComponent(slug) + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         $error.textContent = data.message || data.error || ('failed (' + r.status + ')');
@@ -3180,3 +3184,6 @@ ${BAN_BANNER_HTML}
 <script>${BAN_JS}</script>
 </body>
 </html>`
+
+/** The home page. Today the old main page; Task 12 swaps in the Home page. */
+export const HOME_HTML = PAGE_HTML

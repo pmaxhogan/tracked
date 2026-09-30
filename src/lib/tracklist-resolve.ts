@@ -122,7 +122,7 @@ export type FullTracklist = {
  * Scrape a tracklist and flatten it to the API/UI output shape: one object per
  * track with name, artist, id, cue timestamps and (optionally) Apple/YouTube
  * deep links. Shared by the bearer-gated `/tracklist` route and the CF
- * Access-gated `/subscriptions/api/tracklist` endpoint so both stay identical.
+ * Access-gated `/ui/api/tracklist` endpoint so both stay identical.
  *
  * Propagates IPBlockedError / CloudflareChallengeError from the scrape; a
  * zero-track parse comes back as `tracks: []` for the caller to surface.

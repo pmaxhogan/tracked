@@ -31,22 +31,22 @@ describe('admin audit routes (D1)', () => {
         summary: { t, status: 'ok', title: `set ${i}`, cs: i, dur: null, via: null, skew: null, impossible: false, ms: 1 },
       })
     }
-    const r1 = await get(env, '/subscriptions/api/audit?limit=2')
+    const r1 = await get(env, '/ui/api/audit?limit=2')
     expect(r1.status).toBe(200)
     const p1 = (await r1.json()) as { records: Array<{ key: string; title: string }>; cursor: string | null; listComplete: boolean }
     expect(p1.records.map((r) => r.title)).toEqual(['set 2', 'set 1'])
     expect(p1.listComplete).toBe(false)
-    const r2 = await get(env, `/subscriptions/api/audit?limit=2&cursor=${encodeURIComponent(p1.cursor!)}`)
+    const r2 = await get(env, `/ui/api/audit?limit=2&cursor=${encodeURIComponent(p1.cursor!)}`)
     const p2 = (await r2.json()) as typeof p1
     expect(p2.records.map((r) => r.title)).toEqual(['set 0'])
     expect(p2.cursor).toBeNull()
     expect(p2.listComplete).toBe(true)
 
-    const d = await get(env, `/subscriptions/api/audit-detail?key=${p1.records[0]!.key}`)
+    const d = await get(env, `/ui/api/audit-detail?key=${p1.records[0]!.key}`)
     expect(d.status).toBe(200)
     expect(((await d.json()) as { record: { reqId: string } }).record.reqId).toBe('r2')
-    expect((await get(env, '/subscriptions/api/audit-detail?key=np:old')).status).toBe(400)
-    expect((await get(env, '/subscriptions/api/audit-detail?key=999')).status).toBe(404)
+    expect((await get(env, '/ui/api/audit-detail?key=np:old')).status).toBe(400)
+    expect((await get(env, '/ui/api/audit-detail?key=999')).status).toBe(404)
   })
 
   it('/api/playlist-additions + detail serve the sync trail', async () => {
@@ -57,18 +57,18 @@ describe('admin audit routes (D1)', () => {
       via: 'direct', trigger: 'test', message: null, failureCount: null, meta: { ms: 1 },
     }
     await flushPlaylistAdditions(env, [rec], makeLogger({ task: 'test' }))
-    const r = await get(env, '/subscriptions/api/playlist-additions')
+    const r = await get(env, '/ui/api/playlist-additions')
     const p = (await r.json()) as { records: Array<{ key: string; set: string; vid: string; cmb: string }>; cursor: null }
     expect(p.records).toHaveLength(1)
     expect(p.records[0]).toMatchObject({ set: 'https://x/tracklist/1', vid: 'vid00000001', cmb: 'added' })
-    const d = await get(env, `/subscriptions/api/playlist-addition-detail?key=${p.records[0]!.key}`)
+    const d = await get(env, `/ui/api/playlist-addition-detail?key=${p.records[0]!.key}`)
     expect(((await d.json()) as { record: PlaylistAdditionRecord }).record).toEqual(rec)
-    expect((await get(env, '/subscriptions/api/playlist-addition-detail?key=pladd:x')).status).toBe(400)
+    expect((await get(env, '/ui/api/playlist-addition-detail?key=pladd:x')).status).toBe(400)
   })
 
   it('/api/migration reports import progress', async () => {
     const env = makeEnv()
-    const r = await get(env, '/subscriptions/api/migration')
+    const r = await get(env, '/ui/api/migration')
     expect(r.status).toBe(200)
     expect(await r.json()).toEqual({ subs: null, states: null, audit: { np: null, pladd: null, imported: { np: 0, pladd: 0 } } })
   })

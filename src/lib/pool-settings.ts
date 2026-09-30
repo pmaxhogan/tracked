@@ -3,7 +3,7 @@
  * the priority order work is submitted in (decision 12), and how much a cron
  * tick may submit. One JSON document in SUBS KV (`pool:settings`, durable),
  * merged over the defaults below on every read, edited through
- * `GET/PUT /subscriptions/api/pool/settings` (routes/pool-api.ts; the admin
+ * `GET/PUT /ui/api/pool/settings` (routes/pool-api.ts; the admin
  * page is W8's).
  *
  * Budget, pacing and the phone's reserved share are NOT here: tlpool owns

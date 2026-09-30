@@ -4,7 +4,9 @@ import { tracklistRoute, tracklistHandler } from './routes/tracklist'
 import { tracklistPurgeRoute, tracklistPurgeHandler } from './routes/tracklist-purge'
 import { likesRoute, likesHandler } from './routes/likes'
 import { likedSongsRoute, likedSongsHandler } from './routes/liked-songs'
-import { subscriptionsApp } from './routes/subscriptions'
+import { HOME_HTML, servePage, subscriptionsApp } from './routes/subscriptions'
+import { legacyApp } from './routes/legacy'
+import { cfAccess } from './middleware/cf-access'
 import { noFraming, sameOriginJson } from './middleware/same-origin'
 import { mkvidApp } from './routes/mkvid'
 import { poolUiApp } from './routes/pool-ui'
@@ -54,28 +56,35 @@ app.openapi(likesRoute, likesHandler)
 // before that gate ever runs.
 app.openapi(likedSongsRoute, likedSongsHandler)
 
-// Public root: just a hint. Anything past `/` requires the bearer token.
-app.get('/', (c) => c.text('tracked — POST /now-playing, POST /tracklist, POST /tracklist/purge, POST /likes (Bearer auth); GET /liked-songs (own token). See /openapi.json'))
+// Public root: send a browser to the admin UI (Access-gated there). Anything
+// else outside the Access and own-token surfaces requires the bearer token.
+app.get('/', (c) => c.redirect('/ui/', 302))
 
 // Browsers auto-request /favicon.ico for every page; serve a tiny 204 so it
 // doesn't fall through to the bearer-token gate and show up as 401 noise in
 // logs.
 app.get('/favicon.ico', (c) => c.body(null, 204))
 
-// Mini-app for managing DJ subscriptions. Gated by Cloudflare Access (verified
-// inside the sub-app's middleware), NOT by the Tasker bearer token.
+// Admin UI (DJ subscriptions, pool, playlists, mkvid). Gated by Cloudflare Access
+// (verified inside the sub-apps' middleware), NOT by the Tasker bearer token.
 // CSRF guard for every state-changing admin API call (middleware/same-origin.ts).
 // Registered before the sub-apps so it runs ahead of their handlers.
-app.use('/subscriptions/api/*', sameOriginJson)
-app.use('/subscriptions/oauth/disconnect', sameOriginJson)
+app.use('/ui/api/*', sameOriginJson)
+app.use('/ui/oauth/disconnect', sameOriginJson)
 // Admin pages may not be framed by another site (the captcha page frames its own live view).
-app.use('/subscriptions', noFraming)
-app.use('/subscriptions/*', noFraming)
-app.route('/subscriptions', poolUiApp) // pool admin pages (own CF Access gate); ahead of subscriptionsApp so its '*' gate doesn't run twice
-app.route('/subscriptions', subscriptionsApp)
+app.use('/ui', noFraming)
+app.use('/ui/*', noFraming)
+app.route('/ui', poolUiApp) // ahead of subscriptionsApp so its '*' gate doesn't run twice
+app.route('/ui', subscriptionsApp)
+// Routing is strict: the sub-apps' get('/') answers /ui but not /ui/, so the
+// trailing-slash home is registered here, behind the same Access gate.
+app.use('/ui/', cfAccess)
+app.get('/ui/', (c) => servePage(c, HOME_HTML))
+// Old prefix: 301 for pages, 410 for API / OAuth / sw.js (routes/legacy.ts). No content, no Access needed.
+app.route('/subscriptions', legacyApp)
 
 // Work queue for mkvid (the NAS render/upload service). Gated by its own
-// MKVID_TOKEN inside the sub-app, so like /subscriptions it must be skipped by
+// MKVID_TOKEN inside the sub-app, so like /ui it must be skipped by
 // the API_TOKEN wildcard gate below.
 app.route('/mkvid', mkvidApp)
 
@@ -101,12 +110,15 @@ app.openAPIRegistry.registerPath({
 })
 
 // Bearer-gate everything else, including /openapi.json and /doc. Skip
-// /subscriptions/* and /mkvid/* — a naive wildcard would double-gate those
+// / (a redirect), /ui/* (Access), /subscriptions/* (legacy answers, no
+// content), /mkvid/* and /pool/* — a naive wildcard would double-gate those
 // surfaces, since Hono runs parent middleware after a mounted sub-app's
 // handlers; their own gate would pass but then bearerAuth would 401 the
 // token it doesn't recognise.
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
+  if (path === '/') return next()
+  if (path === '/ui' || path.startsWith('/ui/')) return next()
   if (path === '/subscriptions' || path.startsWith('/subscriptions/')) return next()
   if (path === '/mkvid' || path.startsWith('/mkvid/')) return next()
   if (path === '/pool' || path.startsWith('/pool/')) return next()

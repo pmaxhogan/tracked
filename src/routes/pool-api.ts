@@ -10,8 +10,8 @@
  *                              `{ ok, duplicate, push }`, 400 on a bad body.
  *   - `poolSettingsApp`, mounted at `/api/pool` inside the CF Access-gated
  *     subscriptions app:
- *       GET  /subscriptions/api/pool/settings   `{ settings, defaults }`
- *       PUT  /subscriptions/api/pool/settings   partial or full settings,
+ *       GET  /ui/api/pool/settings   `{ settings, defaults }`
+ *       PUT  /ui/api/pool/settings   partial or full settings,
  *                              deep-merged over the current ones, validated
  *                              (lib/pool-settings.ts); 200 `{ settings }` or
  *                              400 `{ error: 'invalid_settings', issues }`.
