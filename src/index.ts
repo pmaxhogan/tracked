@@ -18,7 +18,7 @@ import { runKvMigrationTickSafely } from './lib/kv-import'
 import { pruneNowPlayingAudit } from './lib/now-playing-audit'
 import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
-import { runPlaylistHygiene } from './lib/playlist-hygiene'
+import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
 import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
@@ -162,7 +162,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         log.error('cron.combined_backfill_threw', errorFields(e))
       }
       // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
-      await runPlaylistHygiene(env, log)
+      await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) })
     })(),
   )
 }

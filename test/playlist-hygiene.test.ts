@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +30,8 @@ import {
   hasGoodVideo,
   isMassRemoval,
   listHolds,
+  playlistHoldNotifier,
+  playlistHoldPayload,
   mkvidReplacedIds,
   approveHold,
   pickSetVideo,
@@ -42,6 +44,8 @@ import {
   undoRemoval,
   type SetFacts,
 } from '../src/lib/playlist-hygiene'
+import { savePushSubscription } from '../src/lib/web-push'
+import { pushSubscription, vapid } from './helpers/web-push'
 import { blockedIds, combinedRefuses, combinedSkipIds, isBlocked, recordRemoved, savePlaylistMembers, setOverride } from '../src/lib/playlist-blocklist'
 import { getMkvidRequestForSet } from '../src/lib/mkvid'
 
@@ -299,13 +303,13 @@ describe('runRemovalSweep', () => {
   })
 })
 
-describe('comparePlaylists', () => {
-  async function seedFive(env: Env) {
-    await seedSub(env)
-    for (let i = 1; i <= 10; i++) await seedSet(env, setUrl(i), `vid${String(i).padStart(8, '0')}`, { pos: i })
-  }
-  const ids = (n: number[]) => n.map((i) => `vid${String(i).padStart(8, '0')}`)
+async function seedFive(env: Env) {
+  await seedSub(env)
+  for (let i = 1; i <= 10; i++) await seedSet(env, setUrl(i), `vid${String(i).padStart(8, '0')}`, { pos: i })
+}
+const ids = (n: number[]) => n.map((i) => `vid${String(i).padStart(8, '0')}`)
 
+describe('comparePlaylists', () => {
   it('records a video missing from the artist playlist as owner-removed, clears its set and never re-adds it', async () => {
     const env = makeEnv()
     await seedFive(env)
@@ -574,5 +578,49 @@ describe("mkvid's own videos (W7 interface)", () => {
     // A database without migration 0009 yet: no table, no throw, nothing skipped.
     await env.DB.exec('DROP TABLE mkvid_old_videos')
     expect(await mkvidReplacedIds(env, log)).toEqual(new Set())
+  })
+})
+
+describe('held comparison push (cron wiring)', () => {
+  // 2026-09-29 is CDT: 15:00Z = 10:00 Chicago, 06:00Z = 01:00.
+  const DAY = new Date('2026-09-29T15:00:00Z')
+  const NIGHT = new Date('2026-09-29T06:00:00Z')
+  async function pushEnv() {
+    const env = makeEnv(await vapid())
+    await savePushSubscription(env, await pushSubscription('https://push.example/device-1'), 'phone')
+    return env
+  }
+  afterEach(() => vi.useRealTimers())
+
+  it('the payload is a playlist_hold push that opens /subscriptions/removed', () => {
+    expect(playlistHoldPayload('Playlist check held', 'x', DAY)).toEqual({ kind: 'playlist_hold', title: 'Playlist check held', body: 'x', url: '/subscriptions/removed', tag: 'playlist-hold', ts: DAY.toISOString() })
+  })
+
+  it('pushes a held playlist once in the daytime; at night it waits and the hold stays un-notified', async () => {
+    const sent: string[] = []
+    const pushFetch = (async (input: RequestInfo | URL) => (sent.push(String(input)), new Response(null, { status: 201 }))) as unknown as typeof fetch
+    const env = await pushEnv()
+    await seedFive(env)
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NIGHT)
+    const notify = playlistHoldNotifier(env, log, pushFetch)
+    expect((await comparePlaylists(env, 'tok', { log, notify }))[0]).toMatchObject({ status: 'held' })
+    expect(sent).toHaveLength(0)
+    expect(await listHolds(env)).toMatchObject([{ notified: false }])
+    vi.setSystemTime(DAY)
+    await comparePlaylists(env, 'tok', { log, notify })
+    expect(sent).toEqual(['https://push.example/device-1'])
+    expect(await listHolds(env)).toMatchObject([{ notified: true }])
+    await comparePlaylists(env, 'tok', { log, notify })
+    expect(sent).toHaveLength(1)
+  })
+
+  it('without push configured nothing is sent and the hold is not marked notified', async () => {
+    const env = makeEnv()
+    await seedFive(env)
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
+    await comparePlaylists(env, 'tok', { log, notify: playlistHoldNotifier(env, log) })
+    expect(await listHolds(env)).toMatchObject([{ notified: false }])
   })
 })
