@@ -564,6 +564,7 @@ Two kinds of state, two stores:
 | `set_schedule` | when each set page is next due for a recheck (pace by set age), one row per set URL |
 | `set_verification` | the two-fetch verification of each set's track list (fingerprint, accounts, times, `pending` / `verified`) |
 | `dj_schedule` | when each DJ's listing page is next read (discovery) and its next "older sets" backfill step |
+| `render_feed` | the render feeder's first fetches for sets mkvid waits on: the day's count, and each set's cooldown / failures / given-up flag (migration `0012`) |
 | `pool_events` | events tlpool posted (challenges, flagged accounts) and whether each was pushed |
 | `set_media_facts` | per set page: no-full-recording notice, last cue, audio player durations, the linked video (the full-recording rule's input) |
 | `removed_videos` | never re-add: videos the owner removed, dead videos, remove-and-replace, per playlist |

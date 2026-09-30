@@ -13,7 +13,8 @@ import {
   renderFeedAllowance,
   renderFeedCandidates,
   renderFeedUsed,
-  RENDER_FEED_COUNT_PREFIX,
+  claimRenderFeed,
+  RENDER_FEED_MAX_FAILURES,
   RENDER_FEED_REFETCH_COOLDOWN_SECONDS,
   runSchedulerTick,
   TICK_BACKOFF_KEY,
@@ -23,6 +24,7 @@ import { getVerification } from '../src/lib/verification'
 import { enqueueMkvidRequest } from '../src/lib/mkvid'
 import { setPause, _resetTallyForTests } from '../src/lib/ban-state'
 import { PoolPausedError } from '../src/lib/pool'
+import { UpstreamHttpError, UpstreamTransportError } from '../src/lib/upstream-errors'
 import { POOL_PAGES } from '../src/routes/pool-ui'
 
 // Network edges stubbed; the scheduler, syncOne, D1 and verification run for real.
@@ -224,19 +226,73 @@ describe('render feeder: what it feeds, in which order', () => {
 })
 
 describe('render feeder: daily cap and pacing', () => {
+  /** `n` feed fetches recorded at `at` (render_feed rows, the day's count). */
+  const fedAt = async (env: Env, n: number, at: number, tag = 'x') => {
+    for (let i = 0; i < n; i++) {
+      await env.DB.prepare('INSERT INTO render_feed (url, attempts, failures, last_attempt_at, next_feed_at, gave_up, updated_at) VALUES (?, 1, 0, ?, ?, 0, ?)')
+        .bind(`https://www.1001tracklists.com/tracklist/${tag}${at}-${i}/x-2026-01-01.html`, at, at + 2 * D, at)
+        .run()
+    }
+  }
+
   it('spreads renderFeedPerDay over the UTC day, one per tick at most, and stops at the cap', async () => {
     const env = makeEnv()
     const midnight = NOON - 12 * H
     const s = DEFAULT_POOL_SETTINGS // 40 a day
     expect(await renderFeedAllowance(env, s, midnight + 30)).toBe(1)
-    await env.CACHE.put(RENDER_FEED_COUNT_PREFIX + day(0), '1')
+    await fedAt(env, 1, midnight + 30)
     expect(await renderFeedAllowance(env, s, midnight + 10 * 60)).toBe(0) // the next share is ~36 min in
     expect(await renderFeedAllowance(env, s, midnight + 37 * 60)).toBe(1)
-    await env.CACHE.put(RENDER_FEED_COUNT_PREFIX + day(0), '5')
+    await fedAt(env, 4, midnight + 2 * H)
     expect(await renderFeedAllowance(env, s, NOON)).toBe(1) // 21 allowed by noon: behind, but still one per tick
-    await env.CACHE.put(RENDER_FEED_COUNT_PREFIX + day(0), '40')
-    expect(await renderFeedAllowance(env, s, midnight + D - 60)).toBe(0)
+    await fedAt(env, 35, midnight + 20 * H)
+    expect(await renderFeedAllowance(env, s, midnight + D - 60)).toBe(0) // 40 today: the cap
+    expect(await renderFeedAllowance(env, s, midnight + D + 60)).toBe(1) // a new UTC day
     expect(await renderFeedAllowance(env, { ...s, renderFeedPerDay: 0 }, NOON)).toBe(0)
+  })
+
+  it('catches up gently after a pause: at most the even rate + 1 an hour (3/h at 40 a day), never one per tick', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'dj')
+    for (let i = 0; i < 30; i++) await waitingSet(env, `c${String(i).padStart(2, '0')}`, { createdAt: NOON - 100 * D + i })
+    // Nothing fed all morning (paused): by noon the day's share is 21.
+    let fed = 0
+    for (let t = NOON; t < NOON + 2 * H; t += 5 * 60) {
+      const r = await runSchedulerTick(env, { random: always(0.99), now: t })
+      fed += r.items.filter((x) => x.item.kind === 'render_feed' && x.outcome === 'ok').length
+    }
+    expect(fed).toBe(6) // 2 hours × 3
+  })
+
+  it('a tick that lost the race for the last slot (an overlapping tick) does not fetch', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'dj')
+    await waitingSet(env, 'race')
+    const midnight = NOON - 12 * H
+    // Picked while the slot was free; another tick took it before this one ran.
+    const items = await pickTickItems(env, DEFAULT_POOL_SETTINGS, 3, new Set(['dj']), midnight + 60)
+    expect(items.map((i) => i.kind)).toEqual(['render_feed'])
+    await fedAt(env, 1, midnight + 60, 'other')
+    const r = await runSchedulerTick(env, { random: always(0.99), now: midnight + 120 })
+    expect(r.skipped).toBe('nothing_due') // the allowance is spent: not even picked
+    // Two ticks that both picked before either ran: the D1 claim is atomic,
+    // so only one gets the set, and only one gets the day's last slot.
+    const env2 = makeEnv()
+    const a = setUrl('a', 200)
+    const b = setUrl('b', 200)
+    expect(await claimRenderFeed(env2, DEFAULT_POOL_SETTINGS, a, midnight + 60)).toBeNull() // granted (no row before)
+    expect(await claimRenderFeed(env2, DEFAULT_POOL_SETTINGS, a, midnight + 61)).toBe(false) // same set: cooling down
+    expect(await claimRenderFeed(env2, DEFAULT_POOL_SETTINGS, b, midnight + 62)).toBe(false) // share so far (1) taken
+    expect(await renderFeedUsed(env2, midnight + 62)).toBe(1)
+  })
+
+  it('does not rescan the requests every tick when there is nothing to feed', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'dj')
+    expect(await pickTickItems(env, DEFAULT_POOL_SETTINGS, 3, new Set(['dj']), NOON)).toEqual([])
+    const u = await waitingSet(env, 'late')
+    expect(await pickTickItems(env, DEFAULT_POOL_SETTINGS, 3, new Set(['dj']), NOON + 10 * 60)).toEqual([])
+    expect((await pickTickItems(env, DEFAULT_POOL_SETTINGS, 3, new Set(['dj']), NOON + 31 * 60)).map((i) => 'url' in i && i.url)).toEqual([u])
   })
 
   it('a whole day of 5-minute ticks feeds exactly the cap, never two in one tick, never ahead of the pace', async () => {
@@ -334,5 +390,57 @@ describe('render feeder: pause, pool refusals, and the verification that follows
     expect(await candidates(env, NOON + H)).toEqual([])
     // (last_fetched_at is stamped with the real clock, up to a day off NOON.)
     expect(await candidates(env, NOON + RENDER_FEED_REFETCH_COOLDOWN_SECONDS + D + 60)).toEqual([u])
+  })
+})
+
+describe('render feeder: sets whose feed fetch fails (review MAJOR 1)', () => {
+  const failing = [
+    ['a 404 (set deleted on 1001tracklists)', () => new UpstreamHttpError(404, 'https://www.1001tracklists.com/tracklist/dead/x.html')],
+    ['a 5xx', () => new UpstreamHttpError(503, 'https://www.1001tracklists.com/tracklist/dead/x.html')],
+    ['a transport failure', () => new UpstreamTransportError('https://www.1001tracklists.com/tracklist/dead/x.html', 'socket hang up')],
+  ] as const
+
+  for (const [what, err] of failing) {
+    it(`${what}: cooled down 2 d, 4 d, then given up after ${RENDER_FEED_MAX_FAILURES} failures; other sets keep being fed`, async () => {
+      const env = makeEnv()
+      await subscribe(env, 'dj')
+      const dead = await waitingSet(env, 'dead', { createdAt: NOON - 50 * D }) // oldest: head of the queue
+      const alive = await waitingSet(env, 'alive', { createdAt: NOON - 10 * D })
+      mocked(fetch1001Html).mockImplementation(async (url: string) => {
+        if (url === dead) throw err()
+        return { html: '<set/>', via: 'pool', state: { cookie: '' }, accountId: 'acct-9', fetchedAt: new Date(NOON * 1000).toISOString() }
+      })
+      const tick = (t: number) => runSchedulerTick(env, { random: always(0.99), now: t })
+      const r1 = await tick(NOON)
+      expect(r1.items.map((i) => [i.item.kind, 'url' in i.item && i.item.url, i.outcome])).toEqual([['render_feed', dead, 'failed']])
+      const row = () => env.DB.prepare('SELECT failures, gave_up, next_feed_at FROM render_feed WHERE url = ?').bind(dead).first<{ failures: number; gave_up: number; next_feed_at: number }>()
+      expect(await row()).toEqual({ failures: 1, gave_up: 0, next_feed_at: NOON + 2 * D })
+      // The failure counted towards the day's allowance.
+      expect(await renderFeedUsed(env, NOON)).toBe(1)
+      // Later the same day, well past the 15-minute attempt backoff: the dead set
+      // is not fed again; the next one in line is.
+      const r2 = await tick(NOON + H)
+      expect(r2.items.map((i) => 'url' in i.item && i.item.url)).toEqual([alive])
+      expect(await candidates(env, NOON + 2 * H)).toEqual([])
+      // Second failure: 4 days. Third: given up for good.
+      expect(await candidates(env, NOON + 2 * D + 60)).toContain(dead)
+      await tick(NOON + 2 * D + 60)
+      expect(await row()).toEqual({ failures: 2, gave_up: 0, next_feed_at: NOON + 2 * D + 60 + 4 * D })
+      expect(await candidates(env, NOON + 5 * D)).not.toContain(dead)
+      await tick(NOON + 6 * D + 120)
+      expect(await row()).toMatchObject({ failures: 3, gave_up: 1 })
+      expect(await candidates(env, NOON + 100 * D)).not.toContain(dead)
+      expect(mocked(fetch1001Html).mock.calls.filter((c) => c[0] === dead)).toHaveLength(3)
+    })
+  }
+
+  it('a success after a failure resets the failure count', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'dj')
+    const u = await waitingSet(env, 'flaky')
+    mocked(fetch1001Html).mockRejectedValueOnce(new UpstreamHttpError(503, u))
+    await runSchedulerTick(env, { random: always(0.99), now: NOON })
+    await runSchedulerTick(env, { random: always(0.99), now: NOON + 2 * D + 60 })
+    expect(await env.DB.prepare('SELECT failures, gave_up, attempts FROM render_feed WHERE url = ?').bind(u).first()).toEqual({ failures: 0, gave_up: 0, attempts: 2 })
   })
 })

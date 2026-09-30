@@ -912,7 +912,7 @@ const SETTINGS_PAGE_HTML = /* html */ `<!doctype html>
     <h2 style="margin-top:0.5rem">Priority order</h2>
     <p class="muted" style="font-size:0.85rem;margin-top:0">When the budget runs short, earlier ones go first.</p>
     <div id="prios"></div>
-    <div class="field" style="margin-top:0.9rem"><label for="feed">Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /><span class="hint">Sets mkvid is waiting on with no verified list, oldest request first, as verification fetches. Default 40; 0 = off.</span></div>
+    <div class="field" style="margin-top:0.9rem"><label for="feed">Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /><span class="hint">Sets mkvid is waiting on with no verified list, oldest request first, as verification fetches. Each fed set costs about 2 page views (the second fetch follows). Default 40; 0 = off.</span></div>
     <div class="row" style="margin-top:0.9rem"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit">Save</button></div>
   </form>
 </main>

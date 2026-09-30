@@ -17,7 +17,9 @@
  *                  then the render feeder: the FIRST fetch of a set mkvid is
  *                  waiting on that has no verified list and no verification
  *                  started (oldest request first, `renderFeedPerDay` a UTC
- *                  day, paced across the day, one per tick at most)
+ *                  day, paced across the day, one per tick at most; each set
+ *                  cools down 2 d after a feed fetch, longer after failures,
+ *                  and is given up after 3 failures: D1 `render_feed`)
  *   - recheck      a processed set whose `set_schedule.next_due_at` passed
  *                  (pace by set age, lib/pool-settings.ts `recheckIntervalSeconds`)
  *   - backfill     never-fetched older sets, and one "older sets" step of a DJ
@@ -76,12 +78,20 @@ const MKVID_WAITING_SPREAD_SECONDS = 2 * 24 * HOUR
 const DJ_RETRY_SECONDS = HOUR
 /** CACHE KV: when ensureSetSchedules last ran (unix seconds). */
 export const ENSURE_STAMP_KEY = 'scheduler:ensure_at'
-/** CACHE KV prefix: render-feeder first fetches run on a UTC day (`<prefix><YYYY-MM-DD>` → count). */
-export const RENDER_FEED_COUNT_PREFIX = 'scheduler:render_feed:'
 /** The render feeder submits at most this many first fetches per tick. */
 export const RENDER_FEED_MAX_PER_TICK = 1
-/** A set fetched this recently is not fed again, so a fetch that started no verification (decoy, no rows) is not repeated every tick. */
+/**
+ * A set fetched this recently (by anything) is not fed; a set the feeder fed
+ * is not fed again for this long whatever the outcome, doubling after each
+ * failed feed fetch up to RENDER_FEED_MAX_COOLDOWN_SECONDS.
+ */
 export const RENDER_FEED_REFETCH_COOLDOWN_SECONDS = 2 * 24 * HOUR
+export const RENDER_FEED_MAX_COOLDOWN_SECONDS = 14 * 24 * HOUR
+/** After this many feed fetches in a row fail (404, 5xx), the feeder gives the set up. */
+export const RENDER_FEED_MAX_FAILURES = 3
+/** CACHE KV: the feeder found no candidate; the query is not run again before this (unix seconds). */
+export const RENDER_FEED_EMPTY_KEY = 'scheduler:render_feed_empty_until'
+const RENDER_FEED_EMPTY_SECONDS = 30 * 60
 
 // ─── set schedules ──────────────────────────────────────────────────────────
 
@@ -361,9 +371,12 @@ function retryAfterOf(e: unknown): number | null {
  * full-recording rule has none). Also left out: a set still inside the 7-day
  * ID wait whose last known list has ID rows (it is young, so its 12 h / 1 d
  * recheck fetches it anyway), one whose longest audio player is known to be
- * shorter than the last cue (mkvid would refuse it as incomplete), one waiting
- * out a failed attempt or out of attempts today, and one fetched within
- * RENDER_FEED_REFETCH_COOLDOWN_SECONDS.
+ * shorter than the last cue (mkvid would refuse it as incomplete), one whose
+ * set-page fetch is waiting out a failed attempt or is out of attempts today
+ * (set_schedule.retry_at / attempts_today; a request's own mkvid retry
+ * backoff does not matter here), one fetched by anything within
+ * RENDER_FEED_REFETCH_COOLDOWN_SECONDS, and one the feeder already fed whose
+ * `render_feed.next_feed_at` has not come, or that it gave up on.
  */
 export async function renderFeedCandidates(env: Env, nowSec: number, limit: number): Promise<Array<{ url: string; slug: string }>> {
   if (limit <= 0) return []
@@ -375,7 +388,9 @@ export async function renderFeedCandidates(env: Env, nowSec: number, limit: numb
          LEFT JOIN set_schedule s ON s.url = r.set_url
          LEFT JOIN mkvid_request_tracks k ON k.request_id = r.id
          LEFT JOIN set_media_facts f ON f.set_url = r.set_url
+         LEFT JOIN render_feed rf ON rf.url = r.set_url
         WHERE r.status = 'pending' AND r.attempts < ${MKVID_MAX_ATTEMPTS}
+          AND (rf.url IS NULL OR (rf.gave_up = 0 AND rf.next_feed_at <= ?))
           AND r.slug IN (SELECT slug FROM subscriptions)
           AND NOT EXISTS (SELECT 1 FROM set_verification v WHERE v.url = r.set_url)
           AND (t.video_id IS NULL OR (t.video_source = 'mkvid' AND t.video_id = r.replaces_video_id))
@@ -388,36 +403,124 @@ export async function renderFeedCandidates(env: Env, nowSec: number, limit: numb
           AND ${ATTEMPT_OK_SQL}
         GROUP BY r.set_url ORDER BY created, rid LIMIT ?`,
     )
-    .bind(nowSec - ID_WAIT_SECONDS, nowSec - RENDER_FEED_REFETCH_COOLDOWN_SECONDS, nowSec, utcDay(nowSec), limit)
+    .bind(nowSec, nowSec - ID_WAIT_SECONDS, nowSec - RENDER_FEED_REFETCH_COOLDOWN_SECONDS, nowSec, utcDay(nowSec), limit)
     .all<{ url: string; slug: string }>()
   return res.results.map((r) => ({ url: r.url, slug: r.slug }))
 }
 
-const renderFeedKey = (nowSec: number) => RENDER_FEED_COUNT_PREFIX + utcDay(nowSec)
+const dayStart = (nowSec: number) => Math.floor(nowSec / 86400) * 86400
 
-/** Render-feeder first fetches counted on `nowSec`'s UTC day. */
-export async function renderFeedUsed(env: Env, nowSec: number): Promise<number> {
-  return Math.max(0, Number((await env.CACHE.get(renderFeedKey(nowSec))) ?? 0) || 0)
+/**
+ * The pacing limits at `nowSec`: `soFar` = feed fetches allowed since UTC
+ * midnight (the day's even share up to now, plus one, capped at
+ * `renderFeedPerDay`), `perHour` = feed fetches allowed in any rolling hour
+ * (the even rate rounded up, plus one), so a feeder that fell behind (a pause,
+ * a backoff) catches up gently instead of at one per tick.
+ */
+export function renderFeedLimits(settings: PoolSettings, nowSec: number): { soFar: number; perHour: number } {
+  const cap = settings.renderFeedPerDay
+  if (!(cap > 0)) return { soFar: 0, perHour: 0 }
+  const intoDay = nowSec - dayStart(nowSec)
+  return { soFar: Math.min(cap, Math.floor((cap * intoDay) / 86400) + 1), perHour: Math.ceil(cap / 24) + 1 }
 }
 
-async function countRenderFeed(env: Env, nowSec: number): Promise<void> {
-  const used = await renderFeedUsed(env, nowSec)
-  await env.CACHE.put(renderFeedKey(nowSec), String(used + 1), { expirationTtl: 2 * 24 * HOUR })
+/** Feed fetches counted on `nowSec`'s UTC day, and in the hour before `nowSec`. */
+export async function renderFeedUsage(env: Env, nowSec: number): Promise<{ today: number; lastHour: number }> {
+  const row = await dbOf(env)
+    .prepare(
+      `SELECT COALESCE(SUM(CASE WHEN last_attempt_at >= ? THEN 1 ELSE 0 END), 0) AS today,
+              COALESCE(SUM(CASE WHEN last_attempt_at > ? THEN 1 ELSE 0 END), 0) AS last_hour
+         FROM render_feed WHERE last_attempt_at >= ?`,
+    )
+    .bind(dayStart(nowSec), nowSec - HOUR, Math.min(dayStart(nowSec), nowSec - HOUR))
+    .first<{ today: number; last_hour: number }>()
+  return { today: Number(row?.today ?? 0), lastHour: Number(row?.last_hour ?? 0) }
+}
+
+/** Feed fetches counted on `nowSec`'s UTC day. */
+export async function renderFeedUsed(env: Env, nowSec: number): Promise<number> {
+  return (await renderFeedUsage(env, nowSec)).today
 }
 
 /**
- * How many render-feeder items this tick may submit: `renderFeedPerDay`
- * spread evenly over the UTC day (the day's share up to now, plus one), less
- * what already ran today, and RENDER_FEED_MAX_PER_TICK at most. 40 a day is
- * about one every 36 minutes, never a burst after midnight.
+ * How many render-feeder items this tick may submit: within the day's even
+ * share so far and the rolling-hour limit (renderFeedLimits), and
+ * RENDER_FEED_MAX_PER_TICK at most. 40 a day is about one every 36 minutes,
+ * never a burst after midnight; after a pause it catches up at 3 an hour.
  */
 export async function renderFeedAllowance(env: Env, settings: PoolSettings, nowSec: number): Promise<number> {
-  const cap = settings.renderFeedPerDay
-  if (!(cap > 0)) return 0
-  const intoDay = ((nowSec % 86400) + 86400) % 86400
-  const soFar = Math.min(cap, Math.floor((cap * intoDay) / 86400) + 1)
-  const used = await renderFeedUsed(env, nowSec)
-  return Math.max(0, Math.min(RENDER_FEED_MAX_PER_TICK, soFar - used))
+  const { soFar, perHour } = renderFeedLimits(settings, nowSec)
+  if (soFar <= 0) return 0
+  const used = await renderFeedUsage(env, nowSec)
+  return Math.max(0, Math.min(RENDER_FEED_MAX_PER_TICK, soFar - used.today, perHour - used.lastHour))
+}
+
+export type RenderFeedRow = { url: string; attempts: number; failures: number; last_attempt_at: number | null; next_feed_at: number; gave_up: number; updated_at: number }
+
+/**
+ * Take one feed fetch for `url` before running it — atomically, in one D1
+ * statement: only while the day's share and the rolling-hour limit have room
+ * and the set is not cooling down or given up. Two overlapping ticks cannot
+ * both feed the same set, or both take the last slot. Returns the row as it
+ * was before (null = none), to undo the claim if the pool refuses, or
+ * `false` when the claim was not granted.
+ */
+export async function claimRenderFeed(env: Env, settings: PoolSettings, url: string, nowSec: number): Promise<RenderFeedRow | null | false> {
+  const { soFar, perHour } = renderFeedLimits(settings, nowSec)
+  if (soFar <= 0) return false
+  const db = dbOf(env)
+  const before = await db.prepare('SELECT * FROM render_feed WHERE url = ?').bind(url).first<RenderFeedRow>()
+  const res = await db
+    .prepare(
+      `INSERT INTO render_feed (url, attempts, failures, last_attempt_at, next_feed_at, gave_up, updated_at)
+       SELECT ?, 1, 0, ?, ?, 0, ?
+        WHERE (SELECT COUNT(*) FROM render_feed WHERE last_attempt_at >= ?) < ?
+          AND (SELECT COUNT(*) FROM render_feed WHERE last_attempt_at > ?) < ?
+       ON CONFLICT(url) DO UPDATE SET attempts = render_feed.attempts + 1, last_attempt_at = excluded.last_attempt_at,
+         next_feed_at = excluded.next_feed_at, updated_at = excluded.updated_at
+        WHERE render_feed.gave_up = 0 AND render_feed.next_feed_at <= ?`,
+    )
+    .bind(url, nowSec, nowSec + RENDER_FEED_REFETCH_COOLDOWN_SECONDS, nowSec, dayStart(nowSec), soFar, nowSec - HOUR, perHour, nowSec)
+    .run()
+  return (res.meta.changes ?? 0) > 0 ? before : false
+}
+
+/** The pool refused: nothing was fetched, so the claim is undone (it neither counts nor cools the set down). */
+async function undoRenderFeed(env: Env, url: string, before: RenderFeedRow | null): Promise<void> {
+  const db = dbOf(env)
+  if (!before) {
+    await db.prepare('DELETE FROM render_feed WHERE url = ?').bind(url).run()
+    return
+  }
+  await db
+    .prepare('UPDATE render_feed SET attempts = ?, last_attempt_at = ?, next_feed_at = ?, updated_at = ? WHERE url = ?')
+    .bind(before.attempts, before.last_attempt_at, before.next_feed_at, before.updated_at, url)
+    .run()
+}
+
+/**
+ * After a feed fetch ran: a success resets the failure count (the set cools
+ * down RENDER_FEED_REFETCH_COOLDOWN_SECONDS); a failure (404, 5xx, a page
+ * that could not be processed) doubles the cooldown per consecutive failure,
+ * up to RENDER_FEED_MAX_COOLDOWN_SECONDS, and after RENDER_FEED_MAX_FAILURES
+ * the set is given up on. Its recheck by age is not affected.
+ */
+async function settleRenderFeed(env: Env, url: string, ok: boolean, nowSec: number, log: Logger): Promise<void> {
+  const db = dbOf(env)
+  if (ok) {
+    await db.prepare('UPDATE render_feed SET failures = 0, updated_at = ? WHERE url = ?').bind(nowSec, url).run()
+    return
+  }
+  const row = await db.prepare('SELECT failures FROM render_feed WHERE url = ?').bind(url).first<{ failures: number }>()
+  const failures = Number(row?.failures ?? 0) + 1
+  const gaveUp = failures >= RENDER_FEED_MAX_FAILURES
+  const cooldown = Math.min(RENDER_FEED_MAX_COOLDOWN_SECONDS, RENDER_FEED_REFETCH_COOLDOWN_SECONDS * 2 ** (failures - 1))
+  await db
+    .prepare('UPDATE render_feed SET failures = ?, gave_up = ?, next_feed_at = ?, updated_at = ? WHERE url = ?')
+    .bind(failures, gaveUp ? 1 : 0, nowSec + cooldown, nowSec, url)
+    .run()
+  if (gaveUp) log.warn('scheduler.render_feed_gave_up', { setUrl: url, failures })
+  else log.info('scheduler.render_feed_failed', { setUrl: url, failures, nextFeedAt: nowSec + cooldown })
 }
 
 // ─── picking a tick ─────────────────────────────────────────────────────────
@@ -489,9 +592,13 @@ export async function pickTickItems(
   // The render feeder: first fetches for sets mkvid waits on, in the verify
   // class right after the second fetches (completing a pair beats opening one).
   const feed = feedAllowance ?? (await renderFeedAllowance(env, settings, nowSec))
-  if (feed > 0) {
+  // Nothing to feed a moment ago: do not scan the requests again on every tick.
+  const feedEmptyUntil = feed > 0 ? Number((await env.CACHE.get(RENDER_FEED_EMPTY_KEY)) ?? 0) || 0 : 0
+  if (feed > 0 && feedEmptyUntil <= nowSec) {
     let added = 0
-    for (const c of await renderFeedCandidates(env, nowSec, feed + 10)) {
+    const cands = await renderFeedCandidates(env, nowSec, feed + 10)
+    if (cands.length === 0) await env.CACHE.put(RENDER_FEED_EMPTY_KEY, String(nowSec + RENDER_FEED_EMPTY_SECONDS), { expirationTtl: 2 * RENDER_FEED_EMPTY_SECONDS })
+    for (const c of cands) {
       if (added >= feed) break
       if (!slugs.has(c.slug) || seenUrl.has(c.url)) continue
       seenUrl.add(c.url)
@@ -607,6 +714,8 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     const sub = bySlug.get(item.slug)!
     let r: TickItemResult
     let retryAfter: number | null = null
+    /** Set once a render_feed item holds its D1 claim (the row as it was before). */
+    let feedClaim: { before: RenderFeedRow | null } | null = null
     try {
       if (item.kind === 'dj_backfill') {
         // Claim for a short while; only a completed step earns the full interval.
@@ -636,6 +745,16 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           await claimSetAttempt(env, item.url, nowSec)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
         } else if (item.kind === 'render_feed') {
+          // Claimed in D1 first (the day's share, the hourly limit and the
+          // set's cooldown, atomically): an overlapping tick that got there
+          // first means this one skips it.
+          const before = await claimRenderFeed(env, settings, item.url, nowSec)
+          if (before === false) {
+            log.info('scheduler.render_feed_not_claimed', { setUrl: item.url })
+            results.push({ item, outcome: 'skipped' })
+            continue
+          }
+          feedClaim = { before }
           // A first fetch, by any account: noteSetFetch records it as pending
           // and the verify class asks a different account >= 2 h later.
           await claimSetAttempt(env, item.url, nowSec)
@@ -647,8 +766,9 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
             selection: { newUrls: [], recheckUrls: [item.url] },
             settings,
           })
-          // A pool refusal fetched nothing: it does not use the day's allowance.
-          if (!res.stoppedBy) await countRenderFeed(env, nowSec)
+          // syncOne reports ok for the run even when this one set failed: the
+          // set counts as fetched only when its recheck completed.
+          if (!res.stoppedBy && res.ok && res.stats.tracklistsRechecked < 1) res = { ...res, ok: false }
         } else if (item.kind === 'verify') {
           await deferVerification(env, item.url, nowSec + CLAIM_VERIFY_SECONDS)
           await claimSetAttempt(env, item.url, nowSec)
@@ -671,6 +791,16 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     } catch (e) {
       log.error('scheduler.item_threw', { kind: item.kind, slug: item.slug, ...errorFields(e) })
       r = { item, outcome: 'threw' }
+    }
+    if (feedClaim && item.kind === 'render_feed') {
+      // A pool refusal fetched nothing: undo the claim (no count, no cooldown).
+      // Anything else was a feed fetch: settle it, a failure backing the set off.
+      try {
+        if (r.outcome === 'stopped') await undoRenderFeed(env, item.url, feedClaim.before)
+        else await settleRenderFeed(env, item.url, r.outcome === 'ok', nowSec, log)
+      } catch (e) {
+        log.warn('scheduler.render_feed_settle_failed', { setUrl: item.url, ...errorFields(e) })
+      }
     }
     results.push(r)
     if (r.outcome === 'stopped') {
