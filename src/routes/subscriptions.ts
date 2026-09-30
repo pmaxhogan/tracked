@@ -2672,7 +2672,7 @@ ${BAN_BANNER_HTML}
         return;
       }
       $refreshResult.textContent = d.refreshed === false
-        ? (d.dailyCapReached ? 'Not refetched: today's forced refreshes are used up; showing the cached list.' : 'Not refetched: this set was just refreshed; try again in ' + d.cooldownSeconds + ' s.')
+        ? (d.dailyCapReached ? 'Not refetched: the daily limit of forced refreshes is used up; showing the cached list.' : 'Not refetched: this set was just refreshed; try again in ' + d.cooldownSeconds + ' s.')
         : 'Refreshed: ' + d.rowCount + ' rows, ' + d.identifiedCount + ' of ' + d.trackCount + ' identified';
       await load(currentUrl);
     } catch (e) {
