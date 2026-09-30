@@ -91,8 +91,11 @@ function menuNav(nav: NavKey | null): string {
   let out = ''
   let group: string | null = null
   for (const item of NAV) {
-    if (item.group !== group && item.group) out += `<div class="grp">${esc(item.group)}</div>`
-    group = item.group
+    if (item.group !== group) {
+      // Same grouping as the sidebar: ungrouped items after a group get an empty heading as a spacer.
+      out += item.group ? `<div class="grp">${esc(item.group)}</div>` : '<div class="grp" aria-hidden="true"></div>'
+      group = item.group
+    }
     out += `<a href="${esc(item.href)}"${current(item.key === nav)}>${esc(item.label)}</a>`
   }
   return out
@@ -108,8 +111,10 @@ function tabs(nav: NavKey | null): string {
  * Shared behaviour for every shell page: the phone menu, the theme select, the
  * "/" shortcut, the fetch status pill and the Challenges count. An IIFE with
  * every lookup null-tolerant and every browser global guarded; no timers. No
- * fetch at all when document.body is missing (the pool tests' stub) or the
- * page reports its own count (the pool pages, whose tests count tlpool calls).
+ * fetch at all when document.body is missing (the pool tests' stub). The
+ * Challenges fetch (a tlpool request) is also skipped when the page reports
+ * its own count (the pool pages, whose tests count tlpool calls); the status
+ * fetch is not a tlpool request and runs on every page.
  */
 export const SHELL_JS = /* js */ `
 (() => {
@@ -140,13 +145,13 @@ export const SHELL_JS = /* js */ `
   });
 
   const body = document.body;
-  if (!body || (body.dataset && body.dataset.ownCount)) return;
+  if (!body) return;
 
   // ── status pill ──
   const pill = $('tk-status');
   if (pill) TK.api.get('/ui/api/ban/status').then((r) => {
     const s = r && r.ok && r.data;
-    if (!s) { pill.title = 'Fetch status unavailable'; return; }
+    if (!s) { pill.textContent = 'Unknown'; pill.className = 'badge neutral'; pill.title = 'Fetch status unavailable'; return; }
     const st = s.pause ? ['Paused', 'bad'] : !s.poolConfigured ? ['Pool offline', 'warn'] : ['Active', 'ok'];
     pill.textContent = st[0];
     pill.className = 'badge ' + st[1];
@@ -154,6 +159,7 @@ export const SHELL_JS = /* js */ `
   }).catch(() => {});
 
   // ── Challenges count ──
+  if (body.dataset && body.dataset.ownCount) return;
   TK.api.get('/ui/api/pool/challenges').then((r) => {
     const list = r && r.ok && r.data && r.data.challenges;
     if (!Array.isArray(list)) return;
@@ -176,7 +182,7 @@ export function shell(o: ShellOptions): string {
     <a class="tk-brand" href="/ui" title="tracked">${icon('playlist')}<span class="lbl">tracked</span></a>
     <nav class="tk-nav" aria-label="Pages">${sideNav(o.nav)}</nav>
     <div class="tk-side-foot">
-      <span id="tk-status" class="badge neutral" title="Fetch status: checking">…</span>
+      <span id="tk-status" class="badge neutral" title="Fetch status">…</span>
       <label class="lbl">Theme <select id="tk-theme" aria-label="Theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
       <span class="lbl">Signed in via Access</span>
     </div>

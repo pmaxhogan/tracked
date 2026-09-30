@@ -203,9 +203,10 @@ export const BAN_JS = /* js */ `
     const w = reg.installing || reg.waiting;
     if (!w || typeof w.addEventListener !== 'function') return Promise.resolve(reg); // let subscribe report it
     return new Promise((resolve, reject) => {
+      const done = () => { if (typeof w.removeEventListener === 'function') w.removeEventListener('statechange', check); };
       const check = () => {
-        if (w.state === 'activated') resolve(reg);
-        else if (w.state === 'redundant') reject(new Error('the notification service worker failed to install'));
+        if (w.state === 'activated') { done(); resolve(reg); }
+        else if (w.state === 'redundant') { done(); reject(new Error('the notification service worker failed to install')); }
       };
       w.addEventListener('statechange', check);
       check();

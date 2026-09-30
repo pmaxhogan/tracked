@@ -72,12 +72,16 @@ describe('SHELL_JS', () => {
     for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0))
     return { els, fetches, timers }
   }
-  it('fetches nothing and sets no timer without a body or on a page that owns its count', async () => {
-    for (const body of [undefined, { dataset: { ownCount: '1' } }]) {
-      const r = await runShell(body)
-      expect(r.fetches).toEqual([])
-      expect(r.timers).toEqual([])
-    }
+  it('fetches nothing and sets no timer without a body', async () => {
+    const r = await runShell(undefined)
+    expect(r.fetches).toEqual([])
+    expect(r.timers).toEqual([])
+  })
+  it('on a page that owns its count, fetches only the status (no tlpool request), and a failed status leaves a neutral pill', async () => {
+    const r = await runShell({ dataset: { ownCount: '1' } })
+    expect(r.fetches).toEqual(['/ui/api/ban/status'])
+    expect(r.timers).toEqual([])
+    expect([r.els.get('tk-status').textContent, r.els.get('tk-status').className]).toEqual(['Unknown', 'badge neutral'])
   })
   it('fills the status pill and the Challenges count once at load', async () => {
     const r = await runShell({ dataset: {} }, {

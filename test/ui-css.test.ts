@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { TOKENS_CSS } from '../src/ui/tokens'
 import { BASE_CSS } from '../src/ui/base'
+import { shell } from '../src/ui/shell'
 
 describe('tokens', () => {
   it('is dark first with the spec values, and light twice (media query and manual)', () => {
@@ -39,5 +40,23 @@ describe('base', () => {
     const rail = BASE_CSS.slice(BASE_CSS.indexOf('max-width: 1099px'), BASE_CSS.indexOf('max-width: 799px'))
     expect(rail).toContain('.tk-side-foot > :not(.badge) { display: none; }')
     expect(BASE_CSS).toContain('pointer-events: none')
+  })
+})
+
+describe('shell chrome', () => {
+  it('styles every shell element that has no component class of its own', () => {
+    for (const c of ['.tk-menu .grp', '.tk-drawer-head', '.tk-top-title', '.tk-brand', '.tk-side-foot']) expect(BASE_CSS).toContain(c)
+    expect(BASE_CSS).toMatch(/\.tk-top-title \{[^}]*text-overflow: ellipsis/)
+    expect(BASE_CSS).toMatch(/\.tk-drawer-head \{[^}]*display: flex/)
+  })
+  it('groups the phone menu like the sidebar: Settings and Tools are not under Pool', () => {
+    const h = shell({ nav: 'home', title: 'Home', body: '' })
+    const menu = h.slice(h.indexOf('<dialog id="tk-menu"'), h.indexOf('</dialog>', h.indexOf('<dialog id="tk-menu"')))
+    const side = h.slice(h.indexOf('<nav class="tk-nav"'), h.indexOf('</nav>', h.indexOf('<nav class="tk-nav"')))
+    const between = (html: string) => html.slice(html.indexOf('href="/ui/pool/settings"'), html.indexOf('href="/ui/settings"'))
+    for (const html of [menu, side]) {
+      expect(between(html)).toContain('<div class="grp" aria-hidden="true"></div>')
+      expect(html.match(/<div class="grp">[^<]*<\/div>/g)).toEqual(['<div class="grp">Library</div>', '<div class="grp">Pipeline</div>', '<div class="grp">Pool</div>'])
+    }
   })
 })

@@ -180,6 +180,11 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
 .tk-tabs svg { width: 20px; height: 20px; }
 .tk-menu { background: var(--card); color: var(--fg); border: 1px solid var(--line-strong); padding: var(--sp-3) var(--sp-4); padding-bottom: calc(var(--sp-3) + env(safe-area-inset-bottom)); box-shadow: var(--shadow-float); }
 .tk-menu a { display: block; padding: 10px 4px; color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--line); }
+.tk-menu .grp { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .08em; color: var(--subtle); font-weight: 600; padding: var(--sp-3) 4px var(--sp-1); }
+.tk-menu .grp:empty { padding: var(--sp-2) 0 0; }
+.tk-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+.tk-drawer-head h2 { margin: 0; font-size: var(--fs-lg); min-width: 0; overflow-wrap: anywhere; }
+.tk-top-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── breakpoints ── */
 @media (max-width: 1099px) {

@@ -84,7 +84,7 @@ describe('old service worker cleanup', () => {
    * an installing worker that activates a macrotask later, and subscribe()
    * rejects until then (Chromium: "no active Service Worker").
    */
-  async function runMigration(opts: { old: boolean }) {
+  async function runMigration(opts: { old: boolean; install?: 'activated' | 'redundant' }) {
     const { BAN_JS } = await import('../src/routes/ban-ui')
     const posts: Array<{ url: string; body: string }> = []
     const registered: Array<[string, unknown]> = []
@@ -100,7 +100,7 @@ describe('old service worker cleanup', () => {
       unregister: async () => { oldUnregistered++; log.push('old.unregister'); return true },
     }
     const listeners: Array<() => void> = []
-    const worker = { state: 'installing', addEventListener: (type: string, fn: () => void) => { if (type === 'statechange') listeners.push(fn) } }
+    let worker = { state: 'installing', addEventListener: (type: string, fn: () => void) => { if (type === 'statechange') listeners.push(fn) } }
     let newSub: { endpoint: string; toJSON: () => object } | null = null
     const newReg: Record<string, unknown> = {
       scope: 'https://tracked.example/ui/',
@@ -115,14 +115,18 @@ describe('old service worker cleanup', () => {
       },
       unregister: async () => { newUnregistered++; return true },
     }
-    const activate = () => { worker.state = 'activated'; newReg.active = worker; newReg.installing = null; for (const f of listeners) f() }
+    const activate = () => {
+      if (opts.install === 'redundant') { worker.state = 'redundant'; newReg.installing = null } // the install failed
+      else { worker.state = 'activated'; newReg.active = worker; newReg.installing = null }
+      for (const f of listeners.splice(0)) f()
+    }
     const navigator = {
       userAgent: 'test',
       serviceWorker: {
         getRegistrations: async () => (opts.old ? [oldReg] : []),
         register: async (url: string, o: unknown) => {
           registered.push([url, o])
-          if (!newReg.active) { newReg.installing = worker; setTimeout(activate, 0) } // Node's timer, not the page's
+          if (!newReg.active) { worker = { ...worker, state: 'installing' }; newReg.installing = worker; setTimeout(activate, 0) } // Node's timer, not the page's
           return newReg
         },
       },
@@ -130,6 +134,8 @@ describe('old service worker cleanup', () => {
     const Notification = { permission: 'granted', requestPermission: async () => { requestPermission++; return 'granted' } }
     const window = { isSecureContext: true, PushManager: {}, Notification }
     const els: Record<string, El> = {}
+    const enableClicks: Array<() => unknown> = []
+    els['alerts-enable'] = { ...el(), addEventListener: ((type: string, fn: () => unknown) => { if (type === 'click') enableClicks.push(fn) }) as El['addEventListener'] }
     const document = { hidden: false, body: { dataset: { banPage: 'other' } }, getElementById: (id: string) => (els[id] ??= el()), addEventListener() {} }
     const ctx = vm.createContext({
       document, navigator, window, Notification, atob, Uint8Array, console, Date,
@@ -143,7 +149,8 @@ describe('old service worker cleanup', () => {
     })
     vm.runInContext(BAN_JS, ctx)
     await settle()
-    return { posts, registered, log, els, oldUnregistered: () => oldUnregistered, newUnregistered: () => newUnregistered, oldUnsubscribed: () => oldUnsubscribed, requestPermission: () => requestPermission, subscribeRejected: () => subscribeRejected }
+    const clickEnable = async () => { for (const f of enableClicks) await f(); await settle() }
+    return { posts, registered, log, els, clickEnable, oldUnregistered: () => oldUnregistered, newUnregistered: () => newUnregistered, oldUnsubscribed: () => oldUnsubscribed, requestPermission: () => requestPermission, subscribeRejected: () => subscribeRejected }
   }
 
   it('subscribes under /ui/ once the new worker is active, then drops the /subscriptions/ registration and its push subscription, without a prompt', async () => {
@@ -168,6 +175,22 @@ describe('old service worker cleanup', () => {
     expect(m.posts.filter((p) => p.url === '/ui/api/push/unsubscribe')).toHaveLength(0)
     expect(m.requestPermission()).toBe(0)
     expect(m.els['alerts-state']!.textContent).toBe('on (this device)')
+  })
+
+  it('a worker that fails to install (redundant): no subscribe, the old registration stays, the error shows, and Enable retries the install', async () => {
+    const m = await runMigration({ old: true, install: 'redundant' })
+    expect(m.registered).toEqual([['/ui/sw.js', { scope: '/ui/' }]])
+    expect(m.subscribeRejected()).toBe(0)
+    expect(m.log).toEqual([]) // no subscribe, no POST subscribe, nothing dropped
+    expect(m.posts.filter((p) => /push\/(un)?subscribe/.test(p.url))).toEqual([])
+    expect(m.oldUnsubscribed()).toBe(0)
+    expect(m.oldUnregistered()).toBe(0)
+    expect(m.els['alerts-state']!.textContent).toBe('error')
+    expect(m.els['alerts-msg']!.textContent).toContain('failed to install')
+    // The rejected registration is not cached: pressing Enable registers again.
+    await m.clickEnable()
+    expect(m.registered).toHaveLength(2)
+    expect(m.els['alerts-state']!.textContent).toBe('error')
   })
 })
 
