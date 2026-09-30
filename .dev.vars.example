@@ -10,7 +10,7 @@ LIKED_SONGS_TOKEN=replace-with-a-different-long-random-string
 # MKVID_ACCESS_CLIENT_SECRET=
 YOUTUBE_API_KEY=replace-with-google-cloud-yt-data-api-key
 # tlpool, the NAS browser pool. EVERY 1001tracklists request goes through it
-# (README "Network strategy"); while unset nothing is fetched from
+# (README "How 1001tracklists is fetched"); while unset nothing is fetched from
 # 1001tracklists at all. TLPOOL_TOKEN is also what tlpool presents on
 # POST /pool/events.
 # TLPOOL_URL=https://tlpool.example.com

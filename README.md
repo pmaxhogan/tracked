@@ -565,8 +565,16 @@ Two kinds of state, two stores:
 | `set_verification` | the two-fetch verification of each set's track list (fingerprint, accounts, times, `pending` / `verified`) |
 | `dj_schedule` | when each DJ's listing page is next read (discovery) and its next "older sets" backfill step |
 | `pool_events` | events tlpool posted (challenges, flagged accounts) and whether each was pushed |
+| `set_media_facts` | per set page: no-full-recording notice, last cue, audio player durations, the linked video (the full-recording rule's input) |
+| `removed_videos` | never re-add: videos the owner removed, dead videos, remove-and-replace, per playlist |
+| `playlist_removals` | every removal the playlist hygiene made or would make, with the reason (the `/subscriptions/removed` page) |
+| `video_overrides` | videos the owner allowed despite the full-recording rule |
+| `playlist_members` | the last complete listing of each managed playlist |
+| `playlist_confirmed` | videos tracked confirmed in a playlist (insert answered, or seen in a complete listing): what the owner-removal comparison expects |
+| `mkvid_old_videos` | old mkvid videos a recreation replaces, until mkvid confirms their deletion |
+| `mkvid_claims` | append-only log of mkvid claims per Pacific day and account (the daily caps count this) |
 
-The sync still reasons about one `SubState` object per DJ (`lib/sync-store.ts` hydrates it from `sub_sync` + `tracklists` and writes it back as row upserts, diffing against what it loaded so a tick that touched 20 sets writes 20 rows). The 5-minute scheduler tick picks its few items from `set_schedule` / `set_verification` / `dj_schedule` / pending `tracklists` rows instead of loading every DJ; "Invalidate & resync", ban-victim requeues and mkvid's deliveries are direct row updates. D1 has no TTLs, so the daily cron prunes both audit tables at the 90-day horizon.
+The sync still reasons about one `SubState` object per DJ (`lib/sync-store.ts` hydrates it from `sub_sync` + `tracklists` and writes it back as row upserts, diffing against what it loaded so a tick that touched 20 sets writes 20 rows). The 5-minute scheduler tick picks its few items from `set_schedule` / `set_verification` / `dj_schedule` / pending `tracklists` rows instead of loading every DJ; "Invalidate & resync", ban-victim requeues and mkvid's deliveries are direct row updates. D1 has no TTLs, so the daily cron prunes both audit tables and `pool_events` at the 90-day horizon.
 
 **KV** keeps what is genuinely a cache or a tiny blob: every `CACHE` entry that has a TTL (YouTube resolves, 1001tl searches and parsed pages, medialinks, Apple links, playlist membership, DJ set lists, the Access JWKS), the `ban:pause` master switch and the admin banner's episodes, the scheduler settings (`pool:settings` in SUBS) and its backoff, the DJ backfill cursors, the daily combined-insert counter, `subs:combined`, the Google OAuth tokens and the Web Push subscriptions.
 
