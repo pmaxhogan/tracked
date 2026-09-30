@@ -16,7 +16,7 @@
   //                      is spread around the clock by the scheduler instead.
   // Both then reconcile the combined "All tracked artists" playlist against
   // the per-artist ones (YouTube only; bounded per run and per day — see
-  // lib/combined-playlist.ts) and send Web Pushes that quiet hours held back.
+  // lib/combined-playlist.ts), and retry Web Pushes whose delivery failed.
   "triggers": { "crons": ["0 6 * * *", "*/5 * * * *"] },
   // Queryable state: subscriptions, per-tracklist sync rows, both audit trails,
   // the mkvid queue. Schema in migrations/; apply with `npm run d1:migrate`

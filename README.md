@@ -256,7 +256,16 @@ JSON API (also Access-gated):
 GET  /subscriptions/api/list                      → { subscriptions: [{ slug, sourceUrl, addedAt }] }
 POST /subscriptions/api/add    { url: "..." }     → { added: bool, subscription: {...} }
 POST /subscriptions/api/remove { slug: "..." }    → { removed: bool }
+POST /subscriptions/api/tracklist { url }         → the parsed list, no per-track links (see below)
+POST /subscriptions/api/tracklist/links { trackIds: ["909720", …] }   (≤ 25)
+                                                  → { links: { "<id>": { appleLink, youtubeLink, soundcloudLink } } }
+POST /subscriptions/api/tracklist/purge { url | slug | videoId }      → same as POST /tracklist/purge
+POST /subscriptions/api/playlists/fix-titles { dryRun?: true }        → { dryRun, checked, fixes: [{ slug, playlistId, oldTitle, newTitle, status }] }
 ```
+
+**Fix playlist titles** (button on the main page; `lib/playlist-rename.ts`): since 1001tracklists' July 2026 redesign the DJ page H1 reads "Tracklists By X", and playlists created meanwhile are titled "Tracklists By X (1001tklists)". The DJ page parser strips the prefix now and the next DJ page fetch corrects the stored name, but YouTube titles are set only at creation. The route finds every managed DJ playlist whose title starts with "Tracklists By ", computes the title a fresh creation would get ("X (1001tklists)"), and, only with `dryRun: false`, renames it with `playlists.update`, keeping its description, privacy and language (50 quota units each); the stored artist name is corrected too. The button shows the list first and asks before renaming.
+
+**Per-track links in the viewers are lazy**: loading a set costs one set page; each identified row has a **links** button, and **Load links** fetches them for the whole list (25 per request). Every lookup is a budgeted pool view at priority `recheck`, cached per track id for 30 days.
 
 ### Tracklist viewer
 
@@ -332,7 +341,7 @@ On top of those, one **combined playlist** — **`All tracked artists (1001tklis
 
 Both playlists are created on demand (looked up by exact title first, so an existing playlist is adopted rather than duplicated) and their ids are kept in D1 (`sub_sync.playlist_id`) for artists and in KV (`subs:combined`) for the combined one. Deleting a playlist on YouTube is recovered from automatically: the next run re-resolves by title and re-creates if needed. Removing a subscription leaves both playlists in place. The sync never removes a video except to replace it (next paragraph), so anything you prune from a playlist by hand stays pruned.
 
-**Rechecks (swapped recordings).** The first video attached to a set on 1001tracklists is often a phone recording, replaced by an official upload days later — so a set is not "done" once processed. Every processed tracklist records what it resolved to (its `tracklists` row: `video_id` + `checked_at`, surfaced to the sync as `tracklistVideos[url] = { videoId, checkedAt }`), and once the set is due — **by its age** (12 h for a set under 2 days old up to 30 days for one under 180, older ones only while they lack a good video or have ID rows; see **The scheduler** under Network strategy) — the set page is fetched again and compared:
+**Rechecks (swapped recordings).** The first video attached to a set on 1001tracklists is often a phone recording, replaced by an official upload days later — so a set is not "done" once processed. Every processed tracklist records what it resolved to (its `tracklists` row: `video_id` + `checked_at`, surfaced to the sync as `tracklistVideos[url] = { videoId, checkedAt }`), and once the set is due — **by its age** (12 h for a set under 2 days old up to 30 days for one under 180, older ones only while they lack a good video or have ID rows; see **The scheduler** under [How 1001tracklists is fetched](#how-1001tracklists-is-fetched)) — the set page is fetched again and compared:
 
 - **same video**, or the page **lost** its video → nothing changes (a set that drops its recording keeps the one already in the playlist), and no audit row is written — at thousands of rechecks those would drown the rows that matter.
 - the set **had none and now has one** → added, exactly like a first-time set.
@@ -485,9 +494,30 @@ echo $YOUTUBE_API_KEY           | npx wrangler secret put YOUTUBE_API_KEY
 echo $GOOGLE_OAUTH_CLIENT_ID    | npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID
 echo $GOOGLE_OAUTH_CLIENT_SECRET| npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET
 
-# tlpool, the NAS browser pool every 1001tracklists request goes through (see "Network strategy")
+# tlpool, the NAS browser pool every 1001tracklists request goes through (see "How 1001tracklists is fetched")
 echo $TLPOOL_URL         | npx wrangler secret put TLPOOL_URL     # its URL through the cloudflared tunnel
 echo $TLPOOL_TOKEN       | npx wrangler secret put TLPOOL_TOKEN   # bearer, both directions (Worker → /fetch, tlpool → /pool/events)
+
+# mkvid's base URL, for deleting the old video after "Delete and recreate"; optional Access service token
+echo $MKVID_URL                  | npx wrangler secret put MKVID_URL
+echo $MKVID_ACCESS_CLIENT_ID     | npx wrangler secret put MKVID_ACCESS_CLIENT_ID      # optional
+echo $MKVID_ACCESS_CLIENT_SECRET | npx wrangler secret put MKVID_ACCESS_CLIENT_SECRET  # optional
+
+# Web Push (captcha, flagged-account and held-playlist pushes): node scripts/gen-vapid-keys.mjs mailto:you@example.com
+echo $VAPID_PUBLIC_KEY  | npx wrangler secret put VAPID_PUBLIC_KEY
+echo $VAPID_PRIVATE_KEY | npx wrangler secret put VAPID_PRIVATE_KEY
+echo $VAPID_SUBJECT     | npx wrangler secret put VAPID_SUBJECT
+
+# Optional switches (secrets or vars): PLAYLIST_SWEEP_DRY_RUN (default report-only),
+# PLAYLIST_SWEEP_DAILY_REMOVALS (default 40), REJECT_VERTICAL (default off),
+# MKVID_DAILY_CLAIM_CAP (24), MKVID_SHARED_DAILY_CLAIM_CAP (6), MKVID_CLAIM_TTL_SECONDS (3 h).
+#
+# Gone since 2026-09-29; delete them from an older deployment:
+#   npx wrangler secret delete BRIGHTDATA_API_KEY
+#   npx wrangler secret delete HOME_PROXY_URL
+#   npx wrangler secret delete HOME_PROXY_TOKEN
+#   npx wrangler secret delete MKVID_REQUIRE_FULL_TRACKLIST   # if it was set
+# (the BRIGHTDATA_DAILY_CAP and TL_FETCHES_PER_TICK vars left wrangler.jsonc)
 
 # 3. Set CF Access vars in wrangler.jsonc (`vars` block):
 #    CF_ACCESS_TEAM_DOMAIN     yourteam.cloudflareaccess.com
@@ -548,48 +578,53 @@ The sync still reasons about one `SubState` object per DJ (`lib/sync-store.ts` h
 
 Tests run against the real schema: `test/helpers/fake-d1.ts` is an in-memory sql.js (SQLite-as-WebAssembly, no native build, any Node version) database with `migrations/*.sql` applied, strict like D1 about `undefined`/boolean bind values.
 
-## Network strategy
+## How 1001tracklists is fetched
 
-Since 2026-09-29 **every 1001tracklists request goes through tlpool**, a browser pool on the NAS (its own repo; reached through the cloudflared tunnel, `TLPOOL_URL` + bearer `TLPOOL_TOKEN`). Each pool account is a real headed Chrome profile pinned to one exit IP for life; tlpool owns the accounts, their daily page budget and pacing, and relays captchas to the owner. The Worker never sees a credential: responses name the serving account only by an opaque id (`acct-N`). The home forwarder, Bright Data and direct fetches from Cloudflare's egress are gone from every 1001tracklists path — each of them got accounts flagged or is refused by the site.
+**Only through tlpool.** Since 2026-09-29 every 1001tracklists request (set pages, DJ listing pages, search, media link lookups) goes through tlpool, a browser pool on the NAS (its own repo), reached through the cloudflared tunnel at `TLPOOL_URL` with bearer `TLPOOL_TOKEN`. Each pool account is a real headed Chrome profile pinned to one exit IP for life. tlpool owns the accounts, their daily page budget and pacing, and relays captchas to the owner; the Worker decides only *what* to fetch and *how urgent* it is. The Worker never sees a credential: an answer names the serving account only by an opaque id (`acct-N`). The home forwarder, Bright Data and direct fetches from Cloudflare's egress are gone from every 1001tracklists path.
 
-`src/lib/upstream1001.ts` `fetch1001()` is the only route, and `src/lib/pool.ts` the client:
+**One code path.** `fetch1001()` in `src/lib/upstream1001.ts` is the only route, with `src/lib/pool.ts` as the client:
 
-0. **Master switch** — while `ban:pause` (CACHE KV) is set, nothing is fetched and the scheduler does nothing. The orchestrator sets and lifts it; the admin banner's *Dismiss* lifts it too (`POST /subscriptions/api/ban/clear`).
-1. **`POST {TLPOOL_URL}/fetch`** with `{ url, kind, priority, excludeAccounts?, maxWaitSeconds }` (plus `method` / `form` / `headers` for the two POST endpoints: search and the DJ "older sets" XHR). `kind` is `set`, `dj`, `search` or `medialink`; `priority` is `phone`, `new`, `verify`, `recheck` or `backfill` (a phone fetch waits at most 25 s).
+0. **Master switch.** While `ban:pause` (CACHE KV) is set nothing is fetched and the scheduler does nothing. The orchestrator sets and lifts it; the admin banner's *Dismiss* lifts it too (`POST /subscriptions/api/ban/clear`).
+1. **`POST {TLPOOL_URL}/fetch`** `{ url, kind, priority, excludeAccounts?, maxWaitSeconds }` (plus `method` / `form` / `headers` for the two POST endpoints: search and the DJ "older sets" XHR). A phone fetch waits at most 25 s. tlpool answers every contract result **with HTTP 200**, a page or `{ error, retryAfterSeconds }`, so the client reads the body, never the status.
 
 | request | kind | priority |
 | --- | --- | --- |
-| `/now-playing`, `/tracklist`, the tracklist viewer (search, set page, medialinks) | `search` / `set` / `medialink` | `phone` |
-| DJ profile page in the admin UI | `dj` | `new` |
-| scheduler: DJ discovery (page 1 + head walk) | `dj` | `new` |
+| `/now-playing` (search, set page, per-track links), `/tracklist`, purge / refresh | `search` / `set` / `medialink` | `phone` |
+| the tracklist viewer's set page | `set` | `phone` |
+| the viewers' per-track links (lazy: a row's **links** button or **Load links**) | `medialink` | `recheck` |
+| DJ profile page in the admin UI; scheduler DJ discovery | `dj` | `new` |
 | scheduler: never-fetched set ≤ 14 days old (or undated) | `set` | `new` |
 | scheduler: verification second fetch | `set` | `verify` (with `excludeAccounts`) |
 | scheduler: recheck by age | `set` | `recheck` |
 | scheduler: older never-fetched set, DJ "older sets" step | `set` / `dj` | `backfill` |
 
-Refusals map onto the typed errors every batch already handles: `budget_exhausted` / `challenge_pending` → `PoolPausedError` (an `UpstreamPausedError`), `no_healthy_account` / `blocked` / `timeout` / pool unreachable → `PoolUnavailableError` (an `UpstreamUnavailableError`). Both stop the batch and charge the set nothing. From the site itself: 404/410 → `UpstreamHttpError` (charged, final), 5xx → `UpstreamTransportError` (one ordinary failure), 401/403/429 or a block page / Cloudflare shell that gets through the browser → stop the batch.
+**Failures.** Pool refusals map onto the typed errors every batch handles: `budget_exhausted` / `challenge_pending` → `PoolPausedError`, `no_healthy_account` / `blocked` (tlpool's own decoy and rate-block detection included) / `timeout` / pool unreachable → `PoolUnavailableError`. Both stop the batch and charge the set nothing. From the site itself: 404/410 → `UpstreamHttpError` (charged, final); 5xx → one ordinary failure; 401/403/429, a block page or a Cloudflare shell that gets through the browser → stop the batch. Three charged failures abandon a set. **Decoy pages** (flagged accounts get the real page with randomized names; `parseTracklist` counts rows whose microdata name, visible text and link slug disagree) are never cached or shown (`DecoyTracklistError`); the account is reported to tlpool (`POST /accounts/:id/retest`). A dead YouTube video settles on the first strike.
 
-**Medialinks are budgeted page views too** (decision 11): the tracklist viewer with links on can cost one view per identified track. A failed lookup is not cached.
+**Every page is used fully, once.** A set page fetched by the sync (new set, recheck or verification) is parsed once, and that one parse feeds the parsed-list cache, the verification record, the next due time and the mkvid track list. Every set page fetch, the phone's and the viewer's included, also stores the page's media facts (`set_media_facts`: no-full-recording notice, last cue, audio player durations) for the playlist full-recording rule.
+
+**Parsed-list cache** (decision 19; details under [Tracklist cache and purge](#tracklist-cache-and-purge)): `tl:v4:<slug>` for 3 days when every row is identified, 6 hours with ID rows or a set under 2 days old (date from the URL, else the page). Decoy and empty parses are never cached. **Forced refetches** (purge routes, the viewer's Refresh, `/now-playing` `refresh: true`) are limited by pool settings `forcedRefetch`: 120 s per set, 40 per UTC day overall; a skipped one answers the cached list with `refreshed: false`.
+
+**Per-track media links** are budgeted views too (decision 11). `/now-playing` looks up only the tracks it returns; `/tracklist` at most 25, one at a time; the viewers only on request. Each result is cached per track id for 30 days (`ml:v1:<id>`); a failed lookup is not cached.
 
 ### The scheduler (`src/lib/fetch-scheduler.ts`)
 
-The `*/5` cron is only a heartbeat. Each tick draws a random number of items in `[tick.minItems, tick.maxItems]` (default 0–3), takes them from what is due in `priorities.order` (default new → verify → recheck → backfill), runs them one at a time and stops at the first refusal; with `retryAfterSeconds` it also stands down until then (`pool:tick_backoff_until` in CACHE). There is no burst anywhere: the daily 06:00 cron only prunes audit tables, and each DJ's discovery is spread around the clock (every ~24 h ± 4 h per DJ).
+The `*/5` cron is only a heartbeat. Each tick draws a random number of items in `[tick.minItems, tick.maxItems]` (default 0–3), takes them from what is due in `priorities.order` (default new → verify → recheck → backfill), runs them one at a time and stops at the first refusal; with `retryAfterSeconds` it also stands down until then (`pool:tick_backoff_until` in CACHE). Only subscribed DJs' sets are considered (filtered in SQL, so an unsubscribed DJ's backlog cannot crowd them out). There is no burst anywhere: the daily 06:00 cron only prunes audit tables, and each DJ's discovery is spread around the clock (every ~24 h ± 4 h per DJ).
 
-**Recheck pace by set age** (quest decision 13; the date comes from the URL): 0–2 d every 12 h, 2–7 d daily, 7–30 d every 5 d, 30–180 d every 30 d, older never — unless the set has no good video or has ID rows, then every 90 d. Undated sets every 5 d. Every interval is jittered ±15 %. Schedule rows are created lazily (500 per tick): a set already overdue gets a random due time inside one interval, so the ~2,100 sets known when the pool starts come due gradually. `markSetDue(env, url)` makes a set due now for other modules.
+**Recheck pace by set age** (decision 13; the date comes from the URL): 0–2 d every 12 h, 2–7 d daily, 7–30 d every 5 d, 30–180 d every 30 d, older never, unless the set has no good video or has ID rows, then every 90 d. Undated sets every 5 d. Every interval is jittered ±15 %. Schedule rows are created lazily (500 at a time, at most hourly): a set already overdue gets a random due time inside one interval, so the ~2,100 sets known when the pool starts come due gradually. `markSetDue(env, url)` makes a set due now (hand marks: Invalidate & resync, playlist hygiene).
 
-**Verification** (`src/lib/verification.ts`, decision 2): a track list is `verified` only when a second fetch at least 2 h after the first, served by a *different* account, passes the decoy detector and matches the first on every row (row count, artist, title, cues, layering). A pair that disagrees reports the first account to tlpool (`POST /accounts/:id/retest`) and starts over; a verified list that changes later (IDs identified) just starts over; a decoy page reports its account. `isVerified(env, setUrl)` gates names for mkvid: `mkvid_request_tracks.trusted` is 1 only for a verified list.
+**Attempts.** Every set page the tick fetches first claims an attempt (`set_schedule.retry_at`): a set whose fetch does not complete waits 15 min, then 30, then 60 before it is tried again, and gets at most 3 attempts per UTC day, so no page is fetched every tick.
 
-**DJ backfill**: discovery walks the head of a DJ's list and stores page 1's scroll keys with the backfill cursor (`djbackfill:<slug>` in SUBS); the paced backfill then takes one "older sets" step (10 sets) per DJ about once a day at priority `backfill`, and the sets it finds are fetched at `backfill` too.
+**Verification** (`src/lib/verification.ts`, decision 2): a track list is `verified` only when a second fetch at least 2 h after the first, served by a *different* account, passes the decoy detector and matches the first on every row (row count, artist, title, cues, layering). A pair that disagrees reports the first account and starts over; a verified list that changes later (IDs identified) just starts over. Nothing is rendered by mkvid from an unverified list (`isVerified` gates the claim; `mkvid_request_tracks.trusted` is 1 only for a list saved while its set was verified, and migration 0007 reset every older row).
 
-**Settings** live in SUBS KV (`pool:settings`, merged over the defaults in `src/lib/pool-settings.ts`) and are edited through `GET/PUT /subscriptions/api/pool/settings` (CF Access). Manual buttons (`Sync`, `Invalidate & resync`, the `…all` variants) are bounded by `manualMaxFetches` (default 10) per press.
+**DJ backfill**: discovery walks the head of a DJ's list and stores page 1's scroll keys with the backfill cursor (`djbackfill:<slug>` in SUBS); the paced backfill then takes one "older sets" step (10 sets) per DJ about once a day at priority `backfill`.
 
-Which failures count against a set (three strikes → abandoned): pool refusals and blocks never do; a real 404/410, a page that parses to zero tracks and a 5xx from the site do. **Decoy pages** (since 2026-09-26 flagged accounts get the real page with randomized names; `parseTracklist` counts rows whose microdata name, visible text and link slug disagree — `looksLikeDecoy`) are refused by `resolveTracklistPage` with `DecoyTracklistError` and never cached; the sync only logs them and reports the account to tlpool. Fixture: `test/fixtures/tracklist-decoy-dcr839.html`. **A dead YouTube video settles on the first strike** (recorded as `no_youtube` with the rejected id, so a recheck still notices a replacement recording).
+**Settings** live in SUBS KV (`pool:settings`, merged over the defaults in `src/lib/pool-settings.ts`: recheck bands, priority order, tick size, verification gap, discovery and backfill pace, `manualMaxFetches`, `forcedRefetch`) and are edited on `/subscriptions/pool/settings` through `GET/PUT /subscriptions/api/pool/settings` (CF Access). tlpool's own settings (page budget per account, XHR budget, ramp, phone share, priority ceilings, image policy) are on the same page, proxied to tlpool. Manual buttons (`Sync`, `Invalidate & resync`, the `…all` variants) are bounded by `manualMaxFetches` (default 10) per press.
 
-| upstream                              | how we fetch it                          |
-| ------------------------------------- | ---------------------------------------- |
-| YouTube Data API                       | direct `fetch()`                          |
-| iTunes Search API                      | direct `fetch()`                          |
-| 1001tracklists (every request)         | tlpool `POST /fetch` — nothing else       |
+| upstream | how we fetch it |
+| --- | --- |
+| YouTube Data API | direct `fetch()` |
+| iTunes Search API | direct `fetch()` |
+| 1001tracklists (every request) | tlpool `POST /fetch`, nothing else |
 
 ### Pool events and pushes
 
@@ -599,7 +634,7 @@ tlpool posts `challenge.created` / `.solved` / `.expired` and `account.flagged` 
 
 `src/lib/ban-state.ts` keeps `ban:pause` (the master switch) and the banner's episodes (`ban:home`, `ban:ep:*`) in KV. Every admin page shows the banner while paused; the main page's history lists past episodes and whether tlpool is configured. Web Push needs `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (`node scripts/gen-vapid-keys.mjs mailto:you@example.com`); **Enable notifications** once per device, **Send test notification** proves delivery.
 
-Admin endpoints (CF Access): `GET /subscriptions/api/ban/status[?live=1]`, `POST /subscriptions/api/ban/clear`, `POST /subscriptions/api/ban/simulate`, `POST /subscriptions/api/ban/requeue-victims[?days=14&dry=1]`, `GET/PUT /subscriptions/api/pool/settings`, `GET /subscriptions/api/push/config`, `POST /subscriptions/api/push/{subscribe,unsubscribe,test}`, `GET /subscriptions/sw.js`.
+Admin endpoints (CF Access): `GET /subscriptions/api/ban/status[?live=1]`, `POST /subscriptions/api/ban/clear`, `POST /subscriptions/api/ban/simulate`, `POST /subscriptions/api/ban/requeue-victims[?days=14&dry=1]`, `GET/PUT /subscriptions/api/pool/settings`, `GET /subscriptions/api/push/config`, `POST /subscriptions/api/push/{subscribe,unsubscribe,test}`, `GET /subscriptions/sw.js`. Pool pages and their proxies to tlpool (accounts, add account, captchas, live view, tlpool settings) are listed in `src/routes/pool-ui.ts`.
 
 ## How it works
 
