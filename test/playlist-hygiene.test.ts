@@ -596,7 +596,7 @@ describe('held comparison push (cron wiring)', () => {
     expect(playlistHoldPayload('Playlist check held', 'x', DAY)).toEqual({ kind: 'playlist_hold', title: 'Playlist check held', body: 'x', url: '/subscriptions/removed', tag: 'playlist-hold', ts: DAY.toISOString() })
   })
 
-  it('pushes a held playlist once in the daytime; at night it waits and the hold stays un-notified', async () => {
+  it('pushes a held playlist once, at any hour (no quiet hours)', async () => {
     const sent: string[] = []
     const pushFetch = (async (input: RequestInfo | URL) => (sent.push(String(input)), new Response(null, { status: 201 }))) as unknown as typeof fetch
     const env = await pushEnv()
@@ -606,12 +606,9 @@ describe('held comparison push (cron wiring)', () => {
     vi.setSystemTime(NIGHT)
     const notify = playlistHoldNotifier(env, log, pushFetch)
     expect((await comparePlaylists(env, 'tok', { log, notify }))[0]).toMatchObject({ status: 'held' })
-    expect(sent).toHaveLength(0)
-    expect(await listHolds(env)).toMatchObject([{ notified: false }])
-    vi.setSystemTime(DAY)
-    await comparePlaylists(env, 'tok', { log, notify })
     expect(sent).toEqual(['https://push.example/device-1'])
     expect(await listHolds(env)).toMatchObject([{ notified: true }])
+    vi.setSystemTime(DAY)
     await comparePlaylists(env, 'tok', { log, notify })
     expect(sent).toHaveLength(1)
   })

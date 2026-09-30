@@ -585,7 +585,7 @@ Which failures count against a set (three strikes → abandoned): pool refusals 
 
 ### Pool events and pushes
 
-tlpool posts `challenge.created` / `.solved` / `.expired` and `account.flagged` / `.created` to **`POST /pool/events`** (bearer `TLPOOL_TOKEN`; exempt from the Tasker token gate). Events are stored in `pool_events` with only whitelisted ids (`acct-N`, challenge ids, times); a new challenge and a flagged account become a Web Push (`src/lib/pool-events.ts`) that opens `/subscriptions/captcha/<id>` (or `/subscriptions/accounts`). **Quiet hours 23:00–08:00 America/Chicago**: only a phone-initiated challenge pushes at night; the rest wait for the first tick after 08:00, where a challenge that expired or was solved meanwhile is dropped.
+tlpool posts `challenge.created` / `.solved` / `.expired` and `account.flagged` / `.created` to **`POST /pool/events`** (bearer `TLPOOL_TOKEN`; exempt from the Tasker token gate). Events are stored in `pool_events` with only whitelisted ids (`acct-N`, challenge ids, times); a new challenge and a flagged account become a Web Push (`src/lib/pool-events.ts`) that opens `/subscriptions/captcha/<id>` (or `/subscriptions/accounts`). Every push goes out immediately, at any hour: there are no quiet hours (owner decision, 2026-09-29). tlpool holds a challenge for 2 hours; unanswered, it closes it and rests the account 6 hours.
 
 ### Admin banner and pause
 
@@ -659,7 +659,7 @@ src/
     pool-settings.ts        scheduler settings (recheck pace by age, priorities, tick size) in SUBS KV
     fetch-scheduler.ts      the 5-minute tick: what is due, in priority order, a few items at a time
     verification.ts         two-account verification of track lists (isVerified)
-    pool-events.ts          tlpool webhook events: storage, Web Push, quiet hours
+    pool-events.ts          tlpool webhook events: storage, Web Push
     ban-state.ts            the ban:pause master switch + admin banner episodes (KV)
     web-push.ts             Web Push (VAPID / RFC 8291) delivery + subscription storage
     youtube.ts              YouTube Data API v3 client

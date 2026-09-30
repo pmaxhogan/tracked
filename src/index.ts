@@ -12,7 +12,6 @@ import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 import { backfillCombined } from './lib/sync'
 import { runSchedulerTick } from './lib/fetch-scheduler'
-import { flushDeferredPoolPushes } from './lib/pool-events'
 import { poolEventsApp } from './routes/pool-api'
 import { runKvMigrationTickSafely } from './lib/kv-import'
 import { pruneNowPlayingAudit } from './lib/now-playing-audit'
@@ -114,8 +113,7 @@ app.doc('/openapi.json', {
  *                     clock by the scheduler.
  *
  * Both finish by reconciling the combined "all tracked artists" playlist
- * (YouTube only, no 1001tracklists traffic), and send any Web Push that quiet
- * hours held back (lib/pool-events.ts).
+ * (YouTube only, no 1001tracklists traffic).
  *
  * `ctx.waitUntil` keeps the worker alive past `scheduled` returning.
  */
@@ -148,11 +146,6 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         } catch (e) {
           log.error('cron.threw', errorFields(e))
         }
-      }
-      try {
-        await flushDeferredPoolPushes(env, { log })
-      } catch (e) {
-        log.warn('cron.deferred_pushes_threw', errorFields(e))
       }
       // Separate try/catch: a failed tick shouldn't stop the combined
       // playlist from catching up on everything that *did* land.

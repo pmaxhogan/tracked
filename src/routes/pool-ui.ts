@@ -20,7 +20,7 @@
  *   GET  /api/pool/challenges/:id/live/* tlpool GET /challenges/:id/live/* (noVNC + websocket)
  *   GET|PUT /api/pool/limits            tlpool GET|PUT /settings
  *
- * `/api/pool/settings` (the recheck schedule, priority order and quiet hours;
+ * `/api/pool/settings` (the recheck schedule and priority order;
  * shape: lib/pool-settings.ts PoolSettings) belongs to `routes/pool-api.ts`;
  * the settings page only calls it.
  *
@@ -783,8 +783,6 @@ const SETTINGS_PAGE_HTML = /* html */ `<!doctype html>
     <div class="row" style="margin:0.5rem 0 0.9rem"><button id="sch-add" type="button" class="ghost small">+ Add row</button></div>
     <div class="field"><label for="beyond">Older than the last row: every (hours)</label><input id="beyond" type="number" min="1" step="1" placeholder="never" /><span class="hint">Empty = never (the default).</span></div>
     <div class="field"><label for="over180">Older sets without a good video or with ID rows: every (hours)</label><input id="over180" type="number" min="1" step="1" placeholder="never" /><span class="hint">Default 2160 (90 days).</span></div>
-    <h2 style="margin-top:0.5rem">Quiet hours</h2>
-    <div class="field"><label>No pushes from / until (hour, America/Chicago)</label><div class="row"><input id="quiet-start" type="number" min="0" max="23" step="1" /><span>until</span><input id="quiet-end" type="number" min="0" max="23" step="1" /></div><span class="hint">Default 23 until 8. The same hour twice = no quiet hours. A captcha the phone button hit still pushes; the rest wait for the morning.</span></div>
     <h2 style="margin-top:0.5rem">Priority order</h2>
     <p class="muted" style="font-size:0.85rem;margin-top:0">When the budget runs short, earlier ones go first.</p>
     <div id="prios"></div>
@@ -826,7 +824,7 @@ ${COMMON_JS}
     loadLimits();
   });
 
-  // ── recheck schedule, priorities, quiet hours, via /api/pool/settings ──
+  // ── recheck schedule and priorities, via /api/pool/settings ──
   // The stored shape is lib/pool-settings.ts PoolSettings; PUT deep-merges a
   // partial document, and arrays (bands, order) replace.
   const PRIO_WORDS = { phone: 'Phone button', new: 'New sets', verify: 'Verification second fetches', recheck: 'Routine rechecks', backfill: 'DJ backfill' };
@@ -840,8 +838,6 @@ ${COMMON_JS}
     $('sch-rows').innerHTML = sched.recheck.bands.map(rowHtml).join('');
     $('beyond').value = sched.recheck.beyondIntervalHours ?? '';
     $('over180').value = sched.recheck.beyondExceptionIntervalHours ?? '';
-    $('quiet-start').value = sched.quietHours ? sched.quietHours.startHour : '';
-    $('quiet-end').value = sched.quietHours ? sched.quietHours.endHour : '';
     renderPrios();
   }
   function renderPrios() {
@@ -884,7 +880,7 @@ ${COMMON_JS}
     rows.sort((a, b) => a.maxAgeDays - b.maxAgeDays);
     const recheck = { beyondIntervalHours: numOrNull('beyond'), beyondExceptionIntervalHours: numOrNull('over180') };
     if (rows.length) recheck.bands = rows;
-    const body = { recheck, priorities: { order: sched.priorities.order }, quietHours: { startHour: numOrNull('quiet-start'), endHour: numOrNull('quiet-end') } };
+    const body = { recheck, priorities: { order: sched.priorities.order } };
     $('sch-save').disabled = true; $('sch-msg').textContent = 'saving…';
     const r = await fetch('/subscriptions/api/pool/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
     $('sch-save').disabled = false;

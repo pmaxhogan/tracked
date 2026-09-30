@@ -624,39 +624,37 @@ describe('pool pages: HTML smoke', () => {
     expect(rows).toContain('data-k="maxAgeDays" value="180"')
     expect(els.get('beyond')!.value).toBe('') // never
     expect(els.get('over180')!.value).toBe(2160)
-    expect(els.get('quiet-start')!.value).toBe(23)
-    expect(els.get('quiet-end')!.value).toBe(8)
     expect(els.get('prios')!.innerHTML).toContain('Verification second fetches')
   })
 
-  it('saving the settings page stores quiet hours and the schedule in the shape W4 validates, and a reload shows them', async () => {
+  it('saving the settings page stores the schedule in the shape W4 validates, and a reload shows it', async () => {
     const { fetcher } = fakePool({ 'GET /settings': () => json({ budgetPerDay: 30 }) })
     const env = makeEnv()
     const appl = withSettingsApi(fetcher)
     const els = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, appl, env)
-    els.get('quiet-start')!.value = '22' as unknown as string
-    els.get('quiet-end')!.value = '7' as unknown as string
     els.get('beyond')!.value = '4320' as unknown as string
     await (els.get('sch')!.handlers as Record<string, (ev: unknown) => Promise<void>>).submit!({ preventDefault() {} })
     await settle()
     expect(els.get('sch-err')!.textContent).toBe('')
     expect(els.get('sch-msg')!.textContent).toBe('Saved.')
     const stored = (await (await appl.request('https://tracked.example/subscriptions/api/pool/settings', {}, env)).json()) as { settings: PoolSettings }
-    expect(stored.settings.quietHours).toEqual({ startHour: 22, endHour: 7 })
     expect(stored.settings.recheck.beyondIntervalHours).toBe(4320)
     expect(stored.settings.recheck.bands).toHaveLength(4) // untouched: the stub DOM has no table rows to send
     const again = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, appl, env)
-    expect(again.get('quiet-start')!.value).toBe(22)
     expect(again.get('beyond')!.value).toBe(4320)
   })
 
-  it('an invalid quiet hour is refused with the validator\'s message', async () => {
+  it('an invalid value is refused with the validator\'s message', async () => {
     const { fetcher } = fakePool({ 'GET /settings': () => json({ budgetPerDay: 30 }) })
     const els = await runPage(POOL_PAGES.SETTINGS_PAGE_HTML, withSettingsApi(fetcher), makeEnv())
-    els.get('quiet-start')!.value = '25' as unknown as string
+    els.get('over180')!.value = '-5' as unknown as string
     await (els.get('sch')!.handlers as Record<string, (ev: unknown) => Promise<void>>).submit!({ preventDefault() {} })
     await settle()
-    expect(els.get('sch-err')!.textContent).toContain('quietHours.startHour')
+    expect(els.get('sch-err')!.textContent).toContain('recheck.beyondExceptionIntervalHours')
+  })
+
+  it('the settings page has no quiet hours any more', () => {
+    expect(POOL_PAGES.SETTINGS_PAGE_HTML).not.toMatch(/quiet/i)
   })
 })
 

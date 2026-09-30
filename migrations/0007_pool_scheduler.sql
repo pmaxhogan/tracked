@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS pool_events (
   account_id TEXT,
   payload TEXT NOT NULL,
   received_at INTEGER NOT NULL,           -- unix seconds
-  push_status TEXT NOT NULL,              -- none | sent | failed | not_configured | quiet_deferred | quiet_dropped | expired
+  push_status TEXT NOT NULL,              -- none | sent | failed | not_configured
   pushed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS pool_events_received ON pool_events (received_at);

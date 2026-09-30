@@ -55,7 +55,6 @@ import { getAccessToken } from './google-oauth'
 import { parseCueValueData } from './tracklists1001'
 import { parseSetYouTubeId } from './dj-index'
 import { pushConfigured, sendPushToAll, type PushPayload } from './web-push'
-import { quietNow } from './pool-events'
 import {
   enqueueMkvidRequest,
   extractSetAudioSource,
@@ -645,14 +644,14 @@ export function isMassRemoval(missing: number, expected: number): boolean {
   return missing >= MASS_REMOVAL_MIN && expected > 0 && missing / expected > MASS_REMOVAL_RATIO
 }
 
-/** Tells the owner. Resolves false when nothing was sent (quiet hours, push not set up): the hold then notifies again next time. */
+/** Tells the owner. Resolves false when nothing was sent (push not set up, no device took it): the hold then notifies again next time. */
 export type Notifier = (title: string, body: string) => Promise<boolean | void>
 
 /**
  * The cron's notifier for a held comparison: a Web Push (kind `playlist_hold`)
- * to every subscribed device, opening /subscriptions/removed. Returns false
- * during quiet hours (pool settings) or when nothing was delivered, so the
- * hold stays un-notified and the next 6-hourly comparison tries again.
+ * to every subscribed device, opening /subscriptions/removed, at any hour.
+ * Returns false when nothing was delivered, so the hold stays un-notified
+ * and the next 6-hourly comparison tries again.
  */
 export function playlistHoldPayload(title: string, body: string, now: Date = new Date()): PushPayload {
   return { kind: 'playlist_hold', title, body, url: '/subscriptions/removed', tag: 'playlist-hold', ts: now.toISOString() }
@@ -661,10 +660,6 @@ export function playlistHoldPayload(title: string, body: string, now: Date = new
 export function playlistHoldNotifier(env: Env, log?: Logger, fetchImpl?: typeof fetch): Notifier {
   return async (title, body) => {
     if (!pushConfigured(env)) return false
-    if (await quietNow(env)) {
-      log?.info('hygiene.hold_push_quiet', { title })
-      return false
-    }
     const r = await sendPushToAll(env, playlistHoldPayload(title, body), log, fetchImpl ?? fetch)
     return r.sent > 0
   }

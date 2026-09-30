@@ -9,14 +9,9 @@
  *   - `account.flagged`   → "account flagged", opens the captcha page when the
  *     event names a challenge, else /subscriptions/accounts
  *
- * Quiet hours (decision 15): no pushes 23:00-08:00 America/Chicago, except for
- * a challenge the phone button triggered (someone is awake and waiting).
- * What happens to a push held back by quiet hours:
- *   - `account.flagged` is deferred and sent by the first cron tick after
- *     08:00 (the account rests 72 h; the owner still wants to know).
- *   - `challenge.created` is deferred too, but at 08:00 it is only sent if the
- *     challenge is still open (tlpool holds one for 2 h, so a 23:30 captcha
- *     has usually expired by then and is marked `expired`, not pushed).
+ * Every push is sent immediately, at any hour (owner decision 2026-09-29: no
+ * quiet hours). tlpool still holds a challenge for 2 h and then rests the
+ * account 6 h; that is tlpool's, not this module's.
  *
  * Accepted body (liberal; unknown fields are ignored and never stored):
  *   { id?, type, challengeId? | challenge: { id, type, account, createdAt, expiresAt },
@@ -29,7 +24,6 @@ import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import type { Logger } from './log'
 import { pushConfigured, sendPushToAll, type PushPayload } from './web-push'
-import { getPoolSettings } from './pool-settings'
 
 export const POOL_EVENT_TYPES = ['challenge.created', 'challenge.solved', 'challenge.expired', 'account.flagged', 'account.created'] as const
 export type PoolEventType = (typeof POOL_EVENT_TYPES)[number]
@@ -42,12 +36,12 @@ export type PoolEvent = {
   challengeType: 'image' | 'checkbox' | null
   createdAt: string | null
   expiresAt: string | null
-  /** The fetch that hit the challenge was the phone button's (pushes then ignore quiet hours). */
+  /** The fetch that hit the challenge was the phone button's (said in the push text). */
   phoneInitiated: boolean
   reason: string | null
 }
 
-export type PushStatus = 'none' | 'sent' | 'failed' | 'not_configured' | 'quiet_deferred' | 'quiet_dropped' | 'expired'
+export type PushStatus = 'none' | 'sent' | 'failed' | 'not_configured'
 
 const ID_RE = /^[A-Za-z0-9_.:-]{1,80}$/
 const ACCOUNT_RE = /^acct-[A-Za-z0-9_-]{1,40}$/
@@ -95,24 +89,6 @@ export function sanitizePoolEvent(body: unknown): { ok: true; event: PoolEvent }
   return { ok: true, event }
 }
 
-/** Hour of day (0-23) in `timeZone`. */
-function hourIn(date: Date, timeZone: string): number {
-  const h = new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', hourCycle: 'h23' }).format(date)
-  return Number(h) % 24
-}
-
-/** Default 23:00-08:00 America/Chicago (decision 15); equal hours = never quiet. */
-export function inQuietHours(date: Date = new Date(), timeZone = 'America/Chicago', startHour = 23, endHour = 8): boolean {
-  const h = hourIn(date, timeZone)
-  return startHour > endHour ? h >= startHour || h < endHour : h >= startHour && h < endHour
-}
-
-/** Quiet hours as set on the pool settings page (lib/pool-settings.ts `quietHours`). */
-export async function quietNow(env: Pick<Env, 'SUBS'>, date: Date = new Date()): Promise<boolean> {
-  const { quietHours } = await getPoolSettings(env)
-  return inQuietHours(date, 'America/Chicago', quietHours.startHour, quietHours.endHour)
-}
-
 /** The push for an event, or null when this event type does not page the owner. */
 export function poolEventPushPayload(ev: PoolEvent, now: Date = new Date()): PushPayload | null {
   const who = ev.accountId ?? 'a pool account'
@@ -145,7 +121,7 @@ export type ReceiveResult = { duplicate: boolean; rowId: number | null; push: Pu
 
 /**
  * Store one event (idempotent on tlpool's event id) and push it when it pages
- * the owner and quiet hours allow. Never throws on push problems.
+ * the owner. Never throws on push problems.
  */
 export async function receivePoolEvent(
   env: Env,
@@ -163,7 +139,6 @@ export async function receivePoolEvent(
   let push: PushStatus = 'none'
   if (payload) {
     if (!pushConfigured(env)) push = 'not_configured'
-    else if ((await quietNow(env, now)) && !(event.type === 'challenge.created' && event.phoneInitiated)) push = 'quiet_deferred'
     else push = 'sent'
   }
   const ins = await db
@@ -184,49 +159,6 @@ async function deliver(env: Env, rowId: number | null, payload: PushPayload, now
   const status: PushStatus = r.sent > 0 ? 'sent' : 'failed'
   if (rowId !== null) await dbOf(env).prepare('UPDATE pool_events SET push_status = ?, pushed_at = ? WHERE id = ?').bind(status, nowSec, rowId).run()
   return status
-}
-
-/**
- * Cron hook: once quiet hours are over, send the pushes they held back —
- * flagged accounts always, challenges only while still open (not expired, no
- * later solved/expired event for the same id). No-op during quiet hours.
- */
-export async function flushDeferredPoolPushes(env: Env, opts: { log?: Logger; now?: Date; fetchImpl?: typeof fetch } = {}): Promise<{ sent: number; expired: number }> {
-  const now = opts.now ?? new Date()
-  if (await quietNow(env, now)) return { sent: 0, expired: 0 }
-  const nowSec = Math.floor(now.getTime() / 1000)
-  const db = dbOf(env)
-  const rows = await db
-    .prepare(`SELECT id, type, challenge_id, payload FROM pool_events WHERE push_status = 'quiet_deferred' ORDER BY received_at LIMIT 20`)
-    .all<{ id: number; type: string; challenge_id: string | null; payload: string }>()
-  let sent = 0
-  let expired = 0
-  for (const row of rows.results) {
-    const ev = parseJson<PoolEvent | null>(row.payload, null)
-    if (!ev) continue
-    if (ev.type === 'challenge.created') {
-      const closed = row.challenge_id
-        ? await db
-            .prepare(`SELECT 1 AS x FROM pool_events WHERE challenge_id = ? AND type IN ('challenge.solved', 'challenge.expired') LIMIT 1`)
-            .bind(row.challenge_id)
-            .first<{ x: number }>()
-        : null
-      const lapsed = ev.expiresAt ? Date.parse(ev.expiresAt) <= now.getTime() : false
-      if (closed || lapsed) {
-        await db.prepare(`UPDATE pool_events SET push_status = 'expired' WHERE id = ?`).bind(row.id).run()
-        expired++
-        continue
-      }
-    }
-    const payload = poolEventPushPayload(ev, now)
-    if (!payload || !pushConfigured(env)) {
-      await db.prepare(`UPDATE pool_events SET push_status = ? WHERE id = ?`).bind(payload ? 'not_configured' : 'none', row.id).run()
-      continue
-    }
-    if ((await deliver(env, Number(row.id), payload, nowSec, opts)) === 'sent') sent++
-  }
-  if (rows.results.length) opts.log?.info('pool.deferred_pushes', { considered: rows.results.length, sent, expired })
-  return { sent, expired }
 }
 
 /** Newest events first, for the admin pages. */

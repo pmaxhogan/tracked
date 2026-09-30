@@ -3,8 +3,7 @@ import { app } from '../src/index'
 import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
-import { updatePoolSettings } from '../src/lib/pool-settings'
-import { flushDeferredPoolPushes, inQuietHours, listPoolEvents, poolEventPushPayload, receivePoolEvent, sanitizePoolEvent, type PoolEvent } from '../src/lib/pool-events'
+import { listPoolEvents, poolEventPushPayload, receivePoolEvent, sanitizePoolEvent, type PoolEvent } from '../src/lib/pool-events'
 import { savePushSubscription } from '../src/lib/web-push'
 
 const b64url = (buf: ArrayBuffer | Uint8Array) =>
@@ -75,17 +74,6 @@ describe('pool events: sanitising', () => {
   })
 })
 
-describe('quiet hours: 23:00-08:00 America/Chicago', () => {
-  it('follows Chicago time, DST included', () => {
-    expect(inQuietHours(new Date('2026-09-29T03:59:00Z'))).toBe(false) // 22:59 CDT
-    expect(inQuietHours(new Date('2026-09-29T04:00:00Z'))).toBe(true) // 23:00 CDT
-    expect(inQuietHours(new Date('2026-09-29T12:59:00Z'))).toBe(true) // 07:59 CDT
-    expect(inQuietHours(new Date('2026-09-29T13:00:00Z'))).toBe(false) // 08:00 CDT
-    expect(inQuietHours(new Date('2026-12-15T04:30:00Z'))).toBe(false) // 22:30 CST
-    expect(inQuietHours(new Date('2026-12-15T05:00:00Z'))).toBe(true) // 23:00 CST
-  })
-})
-
 describe('receivePoolEvent', () => {
   it('a daytime challenge is stored and pushed with a link to the captcha page', async () => {
     const env = await makeEnv()
@@ -103,41 +91,15 @@ describe('receivePoolEvent', () => {
     expect(await listPoolEvents(env)).toHaveLength(1)
   })
 
-  it('quiet hours come from the pool settings page: moved or switched off, pushes follow', async () => {
-    const env = await makeEnv()
-    const push = pushService()
-    await updatePoolSettings(env, { quietHours: { startHour: 5, endHour: 5 } }) // same hour = never quiet
-    expect((await receivePoolEvent(env, ev({ type: 'account.flagged', accountId: 'acct-5' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('sent')
-    await updatePoolSettings(env, { quietHours: { startHour: 9, endHour: 17 } }) // a daytime window instead
-    expect((await receivePoolEvent(env, ev({ type: 'account.flagged', accountId: 'acct-6' }), { now: DAYTIME, fetchImpl: push.fetchImpl })).push).toBe('quiet_deferred')
-    expect(await flushDeferredPoolPushes(env, { now: DAYTIME, fetchImpl: push.fetchImpl })).toEqual({ sent: 0, expired: 0 })
-  })
-
-  it('at night: a phone-initiated challenge still pushes; a background one waits for 08:00 and is dropped if it expired', async () => {
+  it('pushes at any hour: no quiet hours (owner decision), whoever triggered the challenge', async () => {
     const env = await makeEnv()
     const push = pushService()
     expect((await receivePoolEvent(env, ev({ type: 'challenge.created', challengeId: 'phone-1', phoneInitiated: true }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('sent')
-    expect((await receivePoolEvent(env, ev({ type: 'challenge.created', challengeId: 'bg-1', expiresAt: '2026-09-29T08:00:00Z' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('quiet_deferred')
-    expect((await receivePoolEvent(env, ev({ type: 'challenge.created', challengeId: 'bg-2', expiresAt: '2026-09-29T20:00:00Z' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('quiet_deferred')
-    expect((await receivePoolEvent(env, ev({ type: 'account.flagged', accountId: 'acct-5', reason: 'decoys' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('quiet_deferred')
-    expect(push.sent).toHaveLength(1)
-    // Still night: nothing goes out.
-    expect(await flushDeferredPoolPushes(env, { now: new Date('2026-09-29T07:00:00Z'), fetchImpl: push.fetchImpl })).toEqual({ sent: 0, expired: 0 })
-    // 08:30 Chicago: bg-1 expired at 03:00 → dropped; bg-2 still open → pushed; the flagged account → pushed.
-    const r = await flushDeferredPoolPushes(env, { now: new Date('2026-09-29T13:30:00Z'), fetchImpl: push.fetchImpl })
-    expect(r).toEqual({ sent: 2, expired: 1 })
+    expect((await receivePoolEvent(env, ev({ type: 'challenge.created', challengeId: 'bg-1', expiresAt: '2026-09-29T08:00:00Z' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('sent')
+    expect((await receivePoolEvent(env, ev({ type: 'account.flagged', accountId: 'acct-5', reason: 'decoys' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('sent')
     expect(push.sent).toHaveLength(3)
     const byId = Object.fromEntries((await listPoolEvents(env)).map((e) => [e.challengeId ?? e.accountId, e.pushStatus]))
-    expect(byId).toEqual({ 'phone-1': 'sent', 'bg-1': 'expired', 'bg-2': 'sent', 'acct-5': 'sent' })
-  })
-
-  it('a deferred challenge solved in the meantime is not pushed', async () => {
-    const env = await makeEnv()
-    const push = pushService()
-    await receivePoolEvent(env, ev({ type: 'challenge.created', challengeId: 'c7' }), { now: NIGHT, fetchImpl: push.fetchImpl })
-    expect((await receivePoolEvent(env, ev({ type: 'challenge.solved', challengeId: 'c7' }), { now: NIGHT, fetchImpl: push.fetchImpl })).push).toBe('none')
-    expect(await flushDeferredPoolPushes(env, { now: DAYTIME, fetchImpl: push.fetchImpl })).toEqual({ sent: 0, expired: 1 })
-    expect(push.sent).toEqual([])
+    expect(byId).toEqual({ 'phone-1': 'sent', 'bg-1': 'sent', 'acct-5': 'sent' })
   })
 
   it('account.flagged links to the accounts page (or the captcha when it names one)', () => {
