@@ -1,0 +1,346 @@
+// DJ profile: every tracklist we know about for one DJ, as expandable set cards
+// next to a sticky summary column. The slug is read client-side from the path
+// (/ui/dj/<slug>); nothing user-controlled is templated into the markup.
+import { shell } from '../shell'
+import type { UiPage } from './index'
+import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
+
+const BODY = /* html */ `
+<div class="dj-layout">
+  <aside class="tk-card dj-side">
+    <div class="tk-row"><span id="dj-sub" class="badge ok" hidden>subscribed</span></div>
+    <p class="mono dj-slug"><span id="dj-slug"></span></p>
+    <p id="counts" class="muted sub">Loading sets…</p>
+    <p class="sub"><a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> · <a href="/ui/djs">All DJs</a></p>
+    <div class="dj-actions">
+      <button id="sync" type="button" class="btn primary" hidden>Sync</button>
+      <button id="resync" type="button" class="btn danger" hidden title="Forget the cached video for every set and re-check them all">Invalidate &amp; resync</button>
+      <button id="refresh" type="button" class="btn">Refresh from 1001tracklists</button>
+    </div>
+    <div id="dj-msg" class="error" role="alert"></div>
+  </aside>
+  <section class="dj-main">
+    <div id="chips" class="chips" role="group" aria-label="Filter sets">
+      <button type="button" class="chip on" data-f="all" aria-pressed="true">all</button>
+      <button type="button" class="chip" data-f="video" aria-pressed="false">with video</button>
+      <button type="button" class="chip" data-f="novideo" aria-pressed="false">no video</button>
+      <button type="button" class="chip" data-f="partial" aria-pressed="false">partial ID</button>
+    </div>
+    <p id="filter-note" class="muted sub" hidden></p>
+    <div id="error" class="err-state" role="alert" hidden></div>
+    <div id="sets" class="dj-sets"></div>
+    <div id="empty" class="empty" hidden>Loading sets…</div>
+  </section>
+</div>
+`
+
+const CSS = /* css */ `
+  .dj-layout { display: grid; gap: var(--sp-4); align-items: start; }
+  .dj-main { min-width: 0; }
+  .dj-side .sub, .dj-side p { margin: var(--sp-2) 0; font-size: var(--fs-sm); }
+  .dj-slug { font-size: var(--fs-md); }
+  .dj-actions { display: grid; gap: var(--sp-2); margin-top: var(--sp-3); }
+  .dj-sets { display: grid; gap: var(--sp-2); align-items: start; }
+  .dj-sets .set-card { margin-bottom: 0; min-width: 0; }
+  .set-card > .head:hover { background: var(--elev); }
+  .set-card .chev { color: var(--muted); width: 1em; transition: transform .15s; }
+  .set-card.open .chev { transform: rotate(90deg); }
+  .set-card .badge { text-transform: none; }
+  .set-card > .body { padding-top: var(--sp-3); }
+  .set-meta { color: var(--muted); font-size: var(--fs-sm); display: flex; flex-wrap: wrap; gap: 4px var(--sp-3); margin-bottom: var(--sp-3); }
+  .set-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+  .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
+  .retry { margin-left: var(--sp-2); }
+  .warn-text { color: var(--danger); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+  .loading-text { color: var(--muted); font-size: var(--fs-sm); }
+  #dj-msg a { color: inherit; font-weight: 600; }
+  @media (min-width: 900px) {
+    .dj-layout { grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr); }
+    .dj-side { position: sticky; top: var(--sp-4); }
+  }
+  @media (min-width: 1300px) {
+    .dj-sets { grid-template-columns: 1fr 1fr; }
+  }
+${TRACK_ROW_CSS}`
+
+const JS = /* js */ `
+(() => {
+${TRACK_ROW_JS}
+  const $ = TK.$;
+  // The slug comes from the path (/ui/dj/<slug>).
+  const slug = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
+
+  const $name = $('dj-name'), $sub = $('dj-sub'), $slug = $('dj-slug'), $link1001 = $('dj-1001'), $counts = $('counts');
+  const $refresh = $('refresh'), $sync = $('sync'), $resync = $('resync'), $msg = $('dj-msg');
+  const $error = $('error'), $sets = $('sets'), $empty = $('empty'), $chips = $('chips'), $note = $('filter-note');
+  let filter = 'all';
+  let subscribed = false;
+
+  function setTitle(name) {
+    if (!name) return;
+    $name.textContent = name;
+    const top = document.querySelector('.tk-top-title');
+    if (top) top.textContent = name + ' · tracked';
+    document.title = name + ' · tracked';
+  }
+
+  // ── filter chips (client-side, over the cards that have been opened) ──
+  function matches(card) {
+    if (filter === 'all') return true;
+    if (card.dataset.loaded !== '1') return false;
+    if (filter === 'video') return card.dataset.video === '1';
+    if (filter === 'novideo') return card.dataset.video === '0';
+    return card.dataset.partial === '1';
+  }
+  function applyFilter() {
+    let shown = 0, unloaded = 0;
+    for (const card of $sets.children) {
+      if (card.dataset.loaded !== '1') unloaded++;
+      const ok = matches(card);
+      card.hidden = !ok;
+      if (ok) shown++;
+    }
+    if (filter === 'all' || !$sets.children.length) { $note.hidden = true; return; }
+    $note.hidden = false;
+    $note.textContent = shown + ' set' + (shown === 1 ? '' : 's') + ' match' + (shown === 1 ? 'es' : '') + (unloaded ? ' · ' + unloaded + ' not opened yet (open a set to classify it)' : '');
+  }
+  $chips.addEventListener('click', (ev) => {
+    const b = ev.target && ev.target.closest ? ev.target.closest('button[data-f]') : null;
+    if (!b) return;
+    filter = b.dataset.f;
+    for (const c of $chips.querySelectorAll('button[data-f]')) {
+      const on = c.dataset.f === filter;
+      c.classList.toggle('on', on);
+      c.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    applyFilter();
+  });
+
+  // ── set cards ──
+  function renderSetBody(card, body, head, set, data) {
+    body.textContent = '';
+    const tracks = data.tracks || [];
+    // "Full tracklist" = every row resolves to a known track. Rows with an
+    // idStatus ("ID Remix" etc.) still point at a known base track, so only
+    // fully-anonymous rows count against completeness.
+    const total = tracks.length;
+    const ided = tracks.filter((t) => !t.isUnidentified).length;
+    const cued = tracks.filter((t) => t.startSeconds != null).length;
+    const partialIds = tracks.filter((t) => t.idStatus).length;
+    const full = total > 0 && ided === total;
+    card.dataset.loaded = '1';
+    card.dataset.video = data.setYoutubeLink ? '1' : '0';
+    card.dataset.partial = full ? '0' : '1';
+
+    // The completeness badge lives in the card head so it stays visible when collapsed.
+    const old = head.querySelector('.badge'); if (old) old.remove();
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + (full ? 'ok' : 'warn');
+    badge.textContent = full ? 'full tracklist' : 'partial';
+    head.insertBefore(badge, head.querySelector('.date'));
+
+    const meta = document.createElement('div');
+    meta.className = 'set-meta';
+    const bits = [total + ' track' + (total === 1 ? '' : 's'), ided + '/' + total + ' IDed', cued + ' cued'];
+    if (partialIds) bits.push(partialIds + ' partial ID' + (partialIds === 1 ? '' : 's'));
+    for (const b of bits) { const s = document.createElement('span'); s.textContent = b; meta.appendChild(s); }
+    body.appendChild(meta);
+
+    const links = document.createElement('div');
+    links.className = 'set-links';
+    const l1001 = pill(set.url, '1001tracklists ↗'); if (l1001) links.appendChild(l1001);
+    const lyt = pill(data.setYoutubeLink, 'YouTube', 'Watch the set on YouTube'); if (lyt) links.appendChild(lyt);
+    const lsc = pill(data.setSoundcloudLink, 'SoundCloud', 'Listen to the set on SoundCloud'); if (lsc) links.appendChild(lsc);
+    const lap = pill(data.setAppleLink, 'Apple Music', 'Full set on Apple Music'); if (lap) links.appendChild(lap);
+    const viewer = document.createElement('a');
+    viewer.className = 'pill';
+    viewer.href = '/ui/set?url=' + encodeURIComponent(set.url);
+    viewer.textContent = 'Open set page';
+    links.appendChild(viewer);
+    // Remove and replace (routes/playlist-hygiene.ts): out of both playlists now, never re-added, queued for mkvid.
+    const rr = document.createElement('button');
+    rr.type = 'button'; rr.className = 'btn small'; rr.textContent = 'Remove & replace video';
+    rr.title = "Take this set's video out of the playlists for good and render one from its audio instead";
+    rr.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (!(await TK.ask("Remove this set's video from the playlists and never re-add it?", { yes: 'Remove', danger: true }))) return;
+      rr.disabled = true;
+      const res = await TK.api.post('/ui/api/set/remove-replace', { slug, url: set.url });
+      if (!res.ok) { rr.textContent = 'Remove failed: ' + TK.errText(res, 'failed (' + res.status + ')'); rr.disabled = false; return; }
+      const d = res.data || {};
+      rr.textContent = 'Removed ' + d.videoId + ' — ' + d.mkvid;
+    });
+    links.appendChild(rr);
+    const ll = document.createElement('button');
+    ll.type = 'button'; ll.className = 'btn small'; ll.textContent = 'Load links';
+    ll.title = 'Look up Apple Music / YouTube links for every identified track (one page view per track not cached yet)';
+    const llStatus = document.createElement('span'); llStatus.className = 'muted sub';
+    links.appendChild(ll); links.appendChild(llStatus);
+    body.appendChild(links);
+
+    const list = document.createElement('div');
+    for (const t of tracks) list.appendChild(trackRow(t));
+    body.appendChild(list);
+    ll.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      ll.disabled = true;
+      try { await loadAllLinks(list, llStatus); } catch (e) { llStatus.textContent = 'Links failed: ' + (e && e.message ? e.message : e); }
+      finally { ll.disabled = false; }
+    });
+    applyFilter();
+  }
+
+  async function loadSetInto(card, body, head, set) {
+    body.textContent = '';
+    const l = document.createElement('span'); l.className = 'loading-text'; l.textContent = 'loading tracklist…'; body.appendChild(l);
+    const res = await TK.api.post('/ui/api/tracklist', { url: set.url });
+    if (res.ok) { renderSetBody(card, body, head, set, res.data || {}); return true; }
+    body.textContent = '';
+    const w = document.createElement('span');
+    w.className = 'warn-text';
+    w.textContent = 'failed to load: ' + TK.errText(res, 'failed (' + res.status + ')');
+    body.appendChild(w);
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn small retry'; btn.textContent = 'Retry';
+    btn.addEventListener('click', () => loadSetInto(card, body, head, set));
+    body.appendChild(btn);
+    return false;
+  }
+
+  function renderSets(sets) {
+    $sets.textContent = '';
+    if (!sets.length) { $empty.textContent = 'No sets found for this DJ.'; $empty.hidden = false; applyFilter(); return; }
+    $empty.hidden = true;
+    for (const set of sets) {
+      const card = document.createElement('div');
+      card.className = 'set-card';
+      const head = document.createElement('div');
+      head.className = 'head';
+      head.tabIndex = 0;
+      head.setAttribute('role', 'button');
+      const chev = document.createElement('span'); chev.className = 'chev'; chev.textContent = '▸'; head.appendChild(chev);
+      const title = document.createElement('span'); title.className = 'title'; title.textContent = set.title; head.appendChild(title);
+      const date = document.createElement('span'); date.className = 'date'; date.textContent = set.date || ''; head.appendChild(date);
+      card.appendChild(head);
+      const body = document.createElement('div');
+      body.className = 'body';
+      body.hidden = true;
+      card.appendChild(body);
+      let loaded = false, loading = false;
+      const toggle = async () => {
+        body.hidden = !body.hidden;
+        card.classList.toggle('open', !body.hidden);
+        head.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
+        if (body.hidden || loaded || loading) return;
+        loading = true;
+        loaded = await loadSetInto(card, body, head, set);
+        loading = false;
+      };
+      head.addEventListener('click', toggle);
+      head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+      $sets.appendChild(card);
+    }
+    applyFilter();
+  }
+
+  function fmtWhen(epoch) {
+    if (!epoch) return '';
+    try { return new Date(epoch * 1000).toLocaleString(); } catch (e) { return ''; }
+  }
+
+  function showError(msg) {
+    $error.textContent = '';
+    if (!msg) { $error.hidden = true; return; }
+    const g = document.createElement('span'); g.className = 'grow'; g.textContent = msg; $error.appendChild(g);
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'btn small'; b.textContent = 'Retry';
+    b.addEventListener('click', () => load(false));
+    $error.appendChild(b);
+    $error.hidden = false;
+  }
+
+  async function load(refresh) {
+    showError('');
+    const run = async () => {
+      if (!$sets.children.length) { $empty.textContent = refresh ? 'Crawling 1001tracklists…' : 'Loading sets…'; $empty.hidden = false; }
+      const res = await TK.api.get('/ui/api/dj/' + encodeURIComponent(slug) + (refresh ? '?refresh=1' : ''));
+      const data = res.data || {};
+      if (!res.ok) {
+        showError(TK.errText(res, 'failed (' + res.status + ')'));
+        if (!$sets.children.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
+        return;
+      }
+      setTitle(data.artistName || slug);
+      subscribed = !!data.subscribed;
+      $sub.hidden = !subscribed;
+      $sync.hidden = !subscribed;
+      $resync.hidden = !subscribed;
+      const src = data.source === 'state' ? 'from sync state (crawl unavailable)' : 'crawled ' + fmtWhen(data.crawledAt);
+      // Until the daily backfill reaches the end of the DJ's list, the count is
+      // "sets found so far", not the DJ's total on 1001tracklists.
+      const partial = data.listingComplete === false ? ' found so far — listing may be incomplete (older sets are backfilled 10 a day)' : '';
+      const n = (data.sets || []).length;
+      $counts.textContent = n + ' set' + (n === 1 ? '' : 's') + partial + ' · ' + src;
+      renderSets(data.sets || []);
+    };
+    if (refresh) await TK.busy($refresh, 'Refreshing…', run); else await run();
+  }
+
+  // ── Sync / Invalidate & resync (same endpoints and wording as the DJs page) ──
+  function showReauth() {
+    $msg.textContent = '';
+    const t = document.createElement('span');
+    t.textContent = TK.errText({ data: { error: 'youtube_reauth_required' } }, '') + ' ';
+    const a = document.createElement('a'); a.href = '/ui/oauth/start'; a.textContent = 'Reconnect YouTube';
+    $msg.appendChild(t); $msg.appendChild(a);
+  }
+  async function syncOne(resync, btn) {
+    $msg.textContent = '';
+    await TK.busy(btn, resync ? 'Resyncing…' : 'Syncing…', async () => {
+      const res = await TK.api.post('/ui/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {});
+      const data = res.data && typeof res.data === 'object' ? res.data : {};
+      if (!res.ok) {
+        if (res.status === 412 && data.error === 'youtube_reauth_required') { showReauth(); TK.toast(TK.errText(res, ''), 'bad'); return; }
+        const msg = data.errorMessage || TK.errText(res, 'sync failed (' + res.status + ')');
+        const detail = data.errorStack
+          || (data.errorName && data.errorName !== 'Error' ? data.errorName : null)
+          || (res.raw && res.raw !== msg ? res.raw : null);
+        TK.toast('sync failed: ' + msg, 'bad', detail);
+        return;
+      }
+      const stats = data.stats || {};
+      const pending = stats.tracklistsPending || 0;
+      const rechecksPending = stats.rechecksPending || 0;
+      const continuing = [];
+      if (pending > 0) continuing.push(pending + ' new pending');
+      if (rechecksPending > 0) continuing.push(rechecksPending + ' recheck' + (rechecksPending === 1 ? '' : 's') + ' pending');
+      const more = continuing.length ? ' · ' + continuing.join(', ') + ' — auto-continuing every 5 min' : '';
+      const combined = stats.combinedVideoIdsAdded ? ' · ' + stats.combinedVideoIdsAdded + ' into the combined playlist' : '';
+      const rechecked = stats.tracklistsRechecked ? ' · rechecked ' + stats.tracklistsRechecked + ', replaced ' + (stats.videosReplaced || 0) : '';
+      const inv = data.invalidated ? ' (invalidated ' + (data.invalidated.tracklistsMarked || 0) + ' cached videos)' : '';
+      TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
+        (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
+        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + rechecked + combined + more, 'ok');
+    });
+  }
+  $sync.addEventListener('click', () => syncOne(false, $sync));
+  $resync.addEventListener('click', () => syncOne(true, $resync));
+  $refresh.addEventListener('click', () => load(true));
+
+  $slug.textContent = slug;
+  $link1001.href = 'https://www.1001tracklists.com/dj/' + encodeURIComponent(slug) + '/index.html';
+  $name.textContent = slug;
+  load(false);
+})();
+`
+
+export const DJ_PAGE: UiPage = {
+  path: '/dj/:slug',
+  html: shell({
+    nav: 'djs',
+    title: 'DJ',
+    h1Id: 'dj-name',
+    body: BODY,
+    css: CSS,
+    js: JS,
+  }),
+}

@@ -17,6 +17,8 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/pool/settings', 'Pool settings'],
   ['/ui/captcha', 'Captchas'],
   ['/ui/captcha/ch-1', 'Captcha'],
+  ['/ui/set', 'Set'],
+  ['/ui/dj/some-dj', ''],
 ]
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
@@ -119,7 +121,7 @@ describe.runIf(PAGES.length > 0)('every UI page', () => {
     expect(r.headers.get('cache-control')).toBe('no-store')
     const text = await r.text()
     expect(text).toContain('class="tk-nav"')
-    expect(text).toContain(`<h1>${h1}`)
+    expect(text).toContain(h1 ? `<h1>${h1}` : '<h1 id="dj-name"')
     expect(text).toContain('/ui/pool/settings')
     expect(text).toContain('id="ban-banner"')
     const scripts = scriptsOf(text)
