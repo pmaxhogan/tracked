@@ -39,9 +39,11 @@ describe('decideFullRecording', () => {
     expect(decideFullRecording({ ...base, lastCueSeconds: null, videoSeconds: 7200, audioMaxSeconds: 60 })).toEqual({ ok: true })
   })
 
-  it('(d) rejects a vertical video', () => {
-    expect(decideFullRecording({ ...base, embedWidth: 1280, embedHeight: 2276 })).toMatchObject({ ok: false, reason: 'vertical' })
-    expect(decideFullRecording({ ...base, embedWidth: 1280, embedHeight: 1280 })).toEqual({ ok: true })
+  it('(d) rejects a vertical video only when the rule is switched on (REJECT_VERTICAL)', () => {
+    expect(decideFullRecording({ ...base, embedWidth: 1280, embedHeight: 2276, rejectVertical: true })).toMatchObject({ ok: false, reason: 'vertical' })
+    expect(decideFullRecording({ ...base, embedWidth: 1280, embedHeight: 1280, rejectVertical: true })).toEqual({ ok: true })
+    // Default off: embed sizes are not yet verified live to follow the aspect ratio.
+    expect(decideFullRecording({ ...base, embedWidth: 1280, embedHeight: 2276 })).toEqual({ ok: true })
   })
 
   it('never rejects on unknown inputs', () => {
@@ -59,7 +61,7 @@ describe('decideFullRecording', () => {
     expect(decideFullRecording(all)).toMatchObject({ reason: 'notice' })
     expect(decideFullRecording({ ...all, notice: false })).toMatchObject({ reason: 'short' })
     expect(decideFullRecording({ ...all, notice: false, lastCueSeconds: null })).toMatchObject({ reason: 'audio_longer' })
-    expect(decideFullRecording({ ...all, notice: false, lastCueSeconds: null, audioMaxSeconds: null })).toMatchObject({ reason: 'vertical' })
+    expect(decideFullRecording({ ...all, notice: false, lastCueSeconds: null, audioMaxSeconds: null, rejectVertical: true })).toMatchObject({ reason: 'vertical' })
   })
 })
 

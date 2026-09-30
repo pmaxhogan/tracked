@@ -107,3 +107,43 @@ export async function setOverride(env: Env, videoId: string, at = nowSeconds()):
     .bind(videoId, at)
     .run()
 }
+
+// ─── confirmed membership (migrations/0011) ─────────────────────────────────
+
+export type MembershipSource = 'sync' | 'mkvid' | 'undo' | 'listing' | 'sweep' | 'button' | 'swap' | 'recreate'
+
+/** tracked put `videoId` into `playlistId` (a confirmed insert), or saw it there in a complete listing. Best effort: never throws. */
+export async function markInPlaylist(env: Env, playlistId: string, videoId: string, source: MembershipSource, at = nowSeconds()): Promise<void> {
+  try {
+    await dbOf(env)
+      .prepare(
+        `INSERT INTO playlist_confirmed (playlist_id, video_id, state, source, at) VALUES (?, ?, 'in', ?, ?)
+         ON CONFLICT(playlist_id, video_id) DO UPDATE SET state = 'in', source = excluded.source, at = excluded.at`,
+      )
+      .bind(playlistId, videoId, source, at)
+      .run()
+  } catch {
+    /* a missing table (migration 0011 not applied) must not fail an insert that already happened */
+  }
+}
+
+/** tracked itself took `videoId` out of `playlistId` (sweep, button, swap, recreate): its absence is not the owner's doing. Never throws. */
+export async function markOutOfPlaylist(env: Env, playlistId: string, videoId: string, source: MembershipSource, at = nowSeconds()): Promise<void> {
+  try {
+    await dbOf(env)
+      .prepare(
+        `INSERT INTO playlist_confirmed (playlist_id, video_id, state, source, at) VALUES (?, ?, 'out', ?, ?)
+         ON CONFLICT(playlist_id, video_id) DO UPDATE SET state = 'out', source = excluded.source, at = excluded.at`,
+      )
+      .bind(playlistId, videoId, source, at)
+      .run()
+  } catch {
+    /* see markInPlaylist */
+  }
+}
+
+/** Every membership record of `playlistId`: video id → 'in' | 'out'. */
+export async function confirmedMembership(env: Env, playlistId: string): Promise<Map<string, 'in' | 'out'>> {
+  const res = await dbOf(env).prepare('SELECT video_id, state FROM playlist_confirmed WHERE playlist_id = ?').bind(playlistId).all<{ video_id: string; state: 'in' | 'out' }>()
+  return new Map(res.results.map((r) => [r.video_id, r.state]))
+}

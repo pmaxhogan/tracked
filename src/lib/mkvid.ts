@@ -43,6 +43,7 @@ import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds 
 import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
 import { isVerified } from './verification'
+import { markInPlaylist } from './playlist-blocklist'
 import { CLAIM_READY_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 import { isOldStyle, retireReplacedVideo } from './mkvid-recreate'
 
@@ -1058,6 +1059,7 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
     await addVideoToPlaylist(playlistId!, input.videoId, accessToken)
     existing.add(input.videoId)
     await cachePlaylistVideoIds(env, playlistId!, existing)
+    await markInPlaylist(env, playlistId!, input.videoId, 'mkvid')
     playlistStatus = 'added'
   }
 

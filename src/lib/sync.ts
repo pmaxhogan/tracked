@@ -86,7 +86,7 @@ import {
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
 import { pickSetVideo, rejectionNote } from './playlist-hygiene'
-import { combinedRefuses } from './playlist-blocklist'
+import { combinedRefuses, markInPlaylist, markOutOfPlaylist } from './playlist-blocklist'
 import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
@@ -835,6 +835,8 @@ export async function syncOne(
       await addVideoToPlaylist(playlistId, videoId, accessToken)
     }
     existingVideoIds.add(videoId)
+    // Confirmed insert: from now on the comparison expects it in this playlist.
+    await markInPlaylist(env, playlistId, videoId, 'sync')
     videoIdsAdded += 1
     playlistChanged = true
   }
@@ -844,6 +846,8 @@ export async function syncOne(
     if (!existingVideoIds.has(videoId)) return 0
     const n = await removeVideoFromPlaylist(playlistId, videoId, accessToken)
     existingVideoIds.delete(videoId)
+    // Taken out by the sync itself (a swap): never an owner removal, even if the new insert then fails.
+    await markOutOfPlaylist(env, playlistId, videoId, 'swap')
     playlistChanged = true
     return n
   }

@@ -36,6 +36,9 @@ import {
   isOverridden,
   overriddenIds,
   playlistMembers,
+  confirmedMembership,
+  markInPlaylist,
+  markOutOfPlaylist,
   recordRemoved,
   savePlaylistMembers,
   setOverride,
@@ -62,6 +65,7 @@ import {
   extractSetTitle,
   getMkvidRequestForSet,
   retryMkvidRequest,
+  supersedeMkvidRequestForSet,
   type MkvidSourceKind,
 } from './mkvid'
 
@@ -75,10 +79,6 @@ export const DEFAULT_SWEEP_DAILY_REMOVALS = 40
 export const COMPARE_INTERVAL_SECONDS = 6 * 60 * 60
 /** The sweep re-evaluates on the same cadence; its deletes are budgeted per UTC day. */
 export const SWEEP_INTERVAL_SECONDS = 6 * 60 * 60
-/** Hold a playlist when more than this share of what the sync added seems gone. */
-export const MASS_REMOVAL_RATIO = 0.3
-/** ...and at least this many are gone (1 of 2 is 50% but not a mass removal). */
-export const MASS_REMOVAL_MIN = 3
 /** Page cap for one playlist listing: 200 pages = 10 000 items, far above any real playlist. */
 const LIST_MAX_PAGES = 200
 
@@ -236,7 +236,17 @@ export async function loadSetFacts(env: Env, setUrls: string[]): Promise<Map<str
 export type VideoVerdict = { ok: true } | { ok: false; reason: RejectReason | 'dead'; detail: string }
 
 /** The rule for one video, from whatever is known: facts may be missing, meta may be missing. */
-export function judgeVideo(facts: SetFacts | null | undefined, meta: VideoMeta | null | undefined): VideoVerdict {
+/**
+ * `REJECT_VERTICAL` (default OFF): the vertical rule (d) reads videos.list
+ * embed sizes, which have not been verified live to follow a Short's aspect
+ * ratio. Until the orchestrator checks a known Short and a known 16:9 video
+ * with read-only calls, a vertical-looking video is NOT rejected.
+ */
+export function rejectVerticalEnabled(env: Pick<Env, 'REJECT_VERTICAL'>): boolean {
+  return /^\s*(1|true|yes|on)\s*$/i.test(env.REJECT_VERTICAL ?? '')
+}
+
+export function judgeVideo(facts: SetFacts | null | undefined, meta: VideoMeta | null | undefined, opts: { rejectVertical?: boolean } = {}): VideoVerdict {
   if (meta && !meta.alive) return { ok: false, reason: 'dead', detail: 'videos.list: deleted or private' }
   const d = decideFullRecording({
     notice: facts ? facts.noFullNotice : null,
@@ -245,6 +255,7 @@ export function judgeVideo(facts: SetFacts | null | undefined, meta: VideoMeta |
     videoSeconds: meta?.durationSeconds ?? null,
     embedWidth: meta?.embedWidth ?? null,
     embedHeight: meta?.embedHeight ?? null,
+    rejectVertical: opts.rejectVertical === true,
   })
   return d.ok ? d : { ok: false, reason: d.reason, detail: d.detail }
 }
@@ -298,8 +309,16 @@ export async function pickSetVideo(
     meta = (await getVideoMeta(env, [videoId], ctx.accessToken, { fetcher: ctx.fetcher })).get(videoId) ?? null
   } catch (e) {
     log.warn('hygiene.video_meta_failed', { slug: ctx.slug, setUrl: ctx.setUrl, videoId, ...errorFields(e) })
+    // m6: without a lookup the duration rules cannot run. A video the sweep
+    // already took out is not put back on that basis (it would come out again).
+    const swept = await dbOf(env)
+      .prepare("SELECT 1 AS x FROM playlist_removals WHERE video_id = ? AND source = 'sweep' AND status = 'removed' LIMIT 1")
+      .bind(videoId)
+      .first<{ x: number }>()
+      .catch(() => null)
+    if (swept) return { videoId: null, rejected: { videoId, reason: 'blocked', detail: 'the sweep removed it before; video lookup failed' } }
   }
-  const verdict = judgeVideo(facts, meta)
+  const verdict = judgeVideo(facts, meta, { rejectVertical: rejectVerticalEnabled(env) })
   if (verdict.ok) return { videoId, rejected: null }
   log.info('hygiene.video_rejected', { slug: ctx.slug, setUrl: ctx.setUrl, videoId, reason: verdict.reason, detail: verdict.detail })
   return { videoId: null, rejected: { videoId, reason: verdict.reason, detail: verdict.detail } }
@@ -323,7 +342,7 @@ export async function hasGoodVideo(env: Env, set: { slug: string; setUrl: string
   if (pl?.playlist_id && (await isBlocked(env, pl.playlist_id, set.videoId))) return false
   const facts = (await loadSetFacts(env, [set.setUrl])).get(set.setUrl)
   const meta = (await readCachedVideoMeta(env, [set.videoId])).get(set.videoId)
-  return judgeVideo(facts, meta).ok
+  return judgeVideo(facts, meta, { rejectVertical: rejectVerticalEnabled(env) }).ok
 }
 
 // ─── removal log ────────────────────────────────────────────────────────────
@@ -439,6 +458,8 @@ export type SweepResult = {
   budgetLeft: number
   stoppedBy: 'budget' | 'quota' | null
   metaFailed: boolean
+  /** Rejected for one set, but another accepted set of the DJ uses the same video: kept, nothing deleted. */
+  keptShared: number
 }
 
 type AddedRow = { slug: string; url: string; video_id: string; playlist_id: string | null }
@@ -483,6 +504,7 @@ export async function runRemovalSweep(
     budgetLeft: Math.max(0, settings.dailyRemovals - used),
     stoppedBy: null,
     metaFailed: false,
+    keptShared: 0,
   }
   if (candidates.length === 0) return result
 
@@ -497,10 +519,11 @@ export async function runRemovalSweep(
     metas = await readCachedVideoMeta(env, candidates.map((r) => r.video_id))
   }
   const facts = await loadSetFacts(env, candidates.map((r) => r.url))
+  const vertical = rejectVerticalEnabled(env)
   const rejected: Array<AddedRow & { verdict: Extract<VideoVerdict, { ok: false }> }> = []
   for (const r of candidates) {
     result.judged++
-    const verdict = judgeVideo(facts.get(r.url), metas.get(r.video_id))
+    const verdict = judgeVideo(facts.get(r.url), metas.get(r.video_id), { rejectVertical: vertical })
     // Dead videos are the comparison's business (recorded, never re-added,
     // set made mkvid-eligible) — deleting their husk would only spend budget.
     if (!verdict.ok && verdict.reason !== 'dead') rejected.push({ ...r, verdict })
@@ -508,9 +531,30 @@ export async function runRemovalSweep(
   result.rejected = rejected.length
   const combinedId = (await loadCombinedState(env)).playlistId ?? null
 
+  // B1: a video is taken out of a DJ's playlist only when EVERY set of that DJ
+  // that resolves to it is rejected. Any accepted set of the DJ keeps it there
+  // (and keeps it in the combined playlist); any accepted set anywhere keeps
+  // it in the combined playlist. The sweep never blocklists anything.
+  const rejectedKeys = new Set(rejected.map((r) => `${r.slug}\n${r.url}`))
+  const acceptedBySlug = new Map<string, Set<string>>()
+  const acceptedAnywhere = new Set<string>()
+  for (const r of rows) {
+    if (rejectedKeys.has(`${r.slug}\n${r.url}`)) continue
+    if (!acceptedBySlug.has(r.slug)) acceptedBySlug.set(r.slug, new Set())
+    acceptedBySlug.get(r.slug)!.add(r.video_id)
+    acceptedAnywhere.add(r.video_id)
+  }
+  const planFor = (r: AddedRow): Array<[string, 'artist' | 'combined']> =>
+    targets(r.playlist_id, combinedId).filter(([, kind]) => (kind === 'artist' ? !acceptedBySlug.get(r.slug)?.has(r.video_id) : !acceptedAnywhere.has(r.video_id)))
+
   if (settings.dryRun) {
     for (const r of rejected) {
-      for (const [pl, kind] of targets(r.playlist_id, combinedId)) {
+      const plan = planFor(r)
+      if (plan.length === 0) {
+        result.keptShared++
+        continue
+      }
+      for (const [pl, kind] of plan) {
         await logRemoval(env, { source: 'sweep', status: 'would_remove', slug: r.slug, set_url: r.url, video_id: r.video_id, playlist_id: pl, playlist_kind: kind, reason: r.verdict.reason, detail: r.verdict.detail })
       }
       result.reported++
@@ -519,27 +563,46 @@ export async function runRemovalSweep(
     return result
   }
 
-  // Videos another, non-rejected set still resolves to stay in the combined playlist.
-  const rejectedKeys = new Set(rejected.map((r) => `${r.slug}\n${r.url}`))
-  const stillUsed = new Set(rows.filter((r) => !rejectedKeys.has(`${r.slug}\n${r.url}`)).map((r) => r.video_id))
   let budgetLeft = result.budgetLeft
   const touched = new Set<string>()
+  // The same video in two rejected rows of one DJ: remove once, clear both rows.
+  const done = new Set<string>()
   for (const r of rejected) {
-    const plan = targets(r.playlist_id, combinedId).filter(([, kind]) => kind === 'artist' || !stillUsed.has(r.video_id))
-    if (budgetLeft < Math.max(1, plan.length)) {
+    const plan = planFor(r).filter(([pl]) => !done.has(`${pl}\n${r.video_id}`))
+    if (plan.length === 0) {
+      // Still used by an accepted set (or already taken out for a sibling row):
+      // nothing is deleted; only this set loses the video it cannot use.
+      await clearSetVideoStmt(db, r.slug, r.video_id, r.url).run()
+      if (!planFor(r).length) {
+        result.keptShared++
+        log.info('hygiene.sweep.kept_shared', { slug: r.slug, setUrl: r.url, videoId: r.video_id, reason: r.verdict.reason })
+      }
+      continue
+    }
+    if (budgetLeft < plan.length) {
       result.stoppedBy = 'budget'
       break
     }
-    let deletesHere = 0
     let quota = false
+    let allOk = true
+    let deletesHere = 0
     for (const [pl, kind] of plan) {
       try {
         const n = await removeVideoFromPlaylist(pl, r.video_id, accessToken, opts.fetcher)
+        done.add(`${pl}\n${r.video_id}`)
         deletesHere += n
+        budgetLeft -= n
+        // Counted per delete (m3): a throw or a killed run later on cannot leave deletes uncounted.
+        await bumpSweepDeletes(env, n, nowMs)
         touched.add(pl)
+        // Taken out by tracked itself: the comparison must never read its absence as the owner's doing.
+        await markOutOfPlaylist(env, pl, r.video_id, 'sweep')
         await logRemoval(env, { source: 'sweep', status: 'removed', slug: r.slug, set_url: r.url, video_id: r.video_id, playlist_id: pl, playlist_kind: kind, reason: r.verdict.reason, detail: n === 0 ? `${r.verdict.detail}; was not in the playlist` : r.verdict.detail })
+        // Out of the artist playlist: the set has no video from now on (m4: before the combined step can fail).
+        if (kind === 'artist') await clearSetVideoStmt(db, r.slug, r.video_id, r.url).run()
       } catch (e) {
         result.failed++
+        allOk = false
         log.warn('hygiene.sweep.remove_failed', { slug: r.slug, setUrl: r.url, videoId: r.video_id, playlistId: pl, ...errorFields(e) })
         await logRemoval(env, { source: 'sweep', status: 'failed', slug: r.slug, set_url: r.url, video_id: r.video_id, playlist_id: pl, playlist_kind: kind, reason: r.verdict.reason, detail: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
         if (isQuotaError(e)) {
@@ -549,17 +612,17 @@ export async function runRemovalSweep(
       }
     }
     result.deletes += deletesHere
-    budgetLeft -= deletesHere
+    if (!plan.some(([, kind]) => kind === 'artist')) {
+      // Only the combined playlist was in the plan: the DJ has no artist playlist, the set still loses its video.
+      await clearSetVideoStmt(db, r.slug, r.video_id, r.url).run()
+    }
+    if (allOk) result.removedVideos++
+    log.info('hygiene.sweep.removed', { slug: r.slug, setUrl: r.url, videoId: r.video_id, reason: r.verdict.reason, deletes: deletesHere })
     if (quota) {
       result.stoppedBy = 'quota'
       break
     }
-    // Removed from its artist playlist: the set now has no video, which the next recheck turns into an mkvid request.
-    await clearSetVideoStmt(db, r.slug, r.video_id, r.url).run()
-    result.removedVideos++
-    log.info('hygiene.sweep.removed', { slug: r.slug, setUrl: r.url, videoId: r.video_id, reason: r.verdict.reason, deletes: deletesHere })
   }
-  await bumpSweepDeletes(env, result.deletes, nowMs)
   for (const pl of touched) await invalidatePlaylistVideoIds(env, pl)
   result.budgetLeft = Math.max(0, budgetLeft)
   log.info('hygiene.sweep.done', { ...result })
@@ -604,7 +667,11 @@ async function completeListing(
     const deadPresent = new Set<string>()
     for (const it of r.items) {
       const id = itemVideoId(it)
-      if (!id) continue
+      if (!id) {
+        // A part/format change or a partial body: nothing may be inferred from this listing.
+        log.warn('hygiene.compare.item_without_video_id', { playlistId })
+        return null
+      }
       present.add(id)
       const title = itemTitle(it)
       if (title && DEAD_ITEM_TITLES.has(title)) deadPresent.add(id)
@@ -616,32 +683,75 @@ async function completeListing(
   }
 }
 
-export type PlaylistHold = { playlistId: string; kind: 'artist' | 'combined'; slug: string | null; expected: number; missing: number; at: number; notified: boolean }
+/** A held playlist: what the comparison would have recorded, waiting for the owner. */
+export type PlaylistHold = {
+  playlistId: string
+  kind: 'artist' | 'combined'
+  slug: string | null
+  expected: number
+  missing: number
+  /** The exact ids that looked removed (sorted); an approval covers exactly these. */
+  missingIds: string[]
+  /** Held by the run-wide breaker rather than this playlist's own guard. */
+  runWide: boolean
+  at: number
+  notified: boolean
+}
 
 const HOLD_PREFIX = 'hygiene:hold:'
 const APPROVE_PREFIX = 'hygiene:approve:'
+/** An approval answers one hold: its exact ids, for this long. */
+export const HOLD_APPROVAL_TTL_SECONDS = 24 * 60 * 60
+
+type HoldApproval = { missingIds: string[]; at: number }
 
 export async function listHolds(env: Env): Promise<PlaylistHold[]> {
   const out: PlaylistHold[] = []
   const r = await env.SUBS.list({ prefix: HOLD_PREFIX })
   for (const k of r.keys) {
     const h = (await env.SUBS.get(k.name, 'json')) as PlaylistHold | null
-    if (h) out.push(h)
+    if (h) out.push({ ...h, missingIds: h.missingIds ?? [], runWide: h.runWide ?? false })
   }
   return out
 }
 
-/** Owner looked at a held playlist and says the removals are real: the next comparison applies them once. */
-export async function approveHold(env: Env, playlistId: string): Promise<boolean> {
-  const h = await env.SUBS.get(HOLD_PREFIX + playlistId)
+/**
+ * Owner looked at a held playlist and says the removals are real. The
+ * approval covers exactly the ids that hold showed, for 24 hours: a later,
+ * different set of missing videos is held again.
+ */
+export async function approveHold(env: Env, playlistId: string, now = nowSeconds()): Promise<boolean> {
+  const h = (await env.SUBS.get(HOLD_PREFIX + playlistId, 'json')) as PlaylistHold | null
   if (!h) return false
-  await env.SUBS.put(APPROVE_PREFIX + playlistId, '1')
+  const approval: HoldApproval = { missingIds: [...(h.missingIds ?? [])].sort(), at: now }
+  await env.SUBS.put(APPROVE_PREFIX + playlistId, JSON.stringify(approval), { expirationTtl: HOLD_APPROVAL_TTL_SECONDS })
   return true
 }
 
-/** Guard against a partial view being read as a mass removal. Pure. */
+async function approvalCovers(env: Env, playlistId: string, missingIds: string[], now: number): Promise<boolean> {
+  const a = (await env.SUBS.get(APPROVE_PREFIX + playlistId, 'json').catch(() => null)) as HoldApproval | null
+  if (!a || !Array.isArray(a.missingIds) || typeof a.at !== 'number') return false
+  if (now - a.at > HOLD_APPROVAL_TTL_SECONDS) return false
+  const want = [...missingIds].sort()
+  return want.length === a.missingIds.length && want.every((id, i) => id === a.missingIds[i])
+}
+
+async function clearHold(env: Env, playlistId: string): Promise<void> {
+  await env.SUBS.delete(HOLD_PREFIX + playlistId)
+  await env.SUBS.delete(APPROVE_PREFIX + playlistId)
+}
+
+/** Hold a playlist when more than this share of what tracked put there seems gone... */
+export const MASS_REMOVAL_RATIO = 0.3
+/** ...or more than this many videos. */
+export const MASS_REMOVAL_MAX = 5
+/** More than this many videos missing across every playlist in one run: hold them all and push once. */
+export const RUN_REMOVAL_MAX = 15
+
+/** Per-playlist guard against a partial view being read as a mass removal. Pure. */
 export function isMassRemoval(missing: number, expected: number): boolean {
-  return missing >= MASS_REMOVAL_MIN && expected > 0 && missing / expected > MASS_REMOVAL_RATIO
+  if (missing <= 0) return false
+  return missing > MASS_REMOVAL_MAX || (expected > 0 && missing / expected > MASS_REMOVAL_RATIO)
 }
 
 /** Tells the owner. Resolves false when nothing was sent (push not set up, no device took it): the hold then notifies again next time. */
@@ -728,12 +838,43 @@ async function applyFindings(
   await batchChunked(db, stmts)
 }
 
+/** Videos the audit trail shows the sync (or mkvid delivery) successfully inserted for a DJ. */
+async function auditedInserts(env: Env, slug: string): Promise<Set<string>> {
+  const res = await dbOf(env)
+    .prepare("SELECT DISTINCT video_id FROM playlist_additions WHERE slug = ? AND status IN ('added', 'replaced') AND video_id IS NOT NULL")
+    .bind(slug)
+    .all<{ video_id: string }>()
+  return new Set(res.results.map((r) => r.video_id))
+}
+
+type Pending = {
+  /** Index of this playlist's entry in the results (listing order). */
+  slot: number
+  ctx: { playlistId: string; kind: 'artist' | 'combined'; slug: string | null }
+  expected: number
+  missing: string[]
+  deadHere: string[]
+  deadPresent: ReadonlySet<string>
+  setUrlsOf: (id: string) => string[]
+  /** Run after findings are applied (the combined playlist saves its snapshot). */
+  after?: () => Promise<void>
+}
+
 /**
- * List every managed playlist in full and compare it with what the sync put
- * there. Artist playlists: expected = every video a tracklists row of that
- * DJ resolves to, so removals made before this existed are found on the first
- * run. Combined playlist: its backfill lags by design, so it is compared with
- * its own last complete listing instead (the first run only records one).
+ * List every managed playlist in full and compare it with what tracked put
+ * there. Evidence that a video belongs in a playlist (anything else is never
+ * read as removed):
+ *   - artist playlists: a confirmed insert or a sighting in an earlier
+ *     complete listing (`playlist_confirmed` state `in`), or — so removals
+ *     made before this existed are still found — an `added`/`replaced` audit
+ *     row for the DJ that tracked never took back out (`out`). The video must
+ *     also still be what one of the DJ's sets resolves to.
+ *   - the combined playlist: its own last complete listing (first run only
+ *     records one).
+ * Guards: a playlist with more than 30% or more than 5 of its videos missing
+ * is held; more than 15 missing across the whole run holds every playlist
+ * with a missing video and pushes once. A hold is applied only after the
+ * owner approves exactly those ids (valid 24 h).
  */
 export async function comparePlaylists(
   env: Env,
@@ -757,104 +898,133 @@ export async function comparePlaylists(
     allExpected.set(r.video_id, [...(allExpected.get(r.video_id) ?? []), r.url])
   }
   const results: ComparePlaylistResult[] = []
+  const pending: Pending[] = []
 
-  const guarded = async (
-    ctx: { playlistId: string; kind: 'artist' | 'combined'; slug: string | null },
-    expected: number,
-    missingIds: string[],
-  ): Promise<boolean> => {
-    if (!isMassRemoval(missingIds.length, expected)) {
-      await env.SUBS.delete(HOLD_PREFIX + ctx.playlistId)
-      return true
-    }
-    if (await env.SUBS.get(APPROVE_PREFIX + ctx.playlistId)) {
-      await env.SUBS.delete(APPROVE_PREFIX + ctx.playlistId)
-      await env.SUBS.delete(HOLD_PREFIX + ctx.playlistId)
-      log.warn('hygiene.compare.hold_approved', { ...ctx, expected, missing: missingIds.length })
-      return true
-    }
-    const prev = (await env.SUBS.get(HOLD_PREFIX + ctx.playlistId, 'json')) as PlaylistHold | null
-    const hold: PlaylistHold = { ...ctx, expected, missing: missingIds.length, at: prev?.at ?? now, notified: prev?.notified ?? false }
-    log.error('hygiene.compare.held', { ...hold })
-    if (!hold.notified && opts.notify) {
-      try {
-        const sent = await opts.notify(
-          'Playlist check held',
-          `${ctx.kind === 'combined' ? 'The combined playlist' : `${ctx.slug}'s playlist`} seems to have lost ${missingIds.length} of ${expected} videos. Nothing was recorded; review at /subscriptions/removed.`,
-        )
-        hold.notified = sent !== false
-      } catch (e) {
-        log.warn('hygiene.compare.notify_failed', { ...ctx, ...errorFields(e) })
-      }
-    }
-    await env.SUBS.put(HOLD_PREFIX + ctx.playlistId, JSON.stringify(hold))
-    return false
-  }
-
+  // ── phase 1: list everything, work out what looks removed ────────────────
   for (const s of subs) {
     const ctx = { playlistId: s.playlist_id, kind: 'artist' as const, slug: s.slug }
-    const expectedMap = bySlug.get(s.slug) ?? new Map<string, string[]>()
+    const referenced = bySlug.get(s.slug) ?? new Map<string, string[]>()
     const listing = await completeListing(s.playlist_id, accessToken, log, opts.fetcher)
     if (!listing) {
-      results.push({ ...ctx, status: 'incomplete', expected: expectedMap.size, missing: 0, owner: 0, dead: 0 })
+      results.push({ ...ctx, status: 'incomplete', expected: 0, missing: 0, owner: 0, dead: 0 })
       continue
     }
     await cachePlaylistVideoIds(env, s.playlist_id, listing.present)
     const blocked = await blockedIds(env, s.playlist_id)
-    const missing = [...expectedMap.keys()].filter((id) => !listing.present.has(id) && !blocked.has(id))
-    const deadHere = [...expectedMap.keys()].filter((id) => listing.deadPresent.has(id) && !blocked.has(id))
-    if (!(await guarded(ctx, expectedMap.size, missing))) {
-      results.push({ ...ctx, status: 'held', expected: expectedMap.size, missing: missing.length, owner: 0, dead: 0 })
-      continue
-    }
-    const ids = [...new Set([...missing, ...deadHere])]
-    const labels = await classify(env, ids, listing.deadPresent, accessToken, log, opts.fetcher)
-    const findings = ids.map((id) => ({ videoId: id, reason: labels.get(id)!, setUrls: expectedMap.get(id) ?? [] }))
-    await applyFindings(env, findings, ctx)
-    const owner = findings.filter((f) => f.reason === 'owner').length
-    results.push({ ...ctx, status: 'ok', expected: expectedMap.size, missing: missing.length, owner, dead: findings.length - owner })
-    if (findings.length > 0) log.warn('hygiene.compare.removals_recorded', { ...ctx, owner, dead: findings.length - owner, videoIds: ids.slice(0, 50) })
+    const membership = await confirmedMembership(env, s.playlist_id)
+    const audited = await auditedInserts(env, s.slug)
+    const expected = [...referenced.keys()].filter((id) => !blocked.has(id) && (membership.get(id) === 'in' || (membership.get(id) !== 'out' && audited.has(id))))
+    // Snapshot: what a complete listing shows of the DJ's own videos counts as confirmed from now on.
+    for (const id of referenced.keys()) if (listing.present.has(id) && membership.get(id) !== 'in') await markInPlaylist(env, s.playlist_id, id, 'listing', now)
+    pending.push({
+      slot: results.push({ ...ctx, status: 'ok', expected: 0, missing: 0, owner: 0, dead: 0 }) - 1,
+      ctx,
+      expected: expected.length,
+      missing: expected.filter((id) => !listing.present.has(id)),
+      deadHere: expected.filter((id) => listing.deadPresent.has(id)),
+      deadPresent: listing.deadPresent,
+      setUrlsOf: (id) => referenced.get(id) ?? [],
+    })
   }
 
   const combined = await loadCombinedState(env)
   if (combined.playlistId) {
-    const ctx = { playlistId: combined.playlistId, kind: 'combined' as const, slug: null }
-    const listing = await completeListing(combined.playlistId, accessToken, log, opts.fetcher)
+    const combinedId = combined.playlistId
+    const ctx = { playlistId: combinedId, kind: 'combined' as const, slug: null }
+    const listing = await completeListing(combinedId, accessToken, log, opts.fetcher)
     if (!listing) {
       results.push({ ...ctx, status: 'incomplete', expected: 0, missing: 0, owner: 0, dead: 0 })
     } else {
-      await cachePlaylistVideoIds(env, combined.playlistId, listing.present)
-      const members = await playlistMembers(env, combined.playlistId)
-      const unavailable = new Set(combined.unavailableVideoIds ?? [])
-      const blocked = await blockedIds(env, combined.playlistId)
-      const expected = [...members].filter((id) => allExpected.has(id) && !unavailable.has(id))
-      const missing = expected.filter((id) => !listing.present.has(id) && !blocked.has(id))
-      const deadHere = expected.filter((id) => listing.deadPresent.has(id) && !blocked.has(id))
+      await cachePlaylistVideoIds(env, combinedId, listing.present)
+      const members = await playlistMembers(env, combinedId)
       if (members.size === 0) {
-        await savePlaylistMembers(env, combined.playlistId, listing.present, now)
+        await savePlaylistMembers(env, combinedId, listing.present, now)
         results.push({ ...ctx, status: 'first_snapshot', expected: 0, missing: 0, owner: 0, dead: 0 })
-      } else if (!(await guarded(ctx, expected.length, missing))) {
-        // Snapshot kept as it was, so the backfill keeps skipping the held ids.
-        results.push({ ...ctx, status: 'held', expected: expected.length, missing: missing.length, owner: 0, dead: 0 })
       } else {
-        const ids = [...new Set([...missing, ...deadHere])]
-        const labels = await classify(env, ids, listing.deadPresent, accessToken, log, opts.fetcher)
-        const findings = ids.map((id) => ({ videoId: id, reason: labels.get(id)!, setUrls: allExpected.get(id) ?? [] }))
-        await applyFindings(env, findings, ctx)
-        await savePlaylistMembers(env, combined.playlistId, listing.present, now)
-        const owner = findings.filter((f) => f.reason === 'owner').length
-        results.push({ ...ctx, status: 'ok', expected: expected.length, missing: missing.length, owner, dead: findings.length - owner })
+        const unavailable = new Set(combined.unavailableVideoIds ?? [])
+        const blocked = await blockedIds(env, combinedId)
+        const expected = [...members].filter((id) => allExpected.has(id) && !unavailable.has(id) && !blocked.has(id))
+        pending.push({
+          slot: results.push({ ...ctx, status: 'ok', expected: 0, missing: 0, owner: 0, dead: 0 }) - 1,
+          ctx,
+          expected: expected.length,
+          missing: expected.filter((id) => !listing.present.has(id)),
+          deadHere: expected.filter((id) => listing.deadPresent.has(id)),
+          deadPresent: listing.deadPresent,
+          setUrlsOf: (id) => allExpected.get(id) ?? [],
+          // Saved only when applied: a held playlist keeps its old snapshot, so the backfill keeps skipping the held ids.
+          after: () => savePlaylistMembers(env, combinedId, listing.present, now),
+        })
       }
     }
   }
-  log.info('hygiene.compare.done', { playlists: results.length, held: results.filter((r) => r.status === 'held').length, incomplete: results.filter((r) => r.status === 'incomplete').length })
+
+  // ── phase 2: guards ──────────────────────────────────────────────────────
+  const approved = new Set<string>()
+  for (const p of pending) if (p.missing.length > 0 && (await approvalCovers(env, p.ctx.playlistId, p.missing, now))) approved.add(p.ctx.playlistId)
+  const runMissing = pending.filter((p) => !approved.has(p.ctx.playlistId)).reduce((n, p) => n + p.missing.length, 0)
+  const breaker = runMissing > RUN_REMOVAL_MAX
+  if (breaker) log.error('hygiene.compare.run_breaker', { runMissing, playlists: pending.filter((p) => p.missing.length > 0).length })
+  const newHolds: PlaylistHold[] = []
+
+  for (const p of pending) {
+    const { ctx } = p
+    let hold = false
+    if (p.missing.length === 0) await clearHold(env, ctx.playlistId)
+    else if (approved.has(ctx.playlistId)) {
+      await clearHold(env, ctx.playlistId)
+      log.warn('hygiene.compare.hold_approved', { ...ctx, expected: p.expected, missing: p.missing.length })
+    } else if (breaker || isMassRemoval(p.missing.length, p.expected)) hold = true
+    else await clearHold(env, ctx.playlistId)
+
+    if (hold) {
+      const prev = (await env.SUBS.get(HOLD_PREFIX + ctx.playlistId, 'json')) as PlaylistHold | null
+      const missingIds = [...p.missing].sort().slice(0, 500)
+      const sameIds = !!prev && JSON.stringify(prev.missingIds ?? []) === JSON.stringify(missingIds)
+      const h: PlaylistHold = { ...ctx, expected: p.expected, missing: p.missing.length, missingIds, runWide: breaker && !isMassRemoval(p.missing.length, p.expected), at: sameIds ? prev!.at : now, notified: sameIds ? prev!.notified : false }
+      log.error('hygiene.compare.held', { ...h, missingIds: missingIds.slice(0, 20) })
+      newHolds.push(h)
+      results[p.slot] = { ...ctx, status: 'held', expected: p.expected, missing: p.missing.length, owner: 0, dead: 0 }
+      continue
+    }
+    const ids = [...new Set([...p.missing, ...p.deadHere])]
+    const labels = await classify(env, ids, p.deadPresent, accessToken, log, opts.fetcher)
+    const findings = ids.map((id) => ({ videoId: id, reason: labels.get(id)!, setUrls: p.setUrlsOf(id) }))
+    await applyFindings(env, findings, ctx)
+    if (p.after) await p.after()
+    const owner = findings.filter((f) => f.reason === 'owner').length
+    results[p.slot] = { ...ctx, status: 'ok', expected: p.expected, missing: p.missing.length, owner, dead: findings.length - owner }
+    if (findings.length > 0) log.warn('hygiene.compare.removals_recorded', { ...ctx, owner, dead: findings.length - owner, videoIds: ids.slice(0, 50) })
+  }
+
+  // ── notify: one push per new hold, or one for the whole run when the breaker tripped ──
+  const unnotified = newHolds.filter((h) => !h.notified)
+  if (unnotified.length > 0 && opts.notify) {
+    const title = breaker ? 'Playlist check held: too many removals' : 'Playlist check held'
+    const messages = breaker
+      ? [`${runMissing} videos across ${newHolds.length} playlists seem to be gone in one check. Nothing was recorded; review at /subscriptions/removed.`]
+      : unnotified.map((h) => `${h.kind === 'combined' ? 'The combined playlist' : `${h.slug}'s playlist`} seems to have lost ${h.missing} of ${h.expected} videos. Nothing was recorded; review at /subscriptions/removed.`)
+    let allSent = true
+    for (const body of messages) {
+      try {
+        if ((await opts.notify(title, body)) === false) allSent = false
+      } catch (e) {
+        allSent = false
+        log.warn('hygiene.compare.notify_failed', errorFields(e))
+      }
+    }
+    if (allSent) for (const h of unnotified) h.notified = true
+  }
+  for (const h of newHolds) await env.SUBS.put(HOLD_PREFIX + h.playlistId, JSON.stringify(h))
+
+  log.info('hygiene.compare.done', { playlists: results.length, held: newHolds.length, breaker, incomplete: results.filter((r) => r.status === 'incomplete').length })
   return results
 }
 
 // ─── remove and replace ─────────────────────────────────────────────────────
 
 export type RemoveReplaceResult =
-  | { ok: false; error: 'not_found' | 'no_video' }
+  | { ok: false; error: 'not_found' | 'no_video' | 'mkvid_video' }
   | { ok: true; videoId: string; removedFrom: Array<{ playlistId: string; kind: 'artist' | 'combined'; deleted: number }>; mkvid: string }
 
 /**
@@ -862,6 +1032,7 @@ export type RemoveReplaceResult =
  * artist playlist and the combined one now, record it as owner-removed for
  * both (never re-added), and queue the set for mkvid when its page had an
  * audio source. Owner action: not charged to the sweep's daily budget.
+ * Refused for an mkvid render (m10): "delete and recreate" is the path there.
  */
 export async function removeAndReplace(
   env: Env,
@@ -870,9 +1041,10 @@ export async function removeAndReplace(
 ): Promise<RemoveReplaceResult> {
   const { log } = input
   const db = dbOf(env)
-  const row = await db.prepare('SELECT video_id FROM tracklists WHERE slug = ? AND url = ?').bind(input.slug, input.setUrl).first<{ video_id: string | null }>()
+  const row = await db.prepare('SELECT video_id, video_source FROM tracklists WHERE slug = ? AND url = ?').bind(input.slug, input.setUrl).first<{ video_id: string | null; video_source: string | null }>()
   if (!row) return { ok: false, error: 'not_found' }
   if (!row.video_id) return { ok: false, error: 'no_video' }
+  if (row.video_source === 'mkvid' || (await mkvidUploadedIds(env, log)).has(row.video_id)) return { ok: false, error: 'mkvid_video' }
   const videoId = row.video_id
   const artist = (await db.prepare('SELECT playlist_id FROM sub_sync WHERE slug = ?').bind(input.slug).first<{ playlist_id: string | null }>())?.playlist_id ?? null
   const combinedId = (await loadCombinedState(env)).playlistId ?? null
@@ -880,6 +1052,7 @@ export async function removeAndReplace(
   for (const [pl, kind] of targets(artist, combinedId)) {
     const deleted = await removeVideoFromPlaylist(pl, videoId, accessToken, input.fetcher)
     removedFrom.push({ playlistId: pl, kind, deleted })
+    await markOutOfPlaylist(env, pl, videoId, 'button')
     await recordRemoved(env, { playlistId: pl, videoId, slug: input.slug, setUrl: input.setUrl, reason: 'button' })
     await logRemoval(env, { source: 'button', status: 'removed', slug: input.slug, set_url: input.setUrl, video_id: videoId, playlist_id: pl, playlist_kind: kind, reason: 'button', detail: `deleted ${deleted} item(s)` })
     await invalidatePlaylistVideoIds(env, pl)
@@ -926,26 +1099,47 @@ export type UndoResult = { ok: true; readded: boolean } | { ok: false; error: 'n
  * Undo one logged removal: the video goes back into that playlist (unless it
  * was only a dry-run report), leaves the blocklist, and the full-recording
  * rule stops applying to it so the next sweep does not take it out again.
- * The set's row gets the video back only if nothing replaced it meanwhile.
+ *   - The row is claimed first (`undoing`), so a double click re-adds once.
+ *   - The video is re-inserted BEFORE it leaves the blocklist: a failed
+ *     insert keeps it blocked (and the row back in its old state), so the
+ *     next comparison cannot record it a second time.
+ *   - Every set of the DJ that lost this video gets it back (only where
+ *     nothing replaced it meanwhile), and an mkvid request queued for those
+ *     sets since the removal is superseded, so no render replaces it later.
  */
 export async function undoRemoval(env: Env, accessToken: string, id: number, log: Logger, fetcher?: typeof fetch): Promise<UndoResult> {
   const db = dbOf(env)
   const row = await db.prepare('SELECT * FROM playlist_removals WHERE id = ?').bind(id).first<RemovalRow>()
   if (!row) return { ok: false, error: 'not_found' }
   if (row.source === 'dead' || !['would_remove', 'removed', 'recorded'].includes(row.status)) return { ok: false, error: 'not_undoable' }
-  await setOverride(env, row.video_id)
+  const claimed = await db.prepare("UPDATE playlist_removals SET status = 'undoing' WHERE id = ? AND status = ?").bind(id, row.status).run()
+  if ((claimed.meta.changes ?? 0) === 0) return { ok: false, error: 'not_undoable' }
   let readded = false
-  if (row.status !== 'would_remove') {
-    await unblock(env, row.playlist_id, row.video_id)
-    await addVideoToPlaylist(row.playlist_id, row.video_id, accessToken, fetcher)
-    readded = true
-    await invalidatePlaylistVideoIds(env, row.playlist_id)
-    if (row.playlist_kind === 'artist' && row.slug && row.set_url) {
-      await db
-        .prepare("UPDATE tracklists SET video_id = ?, video_source = '1001tl', video_known = 1 WHERE slug = ? AND url = ? AND video_id IS NULL")
-        .bind(row.video_id, row.slug, row.set_url)
-        .run()
+  try {
+    if (row.status !== 'would_remove') {
+      await addVideoToPlaylist(row.playlist_id, row.video_id, accessToken, fetcher)
+      readded = true
+      await markInPlaylist(env, row.playlist_id, row.video_id, 'undo')
+      await unblock(env, row.playlist_id, row.video_id)
+      await invalidatePlaylistVideoIds(env, row.playlist_id)
+      if (row.playlist_kind === 'artist' && row.slug) {
+        // The rows this removal cleared: the logged set, and any other set of the DJ whose page links this video.
+        const urls = new Set<string>(row.set_url ? [row.set_url] : [])
+        const facts = await db.prepare('SELECT set_url FROM set_media_facts WHERE slug = ? AND video_id = ?').bind(row.slug, row.video_id).all<{ set_url: string }>()
+        for (const f of facts.results) urls.add(f.set_url)
+        for (const url of urls) {
+          const r = await db
+            .prepare("UPDATE tracklists SET video_id = ?, video_source = '1001tl', video_known = 1 WHERE slug = ? AND url = ? AND video_id IS NULL")
+            .bind(row.video_id, row.slug, url)
+            .run()
+          if ((r.meta.changes ?? 0) > 0 && (await supersedeMkvidRequestForSet(env, url, row.video_id))) log.info('hygiene.undo.mkvid_superseded', { setUrl: url, videoId: row.video_id })
+        }
+      }
     }
+    await setOverride(env, row.video_id)
+  } catch (e) {
+    await db.prepare("UPDATE playlist_removals SET status = ? WHERE id = ? AND status = 'undoing'").bind(row.status, id).run()
+    throw e
   }
   await db.prepare("UPDATE playlist_removals SET status = 'undone' WHERE id = ?").bind(id).run()
   log.info('hygiene.undo', { id, videoId: row.video_id, playlistId: row.playlist_id, readded })

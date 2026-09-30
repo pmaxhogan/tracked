@@ -46,7 +46,7 @@ import {
 } from '../src/lib/playlist-hygiene'
 import { savePushSubscription } from '../src/lib/web-push'
 import { pushSubscription, vapid } from './helpers/web-push'
-import { blockedIds, combinedRefuses, combinedSkipIds, isBlocked, recordRemoved, savePlaylistMembers, setOverride } from '../src/lib/playlist-blocklist'
+import { blockedIds, combinedRefuses, combinedSkipIds, confirmedMembership, isBlocked, markInPlaylist, markOutOfPlaylist, recordRemoved, savePlaylistMembers, setOverride } from '../src/lib/playlist-blocklist'
 import { getMkvidRequestForSet } from '../src/lib/mkvid'
 
 const log = makeLogger({ task: 'test' })
@@ -64,12 +64,17 @@ const setUrl = (n: number | string) => `https://www.1001tracklists.com/tracklist
 async function seedSub(env: Env, slug = SLUG, playlistId = PL) {
   await env.DB.prepare('INSERT INTO sub_sync (slug, playlist_id, artist_name) VALUES (?, ?, ?)').bind(slug, playlistId, 'DJ').run()
 }
-async function seedSet(env: Env, url: string, videoId: string | null, opts: { slug?: string; source?: string; pos?: number } = {}) {
+/**
+ * A processed set. Its video counts as confirmed in the DJ's playlist (the
+ * sync's insert succeeded) unless `confirmed: false`.
+ */
+async function seedSet(env: Env, url: string, videoId: string | null, opts: { slug?: string; source?: string; pos?: number; confirmed?: boolean; playlistId?: string } = {}) {
   await env.DB.prepare(
     'INSERT INTO tracklists (slug, url, position, discovered_at, processed, video_known, video_id, video_source, checked_at) VALUES (?, ?, ?, 0, 1, 1, ?, ?, ?)',
   )
     .bind(opts.slug ?? SLUG, url, opts.pos ?? 0, videoId, videoId ? (opts.source ?? '1001tl') : null, 1_900_000_000)
     .run()
+  if (videoId && opts.confirmed !== false) await markInPlaylist(env, opts.playlistId ?? PL, videoId, 'sync', 1)
 }
 async function seedCombined(env: Env, extra: Record<string, unknown> = {}) {
   await env.SUBS.put('subs:combined', JSON.stringify({ playlistId: PLC, ...extra }))
@@ -161,8 +166,14 @@ describe('pickSetVideo (the sync gate)', () => {
     expect(r.rejected).toMatchObject({ videoId: '79n8BaQAL2Q', reason: 'notice' })
   })
 
-  it('turns down a vertical video and one much shorter than the audio', async () => {
+  it('leaves a vertical-looking video alone while REJECT_VERTICAL is off (the default)', async () => {
     const env = makeEnv()
+    metaAnswer({ vert0000001: { embedWidth: 720, embedHeight: 1280 } })
+    expect((await pickSetVideo(env, { slug: SLUG, setUrl: setUrl(1), html, rawVideoId: 'vert0000001', playlistId: PL, accessToken: 'tok', log })).rejected).toBeNull()
+  })
+
+  it('turns down a vertical video (REJECT_VERTICAL=1) and one much shorter than the audio', async () => {
+    const env = makeEnv({ REJECT_VERTICAL: '1' })
     metaAnswer({ vert0000001: { embedWidth: 720, embedHeight: 1280 }, clip0000001: { durationSeconds: 600 } })
     expect((await pickSetVideo(env, { slug: SLUG, setUrl: setUrl(1), html, rawVideoId: 'vert0000001', playlistId: PL, accessToken: 'tok', log })).rejected).toMatchObject({ reason: 'vertical' })
     const withAudio = 'new AudioPlayerSC("scWidget_1", { idPlayer: "1", type: "soundcloud", source: "x", duration: "3600" })'
@@ -222,7 +233,7 @@ describe('runRemovalSweep', () => {
   }
 
   it('dry run (the default) only reports, from facts and video meta, and never deletes', async () => {
-    const env = makeEnv()
+    const env = makeEnv({ REJECT_VERTICAL: '1' })
     await seedMix(env)
     const r = await runRemovalSweep(env, 'tok', { log })
     expect(r).toMatchObject({ dryRun: true, candidates: 3, rejected: 2, reported: 2, deletes: 0 })
@@ -241,7 +252,7 @@ describe('runRemovalSweep', () => {
   })
 
   it('live: removes from both playlists, logs, clears the set so the recheck queues mkvid', async () => {
-    const env = makeEnv()
+    const env = makeEnv({ REJECT_VERTICAL: '1' })
     await seedMix(env)
     const r = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
     expect(r).toMatchObject({ dryRun: false, rejected: 2, removedVideos: 2, deletes: 4 })
@@ -259,7 +270,7 @@ describe('runRemovalSweep', () => {
   })
 
   it('stops at the daily delete budget and carries on the next day', async () => {
-    const env = makeEnv()
+    const env = makeEnv({ REJECT_VERTICAL: '1' })
     await seedMix(env)
     const day1 = Date.parse('2026-10-01T12:00:00Z')
     const r1 = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 3 }, nowMs: day1 })
@@ -271,7 +282,7 @@ describe('runRemovalSweep', () => {
   })
 
   it('stops on a quota error without clearing the set', async () => {
-    const env = makeEnv()
+    const env = makeEnv({ REJECT_VERTICAL: '1' })
     await seedMix(env)
     vi.mocked(removeVideoFromPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.delete', 403, 'quotaExceeded', '{}'))
     const r = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
@@ -281,7 +292,7 @@ describe('runRemovalSweep', () => {
   })
 
   it('skips overridden videos and leaves a shared video in the combined playlist', async () => {
-    const env = makeEnv()
+    const env = makeEnv({ REJECT_VERTICAL: '1' })
     await seedMix(env)
     await setOverride(env, 'vert0000001')
     // Another DJ's set (fine, no facts) resolves to the rejected video too.
@@ -293,7 +304,7 @@ describe('runRemovalSweep', () => {
   })
 
   it('does not delete dead videos (the comparison records those)', async () => {
-    const env = makeEnv()
+    const env = makeEnv({ REJECT_VERTICAL: '1' })
     await seedSub(env)
     await seedSet(env, setUrl(1), 'dead0000001')
     metaAnswer({ dead0000001: { alive: false } })
@@ -370,11 +381,15 @@ describe('comparePlaylists', () => {
     expect(await approveHold(env, PL)).toBe(false)
   })
 
-  it('does not hold exactly at 30% or below three missing', async () => {
+  it('holds above 30% or above 5 missing, whatever the playlist size (M3)', async () => {
+    expect(isMassRemoval(0, 10)).toBe(false)
     expect(isMassRemoval(3, 10)).toBe(false)
     expect(isMassRemoval(4, 10)).toBe(true)
-    expect(isMassRemoval(2, 2)).toBe(false)
-    expect(isMassRemoval(3, 4)).toBe(true)
+    expect(isMassRemoval(1, 10)).toBe(false)
+    expect(isMassRemoval(2, 2)).toBe(true) // small playlists no longer slip under a minimum
+    expect(isMassRemoval(1, 1)).toBe(true)
+    expect(isMassRemoval(5, 100)).toBe(false)
+    expect(isMassRemoval(6, 100)).toBe(true)
   })
 
   it('combined: first run only snapshots; later a missing member is recorded for the combined playlist only', async () => {
@@ -437,9 +452,8 @@ describe('removeAndReplace', () => {
 describe('undoRemoval', () => {
   it('re-adds a removed video, unblocks it, restores the set and exempts it from the rule', async () => {
     const env = makeEnv()
-    await seedSub(env)
-    await seedSet(env, setUrl(1), 'vid00000001')
-    listing({ [PL]: [] })
+    await seedFive(env)
+    listing({ [PL]: ids([2, 3, 4, 5, 6, 7, 8, 9, 10]) })
     await comparePlaylists(env, 'tok', { log })
     const [rec] = await removals(env)
     const r = await undoRemoval(env, 'tok', rec!.id, log)
@@ -465,6 +479,9 @@ describe('undoRemoval', () => {
     await seedSet(env, setUrl(2), 'dead0000001', { pos: 1 })
     listing({ [PL]: ['notc0000001'] })
     metaAnswer({ dead0000001: { alive: false } })
+    // 1 of 2 missing is held (>30%); the owner approves exactly that id.
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'held' })
+    expect(await approveHold(env, PL)).toBe(true)
     await comparePlaylists(env, 'tok', { log })
     const dead = (await removals(env)).find((x) => x.source === 'dead')!
     expect(await undoRemoval(env, 'tok', dead.id, log)).toEqual({ ok: false, error: 'not_undoable' })
@@ -534,6 +551,8 @@ describe('a cleared set loads as "no video", due now (the seam to the recheck an
     await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
     await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
     listing({ [PL]: ['keep0000001'] })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'held' }) // 1 of 2 missing
+    await approveHold(env, PL)
     await comparePlaylists(env, 'tok', { log })
 
     const state = (await loadSubState(env, SLUG))!
@@ -619,5 +638,278 @@ describe('held comparison push (cron wiring)', () => {
     listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
     await comparePlaylists(env, 'tok', { log, notify: playlistHoldNotifier(env, log) })
     expect(await listHolds(env)).toMatchObject([{ notified: false }])
+  })
+})
+
+// ─── W6 review fixes ────────────────────────────────────────────────────────
+
+describe('review B1: the sweep never takes out a video another set of the DJ still uses', () => {
+  it('two sets of one DJ share a video; one is rejected: nothing is deleted, only that set is cleared, and no ban follows', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedCombined(env)
+    await seedSet(env, setUrl(1), 'shrd0000001', { pos: 0 })
+    await seedSet(env, setUrl(2), 'shrd0000001', { pos: 1 })
+    await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+    const r = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
+    expect(r).toMatchObject({ rejected: 1, keptShared: 1, deletes: 0 })
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect((await row(env, setUrl(1)))!.video_id).toBeNull()
+    expect((await row(env, setUrl(2)))!.video_id).toBe('shrd0000001')
+    expect((await blockedIds(env, PL)).size).toBe(0)
+    // The comparison afterwards sees it present: nothing recorded.
+    listing({ [PL]: ['shrd0000001'], [PLC]: ['shrd0000001'] })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'ok', missing: 0, owner: 0 })
+    expect(await removals(env)).toHaveLength(0)
+  })
+
+  it('a dry run does not report a shared video either', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedSet(env, setUrl(1), 'shrd0000001', { pos: 0 })
+    await seedSet(env, setUrl(2), 'shrd0000001', { pos: 1 })
+    await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+    expect(await runRemovalSweep(env, 'tok', { log })).toMatchObject({ dryRun: true, reported: 0, keptShared: 1 })
+    expect(await removals(env)).toHaveLength(0)
+  })
+
+  it('when every set of the DJ that uses it is rejected, it is removed once and both sets are cleared; never blocklisted', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedSet(env, setUrl(1), 'shrd0000001', { pos: 0 })
+    await seedSet(env, setUrl(2), 'shrd0000001', { pos: 1 })
+    await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+    await saveSetFacts(env, facts(setUrl(2), { noFullNotice: true }))
+    await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
+    expect(vi.mocked(removeVideoFromPlaylist).mock.calls.map((c) => [c[0], c[1]])).toEqual([[PL, 'shrd0000001']])
+    expect((await row(env, setUrl(1)))!.video_id).toBeNull()
+    expect((await row(env, setUrl(2)))!.video_id).toBeNull()
+    expect((await blockedIds(env, PL)).size).toBe(0)
+    expect((await confirmedMembership(env, PL)).get('shrd0000001')).toBe('out')
+  })
+})
+
+describe('review M1: only videos tracked confirmed inserting are expected', () => {
+  async function seedNine(env: Env) {
+    await seedSub(env)
+    for (let i = 1; i <= 9; i++) await seedSet(env, setUrl(i), `vid${String(i).padStart(8, '0')}`, { pos: i })
+  }
+  async function audit(env: Env, videoId: string, status = 'added') {
+    await env.DB.prepare("INSERT INTO playlist_additions (t, ts, status, slug, set_url, video_id, summary, record) VALUES ('2026-01-01T00:00:00Z', 1, ?, ?, ?, ?, '{}', '{}')")
+      .bind(status, SLUG, setUrl(10), videoId)
+      .run()
+  }
+
+  it('a row whose insert never succeeded (no confirmation, no audit) is ignored when it is missing', async () => {
+    const env = makeEnv()
+    await seedNine(env)
+    await seedSet(env, setUrl(10), 'never000001', { pos: 10, confirmed: false })
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6, 7, 8, 9]) })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'ok', expected: 9, missing: 0 })
+    expect(await removals(env)).toHaveLength(0)
+    expect((await row(env, setUrl(10)))!.video_id).toBe('never000001')
+  })
+
+  it('past removals: an audited successful insert that is gone is owner-removed on the first run; "duplicate" and "failed" rows are not evidence', async () => {
+    const env = makeEnv()
+    await seedNine(env)
+    await seedSet(env, setUrl(10), 'past0000001', { pos: 10, confirmed: false })
+    await audit(env, 'past0000001', 'added')
+    await seedSet(env, setUrl(11), 'dupl0000001', { pos: 11, confirmed: false })
+    await audit(env, 'dupl0000001', 'duplicate')
+    await seedSet(env, setUrl(12), 'fail0000001', { pos: 12, confirmed: false })
+    await audit(env, 'fail0000001', 'failed')
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6, 7, 8, 9]) })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'ok', expected: 10, missing: 1, owner: 1 })
+    expect(await isBlocked(env, PL, 'past0000001')).toBe(true)
+    expect(await isBlocked(env, PL, 'dupl0000001')).toBe(false)
+    expect(await isBlocked(env, PL, 'fail0000001')).toBe(false)
+  })
+
+  it('an audited insert that tracked later took out itself (swap, sweep) is not the owner', async () => {
+    const env = makeEnv()
+    await seedNine(env)
+    await seedSet(env, setUrl(10), 'swap0000001', { pos: 10, confirmed: false })
+    await audit(env, 'swap0000001', 'added')
+    await markOutOfPlaylist(env, PL, 'swap0000001', 'swap')
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6, 7, 8, 9]) })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'ok', missing: 0 })
+    expect(await removals(env)).toHaveLength(0)
+  })
+
+  it('snapshot: an unconfirmed video seen in a complete listing becomes expected, and its later removal is found from the second run on', async () => {
+    const env = makeEnv()
+    await seedNine(env)
+    await seedSet(env, setUrl(10), 'snap0000001', { pos: 10, confirmed: false })
+    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9]), 'snap0000001'] })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ expected: 9, missing: 0 })
+    expect((await confirmedMembership(env, PL)).get('snap0000001')).toBe('in')
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6, 7, 8, 9]) })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'ok', expected: 10, missing: 1, owner: 1 })
+  })
+})
+
+describe('review M2: an approval covers one hold, its exact ids, for 24 hours', () => {
+  it('a hold cleared in between takes its approval with it', async () => {
+    const env = makeEnv()
+    await seedFive(env)
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
+    await comparePlaylists(env, 'tok', { log })
+    await approveHold(env, PL)
+    // The anomaly clears: nothing missing, hold and approval both gone.
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) })
+    await comparePlaylists(env, 'tok', { log })
+    expect(await env.SUBS.get(`hygiene:approve:${PL}`)).toBeNull()
+    // Later, the same four go missing again: held, not auto-approved.
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'held' })
+    expect(await removals(env)).toHaveLength(0)
+  })
+
+  it('an approval does not cover a different set of missing ids', async () => {
+    const env = makeEnv()
+    await seedFive(env)
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
+    await comparePlaylists(env, 'tok', { log })
+    await approveHold(env, PL)
+    listing({ [PL]: ids([1, 2, 3, 4, 5]) }) // now five missing
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'held', missing: 5 })
+    expect(await removals(env)).toHaveLength(0)
+  })
+
+  it('an approval older than 24 hours no longer applies', async () => {
+    const env = makeEnv()
+    await seedFive(env)
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
+    const t0 = 1_900_000_000
+    await comparePlaylists(env, 'tok', { log, now: t0 })
+    await approveHold(env, PL, t0)
+    expect((await comparePlaylists(env, 'tok', { log, now: t0 + 25 * 3600 }))[0]).toMatchObject({ status: 'held' })
+    expect((await comparePlaylists(env, 'tok', { log, now: t0 + 3600 }))[0]).toMatchObject({ status: 'ok', owner: 4 })
+  })
+})
+
+describe('review M3: guards', () => {
+  it('more than 15 missing across the run holds every playlist with a missing video and pushes once', async () => {
+    const env = makeEnv()
+    const listed: Record<string, string[]> = {}
+    for (const dj of ['a', 'b', 'c', 'd']) {
+      await seedSub(env, dj, `PL${dj}`)
+      const vids = Array.from({ length: 20 }, (_, i) => `${dj}vid${String(i).padStart(7, '0')}`)
+      for (const [i, v] of vids.entries()) await seedSet(env, `https://www.1001tracklists.com/tracklist/${dj}${i}/x.html`, v, { slug: dj, pos: i, playlistId: `PL${dj}` })
+      listed[`PL${dj}`] = vids.slice(4) // 4 of 20 missing: 20%, not a mass removal on its own
+    }
+    listing(listed)
+    const notify = vi.fn(async () => true)
+    const res = await comparePlaylists(env, 'tok', { log, notify })
+    expect(res.map((r) => r.status)).toEqual(['held', 'held', 'held', 'held'])
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(await removals(env)).toHaveLength(0)
+    expect((await listHolds(env)).every((h) => h.runWide && h.notified)).toBe(true)
+  })
+
+  it('a listing item without a video id makes the listing incomplete: nothing inferred', async () => {
+    const env = makeEnv()
+    await seedFive(env)
+    vi.mocked(listPlaylistItems).mockResolvedValue({ items: [{ id: 'item-x', snippet: { title: 'Set' } }], nextPageToken: null, pages: 1 } as never)
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'incomplete' })
+    expect(await removals(env)).toHaveLength(0)
+  })
+
+  it('m5: already-blocked videos do not dilute the 30% guard', async () => {
+    const env = makeEnv()
+    await seedFive(env)
+    for (const id of ids([6, 7, 8, 9, 10])) await recordRemoved(env, { playlistId: PL, videoId: id, slug: SLUG, setUrl: null, reason: 'owner' })
+    listing({ [PL]: ids([1, 2, 3]) }) // 4, 5 missing of the 5 still expected: 40%
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'held', expected: 5, missing: 2 })
+  })
+})
+
+describe('review minors', () => {
+  it('m3: each delete is counted as it happens', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedCombined(env)
+    await seedSet(env, setUrl(1), 'notc0000001')
+    await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+    const seen: number[] = []
+    vi.mocked(removeVideoFromPlaylist).mockImplementation(async () => {
+      seen.push(await sweepDeletesUsed(env))
+      return 1
+    })
+    await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
+    expect(seen).toEqual([0, 1]) // the artist delete was on the books before the combined one started
+  })
+
+  it('m4: a quota stop on the combined step after the artist delete still clears the set and marks it out, so no owner record follows', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedCombined(env)
+    for (let i = 2; i <= 10; i++) await seedSet(env, setUrl(i), `vid${String(i).padStart(8, '0')}`, { pos: i })
+    await seedSet(env, setUrl(1), 'notc0000001')
+    await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+    vi.mocked(removeVideoFromPlaylist)
+      .mockResolvedValueOnce(1)
+      .mockRejectedValueOnce(new YouTubeApiError('playlistItems.delete', 403, 'quotaExceeded', '{}'))
+    const r = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
+    expect(r).toMatchObject({ stoppedBy: 'quota' })
+    expect((await row(env, setUrl(1)))!.video_id).toBeNull()
+    listing({ [PL]: ids([2, 3, 4, 5, 6, 7, 8, 9, 10]), [PLC]: [] })
+    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'ok', missing: 0, owner: 0 })
+    expect(await isBlocked(env, PL, 'notc0000001')).toBe(false)
+  })
+
+  it('m2: undo is claimed once (double click), re-adds before unblocking, and a failed re-add keeps the block', async () => {
+    const env = makeEnv()
+    await seedFive(env)
+    listing({ [PL]: ids([2, 3, 4, 5, 6, 7, 8, 9, 10]) })
+    await comparePlaylists(env, 'tok', { log })
+    const [rec] = await removals(env)
+    vi.mocked(addVideoToPlaylist).mockRejectedValueOnce(new Error('youtube 500'))
+    await expect(undoRemoval(env, 'tok', rec!.id, log)).rejects.toThrow('youtube 500')
+    expect(await isBlocked(env, PL, 'vid00000001')).toBe(true)
+    expect((await removals(env))[0]!.status).toBe('recorded')
+    const both = await Promise.all([undoRemoval(env, 'tok', rec!.id, log), undoRemoval(env, 'tok', rec!.id, log)])
+    expect(both.filter((x) => x.ok)).toHaveLength(1)
+    expect(vi.mocked(addVideoToPlaylist)).toHaveBeenCalledTimes(2) // the failed try + one real re-add
+    expect((await confirmedMembership(env, PL)).get('vid00000001')).toBe('in')
+  })
+
+  it('m2: undo restores every set of the DJ that lost the video and supersedes an mkvid request queued since', async () => {
+    const env = makeEnv({ MKVID_TOKEN: 'mk' })
+    await seedFive(env)
+    await seedSet(env, setUrl(11), 'vid00000001', { pos: 11 })
+    await saveSetFacts(env, facts(setUrl(11), { videoId: 'vid00000001' }))
+    listing({ [PL]: ids([2, 3, 4, 5, 6, 7, 8, 9, 10]) })
+    await comparePlaylists(env, 'tok', { log })
+    expect((await row(env, setUrl(11)))!.video_id).toBeNull()
+    const { enqueueMkvidRequest } = await import('../src/lib/mkvid')
+    await enqueueMkvidRequest(env, { slug: SLUG, setUrl: setUrl(11), artistName: 'DJ', setTitle: 'x', setDate: null, source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1' }, lastCueSeconds: 1, trackCount: 1, idedCount: 1 })
+    const [rec] = await removals(env)
+    expect(await undoRemoval(env, 'tok', rec!.id, log)).toEqual({ ok: true, readded: true })
+    expect((await row(env, setUrl(1)))!.video_id).toBe('vid00000001')
+    expect((await row(env, setUrl(11)))!.video_id).toBe('vid00000001')
+    expect((await getMkvidRequestForSet(env, setUrl(11)))!.status).toBe('superseded')
+  })
+
+  it('m6: when the video lookup fails, a video the sweep removed before is not taken again', async () => {
+    const env = makeEnv()
+    await env.DB.prepare("INSERT INTO playlist_removals (at, source, status, slug, set_url, video_id, playlist_id, playlist_kind, reason, detail) VALUES (1, 'sweep', 'removed', ?, ?, 'swpt0000001', ?, 'artist', 'short', NULL)")
+      .bind(SLUG, setUrl(1), PL)
+      .run()
+    vi.mocked(getVideoMeta).mockRejectedValue(new Error('videos.list 500'))
+    const r = await pickSetVideo(env, { slug: SLUG, setUrl: setUrl(1), html: '<html></html>', rawVideoId: 'swpt0000001', playlistId: PL, accessToken: 'tok', log })
+    expect(r.videoId).toBeNull()
+    const other = await pickSetVideo(env, { slug: SLUG, setUrl: setUrl(2), html: '<html></html>', rawVideoId: 'othr0000001', playlistId: PL, accessToken: 'tok', log })
+    expect(other.videoId).toBe('othr0000001')
+  })
+
+  it('m10: remove-and-replace refuses an mkvid render', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedSet(env, setUrl(1), 'mkUp0000001', { source: 'mkvid' })
+    expect(await removeAndReplace(env, 'tok', { slug: SLUG, setUrl: setUrl(1), log })).toEqual({ ok: false, error: 'mkvid_video' })
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect((await row(env, setUrl(1)))!.video_id).toBe('mkUp0000001')
   })
 })

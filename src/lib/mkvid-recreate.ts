@@ -21,6 +21,7 @@
  * resets the row in place rather than adding one.
  */
 
+import { markOutOfPlaylist } from './playlist-blocklist'
 import type { Env } from '../types'
 import { dbOf } from './db'
 import { errorFields, type Logger } from './log'
@@ -145,6 +146,7 @@ export async function retireReplacedVideo(
   let removedFromArtist = 0
   if (a.playlistVideoIds.has(a.oldVideoId)) {
     removedFromArtist = await removeVideoFromPlaylist(a.playlistId, a.oldVideoId, a.accessToken)
+    await markOutOfPlaylist(env, a.playlistId, a.oldVideoId, 'recreate')
     a.playlistVideoIds.delete(a.oldVideoId)
     await cachePlaylistVideoIds(env, a.playlistId, a.playlistVideoIds)
   }
