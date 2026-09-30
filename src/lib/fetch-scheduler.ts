@@ -168,14 +168,25 @@ export type SetFetchRecord = { parsed: ScrapedTracklist | null; verification: Ve
  */
 export async function recordSetFetch(
   env: Env,
-  f: { setUrl: string; html: string; videoId: string | null; accountId?: string | null; fetchedAt?: string | null; settings?: PoolSettings; pool?: PoolConfig | null; log?: Logger },
+  f: {
+    setUrl: string
+    html: string
+    /** The page already parsed by the caller (null = no rows); undefined = parse it here. */
+    parsed?: ScrapedTracklist | null
+    videoId: string | null
+    accountId?: string | null
+    fetchedAt?: string | null
+    settings?: PoolSettings
+    pool?: PoolConfig | null
+    log?: Logger
+  },
 ): Promise<SetFetchRecord> {
   const out: SetFetchRecord = { parsed: null, verification: null }
   try {
     const settings = f.settings ?? (await getPoolSettings(env))
     // No track rows at all (an error page, a stub): nothing to verify, and no
     // ID rows to know about. Skips a pointless parse.
-    const parsed = /tlpItem/.test(f.html) ? parseTracklist(f.setUrl, f.html) : null
+    const parsed = f.parsed !== undefined ? f.parsed : /tlpItem/.test(f.html) ? parseTracklist(f.setUrl, f.html) : null
     out.parsed = parsed
     const fetchedMs = f.fetchedAt ? Date.parse(f.fetchedAt) : NaN
     const fetchedAt = Number.isFinite(fetchedMs) ? Math.floor(fetchedMs / 1000) : nowSeconds()

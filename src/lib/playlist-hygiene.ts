@@ -53,6 +53,7 @@ import { cachePlaylistVideoIds, invalidatePlaylistVideoIds } from './playlist-ca
 import { loadCombinedState } from './combined-playlist'
 import { getAccessToken } from './google-oauth'
 import { parseCueValueData } from './tracklists1001'
+import { parseSetYouTubeId } from './dj-index'
 import {
   enqueueMkvidRequest,
   extractSetAudioSource,
@@ -147,6 +148,26 @@ export function extractSetFacts(slug: string, setUrl: string, html: string, vide
 
 /** A tracklist row: `<div … class="tlpTog bItm tlpItem trRow1" data-trno="0" data-id="…" data-isided="true"`. */
 const TRACK_ROW_RE = /class="[^"]*\btlpItem\b[^"]*"[^>]*?\bdata-isided="(true|false)"/g
+
+/**
+ * Page facts for a set page fetched OUTSIDE the sync (phone, the tracklist
+ * viewer, a purge refetch — lib/tracklist-resolve.ts). The sync's own fetches
+ * (new, recheck, verification) store them through pickSetVideo. The facts are
+ * real even on a decoy page (only names are randomized), so this runs before
+ * any decoy refusal. `slug` is the DJ the set is synced under, else the one
+ * already on record, else '' until a sync fetch fills it. Never throws.
+ */
+export async function recordPageFacts(env: Env, setUrl: string, html: string, log?: Logger): Promise<void> {
+  if (!/\/tracklist\/[^/]+\//.test(setUrl)) return
+  try {
+    const db = dbOf(env)
+    const tl = await db.prepare('SELECT MIN(slug) AS slug FROM tracklists WHERE url = ?').bind(setUrl).first<{ slug: string | null }>()
+    const prev = tl?.slug ? null : await db.prepare('SELECT slug FROM set_media_facts WHERE set_url = ?').bind(setUrl).first<{ slug: string }>()
+    await saveSetFacts(env, extractSetFacts(tl?.slug ?? prev?.slug ?? '', setUrl, html, parseSetYouTubeId(html)))
+  } catch (e) {
+    log?.warn('hygiene.page_facts_failed', { setUrl, ...errorFields(e) })
+  }
+}
 
 export async function saveSetFacts(env: Env, f: SetFacts): Promise<void> {
   await dbOf(env)

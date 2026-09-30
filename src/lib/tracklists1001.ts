@@ -464,7 +464,7 @@ export type FetchTracklistOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
 export async function fetchTracklist(
   tracklistUrl: string,
   opts: FetchTracklistOpts = {},
-): Promise<{ result: ScrapedTracklist; state: ChallengeState; via: string; accountId?: string; fetchedAt?: string }> {
+): Promise<{ result: ScrapedTracklist; html: string; state: ChallengeState; via: string; accountId?: string; fetchedAt?: string }> {
   const log = opts.log
   log?.info('1001scrape.start', { tracklistUrl, priority: opts.priority ?? 'phone' })
   const start = Date.now()
@@ -494,7 +494,7 @@ export async function fetchTracklist(
       sample: result.tracks.slice(0, 3).map((t) => `${t.artist} - ${t.title} @ ${t.trackUrl?.split('/track/')[1]?.split('/index')[0] ?? '?'}`),
     })
   }
-  return { result, state: r.state, via: r.via, accountId: r.accountId, fetchedAt: r.fetchedAt }
+  return { result, html: r.html, state: r.state, via: r.via, accountId: r.accountId, fetchedAt: r.fetchedAt }
 }
 
 /**

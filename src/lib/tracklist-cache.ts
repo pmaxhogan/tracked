@@ -151,10 +151,19 @@ export async function cacheParsedTracklist(
  * sync's new-set and recheck loops). Parses, then caches under the same rules.
  * Best effort: never throws, so a parse problem cannot fail the caller's work.
  */
-export async function cacheTracklistFromHtml(env: Env, tracklistUrl: string, html: string, log: Logger, source: string): Promise<CacheWriteResult | null> {
+export async function cacheTracklistFromHtml(
+  env: Env,
+  tracklistUrl: string,
+  html: string,
+  log: Logger,
+  source: string,
+  /** The caller's parse of `html` (null = no rows: nothing to cache); undefined = parse here. */
+  parsed?: ScrapedTracklist | null,
+): Promise<CacheWriteResult | null> {
   if (!/\/tracklist\/[^/]+\//.test(tracklistUrl)) return null
+  if (parsed === null) return null
   try {
-    return await cacheParsedTracklist(env, tracklistUrl, parseTracklist(tracklistUrl, html), log, { html, source })
+    return await cacheParsedTracklist(env, tracklistUrl, parsed ?? parseTracklist(tracklistUrl, html), log, { html, source })
   } catch (e) {
     log.warn('cache.write_through_failed', { tracklistUrl, source, ...errorFields(e) })
     return null

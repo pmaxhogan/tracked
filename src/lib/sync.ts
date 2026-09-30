@@ -87,7 +87,7 @@ import {
 import { makeLogger, errorFields, type Logger } from './log'
 import { pickSetVideo, rejectionNote } from './playlist-hygiene'
 import { combinedRefuses } from './playlist-blocklist'
-import { parseTracklist } from './tracklists1001'
+import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
@@ -516,8 +516,22 @@ export async function syncOne(
     priority: opts.priority ?? (phase === 'recheck' ? 'recheck' : firstFetchClass(settings, setAgeDays(setDateFromUrl(setUrl), nowSeconds()))),
   })
   /** Verification + next due time for a fetched set page, before anything reads them (lib/fetch-scheduler.ts). */
-  const noteFetched = (setUrl: string, f: { html: string; accountId?: string; fetchedAt?: string }, videoId: string | null) =>
-    recordSetFetch(env, { setUrl, html: f.html, videoId, accountId: f.accountId, fetchedAt: f.fetchedAt, settings, pool: fetchOpts.pool ?? null, log })
+  const noteFetched = (setUrl: string, f: { html: string; accountId?: string; fetchedAt?: string }, videoId: string | null, parsed: ScrapedTracklist | null) =>
+    recordSetFetch(env, { setUrl, html: f.html, parsed, videoId, accountId: f.accountId, fetchedAt: f.fetchedAt, settings, pool: fetchOpts.pool ?? null, log })
+  /**
+   * Parse a fetched set page ONCE; the cache write-through, the verification
+   * record and the mkvid track list all take this result. null = no track rows
+   * (an error page or a stub) or a parse that threw.
+   */
+  const parsePage = (setUrl: string, html: string): ScrapedTracklist | null => {
+    if (!/tlpItem/.test(html)) return null
+    try {
+      return parseTracklist(setUrl, html)
+    } catch (e) {
+      log.warn('sync.parse_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+      return null
+    }
+  }
 
   // 1. Discover tracklists. Either crawl the DJ index (the fresh-discovery
   // path, used by the daily cron + initial manual syncs) OR skip the crawl
@@ -728,12 +742,11 @@ export async function syncOne(
   // polling it. Never fails the set: any error here is a warn log and the set
   // is still recorded as `no_youtube` (the next recheck queues it again).
   const mkvidEnabled = !!env.MKVID_TOKEN
-  const maybeQueueForMkvid = async (setUrl: string, html: string): Promise<string | null> => {
+  const maybeQueueForMkvid = async (setUrl: string, html: string, parsed: ScrapedTracklist | null): Promise<string | null> => {
     if (!mkvidEnabled) return null
     try {
       const source = extractSetAudioSource(html)
-      if (!source) return null
-      const parsed = parseTracklist(setUrl, html)
+      if (!source || !parsed) return null
       const tracks = parsed.tracks
       // Zero rows is the fingerprint of a captcha shell, not a set — never queue from it.
       if (tracks.length === 0) return null
@@ -781,10 +794,9 @@ export async function syncOne(
    * too, so a "Delete and recreate" renders from the newest list. Only writes
    * when the set has a request; never fails the recheck.
    */
-  const refreshMkvidTracks = async (setUrl: string, html: string): Promise<void> => {
-    if (!mkvidEnabled) return
+  const refreshMkvidTracks = async (setUrl: string, parsed: ScrapedTracklist | null): Promise<void> => {
+    if (!mkvidEnabled || !parsed) return
     try {
-      const parsed = parseTracklist(setUrl, html)
       if (parsed.tracks.length > 0) await saveMkvidTracks(env, setUrl, parsed)
     } catch (e) {
       log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
@@ -859,13 +871,14 @@ export async function syncOne(
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
       // Write-through: the phone button then serves this list from cache.
-      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new')
+      const parsedPage = parsePage(setUrl, setFetched.html)
+      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new', parsedPage)
       foundVia = setFetched.via
       // Full-recording rule + never-re-add list (lib/playlist-hygiene.ts): a turned-down video counts as none.
       const pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
       const videoId = pick.videoId
       foundVideoId = videoId
-      await noteFetched(setUrl, setFetched, videoId)
+      await noteFetched(setUrl, setFetched, videoId, parsedPage)
       if (videoId) {
         videoIdsFound += 1
         if (!existingVideoIds.has(videoId)) {
@@ -899,7 +912,7 @@ export async function syncOne(
           setUrl,
           fingerprint: youtubeFingerprint(setFetched.html),
         })
-        const note = [pick.rejected ? rejectionNote(pick.rejected) : null, await maybeQueueForMkvid(setUrl, setFetched.html)].filter(Boolean).join('; ')
+        const note = [pick.rejected ? rejectionNote(pick.rejected) : null, await maybeQueueForMkvid(setUrl, setFetched.html, parsedPage)].filter(Boolean).join('; ')
         auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
       }
       processed.add(setUrl)
@@ -996,10 +1009,11 @@ export async function syncOne(
       const fetchOpts = setFetchOpts(setUrl, 'recheck')
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
-      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck')
+      const parsedPage = parsePage(setUrl, setFetched.html)
+      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck', parsedPage)
       const { videoId } = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
       const checkedAt = nowSeconds()
-      await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null)
+      await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null, parsedPage)
       if (!prev || prev.videoId === undefined) {
         // Unknown baseline: record what the page has now, change nothing.
         tracklistVideos[setUrl] = { videoId, checkedAt }
@@ -1012,8 +1026,8 @@ export async function syncOne(
         // Still nothing on YouTube: a SoundCloud/hearthis recording that has
         // appeared since (or a request that was never queued) goes to mkvid.
         // Idempotent — a set with a request already gets 'exists'.
-        if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html)
-        else await refreshMkvidTracks(setUrl, setFetched.html)
+        if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html, parsedPage)
+        else await refreshMkvidTracks(setUrl, parsedPage)
       } else if (videoId === prev.videoId) {
         tracklistVideos[setUrl] = { videoId, checkedAt }
         log.info('sync.recheck_unchanged', { slug: sub.slug, setUrl, videoId })

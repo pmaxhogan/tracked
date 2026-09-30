@@ -2,6 +2,7 @@ import type { Env } from '../types'
 import { fetchTracklist, fetchMediaLinks, DecoyTracklistError, type MediaLinks, type FetchTracklistOpts } from './tracklists1001'
 import { TTL, getJson, putJson } from './cache'
 import type { Logger } from './log'
+import { recordPageFacts } from './playlist-hygiene'
 import type { PoolPriority } from './pool'
 import { fetchOptsFromEnv } from './upstream1001'
 import {
@@ -68,7 +69,9 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
     log.info('cache.bypass', { key, reason: 'force' })
   }
   const fetchOpts: FetchTracklistOpts = fetchOptsFromEnv(env, log, { priority: opts.priority ?? 'phone' })
-  const { result } = await fetchTracklist(tracklistUrl, fetchOpts)
+  const { result, html } = await fetchTracklist(tracklistUrl, fetchOpts)
+  // The page's media facts (W6's full-recording rule reads them) from every set page fetch.
+  await recordPageFacts(env, tracklistUrl, html, log)
   const written = await cacheParsedTracklist(env, tracklistUrl, result, log, { source: 'resolve' })
   if (written.cached) return written.value
   if (written.reason === 'decoy') {
