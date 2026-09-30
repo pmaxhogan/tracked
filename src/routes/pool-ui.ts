@@ -59,7 +59,7 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
 
   app.onError((e, c) => {
     if (e instanceof PoolAdminError) {
-      return c.json({ error: e.code, ...(e.detail ? { detail: e.detail } : {}) }, e.status)
+      return c.json({ error: e.code, ...(e.detail ? { detail: e.detail } : {}), ...(e.plainMessage ? { message: e.plainMessage } : {}) }, e.status)
     }
     const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'pool_ui.unhandled', path: new URL(c.req.url).pathname })
     log.error('pool_ui.unhandled_throw', errorFields(e))
@@ -132,11 +132,13 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   app.post('/api/pool/challenges/:id/answer', async (c) => {
     const id = c.req.param('id')
     if (!ID_RE.test(id)) return c.json({ error: 'invalid', detail: 'bad_id' }, 400)
-    const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null
+    const body = (await c.req.json().catch(() => null)) as { text?: unknown; done?: unknown } | null
+    // A checkbox wall: {done: true} ("I clicked it, check now"). An image captcha: its text, as tlpool takes it (max 64).
+    const done = body?.done === true
     const text = typeof body?.text === 'string' ? body.text.trim() : ''
-    if (!text || text.length > 200) return c.json({ error: 'invalid', detail: 'empty_answer' }, 400)
+    if (!done && (!text || text.length > 64)) return c.json({ error: 'invalid', detail: text ? 'answer_too_long' : 'empty_answer' }, 400)
     const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'pool_ui.answer', by: c.get('cfAccessEmail') })
-    const outcome = await client(c.env).answer(id, text)
+    const outcome = await client(c.env).answer(id, done ? { done: true } : text)
     log.info('pool_ui.answer', { challengeId: id, outcome })
     return c.json({ outcome })
   })
@@ -246,6 +248,8 @@ const POOL_CSS = /* css */ `
   .cap-form button { font-size: 1.15rem; min-height: 3.2rem; font-weight: 600; }
   .cap-tools { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
   .cap-tools button { flex: 1; }
+  .cap-tools a.btn-link { flex: 1; display: inline-flex; align-items: center; justify-content: center; min-height: 2.5rem; padding: 0.6rem 1rem; border: 1px solid var(--border); border-radius: 6px; text-decoration: none; font-weight: 600; }
+  ol.steps li.skip { color: var(--muted); font-style: italic; }
   .cap-msg { min-height: 1.4em; margin-top: 0.6rem; font-weight: 600; }
   .cap-msg.ok { color: var(--ok); }
   .cap-msg.bad { color: var(--danger); }
@@ -282,6 +286,39 @@ const COMMON_JS = /* js */ `
     return { ok: r.ok, status: r.status, data };
   }
   const jsonInit = (method, body) => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  // Every polling loop on these pages goes through poller(): it pauses while
+  // the tab is hidden (and runs once when it comes back), backs off on errors
+  // (doubling, up to a minute), stops for good on 401/403 (the Access login
+  // expired: hooks.onAuth), and stops after 15 minutes whatever happens
+  // (hooks.onTimeout). fn returns { status } (the api() result is fine).
+  const POLL_HARD_STOP_MS = 15 * 60000;
+  function poller(fn, everyMs, hooks) {
+    hooks = hooks || {};
+    const started = Date.now();
+    let stopped = false, timer = null, running = false, fails = 0;
+    function stop() { stopped = true; if (timer) clearTimeout(timer); timer = null; }
+    function later(ms) { if (!stopped) timer = setTimeout(run, ms); }
+    async function run() {
+      timer = null;
+      if (stopped || running) return;
+      if (Date.now() - started > POLL_HARD_STOP_MS) { stop(); if (hooks.onTimeout) hooks.onTimeout(); return; }
+      if (document.hidden) return; // resumed by visibilitychange
+      running = true;
+      let status = 200;
+      try { const r = await fn(); if (r && typeof r.status === 'number') status = r.status; } catch (e) { status = 0; }
+      running = false;
+      if (stopped) return;
+      if (status === 401 || status === 403) { stop(); if (hooks.onAuth) hooks.onAuth(); return; }
+      if (status === 0 || status >= 500) fails++; else fails = 0;
+      later(fails ? Math.min(everyMs * Math.pow(2, fails), 60000) : everyMs);
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && !stopped && !timer && !running) run(); });
+    later(everyMs);
+    return { stop, isStopped: () => stopped, now: () => { if (stopped) return; if (timer) clearTimeout(timer); timer = null; run(); } };
+  }
+  const SIGN_IN_AGAIN = 'Your Cloudflare Access login has expired. Reload the page to sign in again.';
+  const STOPPED_15 = 'Stopped checking after 15 minutes. Reload the page to check again.';
   const ERRORS = {
     network: 'Your phone could not reach the tracked site. Check the connection and try again.',
     unauthorized: 'Your Cloudflare Access login has expired. Reload the page to sign in again.',
@@ -303,12 +340,21 @@ const COMMON_JS = /* js */ `
     login_failed: 'The new account could not log in.',
     captcha_expired: 'Nobody answered the captcha in time.',
     username_taken: 'The generated username was taken.',
+    no_exit_available: 'There is no free exit IP to pin a new account to.',
+    no_mail_domain: 'No mail domain is set up for confirmation emails.',
+    not_ready: 'There is nothing to answer yet. The captcha has not appeared.',
+    challenge_closed: 'This challenge is already closed.',
+    json_required: 'The page sent a request the Worker refuses. Reload the page.',
+    cross_origin: 'The Worker refused a request from another site.',
   };
   function errText(d, status) {
     const code = d && d.error;
-    const base = ERRORS[code] || (code ? 'Error: ' + String(code).replace(/_/g, ' ') + '.' : 'Unexpected answer (HTTP ' + status + ').');
-    const det = d && d.detail ? ' (' + String(d.detail).replace(/_/g, ' ') + ')' : '';
-    return base + det;
+    // tlpool's own code (detail) says more than our status-level one when we know it.
+    const known = d && d.detail && ERRORS[d.detail];
+    const base = known || ERRORS[code] || (code ? 'Error: ' + String(code).replace(/_/g, ' ') + '.' : 'Unexpected answer (HTTP ' + status + ').');
+    const det = d && d.detail && !known ? ' (' + String(d.detail).replace(/_/g, ' ') + ')' : '';
+    const msg = d && d.message ? ' ' + String(d.message) : '';
+    return base + det + msg;
   }
   function fmtTime(iso) {
     if (!iso) return '—';
@@ -348,20 +394,40 @@ const CAPTCHA_JS = /* js */ `
     hooks = hooks || {};
     const base = '/subscriptions/api/pool/challenges/' + encodeURIComponent(ch.id);
     if (ch.type === 'checkbox') {
+      // tlpool's live page takes only ?path= (the websocket path under our proxy).
       const livePath = base.slice(1) + '/live/websockify';
-      const src = base + '/live/?autoconnect=1&resize=scale&reconnect=1&path=' + encodeURIComponent(livePath);
+      const src = base + '/live/?path=' + encodeURIComponent(livePath);
       root.innerHTML =
-        '<p><b>Tap the checkbox</b> in the view below. It is the real browser on the NAS; once the check passes, this page notices on its own.</p>' +
-        '<iframe class="cap-live" title="Live view of the pool browser" src="' + esc(src) + '" allow="clipboard-read; clipboard-write"></iframe>' +
-        '<div class="cap-tools"><a class="ghost" href="' + esc(src) + '" target="_blank" rel="noopener">Open the live view full screen ↗</a></div>' +
+        '<p><b>Tap the checkbox</b> in the view below. It is the real browser on the NAS. This page checks every few seconds; if it has not noticed, press <b>Done, I clicked it</b>.</p>' +
+        '<iframe class="cap-live" data-r="live" title="Live view of the pool browser" src="' + esc(src) + '" allow="clipboard-read; clipboard-write"></iframe>' +
+        '<div class="cap-form"><button type="button" data-r="done">Done, I clicked it</button></div>' +
+        '<div class="cap-tools"><a class="btn-link" href="' + esc(src) + '" target="_blank" rel="noopener">Open the live view full screen ↗</a><button type="button" class="ghost" data-r="reload">↻ Reload the view</button></div>' +
         '<div class="cap-msg" data-r="msg"></div>';
-      return { setMsg: (t, cls) => { const m = root.querySelector('[data-r=msg]'); m.textContent = t; m.className = 'cap-msg ' + (cls || ''); }, disable: () => {} };
+      const msg = root.querySelector('[data-r=msg]'), doneBtn = root.querySelector('[data-r=done]'), live = root.querySelector('[data-r=live]');
+      const setMsg = (t, cls) => { msg.textContent = t; msg.className = 'cap-msg ' + (cls || ''); };
+      let finished = false;
+      const disable = () => { finished = true; doneBtn.disabled = true; };
+      root.querySelector('[data-r=reload]').addEventListener('click', () => { live.src = src + '&r=' + Date.now(); });
+      doneBtn.addEventListener('click', async () => {
+        if (finished) return;
+        doneBtn.disabled = true; doneBtn.textContent = 'Checking…'; setMsg('');
+        const r = await api('/challenges/' + encodeURIComponent(ch.id) + '/answer', jsonInit('POST', { done: true }));
+        doneBtn.disabled = false; doneBtn.textContent = 'Done, I clicked it';
+        if (!r.ok) { setMsg(r.status === 401 || r.status === 403 ? SIGN_IN_AGAIN : errText(r.data, r.status), 'bad'); return; }
+        const o = r.data.outcome;
+        if (o === 'solved') { disable(); setMsg('✓ Through. The pool browser carries on.', 'ok'); }
+        else if (o === 'pending' || o === 'wrong') setMsg('Not through yet. Click the box again, then press Done.', 'bad');
+        else if (o === 'expired') { disable(); setMsg('This challenge has expired.', 'bad'); }
+        else setMsg('Sent. Checking whether it passed…', '');
+        if (hooks.onOutcome) hooks.onOutcome(o);
+      });
+      return { setMsg, disable };
     }
     root.innerHTML =
       '<img class="cap-img" data-r="img" alt="Captcha image from the pool browser" />' +
       '<div class="cap-tools"><button type="button" class="ghost" data-r="refresh">↻ New screenshot</button></div>' +
       '<form class="cap-form" data-r="form" autocomplete="off">' +
-      '<input data-r="text" type="text" autofocus inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="send" aria-label="Captcha answer" placeholder="Type what you see" required maxlength="200" />' +
+      '<input data-r="text" type="text" autofocus inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="send" aria-label="Captcha answer" placeholder="Type what you see" required maxlength="64" />' +
       '<button type="submit" data-r="submit">Submit answer</button>' +
       '</form>' +
       '<div class="cap-msg" data-r="msg"></div>';
@@ -383,7 +449,7 @@ const CAPTCHA_JS = /* js */ `
       submit.disabled = true; submit.textContent = 'Sending…'; setMsg('');
       const r = await api('/challenges/' + encodeURIComponent(ch.id) + '/answer', jsonInit('POST', { text }));
       submit.disabled = false; submit.textContent = 'Submit answer';
-      if (!r.ok) { setMsg(errText(r.data, r.status), 'bad'); return; }
+      if (!r.ok) { setMsg(r.status === 401 || r.status === 403 ? SIGN_IN_AGAIN : errText(r.data, r.status), 'bad'); return; }
       const o = r.data.outcome;
       if (o === 'solved') { disable(); setMsg('✓ Solved. The pool browser carries on.', 'ok'); }
       else if (o === 'wrong') { setMsg('✗ Wrong, try again with the new image.', 'bad'); input.value = ''; load(true); input.focus(); }
@@ -439,7 +505,8 @@ ${CAPTCHA_JS}
   // ── overview ───────────────────────────────────────────────────────────
   const stateBadge = (a) => {
     const s = String(a.state || 'unknown');
-    const cls = a.flagged || s === 'flagged' ? 'bad' : s === 'retired' ? '' : s === 'resting' || s === 'ramping' || s === 'creating' ? 'warn' : s === 'active' || s === 'ok' || s === 'healthy' ? 'ok' : 'info';
+    // tlpool states: new (signing up), warming (ramp days 1-2), active, passive, resting, retired.
+    const cls = a.flagged || s === 'flagged' ? 'bad' : s === 'retired' ? '' : s === 'resting' || s === 'warming' || s === 'ramping' || s === 'new' || s === 'creating' ? 'warn' : s === 'active' || s === 'ok' || s === 'healthy' ? 'ok' : 'info';
     return '<span class="badge ' + cls + '">' + esc(s) + '</span>';
   };
   const confirmWords = { rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };
@@ -448,12 +515,12 @@ ${CAPTCHA_JS}
   function renderStats(st, chals) {
     const accts = st.accounts || [];
     const live = accts.filter((a) => a.state !== 'retired');
-    const fetching = live.filter((a) => !a.passive && !a.flagged && (a.state === 'active' || a.state === 'ok' || a.state === 'healthy' || a.state === 'ramping'));
+    const fetching = live.filter((a) => !a.passive && !a.flagged && (a.state === 'active' || a.state === 'warming' || a.state === 'ok' || a.state === 'healthy' || a.state === 'ramping'));
     const budget = fetching.reduce((s, a) => s + (a.budget || 0), 0);
     const used = fetching.reduce((s, a) => s + (a.usedToday || 0), 0);
     const tile = (v, k) => '<div class="stat"><div class="v">' + esc(v) + '</div><div class="k">' + esc(k) + '</div></div>';
     $('stats').innerHTML =
-      tile(st.requestsToday ?? '—', 'requests today') +
+      tile(st.requestsToday ?? '—', 'page views today') +
       tile(used + ' / ' + budget, 'used / budget (fetching accounts)') +
       tile(st.queueDepth ?? '—', 'queued fetches') +
       tile(fetching.length + ' / ' + live.length, 'fetching / live accounts') +
@@ -469,7 +536,7 @@ ${CAPTCHA_JS}
 
   function renderChallenges(chals, errCode) {
     if (errCode) { $('chals').innerHTML = '<div class="empty error">' + esc(errText({ error: errCode })) + '</div>'; return; }
-    const open = chals.filter((c) => c.state === 'pending');
+    const open = chals.filter((c) => c.state === 'pending' && c.ready !== false);
     if (!open.length) { $('chals').innerHTML = '<div class="empty">None. Nothing is waiting for you.</div>'; return; }
     $('chals').innerHTML = '<ul class="plain">' + open.map((c) => {
       const l = leftText(c.expiresAt);
@@ -517,6 +584,7 @@ ${CAPTCHA_JS}
       const act = b.dataset.yes;
       b.disabled = true; b.textContent = 'Working…';
       const r = await api('/accounts/' + encodeURIComponent(id) + '/' + act, jsonInit('POST', {}));
+      if (!r.ok && (r.status === 401 || r.status === 403)) { box.innerHTML = '<span class="error">' + esc(SIGN_IN_AGAIN) + '</span>'; return; }
       if (!r.ok) { box.innerHTML = '<span class="error">' + esc(errText(r.data, r.status)) + '</span> <button type="button" class="ghost small" data-no="1">OK</button>'; return; }
       load();
     }
@@ -525,9 +593,9 @@ ${CAPTCHA_JS}
   async function load() {
     const r = await api('/status');
     if (!r.ok) {
-      $('err').hidden = false; $('err').textContent = errText(r.data, r.status);
+      $('err').hidden = false; $('err').textContent = r.status === 401 || r.status === 403 ? SIGN_IN_AGAIN : errText(r.data, r.status);
       if (!lastStatus) { $('accts').innerHTML = ''; $('chals').innerHTML = ''; }
-      return;
+      return r;
     }
     $('err').hidden = true;
     lastStatus = r.data.status;
@@ -535,10 +603,11 @@ ${CAPTCHA_JS}
     renderChallenges(r.data.challenges || [], r.data.challengesError);
     // Don't clobber a row that is mid-confirmation.
     if (!document.querySelector('#accts .confirm')) renderAccounts(r.data.status.accounts || []);
+    return r;
   }
   load();
-  setInterval(() => { if (!document.hidden) load(); }, 20000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+  const showBanner = (t) => { $('err').hidden = false; $('err').textContent = t; };
+  poller(load, 20000, { onAuth: () => showBanner(SIGN_IN_AGAIN), onTimeout: () => showBanner('Auto-refresh stopped after 15 minutes. Reload the page to see fresh numbers.') });
 
   // ── Add account ────────────────────────────────────────────────────────
   const STEPS = [
@@ -552,19 +621,26 @@ ${CAPTCHA_JS}
     ['done', 'Done'],
   ];
   const STEP_ALIASES = { exit: 'exit_assigned', form: 'form_opened', captcha: 'awaiting_captcha', waiting_captcha: 'awaiting_captcha', captcha_pending: 'awaiting_captcha', waiting_email: 'awaiting_email', email: 'awaiting_email', email_confirmed: 'confirmed', login: 'logged_in', created: 'done', complete: 'done', completed: 'done' };
-  const NO_PROGRESS_MS = 15 * 60000;
+  // Below the pollers' 15-minute hard stop, so a stuck signup is called stuck before watching ends.
+  const NO_PROGRESS_MS = 10 * 60000;
   const dlg = $('add-dlg');
-  let flow = null; // { challengeId, accountId, stepIdx, lastChange, timer, captchaShown, widget }
+  let flow = null; // { challengeId, accountId, stepIdx, lastChange, poller, captchaShown, captchaSeen, widget }
 
   function stepIndex(step) { const s = STEP_ALIASES[step] || step; return STEPS.findIndex((x) => x[0] === s); }
+  // The captcha step is optional: tlpool's real signup form usually has none,
+  // and then goes from form_opened straight to submitted. A step this page
+  // never saw is shown as skipped only for that optional step.
+  const OPTIONAL_STEP = 'awaiting_captcha';
   function renderSteps(idx, failed) {
+    const skipCaptcha = flow && !flow.captchaSeen && idx > stepIndex(OPTIONAL_STEP);
     $('add-steps').innerHTML = STEPS.map((s, i) => {
+      if (s[0] === OPTIONAL_STEP && skipCaptcha) return '<li class="skip"><span class="dot">–</span>' + esc('No captcha needed') + '</li>';
       const cls = failed && i === idx ? 'fail' : i < idx || (i === idx && s[0] === 'done') ? 'done' : i === idx ? 'cur' : '';
       const dot = cls === 'done' ? '✓' : cls === 'cur' ? '●' : cls === 'fail' ? '✗' : '○';
       return '<li class="' + cls + '"><span class="dot">' + dot + '</span>' + esc(s[1]) + '</li>';
     }).join('');
   }
-  function stopFlow() { if (flow) { if (flow.timer) clearInterval(flow.timer); flow.active = false; } }
+  function stopFlow() { if (flow) { if (flow.poller) flow.poller.stop(); flow.active = false; } }
   function failFlow(text) {
     stopFlow();
     renderSteps(flow ? Math.max(flow.stepIdx, 0) : 0, true);
@@ -579,8 +655,11 @@ ${CAPTCHA_JS}
     $('add-create').disabled = false;
   }
 
+  const stalled = () => flow && Date.now() - flow.lastChange > NO_PROGRESS_MS;
   async function poll() {
     if (!flow) return;
+    // The stall guard runs before any early return, errors included.
+    if (stalled()) { failFlow('No progress for 10 minutes. The flow may be stuck on the NAS.'); return; }
     const r = await api('/challenges/' + encodeURIComponent(flow.challengeId));
     let ch = r.ok ? r.data.challenge : null;
     if (!r.ok && r.status === 404 && flow.stepIdx >= stepIndex('submitted') && flow.accountId) {
@@ -588,22 +667,26 @@ ${CAPTCHA_JS}
       const a = await api('/accounts');
       const acct = a.ok ? (a.data.accounts || []).find((x) => x.id === flow.accountId) : null;
       if (acct && !/^(creating|signup|pending|new)$/.test(acct.state)) { ch = { state: 'solved', step: 'done' }; }
-      else return;
+      else return a.ok ? r : a;
     } else if (!r.ok) {
+      if (r.status === 401 || r.status === 403) return r; // the poller stops and says sign in again
       // tlpool may only create the challenge record once the form is open: a
       // 404 in the first 90 s (before any step was seen) means "still starting".
-      if (r.status === 404 && flow.stepIdx < 0 && Date.now() - flow.startedAt < 90000) { $('add-msg').innerHTML = '<div class="muted">Starting…</div>'; return; }
-      if (r.status === 404) { failFlow('The pool lost track of this signup. Check the accounts table, then try again.'); return; }
+      if (r.status === 404 && flow.stepIdx < 0 && Date.now() - flow.startedAt < 90000) { $('add-msg').innerHTML = '<div class="muted">Starting…</div>'; return r; }
+      if (r.status === 404) { failFlow('The pool lost track of this signup. Check the accounts table, then try again.'); return r; }
       $('add-msg').innerHTML = '<div class="muted">' + esc(errText(r.data, r.status)) + ' Still trying…</div>';
-      return;
+      return r;
     }
+    // Steps come from tlpool as it reports them; an unknown or missing step keeps the last one.
     let idx = ch.step ? stepIndex(ch.step) : -1;
-    if (idx < 0) idx = ch.state === 'pending' ? stepIndex('awaiting_captcha') : flow.stepIdx;
+    if (idx < 0) idx = flow.stepIdx;
     if (idx !== flow.stepIdx) { flow.stepIdx = idx; flow.lastChange = Date.now(); }
-    if (ch.error || ch.state === 'failed') { failFlow('The signup failed: ' + errText({ error: ch.error || 'pool_error' })); return; }
-    if (ch.state === 'expired') { failFlow(errText({ error: 'captcha_expired' })); return; }
+    if (ch.state === 'failed') { failFlow('The signup failed' + (ch.error ? ': ' + ch.error : '.')); return r; }
+    if (ch.state === 'expired') { failFlow(errText({ error: 'captcha_expired' })); return r; }
+    // Only a challenge tlpool marks ready has a captcha to answer (the form showed one).
+    const needCaptcha = ch.state === 'pending' && ch.ready !== false;
+    if (needCaptcha) flow.captchaSeen = true;
     renderSteps(idx, false);
-    const needCaptcha = ch.state === 'pending' && idx === stepIndex('awaiting_captcha');
     if (needCaptcha && !flow.captchaShown && ch.type) {
       flow.captchaShown = true;
       $('add-captcha').hidden = false;
@@ -614,10 +697,16 @@ ${CAPTCHA_JS}
       stopFlow();
       $('add-msg').innerHTML = '<div class="banner ok">Account ' + esc(flow.accountId || '') + ' is ready.</div>';
       load();
-      return;
+      return r;
     }
     $('add-msg').innerHTML = '';
-    if (Date.now() - flow.lastChange > NO_PROGRESS_MS) failFlow('No progress for 15 minutes. The flow may be stuck on the NAS.');
+    return r;
+  }
+  function watchFlow() {
+    flow.poller = poller(poll, 2500, {
+      onAuth: () => { $('add-msg').innerHTML = '<div class="banner bad">' + esc(SIGN_IN_AGAIN) + '</div>'; },
+      onTimeout: () => { $('add-msg').innerHTML = '<div class="banner info">Stopped watching after 15 minutes. The signup carries on in the pool; close and reopen this dialog to look again.</div>'; },
+    });
   }
 
   async function create() {
@@ -627,17 +716,22 @@ ${CAPTCHA_JS}
     renderSteps(-1, false);
     const r = await api('/accounts', jsonInit('POST', { passive: $('add-passive').checked }));
     if (!r.ok) { flow = { stepIdx: 0 }; failFlow(errText(r.data, r.status)); return; }
-    flow = { challengeId: r.data.challengeId, accountId: r.data.accountId, stepIdx: -1, lastChange: Date.now(), startedAt: Date.now(), timer: null, captchaShown: false, active: true };
+    flow = { challengeId: r.data.challengeId, accountId: r.data.accountId, stepIdx: -1, lastChange: Date.now(), startedAt: Date.now(), poller: null, captchaShown: false, captchaSeen: false, active: true };
     poll();
-    flow.timer = setInterval(poll, 2500);
+    watchFlow();
   }
 
-  // Closing the dialog mid-signup keeps it running; reopening shows it again.
-  $('add-btn').addEventListener('click', () => { if (!flow || !flow.active) resetDialog(); dlg.showModal(); });
+  // Closing the dialog stops watching (the signup itself carries on in the
+  // pool); reopening resumes watching it.
+  $('add-btn').addEventListener('click', () => {
+    if (!flow || !flow.active) resetDialog();
+    else if (flow.poller && flow.poller.isStopped()) { flow.lastChange = Date.now(); poll(); watchFlow(); }
+    dlg.showModal();
+  });
   $('add-close').addEventListener('click', () => dlg.close());
   $('add-create').addEventListener('click', create);
   $('add-retry').addEventListener('click', () => { resetDialog(); });
-  dlg.addEventListener('close', () => load());
+  dlg.addEventListener('close', () => { if (flow && flow.active && flow.poller) flow.poller.stop(); load(); });
 })();
 </script>
 </body>
@@ -662,9 +756,9 @@ const CAPTCHA_LIST_HTML = /* html */ `<!doctype html>
 ${COMMON_JS}
   async function load() {
     const r = await api('/challenges');
-    if (!r.ok) { $('list').innerHTML = '<div class="banner bad">' + esc(errText(r.data, r.status)) + '</div>'; return; }
-    const open = (r.data.challenges || []).filter((c) => c.state === 'pending');
-    if (!open.length) { $('list').innerHTML = '<div class="empty">No pending challenges. Nothing is waiting for you.</div>'; return; }
+    if (!r.ok) { $('list').innerHTML = '<div class="banner bad">' + esc(r.status === 401 || r.status === 403 ? SIGN_IN_AGAIN : errText(r.data, r.status)) + '</div>'; return r; }
+    const open = (r.data.challenges || []).filter((c) => c.state === 'pending' && c.ready !== false);
+    if (!open.length) { $('list').innerHTML = '<div class="empty">No pending challenges. Nothing is waiting for you.</div>'; return r; }
     $('list').innerHTML = '<ul class="plain">' + open.map((c) => {
       const l = leftText(c.expiresAt);
       return '<li><a href="/subscriptions/captcha/' + encodeURIComponent(c.id) + '" style="display:block;text-decoration:none;color:inherit">' +
@@ -672,10 +766,11 @@ ${COMMON_JS}
         '<div class="muted" style="font-size:0.85rem">' + esc(c.accountId || 'no account yet') + ' · ' + esc(typeText(c.type)) + ' · since ' + esc(fmtTime(c.createdAt)) + '</div>' +
         '<div style="margin-top:0.4rem;color:var(--accent);font-weight:600">Solve →</div></a></li>';
     }).join('') + '</ul>';
+    return r;
   }
   load();
-  setInterval(() => { if (!document.hidden) load(); }, 15000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+  const note = (t) => { const p = document.createElement('div'); p.className = 'banner info'; p.textContent = t; $('list').prepend(p); };
+  poller(load, 15000, { onAuth: () => note(SIGN_IN_AGAIN), onTimeout: () => note(STOPPED_15) });
 })();
 </script>
 </body>
@@ -704,7 +799,7 @@ function captchaPageHtml(id: string): string {
 ${COMMON_JS}
 ${CAPTCHA_JS}
   const ID = ${JSON.stringify(id)};
-  let ch = null, widget = null, finished = false, timer = null;
+  let ch = null, widget = null, finished = false, timer = null, watch = null;
 
   function renderHead() {
     const l = leftText(ch.expiresAt);
@@ -721,6 +816,7 @@ ${CAPTCHA_JS}
   function finish(kind, text) {
     finished = true;
     if (timer) clearInterval(timer);
+    if (watch) watch.stop();
     if (widget) widget.disable();
     if (kind !== 'ok') $('widget').innerHTML = '';
     $('state').innerHTML = '<div class="banner ' + kind + '">' + esc(text) + '</div><p><a href="/subscriptions/captcha">Other pending captchas</a> · <a href="/subscriptions/pool">Pool</a></p>';
@@ -735,17 +831,30 @@ ${CAPTCHA_JS}
     const r = await api('/challenges/' + encodeURIComponent(ID));
     if (!r.ok) {
       if (r.status === 404) { if (first) $('head').innerHTML = ''; finish('bad', 'This challenge is gone: it was solved, or closed after 2 hours.'); }
+      else if (r.status === 401 || r.status === 403) { $('state').innerHTML = '<div class="banner bad">' + esc(SIGN_IN_AGAIN) + '</div>'; }
       else if (first) { $('head').innerHTML = '<span class="error">' + esc(errText(r.data, r.status)) + '</span> <button type="button" class="ghost small" id="again">Try again</button>'; $('again').onclick = () => refresh(true); }
-      return;
+      return r;
     }
     ch = r.data.challenge;
     renderHead();
-    if (ch.state !== 'pending') { applyState(); return; }
-    if (!widget) widget = mountCaptcha($('widget'), ch, { onOutcome: (o) => { if (o === 'solved') { ch.state = 'solved'; applyState(); } else if (o === 'expired') { ch.state = 'expired'; applyState(); } else if (o === 'accepted') setTimeout(() => refresh(false), 1500); } });
+    if (ch.state !== 'pending') { applyState(); return r; }
+    if (ch.ready === false) { $('widget').innerHTML = '<p class="muted">Nothing to answer yet: the pool has not met a captcha on this page. This page keeps checking.</p>'; return r; }
+    if (!widget) {
+      $('widget').innerHTML = '';
+      widget = mountCaptcha($('widget'), ch, { onOutcome: (o) => { if (o === 'solved') { ch.state = 'solved'; applyState(); } else if (o === 'expired') { ch.state = 'expired'; applyState(); } else if (o === 'accepted' && watch) setTimeout(() => watch.now(), 1500); } });
+    }
+    return r;
   }
-  refresh(true);
-  setInterval(tick, 1000);
-  timer = setInterval(() => { if (!document.hidden) refresh(false); }, 4000);
+  (async () => {
+    await refresh(true);
+    if (finished) return;
+    // The checkbox wall clears by itself once clicked, and tlpool notices: look every 3 s.
+    watch = poller(() => refresh(false), ch && ch.type === 'checkbox' ? 3000 : 4000, {
+      onAuth: () => { $('state').innerHTML = '<div class="banner bad">' + esc(SIGN_IN_AGAIN) + '</div>'; },
+      onTimeout: () => { if (!finished) $('state').innerHTML = '<div class="banner info">' + esc(STOPPED_15) + '</div>'; },
+    });
+  })();
+  timer = setInterval(tick, 1000);
 })();
 </script>
 </body>
@@ -771,6 +880,8 @@ const SETTINGS_PAGE_HTML = /* html */ `<!doctype html>
     <div class="field"><label for="budget">Pages per account per day</label><input id="budget" type="number" min="0" max="1000" step="1" /><span class="hint">Default 30. Spread around the clock with random gaps.</span></div>
     <div class="field"><label>Ramp for new accounts</label><div class="row"><span>Day 1</span><input id="ramp1" type="number" min="0" max="1000" step="1" /><span>Day 2</span><input id="ramp2" type="number" min="0" max="1000" step="1" /><span class="muted">then the full budget</span></div><span class="hint">Default 10, then 20.</span></div>
     <div class="field"><label for="share">Reserved for the phone button</label><div class="row"><input id="share" type="number" min="0" max="90" step="1" /><span>% of each day's budget</span></div></div>
+    <div class="field"><label for="xhr">Link lookups per account per day</label><input id="xhr" type="number" min="0" max="2000" step="1" /><span class="hint">In-page lookups (media links, older-sets pages) on their own budget. Default 60.</span></div>
+    <div class="field"><label>Share of the budget each kind of work may use</label><div class="row"><span>New</span><input id="ceil-new" type="number" min="0" max="100" step="1" /><span>Verify</span><input id="ceil-verify" type="number" min="0" max="100" step="1" /><span>Recheck</span><input id="ceil-recheck" type="number" min="0" max="100" step="1" /><span>Backfill</span><input id="ceil-backfill" type="number" min="0" max="100" step="1" /><span class="muted">%</span></div><span class="hint">The phone button can always use everything. Defaults 100, 100, 90, 75: backfill stops first.</span></div>
     <div class="field"><label for="images">First-party images</label><select id="images"><option value="block">Block</option><option value="allow">Allow</option></select><span class="hint">Video, ads and ad scripts are always blocked.</span></div>
     <div class="row"><span id="lim-msg" class="muted"></span><span class="spacer"></span><button id="lim-save" type="submit">Save</button></div>
   </form>
@@ -802,6 +913,8 @@ ${COMMON_JS}
     $('ramp1').value = lim.ramp && lim.ramp[0] != null ? lim.ramp[0] : '';
     $('ramp2').value = lim.ramp && lim.ramp[1] != null ? lim.ramp[1] : '';
     $('share').value = lim.reservedPhoneShare != null ? Math.round(lim.reservedPhoneShare * 100) : '';
+    $('xhr').value = lim.xhrBudgetPerDay ?? '';
+    for (const p of ['new', 'verify', 'recheck', 'backfill']) $('ceil-' + p).value = lim.priorityCeilings && lim.priorityCeilings[p] != null ? Math.round(lim.priorityCeilings[p] * 100) : '';
     if (lim.imagePolicy) {
       if (![...$('images').options].some((o) => o.value === lim.imagePolicy)) $('images').add(new Option(lim.imagePolicy, lim.imagePolicy));
       $('images').value = lim.imagePolicy;
@@ -816,6 +929,10 @@ ${COMMON_JS}
     if (n('ramp1') != null && n('ramp2') != null) body.ramp = [n('ramp1'), n('ramp2')];
     if (n('share') != null) body.reservedPhoneShare = n('share') / 100;
     if ($('images').value) body.imagePolicy = $('images').value;
+    if (n('xhr') != null) body.xhrBudgetPerDay = n('xhr');
+    const ceil = {};
+    for (const p of ['new', 'verify', 'recheck', 'backfill']) if (n('ceil-' + p) != null) ceil[p] = n('ceil-' + p) / 100;
+    if (Object.keys(ceil).length) body.priorityCeilings = ceil;
     $('lim-save').disabled = true; $('lim-msg').textContent = 'saving…';
     const r = await api('/limits', jsonInit('PUT', body));
     $('lim-save').disabled = false;
