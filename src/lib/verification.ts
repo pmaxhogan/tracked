@@ -14,7 +14,10 @@
  * fetches from two accounts are the evidence the names are real.
  *
  * State per set URL in `set_verification` (migration 0007):
- *   - no row: nothing trustworthy fetched yet
+ *   - no row: nothing trustworthy fetched yet. For a set mkvid is waiting on,
+ *     the scheduler's render feeder (lib/fetch-scheduler.ts
+ *     renderFeedCandidates) asks for this first fetch instead of waiting for
+ *     the set's recheck by age
  *   - `pending`: one passing fetch recorded; the scheduler asks for the
  *     second one (priority `verify`, `excludeAccounts`) once `verify_due_at`
  *     passes

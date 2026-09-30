@@ -84,6 +84,12 @@ export const PoolSettingsSchema = z.object({
     cooldownSeconds: z.number().int().min(0).max(86400),
     dailyCap: z.number().int().min(0).max(1000),
   }),
+  /**
+   * The render feeder (lib/fetch-scheduler.ts): first fetches per UTC day, at
+   * most, for sets mkvid is waiting on that have no verified list and no
+   * verification started (default 40; 0 = off). Paced across the day.
+   */
+  renderFeedPerDay: z.number().int().min(0).max(500),
 })
 
 export type PoolSettings = z.infer<typeof PoolSettingsSchema>
@@ -108,6 +114,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   backfill: { stepIntervalHours: 24, jitterHours: 6 },
   manualMaxFetches: 10,
   forcedRefetch: { cooldownSeconds: 120, dailyCap: 40 },
+  renderFeedPerDay: 40,
 }
 
 type Plain = Record<string, unknown>

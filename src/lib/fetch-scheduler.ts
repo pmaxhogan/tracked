@@ -13,7 +13,11 @@
  *   - new          a DJ's listing page (discovery, once a day ± jitter per DJ,
  *                  spread around the clock) and never-fetched sets up to
  *                  `newSetMaxAgeDays` old
- *   - verify       the second fetch of a pending verification (lib/verification.ts)
+ *   - verify       the second fetch of a pending verification (lib/verification.ts),
+ *                  then the render feeder: the FIRST fetch of a set mkvid is
+ *                  waiting on that has no verified list and no verification
+ *                  started (oldest request first, `renderFeedPerDay` a UTC
+ *                  day, paced across the day, one per tick at most)
  *   - recheck      a processed set whose `set_schedule.next_due_at` passed
  *                  (pace by set age, lib/pool-settings.ts `recheckIntervalSeconds`)
  *   - backfill     never-fetched older sets, and one "older sets" step of a DJ
@@ -52,6 +56,8 @@ import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { fetchOptsFromEnv, isStopTheBatchError } from './upstream1001'
 import { deferVerification, dueVerifications, noteSetFetch, type VerificationResult } from './verification'
 import { syncOne, type SyncOneResult } from './sync'
+import { MKVID_MAX_ATTEMPTS } from './mkvid'
+import { DISCOVERED_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 const HOUR = 3600
@@ -70,6 +76,12 @@ const MKVID_WAITING_SPREAD_SECONDS = 2 * 24 * HOUR
 const DJ_RETRY_SECONDS = HOUR
 /** CACHE KV: when ensureSetSchedules last ran (unix seconds). */
 export const ENSURE_STAMP_KEY = 'scheduler:ensure_at'
+/** CACHE KV prefix: render-feeder first fetches run on a UTC day (`<prefix><YYYY-MM-DD>` → count). */
+export const RENDER_FEED_COUNT_PREFIX = 'scheduler:render_feed:'
+/** The render feeder submits at most this many first fetches per tick. */
+export const RENDER_FEED_MAX_PER_TICK = 1
+/** A set fetched this recently is not fed again, so a fetch that started no verification (decoy, no rows) is not repeated every tick. */
+export const RENDER_FEED_REFETCH_COOLDOWN_SECONDS = 2 * 24 * HOUR
 
 // ─── set schedules ──────────────────────────────────────────────────────────
 
@@ -333,17 +345,104 @@ function retryAfterOf(e: unknown): number | null {
   return typeof r === 'number' && Number.isFinite(r) ? r : null
 }
 
+// ─── the render feeder ──────────────────────────────────────────────────────
+
+/**
+ * Sets mkvid is waiting on whose list can only become verified once someone
+ * fetches them: a `pending` mkvid request whose set has no `set_verification`
+ * row at all. Without this they wait for their recheck by age, which for old
+ * sets is weeks away. Oldest request first.
+ *
+ * Only requests the claim could take once verified (lib/mkvid.ts
+ * tryClaimRow, lib/mkvid-readiness.ts): not banned / superseded / failed /
+ * done / claimed, attempts left, the set (under the request's own DJ) still
+ * processed, not abandoned, subscribed, and not resolving to a YouTube video
+ * (the claim would supersede it; a set whose only video fails the
+ * full-recording rule has none). Also left out: a set still inside the 7-day
+ * ID wait whose last known list has ID rows (it is young, so its 12 h / 1 d
+ * recheck fetches it anyway), one whose longest audio player is known to be
+ * shorter than the last cue (mkvid would refuse it as incomplete), one waiting
+ * out a failed attempt or out of attempts today, and one fetched within
+ * RENDER_FEED_REFETCH_COOLDOWN_SECONDS.
+ */
+export async function renderFeedCandidates(env: Env, nowSec: number, limit: number): Promise<Array<{ url: string; slug: string }>> {
+  if (limit <= 0) return []
+  const res = await dbOf(env)
+    .prepare(
+      `SELECT r.set_url AS url, MIN(r.slug) AS slug, MIN(r.created_at) AS created, MIN(r.rowid) AS rid
+         FROM mkvid_requests r
+         JOIN tracklists t ON t.slug = r.slug AND t.url = r.set_url AND t.processed = 1 AND t.abandoned = 0
+         LEFT JOIN set_schedule s ON s.url = r.set_url
+         LEFT JOIN mkvid_request_tracks k ON k.request_id = r.id
+         LEFT JOIN set_media_facts f ON f.set_url = r.set_url
+        WHERE r.status = 'pending' AND r.attempts < ${MKVID_MAX_ATTEMPTS}
+          AND r.slug IN (SELECT slug FROM subscriptions)
+          AND NOT EXISTS (SELECT 1 FROM set_verification v WHERE v.url = r.set_url)
+          AND (t.video_id IS NULL OR (t.video_source = 'mkvid' AND t.video_id = r.replaces_video_id))
+          AND NOT (f.audio_max_seconds IS NOT NULL AND r.last_cue_seconds IS NOT NULL AND f.audio_max_seconds < r.last_cue_seconds)
+          AND NOT (r.skip_id_wait = 0
+                   AND COALESCE(k.id_rows, r.track_count - r.ided_count, 1) > 0
+                   AND (CASE WHEN r.set_date IS NOT NULL AND r.set_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                             THEN CAST(strftime('%s', r.set_date) AS INTEGER) ELSE ${DISCOVERED_SQL} END) > ?)
+          AND (s.last_fetched_at IS NULL OR s.last_fetched_at <= ?)
+          AND ${ATTEMPT_OK_SQL}
+        GROUP BY r.set_url ORDER BY created, rid LIMIT ?`,
+    )
+    .bind(nowSec - ID_WAIT_SECONDS, nowSec - RENDER_FEED_REFETCH_COOLDOWN_SECONDS, nowSec, utcDay(nowSec), limit)
+    .all<{ url: string; slug: string }>()
+  return res.results.map((r) => ({ url: r.url, slug: r.slug }))
+}
+
+const renderFeedKey = (nowSec: number) => RENDER_FEED_COUNT_PREFIX + utcDay(nowSec)
+
+/** Render-feeder first fetches counted on `nowSec`'s UTC day. */
+export async function renderFeedUsed(env: Env, nowSec: number): Promise<number> {
+  return Math.max(0, Number((await env.CACHE.get(renderFeedKey(nowSec))) ?? 0) || 0)
+}
+
+async function countRenderFeed(env: Env, nowSec: number): Promise<void> {
+  const used = await renderFeedUsed(env, nowSec)
+  await env.CACHE.put(renderFeedKey(nowSec), String(used + 1), { expirationTtl: 2 * 24 * HOUR })
+}
+
+/**
+ * How many render-feeder items this tick may submit: `renderFeedPerDay`
+ * spread evenly over the UTC day (the day's share up to now, plus one), less
+ * what already ran today, and RENDER_FEED_MAX_PER_TICK at most. 40 a day is
+ * about one every 36 minutes, never a burst after midnight.
+ */
+export async function renderFeedAllowance(env: Env, settings: PoolSettings, nowSec: number): Promise<number> {
+  const cap = settings.renderFeedPerDay
+  if (!(cap > 0)) return 0
+  const intoDay = ((nowSec % 86400) + 86400) % 86400
+  const soFar = Math.min(cap, Math.floor((cap * intoDay) / 86400) + 1)
+  const used = await renderFeedUsed(env, nowSec)
+  return Math.max(0, Math.min(RENDER_FEED_MAX_PER_TICK, soFar - used))
+}
+
 // ─── picking a tick ─────────────────────────────────────────────────────────
 
 export type TickItem =
   | { cls: ScheduledClass; kind: 'set'; slug: string; url: string }
   | { cls: 'verify'; kind: 'verify'; slug: string; url: string; excludeAccounts: string[] }
+  | { cls: 'verify'; kind: 'render_feed'; slug: string; url: string }
   | { cls: 'recheck'; kind: 'recheck'; slug: string; url: string }
   | { cls: 'new'; kind: 'discovery'; slug: string }
   | { cls: 'backfill'; kind: 'dj_backfill'; slug: string }
 
-/** What is due now, `n` items at most, filled class by class in `priorities.order`. */
-export async function pickTickItems(env: Env, settings: PoolSettings, n: number, slugs: ReadonlySet<string>, nowSec = nowSeconds()): Promise<TickItem[]> {
+/**
+ * What is due now, `n` items at most, filled class by class in
+ * `priorities.order`. `feedAllowance` = render-feeder items allowed this tick
+ * (default: renderFeedAllowance, i.e. the daily cap and its pacing).
+ */
+export async function pickTickItems(
+  env: Env,
+  settings: PoolSettings,
+  n: number,
+  slugs: ReadonlySet<string>,
+  nowSec = nowSeconds(),
+  feedAllowance?: number,
+): Promise<TickItem[]> {
   if (n <= 0) return []
   const db = dbOf(env)
   const lim = Math.max(n * 4, 20)
@@ -385,6 +484,20 @@ export async function pickTickItems(env: Env, settings: PoolSettings, n: number,
     if (!slugs.has(v.slug) || seenUrl.has(v.url)) continue
     seenUrl.add(v.url)
     buckets.verify.push({ cls: 'verify', kind: 'verify', slug: v.slug, url: v.url, excludeAccounts: v.excludeAccounts })
+  }
+
+  // The render feeder: first fetches for sets mkvid waits on, in the verify
+  // class right after the second fetches (completing a pair beats opening one).
+  const feed = feedAllowance ?? (await renderFeedAllowance(env, settings, nowSec))
+  if (feed > 0) {
+    let added = 0
+    for (const c of await renderFeedCandidates(env, nowSec, feed + 10)) {
+      if (added >= feed) break
+      if (!slugs.has(c.slug) || seenUrl.has(c.url)) continue
+      seenUrl.add(c.url)
+      buckets.verify.push({ cls: 'verify', kind: 'render_feed', slug: c.slug, url: c.url })
+      added++
+    }
   }
 
   // Due by schedule - or marked due by hand: `checked_at = 0` is how
@@ -522,6 +635,20 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           await deferSetSchedule(env, item.url, nowSec + CLAIM_RECHECK_SECONDS)
           await claimSetAttempt(env, item.url, nowSec)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
+        } else if (item.kind === 'render_feed') {
+          // A first fetch, by any account: noteSetFetch records it as pending
+          // and the verify class asks a different account >= 2 h later.
+          await claimSetAttempt(env, item.url, nowSec)
+          res = await syncOne(env, sub, tokenInfo.accessToken, {
+            log,
+            trigger: 'cron.render_feed',
+            skipDjCrawl: true,
+            priority: 'verify',
+            selection: { newUrls: [], recheckUrls: [item.url] },
+            settings,
+          })
+          // A pool refusal fetched nothing: it does not use the day's allowance.
+          if (!res.stoppedBy) await countRenderFeed(env, nowSec)
         } else if (item.kind === 'verify') {
           await deferVerification(env, item.url, nowSec + CLAIM_VERIFY_SECONDS)
           await claimSetAttempt(env, item.url, nowSec)

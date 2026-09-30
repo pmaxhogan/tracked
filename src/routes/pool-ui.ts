@@ -912,6 +912,7 @@ const SETTINGS_PAGE_HTML = /* html */ `<!doctype html>
     <h2 style="margin-top:0.5rem">Priority order</h2>
     <p class="muted" style="font-size:0.85rem;margin-top:0">When the budget runs short, earlier ones go first.</p>
     <div id="prios"></div>
+    <div class="field" style="margin-top:0.9rem"><label for="feed">Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /><span class="hint">Sets mkvid is waiting on with no verified list, oldest request first, as verification fetches. Default 40; 0 = off.</span></div>
     <div class="row" style="margin-top:0.9rem"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit">Save</button></div>
   </form>
 </main>
@@ -970,6 +971,7 @@ ${COMMON_JS}
     $('sch-rows').innerHTML = sched.recheck.bands.map(rowHtml).join('');
     $('beyond').value = sched.recheck.beyondIntervalHours ?? '';
     $('over180').value = sched.recheck.beyondExceptionIntervalHours ?? '';
+    $('feed').value = sched.renderFeedPerDay ?? '';
     renderPrios();
   }
   function renderPrios() {
@@ -1013,6 +1015,7 @@ ${COMMON_JS}
     const recheck = { beyondIntervalHours: numOrNull('beyond'), beyondExceptionIntervalHours: numOrNull('over180') };
     if (rows.length) recheck.bands = rows;
     const body = { recheck, priorities: { order: sched.priorities.order } };
+    if (numOrNull('feed') != null) body.renderFeedPerDay = numOrNull('feed');
     $('sch-save').disabled = true; $('sch-msg').textContent = 'saving…';
     const r = await fetch('/subscriptions/api/pool/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
     $('sch-save').disabled = false;
