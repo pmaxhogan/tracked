@@ -22,6 +22,7 @@ import { extractIPBlockedAddress, IPBlockedError, isIPBlocked, looksLikeCfShell,
 import { isPaused } from './ban-state'
 import { poolConfigFromEnv, poolFetch, type PoolConfig, type PoolKind, type PoolPriority } from './pool'
 import { UpstreamHttpError, UpstreamPausedError, UpstreamTransportError, UpstreamUnavailableError } from './upstream-errors'
+import { capturePage, type PageStoreOpts, type PageVerdict } from './page-store'
 import type { Logger } from './log'
 import type { Env } from '../types'
 
@@ -52,6 +53,8 @@ export type Fetch1001Opts = {
   form?: Record<string, string>
   /** Extra request headers (Referer, X-Requested-With…). */
   headers?: Record<string, string>
+  /** Where to keep every page returned (R2 + its daily counter). Absent = not kept. */
+  pages?: Pick<PageStoreOpts, 'bucket' | 'counter'>
   /** Legacy, ignored: sessions live in tlpool's browser profiles now. */
   state?: ChallengeState
 }
@@ -64,6 +67,7 @@ export function fetchOptsFromEnv(env: Env, log?: Logger, overrides: Partial<Fetc
   return {
     pool: poolConfigFromEnv(env),
     cacheKv: env.CACHE,
+    ...(env.PAGES ? { pages: { bucket: env.PAGES, counter: env.CACHE } } : {}),
     log,
     ...overrides,
   }
@@ -108,6 +112,15 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
     },
     log,
   )
+  if (opts.pages) {
+    // Background, never awaited: index.ts drains it into ctx.waitUntil.
+    const blocked = isIPBlocked(r.html) || looksLikeCfShell(r.html)
+    const verdict: { verdict: PageVerdict; detail: string } | undefined = blocked ? { verdict: 'challenge', detail: 'block page or challenge shell' } : undefined
+    capturePage(
+      { ...opts.pages, log },
+      { url, kind, priority, status: r.status, html: r.html, accountId: r.accountId, exitLabel: r.exitLabel, fetchedAt: r.fetchedAt, verdict, variant: opts.form ? JSON.stringify(opts.form) : undefined },
+    )
+  }
   if (FINAL_UPSTREAM_STATUSES.has(r.status)) {
     log?.warn('fetch1001.upstream_final_status', { url, status: r.status, accountId: r.accountId })
     throw new UpstreamHttpError(r.status, url)

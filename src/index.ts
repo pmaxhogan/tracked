@@ -18,6 +18,8 @@ import { runKvMigrationTickSafely } from './lib/kv-import'
 import { pruneNowPlayingAudit } from './lib/now-playing-audit'
 import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
+import { drainPageCaptures } from './lib/page-store'
+import { poolPagesApp } from './routes/pool-pages'
 import { prunePoolEvents, retryFailedPoolPushes } from './lib/pool-events'
 import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
 import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
@@ -31,6 +33,16 @@ const app = new OpenAPIHono<{ Bindings: Env }>({
     const issues = result.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`)
     return c.json({ error: 'invalid_request', message: issues.join('; ') }, 400)
   },
+})
+
+// Stored pages (lib/page-store.ts) are written in the background; hand them to waitUntil once the response is built.
+app.use('*', async (c, next) => {
+  await next()
+  try {
+    c.executionCtx.waitUntil(drainPageCaptures())
+  } catch {
+    /* no executionCtx (tests): captures still run */
+  }
 })
 
 app.openapi(nowPlayingRoute, nowPlayingHandler)
@@ -69,6 +81,7 @@ app.route('/mkvid', mkvidApp)
 
 // tlpool's webhook (POST /pool/events), gated by TLPOOL_TOKEN inside the
 // sub-app — skipped by the API_TOKEN wildcard gate below, like /mkvid.
+app.route('/pool', poolPagesApp) // GET /pool/pages*, bearer API_TOKEN, gated per path; before poolEventsApp's '*' gate
 app.route('/pool', poolEventsApp)
 // Documented here only (the sub-app is plain Hono), so mkvid's side has a
 // published contract for the claim, track list included.
@@ -170,6 +183,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       }
       // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
       await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) })
+      await drainPageCaptures()
     })(),
   )
 }

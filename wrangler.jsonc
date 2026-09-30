@@ -48,6 +48,9 @@
       "preview_id": "9afbf5f55a5541a88c6685bcc1fea10b"
     }
   ],
+  // Every 1001tracklists page tlpool returns, gzip, kept for troubleshooting (lib/page-store.ts).
+  // Bucket lifecycle by prefix: flagged/ 180 d, clean/ 30 d, other/ 30 d.
+  "r2_buckets": [{ "binding": "PAGES", "bucket_name": "tracked-pages" }],
   "vars": {
     // Cloudflare Access team domain (e.g. "yourteam.cloudflareaccess.com").
     // The /subscriptions/* routes verify the Cf-Access-Jwt-Assertion header
