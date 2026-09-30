@@ -311,7 +311,7 @@ describe('queue lifecycle', () => {
     expect(await getMkvidLastPoll(env)).toMatchObject({ outcome: 'not_connected', accounts: [] })
 
     // A failed request retried later is reassigned to whichever account has room then.
-    await failMkvidRequest(env, { id: rows[0]!.id, error: 'boom', permanent: true }, log)
+    await failMkvidRequest(env, { id: rows[0]!.id, error: 'incomplete_recording: clip', permanent: true }, log)
     expect(await retryMkvidRequest(env, rows[0]!.id)).toBe(true)
     const fresh = makeEnv({ MKVID_DAILY_CLAIM_CAP: '0', MKVID_SHARED_DAILY_CLAIM_CAP: '5', DB: env.DB })
     expect((await claimMkvidRequest(fresh, log, both))!).toMatchObject({ setUrl: 'https://x/tracklist/1', account: 'shared' })

@@ -44,7 +44,7 @@ import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
 import { isVerified } from './verification'
 import { CLAIM_READY_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
-import { isOldStyle, retireReplacedVideo } from './mkvid-recreate'
+import { isOldStyle, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
@@ -156,7 +156,7 @@ export async function getMkvidLastPoll(env: Env): Promise<MkvidLastPoll | null> 
  */
 export async function dailyClaimsUsed(env: Env, account: MkvidAccount = 'primary'): Promise<number> {
   const r = await dbOf(env)
-    .prepare("SELECT COUNT(*) AS n FROM mkvid_requests WHERE status IN ('claimed', 'done') AND claimed_at IS NOT NULL AND claimed_at >= ? AND account = ?")
+    .prepare('SELECT COUNT(*) AS n FROM mkvid_claims WHERE claimed_at >= ? AND account = ? AND refunded_at IS NULL')
     .bind(quotaDayStart(), account)
     .first<{ n: number }>()
   return Number(r?.n ?? 0)
@@ -859,8 +859,14 @@ function claimTtl(env: Env): number {
  * whose set has meanwhile gained a video on 1001tracklists is marked
  * `superseded` and skipped. Returns null when there is nothing to do.
  */
-export async function claimMkvidRequest(env: Env, log: Logger, accounts: readonly MkvidAccount[] = ['primary']): Promise<MkvidClaim | null> {
-  const { request, outcome } = await claimNext(env, log, accounts)
+export async function claimMkvidRequest(
+  env: Env,
+  log: Logger,
+  accounts: readonly MkvidAccount[] = ['primary'],
+  /** The style mkvid renders tracked jobs with. Recreations are only handed to a `scene` mkvid. */
+  style: string | null = null,
+): Promise<MkvidClaim | null> {
+  const { request, outcome } = await claimNext(env, log, accounts, style === RECREATE_STYLE)
   await recordMkvidPoll(env, outcome, accounts)
   if (!request) return null
   return { ...request, ...(await getMkvidTracks(env, request.id)) }
@@ -874,7 +880,7 @@ export type MkvidClaim = MkvidRequest & MkvidTrackList
  * with a connected YouTube account); the first of them with claims left today
  * gets the request, so the primary project fills before the shared one.
  */
-async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[]): Promise<{ request: MkvidRequest | null; outcome: MkvidPollOutcome }> {
+async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[], allowRecreate: boolean): Promise<{ request: MkvidRequest | null; outcome: MkvidPollOutcome }> {
   const db = dbOf(env)
   const now = nowSeconds()
   const stale = now - claimTtl(env)
@@ -892,14 +898,22 @@ async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[
   // Only requests whose list is verified and whose ID wait is over (or
   // skipped) are candidates (lib/mkvid-readiness.ts); the rest stay pending,
   // untouched, in their place. Each row is looked at once per claim.
+  // A recreation is only worth rendering in the current style: an mkvid that
+  // does not say `scene` never gets one (it stays pending, no attempt, no slot).
+  const recreateGate = allowRecreate ? '' : 'AND r.replaces_video_id IS NULL'
   const seen = new Set<string>()
   for (let round = 0; round < 4; round++) {
+    // Rows already looked at this claim are excluded, so a page of rows the
+    // fetch layer does not call verified cannot hide the ones behind it.
+    const skip = [...seen]
     const batch = await db
       .prepare(
         `SELECT r.* FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id
-          WHERE (${CLAIMABLE_WHERE_R}) AND ${CLAIM_READY_SQL} ${QUEUE_ORDER_R} LIMIT 25`,
+          WHERE (${CLAIMABLE_WHERE_R}) AND ${CLAIM_READY_SQL} ${recreateGate}
+            ${skip.length ? `AND r.id NOT IN (${skip.map(() => '?').join(', ')})` : ''}
+          ${QUEUE_ORDER_R} LIMIT 25`,
       )
-      .bind(now, stale, now - ID_WAIT_SECONDS)
+      .bind(now, stale, now - ID_WAIT_SECONDS, ...skip)
       .all<Row>()
     const fresh = batch.results.filter((row) => !seen.has(row.id))
     if (!fresh.length) return { request: null, outcome: 'empty' }
@@ -929,6 +943,7 @@ async function tryClaimRow(
         .prepare("UPDATE mkvid_requests SET status = 'superseded', error = ?, updated_at = ? WHERE id = ?")
         .bind(`set already resolves to ${tl.video_id} (${tl.video_source ?? '1001tl'})`, now, row.id)
         .run()
+      if (row.replaces_video_id) await queueSupersededOldVideo(env, row.id, tl.video_id)
       log.info('mkvid.claim_superseded', { id: row.id, setUrl: row.set_url, videoId: tl.video_id })
       return null
     }
@@ -954,6 +969,11 @@ async function tryClaimRow(
     .run()
   // Lost a race with another claimer (two mkvid instances) — pick again.
   if ((r.meta.changes ?? 0) === 0) return null
+  // The day's usage is this append-only log (migration 0010), never the rows' state.
+  await db
+    .prepare('INSERT INTO mkvid_claims (request_id, account, claimed_at, recreate) VALUES (?, ?, ?, ?)')
+    .bind(row.id, account, now, row.replaces_video_id ? 1 : 0)
+    .run()
   const claimed = await getMkvidRequest(env, row.id)
   log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, account, dailyClaims: used + 1, cap, recreate: !!row.replaces_video_id })
   return claimed
@@ -1010,6 +1030,10 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
   const oldVideoId = req.replacesVideoId && req.replacesVideoId !== input.videoId ? req.replacesVideoId : null
   const replacing = !!oldVideoId && tl?.video_source === 'mkvid' && tl.video_id === oldVideoId
   if (tl?.video_id && tl.video_id !== input.videoId && !replacing) {
+    // A recreation superseded by an official recording: the old mkvid video
+    // still goes (out of both playlists if the sync left it there, then
+    // deleted from YouTube). The new upload is kept on record in video_id.
+    if (oldVideoId) await retireSupersededOldVideo(env, { requestId: req.id, slug: req.slug, setUrl: req.setUrl, oldVideoId, replacedBy: tl.video_id, accessToken, log })
     await db
       .prepare(
         "UPDATE mkvid_requests SET status = 'superseded', video_id = ?, video_url = ?, privacy = ?, style = ?, replaces_video_id = NULL, job_id = COALESCE(?, job_id), error = ?, updated_at = ? WHERE id = ?",
@@ -1074,6 +1098,11 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
 
   // A recreation: the new video is in; now the old one comes out of both
   // playlists and is queued for deletion from YouTube (lib/mkvid-recreate.ts).
+  if (oldVideoId && !replacing) {
+    // A recreation whose set no longer resolves to the old video (the owner or
+    // the dead-video pass took it out meanwhile): it still gets deleted.
+    await retireSupersededOldVideo(env, { requestId: req.id, slug: req.slug, setUrl: req.setUrl, oldVideoId, replacedBy: input.videoId, accessToken, log, combined })
+  }
   if (replacing && oldVideoId) {
     await retireReplacedVideo(env, {
       requestId: req.id,
@@ -1085,6 +1114,7 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
       playlistId: playlistId!,
       playlistVideoIds: existing,
       combined,
+      combinedOk: combinedStatus !== 'failed' && combinedStatus !== 'unavailable',
       accessToken,
       log,
     })
@@ -1138,6 +1168,23 @@ export type FailInput = { id: string; error: string; permanent?: boolean; jobId?
  * source is gone) parks the request as `failed`; anything else goes back to
  * `pending` with a backoff, until MAX_ATTEMPTS claims have been used.
  */
+/**
+ * Failure reasons this Worker accepts as final without a second look: the
+ * incomplete recording and the source-gone answers (the families mkvid's own
+ * isPermanentFailure uses). Anything else that would park a request gets
+ * UNKNOWN_FAILURE_GRACE retries first.
+ */
+export const KNOWN_PERMANENT_RE = /incomplete_recording|unsupported url|not available|is private|private (?:track|video)|removed|does not exist|\b404\b|geo[- ]?restricted|no video formats/i
+export const UNKNOWN_FAILURE_GRACE = 3
+
+/** mkvid gave a claim back (nothing uploaded): its latest log row stops counting. */
+async function refundLatestClaim(env: Env, requestId: string, now: number): Promise<void> {
+  await dbOf(env)
+    .prepare('UPDATE mkvid_claims SET refunded_at = ? WHERE id = (SELECT MAX(id) FROM mkvid_claims WHERE request_id = ? AND refunded_at IS NULL)')
+    .bind(now, requestId)
+    .run()
+}
+
 export async function failMkvidRequest(env: Env, input: FailInput, log: Logger): Promise<{ status: MkvidStatus; attempts: number } | null> {
   const req = await getMkvidRequest(env, input.id)
   if (!req) return null
@@ -1153,7 +1200,29 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
       )
       .bind(now + UNVERIFIED_RETRY_SECONDS, input.error.slice(0, 500), v(input.jobId), now, req.id)
       .run()
+    await refundLatestClaim(env, req.id, now)
     log.warn('mkvid.refused_unverified', { id: req.id, slug: req.slug, setUrl: req.setUrl, error: input.error.slice(0, 200) })
+    return { status: 'pending', attempts: Math.max(0, req.attempts - 1) }
+  }
+  // Nothing was uploaded: the claim stops counting against today's cap.
+  await refundLatestClaim(env, req.id, now)
+  // A failure that would park the request (permanent, or out of attempts) for
+  // a reason this Worker does not recognise as final (a newer mkvid, a new
+  // error text) is not believed at once: back to pending with a backoff and
+  // no attempt used, the first UNKNOWN_FAILURE_GRACE times.
+  const wouldPark = !!input.permanent || req.attempts >= MKVID_MAX_ATTEMPTS
+  const unknownFailures = Number(
+    (await dbOf(env).prepare('SELECT unknown_failures AS n FROM mkvid_requests WHERE id = ?').bind(req.id).first<{ n: number }>())?.n ?? 0,
+  )
+  if (wouldPark && !KNOWN_PERMANENT_RE.test(input.error) && unknownFailures < UNKNOWN_FAILURE_GRACE) {
+    const notBefore = now + RETRY_BACKOFF_SECONDS * (unknownFailures + 1)
+    await dbOf(env)
+      .prepare(
+        "UPDATE mkvid_requests SET status = 'pending', attempts = MAX(0, attempts - 1), unknown_failures = unknown_failures + 1, claimed_at = NULL, not_before = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?",
+      )
+      .bind(notBefore, input.error.slice(0, 500), v(input.jobId), now, req.id)
+      .run()
+    log.warn('mkvid.failed_unknown_reason', { id: req.id, slug: req.slug, setUrl: req.setUrl, unknownFailures: unknownFailures + 1, permanent: !!input.permanent, error: input.error.slice(0, 200) })
     return { status: 'pending', attempts: Math.max(0, req.attempts - 1) }
   }
   const exhausted = req.attempts >= MKVID_MAX_ATTEMPTS
@@ -1181,10 +1250,14 @@ export async function retryMkvidRequest(env: Env, id: string): Promise<boolean> 
 
 /** The set gained a real recording on 1001tracklists: nothing left for mkvid to do. */
 export async function supersedeMkvidRequestForSet(env: Env, setUrl: string, videoId: string): Promise<boolean> {
-  const r = await dbOf(env)
+  const db = dbOf(env)
+  const before = await db.prepare("SELECT id, replaces_video_id FROM mkvid_requests WHERE set_url = ? AND status IN ('pending', 'claimed')").bind(setUrl).first<{ id: string; replaces_video_id: string | null }>()
+  const r = await db
     .prepare("UPDATE mkvid_requests SET status = 'superseded', error = ?, updated_at = ? WHERE set_url = ? AND status IN ('pending', 'claimed')")
     .bind(`1001tracklists now has ${videoId}`, nowSeconds(), setUrl)
     .run()
+  // A recreation under way: the old mkvid video (the sync's swap took it out of the playlists) still gets deleted.
+  if ((r.meta.changes ?? 0) > 0 && before?.replaces_video_id) await queueSupersededOldVideo(env, before.id, videoId)
   return (r.meta.changes ?? 0) > 0
 }
 

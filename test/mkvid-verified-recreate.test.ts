@@ -17,6 +17,7 @@ import {
   MKVID_MAX_ATTEMPTS,
   nextMkvidRequests,
   saveMkvidTracks,
+  supersedeMkvidRequestForSet,
 } from '../src/lib/mkvid'
 import { ID_WAIT_SECONDS, isVerified, mkvidReadiness, readinessFor, setAgeReference } from '../src/lib/mkvid-readiness'
 import {
@@ -27,8 +28,10 @@ import {
   isOldStyle,
   listUndeletedOldVideos,
   recreateMkvidRequest,
+  resetOldVideoDelete,
   retryDueOldVideoDeletions,
 } from '../src/lib/mkvid-recreate'
+import { cachePlaylistVideoIds } from '../src/lib/playlist-cache'
 import { parseTracklist } from '../src/lib/tracklists1001'
 import { saveSubState, setTracklistVideo } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
@@ -174,12 +177,12 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     const env = makeEnv()
     const a = await queue(env, 'a', { setDate: '2026-02-01', verified: false })
     const b = await queue(env, 'b', { setDate: '2026-01-01' })
-    const claimed = (await claimMkvidRequest(env, log))!
+    const claimed = (await claimMkvidRequest(env, log, ['primary'], 'scene'))!
     expect(claimed.id).toBe(b.id)
     expect(claimed.tracksTrusted).toBe(true)
     expect(claimed.tracks.length).toBeGreaterThan(0)
     expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', attempts: 0, notBefore: null, error: null })
-    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
     expect(await isVerified(env, a.setUrl)).toBe(false)
     expect(await isVerified(env, b.setUrl)).toBe(true)
   })
@@ -188,27 +191,27 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     const env = makeEnv()
     const a = await queue(env, 'a', { verified: false })
     await storeVerifiedList(env, a.setUrl, { trusted: false })
-    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
     expect(await nextMkvidRequests(env)).toEqual([])
   })
 
   it('holds a verified list with IDs until the set is 7 days old; Render now skips the wait', async () => {
     const env = makeEnv()
     const recent = await queue(env, 'recent', { setDate: isoDay(NOW - 2 * DAY), idRows: 2 })
-    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
     expect(await getMkvidRequest(env, recent.id)).toMatchObject({ status: 'pending', attempts: 0 })
     const rd = (await readinessFor(env, [recent])).get(recent.id)!
     expect(rd).toMatchObject({ state: 'waiting_ids', idRows: 2 })
 
     // An old set with IDs goes, ID rows and all.
     const old = await queue(env, 'old', { setDate: isoDay(NOW - 10 * DAY), idRows: 5 })
-    expect((await claimMkvidRequest(env, log))!.id).toBe(old.id)
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(old.id)
 
     // Render now on the recent one.
     const r = await app.request(`http://x/subscriptions/api/mkvid/render-now/${recent.id}`, { method: 'POST' }, env)
     expect(r.status).toBe(200)
     expect((await getMkvidRequest(env, recent.id))!.skipIdWait).toBe(true)
-    const c = (await claimMkvidRequest(env, log))!
+    const c = (await claimMkvidRequest(env, log, ['primary'], 'scene'))!
     expect(c.id).toBe(recent.id)
     expect(c.tracks.filter((t) => t.isId)).toHaveLength(2)
     // A done request cannot take it.
@@ -220,17 +223,17 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     const env = makeEnv()
     const a = await queue(env, 'undated', { setDate: null, idRows: 1 })
     await env.DB.prepare('INSERT INTO tracklists (slug, url, position, discovered_at) VALUES (?, ?, 0, ?)').bind('lillypalmer', a.setUrl, NOW - 3 * DAY).run()
-    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
     expect((await readinessFor(env, [a])).get(a.id)).toEqual({ state: 'waiting_ids', until: NOW - 3 * DAY + ID_WAIT_SECONDS, idRows: 1 })
     await env.DB.prepare('UPDATE tracklists SET discovered_at = ?').bind(NOW - 8 * DAY).run()
-    expect((await claimMkvidRequest(env, log))!.id).toBe(a.id)
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(a.id)
   })
 
   it('mkvid refusing an unverified list puts it back without using an attempt, however often it happens', async () => {
     const env = makeEnv()
     const a = await queue(env, 'a')
     for (let i = 0; i < MKVID_MAX_ATTEMPTS + 2; i++) {
-      const c = (await claimMkvidRequest(env, log))!
+      const c = (await claimMkvidRequest(env, log, ['primary'], 'scene'))!
       expect(c.id).toBe(a.id)
       const r = await failMkvidRequest(env, { id: a.id, error: 'unverified_tracklist: tracksTrusted is false' }, log)
       expect(r).toEqual({ status: 'pending', attempts: 0 })
@@ -312,7 +315,14 @@ describe('delete and recreate', () => {
 
     // The claim does not take the set's own old mkvid video for a real recording.
     await env.DB.prepare("UPDATE mkvid_requests SET status = 'banned' WHERE id = ?").bind(other.id).run()
-    const claim = (await (await post(env, '/mkvid/claim', {})).json()) as { request: { id: string } }
+    // The old video is on record from the moment Recreate was pressed.
+    expect(await env.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first()).toEqual({ state: 'awaiting_replacement', replaced_by: '' })
+    // An mkvid that does not render scene is not handed the recreation; it stays pending, no attempt, no slot.
+    expect(((await (await post(env, '/mkvid/claim', { style: 'static' })).json()) as { request: unknown }).request).toBeNull()
+    expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', attempts: 0 })
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM mkvid_claims').first<{ n: number }>())!.n).toBe(0)
+    const claim = (await (await post(env, '/mkvid/claim', { accounts: ['primary'], style: 'scene' })).json()) as { request: { id: string } }
     expect(claim.request.id).toBe(a.id)
     expect((await getMkvidRequest(env, a.id))!.status).toBe('claimed')
 
@@ -398,7 +408,7 @@ describe('delete and recreate', () => {
     const a = await doneRequest(env)
     await recreateMkvidRequest(env, a.id, log)
     await setTracklistVideo(env, 'lillypalmer', a.setUrl, { videoId: 'realVid0003', source: '1001tl' })
-    expect(await claimMkvidRequest(env, log)).toBeNull()
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
     expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'superseded' })
   })
 
@@ -437,5 +447,149 @@ describe('delete and recreate', () => {
     expect(await getMkvidRequest(env, y.id)).toMatchObject({ status: 'pending', replacesVideoId: 'yVid0000001' })
     expect(await getMkvidRequest(env, z.id)).toMatchObject({ status: 'done', replacesVideoId: null })
     expect(await countOldStyleVideos(env)).toBe(0)
+  })
+})
+
+// ─── W7 review fixes ────────────────────────────────────────────────────────
+
+describe('W7 review: daily cap from the append-only claims log (blocker 1)', () => {
+  const health = async (env: Env) =>
+    (await (await app.request('http://x/mkvid/health', { headers: { Authorization: 'Bearer mk-secret' } }, env)).json()) as { dailyClaims: number; verifiedLists: boolean; recreateStyle: string }
+
+  it("recreating today's uploads gives no slot back: the claim stays capped", async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '2', MKVID_SHARED_DAILY_CLAIM_CAP: '0' })
+    const a = await queue(env, 'a')
+    await queue(env, 'b')
+    for (const vid of ['vidDone0001', 'vidDone0002']) {
+      const c = (await claimMkvidRequest(env, log, ['primary'], 'scene'))!
+      await env.DB.prepare("UPDATE mkvid_requests SET status = 'done', video_id = ?, style = 'static' WHERE id = ?").bind(vid, c.id).run()
+    }
+    expect((await health(env)).dailyClaims).toBe(2)
+    const bulk = await app.request('http://x/subscriptions/api/mkvid/recreate-old-style', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expect: 2 }) }, env)
+    expect(bulk.status).toBe(200)
+    // Both rows are pending again, but today's two uploads still count.
+    expect((await health(env)).dailyClaims).toBe(2)
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
+    expect((await getMkvidRequest(env, a.id))!.status).toBe('pending')
+  })
+
+  it("a recreation's claim counts as one use; a claim given back through /mkvid/fail stops counting", async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '5' })
+    const a = await doneRequest(env)
+    await recreateMkvidRequest(env, a.id, log)
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(a.id)
+    expect((await health(env)).dailyClaims).toBe(1)
+    expect(await env.DB.prepare('SELECT recreate FROM mkvid_claims WHERE request_id = ?').bind(a.id).first()).toEqual({ recreate: 1 })
+    await failMkvidRequest(env, { id: a.id, error: 'unverified_tracklist: race' }, log)
+    expect((await health(env)).dailyClaims).toBe(0)
+  })
+
+  it("health advertises verified lists and the recreate style (what mkvid's scene style waits for)", async () => {
+    const h = await health(makeEnv())
+    expect(h.verifiedLists).toBe(true)
+    expect(h.recreateStyle).toBe('scene')
+  })
+})
+
+describe('W7 review: the old video survives every supersede path (major 4)', () => {
+  it('superseded at completion: the old mkvid video leaves the playlists and is queued for deletion; the orphan upload stays on record', async () => {
+    const env = makeEnv()
+    const a = await doneRequest(env)
+    await recreateMkvidRequest(env, a.id, log)
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(a.id)
+    // An official recording turns up while mkvid renders; the sync has not swapped yet.
+    await setTracklistVideo(env, 'lillypalmer', a.setUrl, { videoId: 'realVid0003', source: '1001tl' })
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set([OLD, 'realVid0003']))
+    const r = await post(env, '/mkvid/complete', { id: a.id, videoId: NEW, style: 'scene' })
+    expect(await r.json()).toMatchObject({ status: 'superseded', videoId: NEW, existingVideoId: 'realVid0003' })
+    expect(removeVideoFromPlaylist).toHaveBeenCalledWith('PLa', OLD, 'ya29')
+    expect(await env.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first()).toEqual({ state: 'pending', replaced_by: 'realVid0003' })
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'superseded', videoId: NEW, replacesVideoId: null })
+    expect((await listUndeletedOldVideos(env)).map((o) => o.videoId)).toEqual([OLD])
+  })
+
+  it('superseded by the sync or at claim time: the old video is queued for deletion too', async () => {
+    const env = makeEnv()
+    const a = await doneRequest(env)
+    await recreateMkvidRequest(env, a.id, log)
+    // Waiting for its replacement: not on the panel's to-delete list, and Retry cannot delete it early.
+    expect(await listUndeletedOldVideos(env)).toEqual([])
+    expect(await resetOldVideoDelete(env, OLD)).toBe(false)
+    expect(await supersedeMkvidRequestForSet(env, a.setUrl, 'realVid0004')).toBe(true)
+    expect(await env.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first()).toEqual({ state: 'pending', replaced_by: 'realVid0004' })
+
+    const env2 = makeEnv()
+    const b = await doneRequest(env2)
+    await recreateMkvidRequest(env2, b.id, log)
+    await setTracklistVideo(env2, 'lillypalmer', b.setUrl, { videoId: 'realVid0005', source: '1001tl' })
+    expect(await claimMkvidRequest(env2, log, ['primary'], 'scene')).toBeNull()
+    expect(await env2.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first()).toEqual({ state: 'pending', replaced_by: 'realVid0005' })
+  })
+})
+
+describe('W7 review: tolerant of failure reasons tracked does not know (major 3)', () => {
+  it('an unknown permanent reason goes back to pending with a backoff, no attempt used, 3 times; the 4th parks it', async () => {
+    const env = makeEnv()
+    const a = await queue(env, 'a')
+    for (let i = 1; i <= 3; i++) {
+      await env.DB.prepare("UPDATE mkvid_requests SET status = 'pending', not_before = NULL WHERE id = ?").bind(a.id).run()
+      await claimMkvidRequest(env, log, ['primary'])
+      const r = await failMkvidRequest(env, { id: a.id, error: 'brand_new_reason: something mkvid learned', permanent: true }, log)
+      expect(r).toMatchObject({ status: 'pending' })
+      const row = (await getMkvidRequest(env, a.id))!
+      expect(row.attempts).toBe(0)
+      expect(row.notBefore).toBeGreaterThan(NOW)
+    }
+    await env.DB.prepare("UPDATE mkvid_requests SET status = 'pending', not_before = NULL WHERE id = ?").bind(a.id).run()
+    await claimMkvidRequest(env, log, ['primary'])
+    expect(await failMkvidRequest(env, { id: a.id, error: 'brand_new_reason: again', permanent: true }, log)).toMatchObject({ status: 'failed' })
+  })
+
+  it('a reason tracked knows to be final parks the request at once', async () => {
+    const env = makeEnv()
+    const a = await queue(env, 'a')
+    await claimMkvidRequest(env, log, ['primary'])
+    expect(await failMkvidRequest(env, { id: a.id, error: 'incomplete_recording: source is 600s', permanent: true }, log)).toMatchObject({ status: 'failed' })
+  })
+})
+
+describe('W7 review minors', () => {
+  it('(5) more than 25 rows the fetch layer does not call verified cannot hide a verified one behind them', async () => {
+    const env = makeEnv()
+    for (let i = 0; i < 30; i++) {
+      const r = await queue(env, `u${i}`, { setDate: '2026-06-01' })
+      // The stored flag says trusted, the fetch layer says not verified.
+      await env.DB.prepare('DELETE FROM set_verification WHERE url = ?').bind(r.setUrl).run()
+    }
+    const v = await queue(env, 'verified', { setDate: '2020-01-01' }) // last in line
+    expect((await claimMkvidRequest(env, log, ['primary']))!.id).toBe(v.id)
+  })
+
+  it("(6) when the new video missed the combined playlist, the old one's delete waits 6 h", async () => {
+    const env = makeEnv({ MKVID_URL: 'https://mkvid.example/' })
+    const a = await doneRequest(env)
+    await recreateMkvidRequest(env, a.id, log)
+    await claimMkvidRequest(env, log, ['primary'], 'scene')
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set([OLD]))
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockImplementation(async (pl: string) => {
+      if (pl === 'PLc') throw new Error('youtube playlistItems.insert 503')
+    })
+    const calls = stubMkvid(() => json({ ok: true, outcome: 'deleted' }))
+    expect(await (await post(env, '/mkvid/complete', { id: a.id, videoId: NEW, style: 'scene' })).json()).toMatchObject({ status: 'done', replacedVideoId: OLD })
+    const row = (await env.DB.prepare('SELECT state, next_try_at FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first<{ state: string; next_try_at: number }>())!
+    expect(row.state).toBe('pending')
+    expect(row.next_try_at).toBeGreaterThanOrEqual(NOW + 6 * 3600 - 5)
+    expect(calls).toHaveLength(0) // not due: the immediate attempt after the completion is skipped too
+  })
+
+  it('(7) an old video missing from the cached listing is looked for in a fresh one before the delete is recorded', async () => {
+    const env = makeEnv()
+    const a = await doneRequest(env)
+    await recreateMkvidRequest(env, a.id, log)
+    await claimMkvidRequest(env, log, ['primary'], 'scene')
+    await cachePlaylistVideoIds(env, 'PLa', new Set<string>()) // stale cache: the old video is not in it
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set([OLD]))
+    await post(env, '/mkvid/complete', { id: a.id, videoId: NEW, style: 'scene' })
+    expect(removeVideoFromPlaylist).toHaveBeenCalledWith('PLa', OLD, 'ya29')
   })
 })

@@ -18,20 +18,27 @@
  * waits for IDs like any other, and its claim counts against the daily cap.
  *
  * mkvid_requests keeps one row per set (set_url is UNIQUE), so a recreation
- * resets the row in place rather than adding one.
+ * resets the row in place rather than adding one. The old video id is also
+ * written to `mkvid_old_videos` (state `awaiting_replacement`) the moment
+ * Recreate is pressed, so no later path can lose it: it becomes `pending`
+ * (delete it) when the new video is in, or when the set is superseded by an
+ * official recording, and leaves the table's to-do list only on a confirmed
+ * delete. Only an mkvid that renders `scene` is handed a recreation.
  */
 
 import type { Env } from '../types'
 import { dbOf } from './db'
 import { errorFields, type Logger } from './log'
-import { removeFromCombined, type CombinedHandle } from './combined-playlist'
+import { openCombinedPlaylist, removeFromCombined, type CombinedHandle } from './combined-playlist'
 import { cachePlaylistVideoIds } from './playlist-cache'
-import { removeVideoFromPlaylist } from './youtube-playlists'
+import { listPlaylistVideoIds, removeVideoFromPlaylist } from './youtube-playlists'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
 /** The style every video should have; anything else (or unknown) is "old style". */
 export const CURRENT_STYLE = 'scene'
+/** A recreation is only claimed by an mkvid that says (claim body `style`) it renders this. */
+export const RECREATE_STYLE = CURRENT_STYLE
 export const isOldStyle = (style: string | null | undefined): boolean => style !== CURRENT_STYLE
 
 /** Sort key just behind the last pending request (or behind today, when the queue is empty). */
@@ -67,6 +74,7 @@ export async function recreateMkvidRequest(env: Env, id: string, log: Logger): P
     .bind(await backOfQueueKey(env), nowSeconds(), id)
     .run()
   if ((r.meta.changes ?? 0) === 0) return { ok: false, error: 'not_done' }
+  await recordAwaitingOldVideos(env, [id])
   log.info('mkvid.recreate_queued', { id, replacesVideoId: row.video_id })
   return { ok: true, id, replacesVideoId: row.video_id }
 }
@@ -113,8 +121,86 @@ export async function recreateOldStyleVideos(
     const res = await db.batch(stmts.slice(i, i + 50))
     for (const x of res) queued += x.meta.changes ?? 0
   }
+  await recordAwaitingOldVideos(env, rows.results.map((r) => r.id))
   log.info('mkvid.recreate_old_style_queued', { queued })
   return { ok: true, queued }
+}
+
+/** Put the old video of each recreation on record (awaiting its replacement); a row already there is kept. */
+async function recordAwaitingOldVideos(env: Env, requestIds: string[]): Promise<void> {
+  const db = dbOf(env)
+  const now = nowSeconds()
+  const stmt = `INSERT INTO mkvid_old_videos (video_id, request_id, slug, set_url, style, replaced_by, state, attempts, next_try_at, created_at, updated_at)
+                SELECT replaces_video_id, id, slug, set_url, style, '', 'awaiting_replacement', 0, 0, ?, ?
+                  FROM mkvid_requests WHERE id = ? AND replaces_video_id IS NOT NULL
+                ON CONFLICT(video_id) DO NOTHING`
+  for (let i = 0; i < requestIds.length; i += 50) await db.batch(requestIds.slice(i, i + 50).map((id) => db.prepare(stmt).bind(now, now, id)))
+}
+
+/** Mark a recorded old video for deletion (from awaiting_replacement, or insert it). `delaySeconds` holds the delete back. */
+async function markOldVideoForDelete(
+  env: Env,
+  a: { requestId: string; slug: string; setUrl: string; oldVideoId: string; oldStyle: string | null; replacedBy: string; delaySeconds?: number },
+): Promise<void> {
+  const now = nowSeconds()
+  const at = now + (a.delaySeconds ?? 0)
+  await dbOf(env)
+    .prepare(
+      `INSERT INTO mkvid_old_videos (video_id, request_id, slug, set_url, style, replaced_by, state, attempts, next_try_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+       ON CONFLICT(video_id) DO UPDATE SET state = 'pending', replaced_by = excluded.replaced_by, next_try_at = excluded.next_try_at, updated_at = excluded.updated_at
+         WHERE mkvid_old_videos.state = 'awaiting_replacement'`,
+    )
+    .bind(a.oldVideoId, a.requestId, a.slug, a.setUrl, a.oldStyle, a.replacedBy, at, now, now)
+    .run()
+}
+
+/**
+ * The set was superseded while a recreation was under way (an official
+ * recording, or the old video already gone from the set): the old mkvid video
+ * still comes out of both playlists (the sync's swap usually did that
+ * already; every step here is a no-op then) and is queued for deletion.
+ * Best-effort on the playlists; the delete record is always written.
+ */
+export async function retireSupersededOldVideo(
+  env: Env,
+  a: { requestId: string; slug: string; setUrl: string; oldVideoId: string; replacedBy: string; accessToken: string | null; log: Logger; combined?: CombinedHandle | null },
+): Promise<void> {
+  const db = dbOf(env)
+  if (a.accessToken) {
+    try {
+      const pl = await db.prepare('SELECT playlist_id FROM sub_sync WHERE slug = ?').bind(a.slug).first<{ playlist_id: string | null }>()
+      if (pl?.playlist_id) {
+        const ids = await listPlaylistVideoIds(pl.playlist_id, a.accessToken)
+        if (ids.has(a.oldVideoId)) {
+          await removeVideoFromPlaylist(pl.playlist_id, a.oldVideoId, a.accessToken)
+          ids.delete(a.oldVideoId)
+        }
+        await cachePlaylistVideoIds(env, pl.playlist_id, ids)
+      }
+      const combined = a.combined ?? (await openCombinedPlaylist(env, a.accessToken, a.log))
+      if (combined) await removeFromCombined(combined, a.oldVideoId, a.accessToken, a.log)
+    } catch (e) {
+      a.log.warn('mkvid.recreate_superseded_remove_failed', { id: a.requestId, oldVideoId: a.oldVideoId, ...errorFields(e) })
+    }
+  }
+  const style = (await db.prepare('SELECT style FROM mkvid_old_videos WHERE video_id = ?').bind(a.oldVideoId).first<{ style: string | null }>())?.style ?? null
+  await markOldVideoForDelete(env, { requestId: a.requestId, slug: a.slug, setUrl: a.setUrl, oldVideoId: a.oldVideoId, oldStyle: style, replacedBy: a.replacedBy })
+  a.log.info('mkvid.recreate_superseded_old_retired', { id: a.requestId, oldVideoId: a.oldVideoId, replacedBy: a.replacedBy })
+}
+
+/**
+ * Supersede without a YouTube token (the sync noticing an official recording,
+ * the claim finding one): the sync's recheck swap has already taken the old
+ * mkvid video out of the playlists; queue its deletion.
+ */
+export async function queueSupersededOldVideo(env: Env, requestId: string, replacedBy: string): Promise<void> {
+  const r = await dbOf(env)
+    .prepare('SELECT slug, set_url, replaces_video_id FROM mkvid_requests WHERE id = ?')
+    .bind(requestId)
+    .first<{ slug: string; set_url: string; replaces_video_id: string | null }>()
+  if (!r?.replaces_video_id) return
+  await markOldVideoForDelete(env, { requestId, slug: r.slug, setUrl: r.set_url, oldVideoId: r.replaces_video_id, oldStyle: null, replacedBy })
 }
 
 // ─── retiring the replaced video ────────────────────────────────────────────
@@ -138,11 +224,22 @@ export async function retireReplacedVideo(
     playlistId: string
     playlistVideoIds: Set<string>
     combined: CombinedHandle | null
+    /** false = the new video did not make it into the combined playlist: hold the delete back 6 h (the backfill adds it meanwhile). */
+    combinedOk?: boolean
     accessToken: string
     log: Logger
   },
 ): Promise<{ removedFromArtist: number; removedFromCombined: number }> {
   let removedFromArtist = 0
+  // The cached listing can be stale: look again before concluding the old video is not there.
+  if (!a.playlistVideoIds.has(a.oldVideoId)) {
+    try {
+      const fresh = await listPlaylistVideoIds(a.playlistId, a.accessToken)
+      for (const id of fresh) a.playlistVideoIds.add(id)
+    } catch (e) {
+      a.log.warn('mkvid.recreate_relist_failed', { id: a.requestId, playlistId: a.playlistId, ...errorFields(e) })
+    }
+  }
   if (a.playlistVideoIds.has(a.oldVideoId)) {
     removedFromArtist = await removeVideoFromPlaylist(a.playlistId, a.oldVideoId, a.accessToken)
     a.playlistVideoIds.delete(a.oldVideoId)
@@ -156,22 +253,22 @@ export async function retireReplacedVideo(
       a.log.warn('mkvid.recreate_combined_remove_failed', { id: a.requestId, oldVideoId: a.oldVideoId, ...errorFields(e) })
     }
   }
-  const now = nowSeconds()
-  await dbOf(env)
-    .prepare(
-      `INSERT INTO mkvid_old_videos (video_id, request_id, slug, set_url, style, replaced_by, state, attempts, next_try_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
-       ON CONFLICT(video_id) DO NOTHING`,
-    )
-    .bind(a.oldVideoId, a.requestId, a.slug, a.setUrl, a.oldStyle, a.newVideoId, now, now, now)
-    .run()
+  await markOldVideoForDelete(env, {
+    requestId: a.requestId,
+    slug: a.slug,
+    setUrl: a.setUrl,
+    oldVideoId: a.oldVideoId,
+    oldStyle: a.oldStyle,
+    replacedBy: a.newVideoId,
+    delaySeconds: a.combinedOk === false ? 6 * 3600 : 0,
+  })
   a.log.info('mkvid.recreate_retired', { id: a.requestId, oldVideoId: a.oldVideoId, newVideoId: a.newVideoId, removedFromArtist, removedFromCombined })
   return { removedFromArtist, removedFromCombined }
 }
 
 // ─── asking mkvid to delete ─────────────────────────────────────────────────
 
-export type OldVideoState = 'pending' | 'deleted' | 'refused'
+export type OldVideoState = 'awaiting_replacement' | 'pending' | 'deleted' | 'refused'
 export type OldVideo = {
   videoId: string
   requestId: string
@@ -270,11 +367,13 @@ export async function callMkvidDelete(env: Env, videoId: string, requestId: stri
 }
 
 /** One delete attempt for a recorded old video; updates its row. */
-export async function deleteOldVideo(env: Env, videoId: string, log: Logger, fetcher: typeof fetch = fetch): Promise<OldVideo | null> {
+export async function deleteOldVideo(env: Env, videoId: string, log: Logger, fetcher: typeof fetch = fetch, opts: { dueOnly?: boolean } = {}): Promise<OldVideo | null> {
   const db = dbOf(env)
   const row = await db.prepare('SELECT * FROM mkvid_old_videos WHERE video_id = ?').bind(videoId).first<OldRow>()
   if (!row) return null
   if (row.state !== 'pending') return toOld(row)
+  // Held back on purpose (the new video missed the combined playlist): the cron takes it when due.
+  if (opts.dueOnly && Number(row.next_try_at) > nowSeconds()) return toOld(row)
   const r = await callMkvidDelete(env, videoId, row.request_id, fetcher)
   const now = nowSeconds()
   const attempts = Number(row.attempts) + 1
@@ -323,7 +422,7 @@ export async function retryDueOldVideoDeletions(env: Env, log: Logger, limit = 5
 /** Old videos not yet deleted (pending, refused), newest first — the panel's "to delete" list. */
 export async function listUndeletedOldVideos(env: Env, limit = 50): Promise<OldVideo[]> {
   const res = await dbOf(env)
-    .prepare("SELECT * FROM mkvid_old_videos WHERE state <> 'deleted' ORDER BY created_at DESC LIMIT ?")
+    .prepare("SELECT * FROM mkvid_old_videos WHERE state IN ('pending', 'refused') ORDER BY created_at DESC LIMIT ?")
     .bind(limit)
     .all<OldRow>()
   return res.results.map(toOld)
@@ -332,7 +431,7 @@ export async function listUndeletedOldVideos(env: Env, limit = 50): Promise<OldV
 /** Panel: try a pending (or refused) delete again on the next cron tick, or right now via deleteOldVideo. */
 export async function resetOldVideoDelete(env: Env, videoId: string): Promise<boolean> {
   const r = await dbOf(env)
-    .prepare("UPDATE mkvid_old_videos SET state = 'pending', next_try_at = 0, updated_at = ? WHERE video_id = ? AND state <> 'deleted'")
+    .prepare("UPDATE mkvid_old_videos SET state = 'pending', next_try_at = 0, updated_at = ? WHERE video_id = ? AND state IN ('pending', 'refused')")
     .bind(nowSeconds(), videoId)
     .run()
   return (r.meta.changes ?? 0) > 0

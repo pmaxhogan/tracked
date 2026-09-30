@@ -226,6 +226,10 @@ export const MkvidClaimBody = z
     accounts: z.array(z.enum(['primary', 'shared'])).max(2).optional().openapi({
       description: 'Accounts mkvid can upload through right now; default ["primary"]. The primary fills first, then the shared one.',
     }),
+    style: z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/).optional().openapi({
+      description: 'The visual style mkvid renders tracked jobs with (TRACKED_STYLE). A delete-and-recreate request is only handed to an mkvid that says `scene`; others leave it pending.',
+      example: 'scene',
+    }),
   })
   .openapi('MkvidClaimBody')
 
