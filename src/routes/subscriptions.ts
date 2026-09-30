@@ -1,6 +1,7 @@
-import { Hono, type Context } from 'hono'
+import { Hono } from 'hono'
 import type { Env } from '../types'
 import { cfAccess } from '../middleware/cf-access'
+import { servePage } from '../ui/pages'
 import {
   addSubscription,
   djUrlFor,
@@ -89,14 +90,6 @@ subscriptionsApp.onError((e, c) => {
 
 // /removed page, removal log + undo, remove-and-replace (routes/playlist-hygiene.ts). Behind cfAccess above.
 subscriptionsApp.route('/', hygieneApp)
-
-/** Serves one admin page. The page bundles its own JS inline; no-store keeps
- *  browsers from serving a stale page after a deploy, which would mean stale UI
- *  logic (e.g. a banner that doesn't auto-refresh). */
-export function servePage(c: Context, html: string) {
-  c.header('Cache-Control', 'no-store')
-  return c.html(html)
-}
 
 subscriptionsApp.get('/', (c) => servePage(c, HOME_HTML))
 // The old main page also answers at the pages it is being split into, so links

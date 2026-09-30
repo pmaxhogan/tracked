@@ -6,7 +6,13 @@
  *
  * Everything is inline (no bundler, no static assets — same as the pages
  * themselves). The pages interpolate these constants; `BAN_JS` reads
- * `document.body.dataset.banPage` to know which optional elements exist.
+ * `document.body.dataset.banPage` to know what to do:
+ *   main      the old main page: history + auto-prompt
+ *   settings  route, devices and episode history (live status)
+ *   home      auto-prompt for notifications once per session
+ *   other     banner only (the default, and the pool pages' stub DOM)
+ * BAN_JS runs in the pool tests' stub DOM too (no body, window, navigator,
+ * classList), so those accesses are guarded.
  */
 
 export const UNBLOCK_URL = 'https://www.1001tracklists.com/info/unblock_ip.html'
@@ -97,7 +103,10 @@ export const BAN_HISTORY_HTML = /* html */ `
 
 export const BAN_JS = /* js */ `
 (() => {
-  const page = document.body.dataset.banPage || 'other';
+  const page = (document.body && document.body.dataset && document.body.dataset.banPage) || 'other';
+  // history: route, devices and episodes, live status. prompts: auto-prompt for notifications once per session.
+  const history = page === 'main' || page === 'settings';
+  const prompts = page === 'main' || page === 'home';
   const $ = (id) => document.getElementById(id);
   const $banner = $('ban-banner'), $title = $('ban-title'), $sub = $('ban-sub'), $foot = $('ban-foot'), $icon = $('ban-icon');
   const $enable = $('ban-enable'), $dismiss = $('ban-dismiss');
@@ -120,8 +129,12 @@ export const BAN_JS = /* js */ `
     const pause = s.pause && !s.pauseDismissed ? s.pause : null;
     if (!home && !pause) { $banner.hidden = true; return; }
     const simulated = !!(home && home.simulated);
-    $banner.classList.toggle('paused', !!pause);
-    $banner.classList.toggle('simulated', simulated);
+    if ($banner.classList) {
+      $banner.classList.toggle('paused', !!pause);
+      $banner.classList.toggle('simulated', simulated);
+    } else {
+      $banner.className = 'ban-alert' + (pause ? ' paused' : '') + (simulated ? ' simulated' : '');
+    }
     const ip = home && home.ip ? ' <code>' + esc(home.ip) + '</code>' : '';
     if (pause) {
       $icon.textContent = '⛔';
@@ -146,43 +159,65 @@ export const BAN_JS = /* js */ `
       const s = await r.json();
       lastStatus = s;
       renderBanner(s);
-      if (page === 'main') { renderRoute(s); renderEpisodes(s); renderDevices(s); }
+      if (history) { renderRoute(s); renderEpisodes(s); renderDevices(s); }
       return s;
     } catch { lastHttp = 0; return null; }
   }
 
   if ($dismiss) $dismiss.addEventListener('click', async () => {
     $dismiss.disabled = true;
-    try { await api('/api/ban/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await refresh(page === 'main'); } finally { $dismiss.disabled = false; }
+    try { await api('/api/ban/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await refresh(history); } finally { $dismiss.disabled = false; }
   });
 
   // ── Web Push ────────────────────────────────────────────────────────────
-  const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.isSecureContext;
+  const pushSupported = typeof navigator !== 'undefined' && typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.isSecureContext;
   let pushConfig = null; // { configured, publicKey }
-  let swReg = null;
+  let regPromise = null;
 
   function b64ToBytes(b64) { const pad = '='.repeat((4 - (b64.length % 4)) % 4); const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/')); const out = new Uint8Array(raw.length); for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i); return out; }
   async function getConfig() { if (pushConfig) return pushConfig; const r = await api('/api/push/config'); pushConfig = r.ok ? await r.json() : { configured: false }; return pushConfig; }
-  async function dropOldRegistrations() {
-    // Before the /ui move the worker lived at /subscriptions/sw.js. Drop it and its push
-    // subscription once, so a device does not end up subscribed twice.
-    if (!navigator.serviceWorker.getRegistrations) return false;
-    let dropped = false;
-    for (const reg of await navigator.serviceWorker.getRegistrations()) {
-      if (!/\\/subscriptions\\/$/.test(reg.scope || '')) continue;
+  // Before the /ui move the worker lived at /subscriptions/sw.js. Its registrations are
+  // listed first and only dropped (dropOldRegistrations) once the /ui/ subscription is on
+  // the server, so a failed re-subscribe leaves the old one delivering.
+  async function oldRegistrations() {
+    if (!navigator.serviceWorker.getRegistrations) return [];
+    try { return (await navigator.serviceWorker.getRegistrations()).filter((reg) => /\\/subscriptions\\/$/.test((reg && reg.scope) || '')); } catch { return []; }
+  }
+  async function dropOldRegistrations(olds) {
+    for (const reg of olds) {
       try {
         const old = reg.pushManager && (await reg.pushManager.getSubscription());
         if (old) {
-          await api('/api/push/unsubscribe', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ endpoint: old.endpoint }) });
+          await api('/api/push/unsubscribe', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ endpoint: old.endpoint }) }).catch(() => {});
           await old.unsubscribe().catch(() => {});
-          dropped = true;
         }
       } catch {}
       await reg.unregister().catch(() => {});
     }
-    return dropped;
   }
-  async function getReg() { if (swReg) return swReg; swReg = await navigator.serviceWorker.register('/ui/sw.js', { scope: '/ui/' }); return swReg; }
+  // pushManager.subscribe rejects until the registration has an active worker, and
+  // register() resolves while the worker is still installing. Wait on the worker's own
+  // statechange: navigator.serviceWorker.ready never resolves on /ui (outside scope /ui/).
+  function whenActive(reg) {
+    if (reg.active) return Promise.resolve(reg);
+    const w = reg.installing || reg.waiting;
+    if (!w || typeof w.addEventListener !== 'function') return Promise.resolve(reg); // let subscribe report it
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (w.state === 'activated') resolve(reg);
+        else if (w.state === 'redundant') reject(new Error('the notification service worker failed to install'));
+      };
+      w.addEventListener('statechange', check);
+      check();
+    });
+  }
+  function getReg() {
+    if (!regPromise) {
+      regPromise = navigator.serviceWorker.register('/ui/sw.js', { scope: '/ui/' }).then(whenActive);
+      regPromise.catch(() => { regPromise = null; }); // a failed install is retried on the next call
+    }
+    return regPromise;
+  }
 
   function setAlertsUI(state, msg) {
     if ($aState) { $aState.textContent = state.text; $aState.className = 'alerts-state ' + state.cls; }
@@ -213,7 +248,7 @@ export const BAN_JS = /* js */ `
     if (!pushSupported) return;
     const cfg = await getConfig();
     if (!cfg.configured) { setAlertsUI(await pushState(), 'Set VAPID_* secrets on the Worker first.'); return; }
-    // Already granted (the old-worker migration below): no prompt, so no request.
+    // Already granted (the recovery in syncPush below): no prompt, so no request.
     const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
     if (perm !== 'granted') { setAlertsUI(await pushState(), perm === 'denied' ? 'Permission denied — allow notifications for this site in the browser.' : ''); return; }
     const reg = await getReg();
@@ -221,22 +256,30 @@ export const BAN_JS = /* js */ `
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(cfg.publicKey) });
     await sendSubscription(sub);
     setAlertsUI(await pushState(), 'Subscribed. Press "Send test notification" to check delivery.');
-    if (page === 'main') refresh(true);
+    if (history) refresh(true);
+    return sub;
   }
 
   async function syncPush() {
     try {
-      const hadOld = pushSupported ? await dropOldRegistrations() : false;
+      const olds = pushSupported ? await oldRegistrations() : [];
       const st = await pushState();
-      // The old worker's subscription was dropped: re-subscribe under /ui/ without a prompt.
-      if (hadOld && !st.sub && Notification.permission === 'granted') { await enablePush(); return; }
-      setAlertsUI(st);
-      if (st.sub) await sendSubscription(st.sub); // keep the server copy fresh (endpoint rotation)
-      // Auto-prompt on the main page: first visit asks right away.
-      if (page === 'main' && st.showEnable && Notification.permission === 'default' && !sessionStorage.getItem('ban-push-prompted')) {
-        sessionStorage.setItem('ban-push-prompted', '1');
-        await enablePush();
+      let sub = st.sub || null;
+      if (!sub && st.showEnable && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        // Granted but no /ui/ subscription: the /subscriptions/ worker's migration, or a
+        // subscription lost some other way (the UI has no off switch). Re-subscribe without a prompt.
+        sub = await enablePush();
+      } else {
+        setAlertsUI(st);
+        if (sub) await sendSubscription(sub); // keep the server copy fresh (endpoint rotation)
+        // Auto-prompt (main and home pages): first visit asks right away.
+        if (prompts && st.showEnable && Notification.permission === 'default' && !sessionStorage.getItem('ban-push-prompted')) {
+          sessionStorage.setItem('ban-push-prompted', '1');
+          sub = await enablePush();
+        }
       }
+      // The /ui/ subscription is on the server: only now drop the old worker and its subscription.
+      if (sub && olds.length) await dropOldRegistrations(olds);
     } catch (e) { setAlertsUI({ text: 'error', cls: 'err', showEnable: true }, (e && e.message) || String(e)); }
   }
 
@@ -248,7 +291,7 @@ export const BAN_JS = /* js */ `
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { if ($aMsg) $aMsg.textContent = 'test failed: ' + (d.error || r.status); return; }
       if ($aMsg) $aMsg.textContent = d.total === 0 ? 'no devices subscribed yet' : 'sent to ' + d.sent + '/' + d.total + ' device' + (d.total === 1 ? '' : 's') + (d.removed ? ' (' + d.removed + ' stale removed)' : '') + (d.failed ? ' (' + d.failed + ' failed)' : '');
-      if (page === 'main') refresh(true);
+      if (history) refresh(true);
     } catch (e) { if ($aMsg) $aMsg.textContent = 'test failed: ' + ((e && e.message) || e); }
     finally { $aTest.disabled = false; }
   });
@@ -281,12 +324,12 @@ export const BAN_JS = /* js */ `
       const dur = open ? fmtDur(Date.now() - Date.parse(e.startedAt)) + '…' : fmtDur(e.blockedForMs);
       const push = (e.pushStart ? e.pushStart.sent + '/' + e.pushStart.total : '—') + (e.pushClear ? ' · ' + e.pushClear.sent + '/' + e.pushClear.total : '');
       return '<tr>' +
-        '<td' + (open ? ' class="open"' : '') + '>' + esc(fmtTime(e.startedAt)) + (open ? ' <b>(open)</b>' : '') + (e.simulated ? ' <span class="muted">sim</span>' : '') + '</td>' +
-        '<td>' + esc(dur) + '</td>' +
-        '<td class="mono">' + esc(e.ip || '—') + '</td>' +
-        '<td>' + esc(e.source) + (e.clearedBy ? ' → ' + esc(e.clearedBy) : '') + '</td>' +
-        '<td>' + e.poolRequests + ' / ' + e.brightdataRequests + (e.allBlockedHits ? ' <span class="bad" title="times every route was blocked">' + e.allBlockedHits + '⛔</span>' : '') + '</td>' +
-        '<td class="muted">' + esc(push) + '</td>' +
+        '<td data-label="Started"' + (open ? ' class="open"' : '') + '>' + esc(fmtTime(e.startedAt)) + (open ? ' <b>(open)</b>' : '') + (e.simulated ? ' <span class="muted">sim</span>' : '') + '</td>' +
+        '<td data-label="Lasted">' + esc(dur) + '</td>' +
+        '<td data-label="IP" class="mono">' + esc(e.ip || '—') + '</td>' +
+        '<td data-label="Seen by / cleared">' + esc(e.source) + (e.clearedBy ? ' → ' + esc(e.clearedBy) : '') + '</td>' +
+        '<td data-label="Pool / BrightData req">' + e.poolRequests + ' / ' + e.brightdataRequests + (e.allBlockedHits ? ' <span class="bad" title="times every route was blocked">' + e.allBlockedHits + '⛔</span>' : '') + '</td>' +
+        '<td data-label="Push start · clear" class="muted">' + esc(push) + '</td>' +
         '</tr>';
     }).join('');
     $eps.innerHTML = '<table class="ban-eps"><thead><tr><th>Started</th><th>Lasted</th><th>IP</th><th>Seen by / cleared</th><th>Pool / BrightData req</th><th>Push start · clear</th></tr></thead><tbody>' + rows + '</tbody></table>';
@@ -302,7 +345,7 @@ export const BAN_JS = /* js */ `
   });
 
   // ── boot ────────────────────────────────────────────────────────────────
-  refresh(page === 'main');
+  refresh(history);
   syncPush();
   // Status poll: every 15 s while the tab is visible, doubling (to 60 s) on
   // errors, stopped on 401/403 (Access login expired) and after 15 minutes.
@@ -312,10 +355,10 @@ export const BAN_JS = /* js */ `
   async function pollOnce() {
     pollTimer = null;
     if (pollStopped || polling) return;
-    if (Date.now() - POLL_STARTED > 15 * 60000) { stopPoll(page === 'main' ? 'Status refresh stopped after 15 minutes. Reload the page to check again.' : ''); return; }
+    if (Date.now() - POLL_STARTED > 15 * 60000) { stopPoll(history ? 'Status refresh stopped after 15 minutes. Reload the page to check again.' : ''); return; }
     if (document.hidden) return;
     polling = true;
-    await refresh(page === 'main');
+    await refresh(history);
     polling = false;
     if (lastHttp === 401 || lastHttp === 403) { stopPoll('Your Cloudflare Access login has expired. Reload the page to sign in again.'); return; }
     pollFails = lastHttp === 0 || lastHttp >= 500 ? pollFails + 1 : 0;

@@ -79,33 +79,52 @@ describe('push payload URLs point under /ui', () => {
 })
 
 describe('old service worker cleanup', () => {
-  it('drops the /subscriptions/ registration and its push subscription, then re-subscribes under /ui/ without a prompt', async () => {
+  /**
+   * A browser in which /ui/sw.js is not registered yet: register() resolves with
+   * an installing worker that activates a macrotask later, and subscribe()
+   * rejects until then (Chromium: "no active Service Worker").
+   */
+  async function runMigration(opts: { old: boolean }) {
     const { BAN_JS } = await import('../src/routes/ban-ui')
     const posts: Array<{ url: string; body: string }> = []
     const registered: Array<[string, unknown]> = []
+    const log: string[] = []
     let oldUnregistered = 0
     let newUnregistered = 0
     let oldUnsubscribed = 0
     let requestPermission = 0
+    let subscribeRejected = 0
     const oldReg = {
       scope: 'https://tracked.example/subscriptions/',
-      pushManager: { getSubscription: async () => ({ endpoint: 'https://push.example/old', unsubscribe: async () => { oldUnsubscribed++; return true } }) },
-      unregister: async () => { oldUnregistered++; return true },
+      pushManager: { getSubscription: async () => ({ endpoint: 'https://push.example/old', unsubscribe: async () => { oldUnsubscribed++; log.push('old.unsubscribe'); return true } }) },
+      unregister: async () => { oldUnregistered++; log.push('old.unregister'); return true },
     }
+    const listeners: Array<() => void> = []
+    const worker = { state: 'installing', addEventListener: (type: string, fn: () => void) => { if (type === 'statechange') listeners.push(fn) } }
     let newSub: { endpoint: string; toJSON: () => object } | null = null
-    const newReg = {
+    const newReg: Record<string, unknown> = {
       scope: 'https://tracked.example/ui/',
+      active: null, installing: null, waiting: null,
       pushManager: {
         getSubscription: async () => newSub,
-        subscribe: async () => (newSub = { endpoint: 'https://push.example/new', toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } }) }),
+        subscribe: async () => {
+          if (!newReg.active) { subscribeRejected++; throw new Error('AbortError: Subscription failed - no active Service Worker') }
+          log.push('subscribe')
+          return (newSub = { endpoint: 'https://push.example/new', toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } }) })
+        },
       },
       unregister: async () => { newUnregistered++; return true },
     }
+    const activate = () => { worker.state = 'activated'; newReg.active = worker; newReg.installing = null; for (const f of listeners) f() }
     const navigator = {
       userAgent: 'test',
       serviceWorker: {
-        getRegistrations: async () => [oldReg, newReg],
-        register: async (url: string, opts: unknown) => (registered.push([url, opts]), newReg),
+        getRegistrations: async () => (opts.old ? [oldReg] : []),
+        register: async (url: string, o: unknown) => {
+          registered.push([url, o])
+          if (!newReg.active) { newReg.installing = worker; setTimeout(activate, 0) } // Node's timer, not the page's
+          return newReg
+        },
       },
     }
     const Notification = { permission: 'granted', requestPermission: async () => { requestPermission++; return 'granted' } }
@@ -116,7 +135,7 @@ describe('old service worker cleanup', () => {
       document, navigator, window, Notification, atob, Uint8Array, console, Date,
       sessionStorage: { getItem: () => '1', setItem() {} },
       fetch: async (u: string, init?: { method?: string; body?: string }) => {
-        if (init && init.method === 'POST') posts.push({ url: u, body: String(init.body) })
+        if (init && init.method === 'POST') { posts.push({ url: u, body: String(init.body) }); log.push('POST ' + u) }
         if (u === '/ui/api/push/config') return Response.json({ configured: true, publicKey: 'AQAB' })
         return Response.json({})
       },
@@ -124,14 +143,31 @@ describe('old service worker cleanup', () => {
     })
     vm.runInContext(BAN_JS, ctx)
     await settle()
-    expect(posts.filter((p) => p.url === '/ui/api/push/unsubscribe')).toEqual([{ url: '/ui/api/push/unsubscribe', body: '{"endpoint":"https://push.example/old"}' }])
-    expect(oldUnsubscribed).toBe(1)
-    expect(oldUnregistered).toBe(1)
-    expect(newUnregistered).toBe(0)
-    expect(registered).toEqual([['/ui/sw.js', { scope: '/ui/' }]])
-    expect(posts.filter((p) => p.url === '/ui/api/push/subscribe')).toHaveLength(1)
-    expect(posts.every((p) => p.url.startsWith('/ui/'))).toBe(true)
-    expect(requestPermission).toBe(0)
+    return { posts, registered, log, els, oldUnregistered: () => oldUnregistered, newUnregistered: () => newUnregistered, oldUnsubscribed: () => oldUnsubscribed, requestPermission: () => requestPermission, subscribeRejected: () => subscribeRejected }
+  }
+
+  it('subscribes under /ui/ once the new worker is active, then drops the /subscriptions/ registration and its push subscription, without a prompt', async () => {
+    const m = await runMigration({ old: true })
+    expect(m.registered).toEqual([['/ui/sw.js', { scope: '/ui/' }]])
+    expect(m.subscribeRejected()).toBe(0)
+    expect(m.posts.filter((p) => p.url === '/ui/api/push/subscribe')).toHaveLength(1)
+    expect(m.posts.filter((p) => p.url === '/ui/api/push/unsubscribe')).toEqual([{ url: '/ui/api/push/unsubscribe', body: '{"endpoint":"https://push.example/old"}' }])
+    expect(m.oldUnsubscribed()).toBe(1)
+    expect(m.oldUnregistered()).toBe(1)
+    expect(m.newUnregistered()).toBe(0)
+    expect(m.posts.every((p) => p.url.startsWith('/ui/'))).toBe(true)
+    expect(m.requestPermission()).toBe(0)
+    // The old subscription goes only after the new one is on the server.
+    expect(m.log).toEqual(['subscribe', 'POST /ui/api/push/subscribe', 'POST /ui/api/push/unsubscribe', 'old.unsubscribe', 'old.unregister'])
+  })
+
+  it('re-subscribes a device whose permission is granted but has no subscription, with no old registration', async () => {
+    const m = await runMigration({ old: false })
+    expect(m.registered).toEqual([['/ui/sw.js', { scope: '/ui/' }]])
+    expect(m.posts.filter((p) => p.url === '/ui/api/push/subscribe')).toHaveLength(1)
+    expect(m.posts.filter((p) => p.url === '/ui/api/push/unsubscribe')).toHaveLength(0)
+    expect(m.requestPermission()).toBe(0)
+    expect(m.els['alerts-state']!.textContent).toBe('on (this device)')
   })
 })
 

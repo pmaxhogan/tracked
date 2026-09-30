@@ -2,9 +2,10 @@
  * The admin UI lived under /subscriptions until the phase 1 redesign moved it to /ui.
  * Old bookmarks and pushes delivered before the deploy still point here: pages answer a
  * 301 to the same path under /ui (the retired viewer to /ui/set), and the API, OAuth and
- * the old service worker answer 410 (a redirect would drop a POST body, and a 410 on its
- * script makes the browser drop the old worker). No handler serves content, so none needs
- * Access. Keep until the owner retires the old prefix.
+ * the old service worker answer 410 (a redirect would drop a POST body). The 410 only stops
+ * serving the old worker script; it does not make browsers drop that worker. BAN_JS removes
+ * the old registration and its push subscription client-side, after subscribing under /ui/.
+ * No handler serves content, so none needs Access. Keep until the owner retires the old prefix.
  */
 import { Hono } from 'hono'
 
