@@ -49,13 +49,39 @@ export type PageCapture = {
 
 export type PageStoreOpts = { bucket: R2Bucket; counter: KVNamespace; log?: Logger; now?: () => number }
 
-/** Replace the logged-in account's username in the header with the account id. Nothing else is touched. */
-export function scrubUsername(html: string, accountId: string): string {
+export const SCRUB_NOTE = '<!-- page withheld: a logged-in header could not be scrubbed -->'
+
+/**
+ * Replace the logged-in account's username with the account id. Fails closed:
+ *   1. every "user dashboard for NAME (n)" (any case, attribute or text, any
+ *      attribute order) becomes "... for <accountId> (n)";
+ *   2. any title attribute that still mentions "dashboard" (an unknown shape)
+ *      is cut down to "dashboard";
+ *   3. if a "dashboard for" phrase other than the account id still remains
+ *      (entities, odd markup), the body is replaced by SCRUB_NOTE.
+ * An unmatched logged-in header is never returned.
+ */
+export function scrubPage(html: string, accountId: string): { html: string; mode: 'exact' | 'fallback' | 'note' } {
   const safe = accountId.replace(/[^A-Za-z0-9_-]/g, '_')
-  return html.replace(
-    /(title="user dashboard for )([^"]*?)(\s*\([^)"]*\))?(")/g,
-    (_m, a: string, _name: string, n: string | undefined, q: string) => `${a}${safe}${n ?? ''}${q}`,
+  let mode: 'exact' | 'fallback' | 'note' = 'exact'
+  let out = html.replace(
+    /(user\s+dashboard\s+for\s+)([^"'<(]*?)(\s*\(\d[^)"'<]*\))?(?=["'<])/gi,
+    (_m, a: string, _name: string, n: string | undefined) => `${a}${safe}${n ?? ''}`,
   )
+  const okTitle = new RegExp(`^user\\s+dashboard\\s+for\\s+${safe}(\\s*\\(\\d[^)]*\\))?$`, 'i')
+  out = out.replace(/(\btitle\s*=\s*)(["'])([^"']*dashboard[^"']*)\2/gi, (m, a: string, q: string, v: string) => {
+    if (okTitle.test(v.trim())) return m
+    mode = 'fallback'
+    return `${a}${q}dashboard${q}`
+  })
+  const leftover = out.replace(new RegExp(`user\\s+dashboard\\s+for\\s+${safe}`, 'gi'), '')
+  if (/dashboard(?:\s|&nbsp;|&#160;|&#xa0;)*for\b/i.test(leftover)) return { html: SCRUB_NOTE, mode: 'note' }
+  return { html: out, mode }
+}
+
+/** The page with the logged-in username replaced (see scrubPage). */
+export function scrubUsername(html: string, accountId: string): string {
+  return scrubPage(html, accountId).html
 }
 
 const clean = (s: string, max: number) => s.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, max)
@@ -131,10 +157,21 @@ export async function storePage(opts: PageStoreOpts, c: PageCapture): Promise<st
   try {
     const nowMs = (opts.now ?? Date.now)()
     if (!(await underCap(opts.counter, nowMs, log))) return null
-    const v = c.verdict ?? (await classifyPage(c))
+    // Scrub first: nothing below can reach the bucket with an unscrubbed page.
+    const scrubbed = scrubPage(c.html, c.accountId)
+    let v: { verdict: PageVerdict; detail: string }
+    try {
+      v = c.verdict ?? (await classifyPage(c))
+    } catch {
+      v = { verdict: 'error', detail: 'classify_failed' }
+    }
+    if (scrubbed.mode !== 'exact') {
+      log?.warn('pages.scrub_fallback', { mode: scrubbed.mode, accountId: c.accountId })
+      v = { ...v, detail: `${v.detail} scrub:${scrubbed.mode}`.trim() }
+    }
     const slug = await pageSlug(c.url, c.variant)
     const key = pageKey({ verdict: v.verdict, kind: c.kind, slug, accountId: c.accountId, fetchedAt: c.fetchedAt }, nowMs)
-    const body = await gzip(scrubUsername(c.html, c.accountId))
+    const body = await gzip(scrubbed.html)
     await opts.bucket.put(key, body, {
       httpMetadata: { contentType: 'text/html; charset=utf-8', contentEncoding: 'gzip' },
       customMetadata: {

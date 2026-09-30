@@ -153,3 +153,49 @@ describe('GET /pool/pages', () => {
     expect(r.status).toBe(401)
   })
 })
+
+describe('fail-closed scrub', () => {
+  const variants = [
+    '<a href="/dashboard/index.html" class="navBtn" title="USER DASHBOARD FOR Secret_Name (3)">x</a>',
+    "<a data-x=1 title='user dashboard for Secret_Name' href=\"/dashboard/index.html\">x</a>",
+    '<a title="user   dashboard for Secret_Name (0)" class="a" id="b">x</a>',
+    '<a aria-label="user dashboard for Secret_Name (9)">x</a>',
+    '<a title="Dashboard of Secret_Name">x</a>',
+    '<a title="user dashboard for&nbsp;Secret_Name">x</a>',
+  ]
+  it.each(variants)('never keeps the name: %s', (v) => {
+    const out = scrubUsername(`<html>${v}<body>rest</body></html>`, 'acct-7')
+    expect(out).not.toContain('Secret_Name')
+  })
+  it('falls back to a note when the header cannot be scrubbed safely', async () => {
+    const o = ctx()
+    const key = await storePage(o, cap('<html><a title="user dashboard for&#32;Secret_Name">x</a> dashboard&nbsp;for Secret_Name</html>', { verdict: { verdict: 'clean', detail: '' } }))
+    const html = await body(o.bucket, key!)
+    expect(html).not.toContain('Secret_Name')
+    expect(html).toContain('withheld')
+    expect((await o.bucket.get(key!))!.customMetadata!.detail).toContain('scrub:note')
+  })
+  it('keeps a guest page byte for byte', () => {
+    expect(scrubUsername(CLEAN, 'acct-7').length).toBeGreaterThan(1000)
+  })
+})
+
+describe('classification failure', () => {
+  it('stores as other/error with classify_failed, after the scrub', async () => {
+    vi.resetModules()
+    vi.doMock('../src/lib/tracklists1001', () => ({
+      parseTracklist: () => {
+        throw new Error('parser blew up')
+      },
+    }))
+    const { storePage: store } = await import('../src/lib/page-store')
+    const o = ctx()
+    const key = await store(o, cap('<a title="user dashboard for Secret_Name (1)">x</a>'))
+    vi.doUnmock('../src/lib/tracklists1001')
+    expect(key!.startsWith('other/2026-09-30/set/')).toBe(true)
+    expect((await o.bucket.get(key!))!.customMetadata).toMatchObject({ verdict: 'error', detail: 'classify_failed' })
+    const html = await body(o.bucket, key!)
+    expect(html).toContain('for acct-7 (1)')
+    expect(html).not.toContain('Secret_Name')
+  })
+})

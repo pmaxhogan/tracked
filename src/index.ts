@@ -145,6 +145,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
   log.info('cron.start')
   ctx.waitUntil(
     (async () => {
+      try {
       const trigger = isDaily ? 'cron.daily' : 'cron.tick'
       // One-time KV → D1 import, a bounded slice per tick until it reports
       // done (then a cheap flag check).
@@ -183,7 +184,10 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       }
       // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
       await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) })
-      await drainPageCaptures()
+      } finally {
+        // Stored pages finish even when the tick threw.
+        await drainPageCaptures()
+      }
     })(),
   )
 }
