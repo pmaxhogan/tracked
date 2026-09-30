@@ -55,12 +55,14 @@ Code touch points (grep for `subscriptions` and check each hit; the list is what
 - `README.md`, `.dev.vars.example`, `docs/tasker-setup.md`: every mention.
 - Tests: `test/pool-ui.test.ts` (17 gated paths, redirect, nav link), `test/same-origin.test.ts` (page list, guard paths), `test/admin-hardening.test.ts` (sw.js, redirect, framing), `test/playlist-hygiene.test.ts` (hold payload url), `test/mkvid-verified-recreate.test.ts`, `test/playlist-rename.test.ts`, `test/tracklist-cache.test.ts`, `test/lazy-links.test.ts`, `test/audit-routes.test.ts`, `test/pool-api.test.ts` and any other `app.request('/subscriptions...')`.
 
-Optional, recommended: one `app.all('/subscriptions/*')` handler that 301s to the same path under `/ui/` (no auth needed, nothing served), because push notifications delivered before the deploy carry the old URL and phone bookmarks exist. The owner said redirects are not required; drop it if unwanted.
+Redirects (required by the pool session, 2026-09-30, for phone bookmarks and push notifications delivered before the deploy; the owner had said redirects were not needed, so this supersedes that): `/subscriptions` and every `/subscriptions/<page>` path answer a 301 to the same path under `/ui/`; `/subscriptions/api/*` and `/subscriptions/oauth/*` answer `410 { error: 'moved', message: 'This API moved to /ui/api/...' }` (a redirect would not carry a POST body). Neither handler serves content, so neither needs Access. Keep them, and the old Access application, until the owner retires them.
 
-Owner steps outside the repo, before the phase 1 deploy:
-- Cloudflare Access: change the self-hosted application's path from `/subscriptions` to `/ui` on the same application (editing keeps the AUD; creating a new application changes `CF_ACCESS_AUD` in `wrangler.jsonc`). The cookie the Worker verifies is `CF_Authorization`, unchanged.
-- Google Cloud Console: change the authorized redirect URI to `https://<worker-host>/ui/oauth/callback`.
-- Nothing changes for Tasker (`/now-playing`), mkvid (`/mkvid/*`, `TRACKED_URL`) or tlpool (`/pool/events`).
+Deploy gates for the phase 1 release (from the pool session; the Worker's own `cfAccess` middleware fails closed, so a gap would mean 401s rather than exposure, but the gates stay):
+1. An Access application covering `tracked.pmaxhogan.workers.dev/ui/*` with the same policy exists BEFORE the code that serves `/ui/` is deployed. Editing the existing app's path keeps its AUD; a new app means a new `CF_ACCESS_AUD` in `wrangler.jsonc` in the same deploy. The implementing session asks the pool session (it holds a token that can edit Access apps) or the owner to make that change at deploy time; it never creates or copies Cloudflare tokens itself.
+2. `cfAccess` (the `Cf-Access-Jwt-Assertion` / `CF_Authorization` check against `CF_ACCESS_*`) is mounted on every `/ui/**` route, and `test/ui-pages.test.ts` proves every `/ui/**` path answers 401 without a JWT and never reaches tlpool.
+3. The Google OAuth redirect URI `https://<worker-host>/ui/oauth/callback` is added in the Google console before the deploy, with the old one kept until the redirects are retired.
+4. Push subscriptions registered under the `/subscriptions/` service-worker scope are re-subscribed: on first load under `/ui/` the client unregisters the old registration, subscribes with the new one, and posts `push/unsubscribe` for the old endpoint (non-negotiable 4).
+5. Nothing changes for Tasker (`/now-playing`), mkvid (`/mkvid/*`, `TRACKED_URL`) or tlpool (`/pool/events`).
 
 ## 4. Sitemap
 
