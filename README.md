@@ -585,7 +585,7 @@ Which failures count against a set (three strikes → abandoned): pool refusals 
 
 ### Pool events and pushes
 
-tlpool posts `challenge.created` / `.solved` / `.expired` and `account.flagged` / `.created` to **`POST /pool/events`** (bearer `TLPOOL_TOKEN`; exempt from the Tasker token gate). Events are stored in `pool_events` with only whitelisted ids (`acct-N`, challenge ids, times); a new challenge and a flagged account become a Web Push (`src/lib/pool-events.ts`) that opens `/subscriptions/captcha/<id>` (or `/subscriptions/accounts`). Every push goes out immediately, at any hour: there are no quiet hours (owner decision, 2026-09-29). tlpool holds a challenge for 2 hours; unanswered, it closes it and rests the account 6 hours.
+tlpool posts `challenge.created` / `.solved` / `.expired` and `account.flagged` / `.created` / `.retired` / `.rested` to **`POST /pool/events`** (bearer `TLPOOL_TOKEN`; exempt from the Tasker token gate). Events are stored in `pool_events` with only whitelisted ids (`acct-N`, challenge ids, times); a new challenge, a flagged account and a retired account become a Web Push (`src/lib/pool-events.ts`) that opens `/subscriptions/captcha/<id>` (or the accounts page `/subscriptions/pool`); a failed delivery is retried by the cron while the event is under 2 hours old (5 tries at most), and events older than 90 days are pruned daily. Every push goes out immediately, at any hour: there are no quiet hours (owner decision, 2026-09-29). tlpool holds a challenge for 2 hours; unanswered, it closes it and rests the account 6 hours.
 
 ### Admin banner and pause
 

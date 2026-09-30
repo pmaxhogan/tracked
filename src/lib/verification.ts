@@ -206,13 +206,20 @@ export async function noteSetFetch(env: Env, input: NoteInput): Promise<Verifica
   const otherAccount = account !== row.first_account
   if (row.fingerprint === fingerprint) {
     if (otherAccount && gapOk) {
-      await db
+      // Only over the pending row this fetch was compared with: a concurrent
+      // fetch that restarted verification in between must not be overwritten.
+      const upd = await db
         .prepare(
           `UPDATE set_verification SET state = 'verified', verify_due_at = NULL, second_account = ?, second_fetched_at = ?,
-                  verified_at = ?, updated_at = ? WHERE url = ?`,
+                  verified_at = ?, updated_at = ?
+            WHERE url = ? AND state = 'pending' AND fingerprint = ? AND first_account = ? AND first_fetched_at = ?`,
         )
-        .bind(account, fetchedAt, fetchedAt, fetchedAt, setUrl)
+        .bind(account, fetchedAt, fetchedAt, fetchedAt, setUrl, row.fingerprint, row.first_account, row.first_fetched_at)
         .run()
+      if ((upd.meta.changes ?? 0) === 0) {
+        log?.warn('verify.lost_race', { setUrl, accountId: account })
+        return { outcome: 'still_pending', verified: false, reported: null }
+      }
       log?.info('verify.verified', { setUrl, firstAccount: row.first_account, secondAccount: account, gapSeconds: fetchedAt - row.first_fetched_at })
       return { outcome: 'verified', verified: true, reported: null }
     }
@@ -241,6 +248,7 @@ export async function dueVerifications(env: Env, nowSec: number, limit: number):
     .prepare(
       `SELECT v.url AS url, MIN(t.slug) AS slug, v.exclude_accounts AS exclude_accounts
          FROM set_verification v JOIN tracklists t ON t.url = v.url AND t.processed = 1 AND t.abandoned = 0
+                                  AND t.slug IN (SELECT slug FROM subscriptions)
         WHERE v.state = 'pending' AND v.verify_due_at IS NOT NULL AND v.verify_due_at <= ?
         GROUP BY v.url ORDER BY MIN(v.verify_due_at) LIMIT ?`,
     )

@@ -143,6 +143,7 @@ describe('noteSetFetch', () => {
 describe('dueVerifications', () => {
   it('lists pending sets whose second fetch is due, with a DJ to run them under and the accounts to avoid', async () => {
     const env = makeEnv()
+    await env.DB.prepare('INSERT INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, 0, 0)').bind('dj', 'https://www.1001tracklists.com/dj/dj/').run()
     await saveSubState(env, 'dj', { discoveredTracklistUrls: [URL1], processedTracklistUrls: [URL1], tracklistVideos: { [URL1]: { videoId: null, checkedAt: T0 } } })
     await note(env, real, 'acct-1', T0)
     expect(await dueVerifications(env, T0 + H, 10)).toEqual([])

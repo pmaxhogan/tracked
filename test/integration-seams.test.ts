@@ -174,3 +174,21 @@ describe('seam 6: page facts are stored on every set page fetch', () => {
     expect(Number(f!.track_count)).toBeGreaterThan(25) // W6's light row counter, not parseTracklist (see report: 30 vs 31)
   })
 })
+
+describe('review W4 #10: the mkvid queue log says whether the stored list is verified', () => {
+  it('logs verified: false after the first fetch and true after the confirming one', async () => {
+    const lines: string[] = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((x: unknown) => void lines.push(String(x)))
+    try {
+      const env = makeEnv()
+      served('acct-1', 3)
+      await syncOne(env, sub, 'tok')
+      served('acct-2', 0)
+      await verifyRun(env, ['acct-1'])
+    } finally {
+      spy.mockRestore()
+    }
+    const queue = lines.filter((l) => l.includes('"sync.mkvid_queue"')).map((l) => JSON.parse(l) as { verified?: boolean })
+    expect(queue.map((q) => q.verified)).toEqual([false, true])
+  })
+})

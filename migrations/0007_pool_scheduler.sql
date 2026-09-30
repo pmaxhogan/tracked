@@ -18,6 +18,21 @@ CREATE TABLE IF NOT EXISTS set_schedule (
 );
 CREATE INDEX IF NOT EXISTS set_schedule_due ON set_schedule (next_due_at);
 
+-- Hand-marked and failing rechecks (checked_at = 0, or a fetch that did not
+-- complete) are claimed per attempt: retry_at backs off after each attempt,
+-- and at most 3 attempts per set per UTC day (lib/fetch-scheduler.ts).
+ALTER TABLE set_schedule ADD COLUMN retry_at INTEGER;          -- unix seconds; NULL = no attempt pending
+ALTER TABLE set_schedule ADD COLUMN attempt_day TEXT;          -- YYYY-MM-DD (UTC) of attempts_today
+ALTER TABLE set_schedule ADD COLUMN attempts_today INTEGER NOT NULL DEFAULT 0;
+
+-- The pending/recheck queries read tracklists by these columns on every tick.
+CREATE INDEX IF NOT EXISTS tracklists_queue ON tracklists (processed, abandoned, discovered_at);
+
+-- Lists stored for mkvid before verification existed were trusted on the
+-- in-page decoy check alone. From now on trusted = 1 means "saved while the
+-- set was verified" (lib/verification.ts), so every older row starts over.
+UPDATE mkvid_request_tracks SET trusted = 0;
+
 -- Verification (decision 2): a list is `verified` only when a second fetch,
 -- at least 2 h after the first and by a DIFFERENT pool account, passes the
 -- decoy detector and matches the first on every row. `fingerprint` is a
@@ -65,7 +80,9 @@ CREATE TABLE IF NOT EXISTS pool_events (
   payload TEXT NOT NULL,
   received_at INTEGER NOT NULL,           -- unix seconds
   push_status TEXT NOT NULL,              -- none | sent | failed | not_configured
-  pushed_at INTEGER
+  pushed_at INTEGER,
+  push_attempts INTEGER NOT NULL DEFAULT 0 -- deliveries tried (a failed one is retried by the cron, 5 at most)
 );
+CREATE INDEX IF NOT EXISTS pool_events_challenge ON pool_events (challenge_id);
 CREATE INDEX IF NOT EXISTS pool_events_received ON pool_events (received_at);
 CREATE INDEX IF NOT EXISTS pool_events_push ON pool_events (push_status, received_at);

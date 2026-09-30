@@ -17,6 +17,7 @@ import { runKvMigrationTickSafely } from './lib/kv-import'
 import { pruneNowPlayingAudit } from './lib/now-playing-audit'
 import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
+import { prunePoolEvents, retryFailedPoolPushes } from './lib/pool-events'
 import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
 import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
 
@@ -135,7 +136,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       if (isDaily) {
         // D1 has no TTLs: keep both audit trails at the 90-day horizon.
         try {
-          log.info('cron.audit_pruned', { nowPlaying: await pruneNowPlayingAudit(env), playlistAdditions: await prunePlaylistAdditions(env) })
+          log.info('cron.audit_pruned', { nowPlaying: await pruneNowPlayingAudit(env), playlistAdditions: await prunePlaylistAdditions(env), poolEvents: await prunePoolEvents(env) })
         } catch (e) {
           log.warn('cron.audit_prune_threw', errorFields(e))
         }
@@ -146,6 +147,11 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         } catch (e) {
           log.error('cron.threw', errorFields(e))
         }
+      }
+      try {
+        await retryFailedPoolPushes(env, { log })
+      } catch (e) {
+        log.warn('cron.push_retries_threw', errorFields(e))
       }
       // Separate try/catch: a failed tick shouldn't stop the combined
       // playlist from catching up on everything that *did* land.

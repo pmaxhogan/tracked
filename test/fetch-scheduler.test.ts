@@ -3,7 +3,7 @@ import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
 import { DEFAULT_POOL_SETTINGS, type PoolSettings } from '../src/lib/pool-settings'
-import { ensureSetSchedules, markSetDue, pickTickItems, runSchedulerTick, scheduleAfterFetch, TICK_BACKOFF_KEY } from '../src/lib/fetch-scheduler'
+import { attemptBackoffSeconds, claimSetAttempt, ENSURE_STAMP_KEY, ensureSetSchedules, markSetDue, MAX_SET_ATTEMPTS_PER_DAY, pickTickItems, runSchedulerTick, scheduleAfterFetch, TICK_BACKOFF_KEY } from '../src/lib/fetch-scheduler'
 import { loadDjBackfill, loadSubState, saveDjBackfill, saveSubState } from '../src/lib/sync-store'
 import { noteSetFetch } from '../src/lib/verification'
 import { setPause, _resetTallyForTests } from '../src/lib/ban-state'
@@ -64,6 +64,7 @@ beforeEach(() => {
 describe('spreading the backlog (the ~2,100 known sets must not all come due together)', () => {
   it('overdue sets get a random due time inside one interval, created in batches', async () => {
     const env = makeEnv()
+    await subscribe(env, 'dj')
     const urls = Array.from({ length: 2100 }, (_, i) => setUrl(`s${i}`, 3 + (i % 400)))
     await saveSubState(env, 'dj', {
       discoveredTracklistUrls: urls,
@@ -93,6 +94,7 @@ describe('spreading the backlog (the ~2,100 known sets must not all come due tog
 
   it('a set not yet overdue keeps its natural (jittered) due time', async () => {
     const env = makeEnv()
+    await subscribe(env, 'dj')
     const u = setUrl('a', 20) // 7-30 d band: 5 days
     await saveSubState(env, 'dj', { discoveredTracklistUrls: [u], processedTracklistUrls: [u], tracklistVideos: { [u]: { videoId: 'v', checkedAt: NOW - D } } })
     await ensureSetSchedules(env, DEFAULT_POOL_SETTINGS, NOW, () => 0.5)
@@ -332,6 +334,7 @@ describe('hand-made rechecks and failure handling', () => {
 
   it('an overdue set mkvid is waiting on is spread over two days, not its whole interval (its render needs a verified list)', async () => {
     const env = makeEnv()
+    await subscribe(env, 'dj')
     const old = setUrl('mk', 300)
     await saveSubState(env, 'dj', { discoveredTracklistUrls: [old], processedTracklistUrls: [old], tracklistVideos: { [old]: { videoId: null, checkedAt: NOW - 200 * D } } })
     const { enqueueMkvidRequest } = await import('../src/lib/mkvid')
@@ -340,5 +343,107 @@ describe('hand-made rechecks and failure handling', () => {
     const row = await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(old).first<{ next_due_at: number }>()
     expect(row!.next_due_at - NOW).toBeLessThanOrEqual(2 * D)
     expect(row!.next_due_at - NOW).toBeGreaterThan(D)
+  })
+})
+
+describe('review W4 fixes (scheduler)', () => {
+  const always = (x: number) => () => x
+  const insTl = (env: Env, slug: string, url: string, checkedAt: number, processed = 1) =>
+    env.DB.prepare('INSERT INTO tracklists (slug, url, processed, abandoned, checked_at, position, discovered_at) VALUES (?, ?, ?, 0, ?, 0, 0)').bind(slug, url, processed, checkedAt).run()
+  const insSched = (env: Env, url: string, due: number) =>
+    env.DB.prepare('INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at) VALUES (?, NULL, ?, NULL, 0, 0, 0)').bind(url, due).run()
+
+  it('#2 overdue sets of an unsubscribed DJ cannot starve a subscribed one (the SQL filters before its LIMIT)', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'live')
+    for (let i = 0; i < 25; i++) {
+      const u = setUrl(`o${i}`, 400)
+      await insTl(env, 'gone', u, 100)
+      await insSched(env, u, NOW - 100000 - i)
+      await insTl(env, 'gone', setUrl(`p${i}`, 1), 0, 0) // never-fetched sets of the gone DJ
+    }
+    const good = setUrl('g', 400)
+    await insTl(env, 'live', good, 100)
+    await insSched(env, good, NOW - 10)
+    const items = await pickTickItems(env, DEFAULT_POOL_SETTINGS, 3, new Set(['live', 'gone']), NOW)
+    expect(items).toEqual([{ cls: 'recheck', kind: 'recheck', slug: 'live', url: good }])
+  })
+
+  it('#2 a b2b set listed under an unsubscribed DJ too runs under the subscribed one', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'zzz')
+    const u = setUrl('b2b', 400)
+    await insTl(env, 'aaa', u, 100)
+    await insTl(env, 'zzz', u, 100)
+    await insSched(env, u, NOW - 10)
+    const items = await pickTickItems(env, DEFAULT_POOL_SETTINGS, 3, new Set(['zzz']), NOW)
+    expect(items).toEqual([{ cls: 'recheck', kind: 'recheck', slug: 'zzz', url: u }])
+  })
+
+  it('#2 schedules are not created for an unsubscribed DJ', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'live')
+    await insTl(env, 'gone', setUrl('x', 400), 100)
+    await insTl(env, 'live', setUrl('y', 400), 100)
+    expect(await ensureSetSchedules(env, DEFAULT_POOL_SETTINGS, NOW)).toBe(1)
+  })
+
+  it('#3 a hand-marked recheck whose run fails is not picked again until its backoff ends, and at most 3 times a day', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const u = setUrl('hand', 400)
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [u], processedTracklistUrls: [u], tracklistVideos: { [u]: { videoId: null, checkedAt: 0 } } })
+    mocked(fetch1001Html).mockRejectedValue(new Error('transient'))
+    // ENSURE_STAMP_KEY: skip schedule creation, so only the hand mark makes it due.
+    await env.CACHE.put(ENSURE_STAMP_KEY, String(NOW + 10 * D))
+    const day0 = Math.floor(NOW / 86400) * 86400 + 60 // 00:01 UTC: all attempts land on one UTC day
+    let t = day0
+    const runs: string[] = []
+    for (let i = 0; i < 6; i++) {
+      const r = await runSchedulerTick(env, { random: always(0.99), now: t })
+      runs.push(r.skipped ?? r.items.map((x) => `${x.item.kind}`).join(','))
+      t += 5 * 60 // the next tick, 5 minutes later
+    }
+    // Picked once; the following ticks inside the 15-minute backoff leave it alone.
+    expect(runs.filter((x) => x === 'recheck')).toHaveLength(2) // t0 and t0+15 min
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    // Third attempt after 30 more minutes, then the daily cap holds for the rest of the day.
+    await runSchedulerTick(env, { random: always(0.99), now: day0 + 15 * 60 + attemptBackoffSeconds(2) })
+    expect(fetch1001Html).toHaveBeenCalledTimes(MAX_SET_ATTEMPTS_PER_DAY)
+    await runSchedulerTick(env, { random: always(0.99), now: day0 + 20 * 3600 })
+    expect(fetch1001Html).toHaveBeenCalledTimes(MAX_SET_ATTEMPTS_PER_DAY)
+  })
+
+  it('#3 a completed fetch clears the pending attempt; backoff doubles and is capped at 6 h', async () => {
+    const env = makeEnv()
+    const u = setUrl('ok', 1)
+    expect(await claimSetAttempt(env, u, NOW)).toBe(1)
+    expect(await claimSetAttempt(env, u, NOW + 1)).toBe(2)
+    expect((await env.DB.prepare('SELECT retry_at FROM set_schedule WHERE url = ?').bind(u).first<{ retry_at: number }>())!.retry_at).toBe(NOW + 1 + 30 * 60)
+    await scheduleAfterFetch(env, DEFAULT_POOL_SETTINGS, { url: u, videoId: 'v', hasIdRows: false, nowSec: NOW + 2 })
+    expect((await env.DB.prepare('SELECT retry_at FROM set_schedule WHERE url = ?').bind(u).first<{ retry_at: number | null }>())!.retry_at).toBeNull()
+    expect(attemptBackoffSeconds(10)).toBe(6 * H)
+  })
+
+  it('#7 schedule creation runs at most hourly, not on every tick', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const u = setUrl('s', 400)
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [u], processedTracklistUrls: [u], tracklistVideos: { [u]: { videoId: 'v', checkedAt: NOW - 400 * D } } })
+    await runSchedulerTick(env, { random: always(0), now: NOW }) // zero draw, but schedules are ensured
+    expect(Number(await env.CACHE.get(ENSURE_STAMP_KEY))).toBe(NOW)
+    await env.DB.prepare('DELETE FROM set_schedule').run()
+    await runSchedulerTick(env, { random: always(0), now: NOW + 30 * 60 })
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM set_schedule').first<{ n: number }>())!.n).toBe(0)
+    await runSchedulerTick(env, { random: always(0), now: NOW + H })
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM set_schedule').first<{ n: number }>())!.n).toBe(1)
+  })
+
+  it('#7 the tick queries use the new tracklists index', async () => {
+    const env = makeEnv()
+    const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN SELECT t.slug, t.url FROM tracklists t WHERE t.processed = 0 AND t.abandoned = 0 ORDER BY t.discovered_at DESC`).all<{ detail: string }>()
+    expect(plan.results.map((r) => r.detail).join(' ')).toContain('tracklists_queue')
   })
 })

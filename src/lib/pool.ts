@@ -173,10 +173,13 @@ export async function poolFetch(cfg: PoolConfig | null, req: PoolFetchRequest, l
     log?.error('pool.fetch.unauthorized', { url: req.url, status: res.status })
     throw new PoolUnavailableError('unauthorized', `pool answered ${res.status}`)
   }
+  // tlpool answers every contract error as HTTP 200 with an `error` field
+  // (never 502/504, which Cloudflare would rewrite): the body decides, not the status.
   if (json && typeof json.error === 'string') {
     const retry = typeof json.retryAfterSeconds === 'number' && Number.isFinite(json.retryAfterSeconds) ? json.retryAfterSeconds : null
     const err = poolErrorFor(json.error, retry)
-    log?.warn('pool.fetch.refused', { url: req.url, kind: req.kind, priority: req.priority, error: err.code, retryAfterSeconds: retry, ms: Date.now() - start })
+    const reason = typeof json.reason === 'string' ? json.reason.slice(0, 40) : null
+    log?.warn('pool.fetch.refused', { url: req.url, kind: req.kind, priority: req.priority, error: err.code, reason, httpStatus: res.status, retryAfterSeconds: retry, ms: Date.now() - start })
     throw err
   }
   if (!res.ok || !json || typeof json.html !== 'string' || typeof json.status !== 'number') {

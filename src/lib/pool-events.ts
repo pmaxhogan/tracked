@@ -7,7 +7,7 @@
  *     (the page W8 builds: captcha image + answer box, or the live view for
  *     the checkbox wall)
  *   - `account.flagged`   → "account flagged", opens the captcha page when the
- *     event names a challenge, else /subscriptions/accounts
+ *     event names a challenge, else /subscriptions/pool (the accounts page)
  *
  * Every push is sent immediately, at any hour (owner decision 2026-09-29: no
  * quiet hours). tlpool still holds a challenge for 2 h and then rests the
@@ -25,7 +25,8 @@ import { dbOf, parseJson } from './db'
 import type { Logger } from './log'
 import { pushConfigured, sendPushToAll, type PushPayload } from './web-push'
 
-export const POOL_EVENT_TYPES = ['challenge.created', 'challenge.solved', 'challenge.expired', 'account.flagged', 'account.created'] as const
+/** Every event tlpool emits (tlpool/webhook.py EVENTS). Pushed: challenge.created, account.flagged, account.retired. */
+export const POOL_EVENT_TYPES = ['challenge.created', 'challenge.solved', 'challenge.expired', 'account.flagged', 'account.created', 'account.retired', 'account.rested'] as const
 export type PoolEventType = (typeof POOL_EVENT_TYPES)[number]
 
 export type PoolEvent = {
@@ -109,7 +110,17 @@ export function poolEventPushPayload(ev: PoolEvent, now: Date = new Date()): Pus
       kind: 'pool_account',
       title: 'Pool account flagged',
       body: `${who} was flagged${ev.reason ? ` (${ev.reason})` : ''}. It rests 72 h, then gets one retest.`,
-      url: ev.challengeId ? `/subscriptions/captcha/${encodeURIComponent(ev.challengeId)}` : '/subscriptions/accounts',
+      url: ev.challengeId ? `/subscriptions/captcha/${encodeURIComponent(ev.challengeId)}` : '/subscriptions/pool',
+      tag: `tlpool-account-${ev.accountId ?? 'unknown'}`.slice(0, 64),
+      ts: now.toISOString(),
+    }
+  }
+  if (ev.type === 'account.retired') {
+    return {
+      kind: 'pool_account',
+      title: 'Pool account retired',
+      body: `${who} was retired${ev.reason ? ` (${ev.reason})` : ''}. Its exit is not reused for 30 days.`,
+      url: '/subscriptions/pool',
       tag: `tlpool-account-${ev.accountId ?? 'unknown'}`.slice(0, 64),
       ts: now.toISOString(),
     }
@@ -157,8 +168,56 @@ export async function receivePoolEvent(
 async function deliver(env: Env, rowId: number | null, payload: PushPayload, nowSec: number, opts: { log?: Logger; fetchImpl?: typeof fetch }): Promise<PushStatus> {
   const r = await sendPushToAll(env, payload, opts.log, opts.fetchImpl ?? fetch)
   const status: PushStatus = r.sent > 0 ? 'sent' : 'failed'
-  if (rowId !== null) await dbOf(env).prepare('UPDATE pool_events SET push_status = ?, pushed_at = ? WHERE id = ?').bind(status, nowSec, rowId).run()
+  if (rowId !== null) await dbOf(env).prepare('UPDATE pool_events SET push_status = ?, pushed_at = ?, push_attempts = push_attempts + 1 WHERE id = ?').bind(status, nowSec, rowId).run()
   return status
+}
+
+/** A push that failed is tried again by the cron this many times in all. */
+export const MAX_PUSH_ATTEMPTS = 5
+/** ... and only while the event is this fresh (tlpool holds a challenge 2 h). */
+const PUSH_RETRY_WINDOW_SECONDS = 2 * 60 * 60
+
+/**
+ * Cron hook (every tick): send again the pushes whose delivery failed (a
+ * push-service 5xx), while the event is under 2 h old, at most
+ * MAX_PUSH_ATTEMPTS deliveries each; a challenge that was solved or expired
+ * meanwhile is not pushed. Never throws on push problems.
+ */
+export async function retryFailedPoolPushes(env: Env, opts: { log?: Logger; now?: Date; fetchImpl?: typeof fetch } = {}): Promise<{ retried: number; sent: number }> {
+  if (!pushConfigured(env)) return { retried: 0, sent: 0 }
+  const now = opts.now ?? new Date()
+  const nowSec = Math.floor(now.getTime() / 1000)
+  const db = dbOf(env)
+  const rows = await db
+    .prepare(`SELECT id, type, challenge_id, payload FROM pool_events WHERE push_status = 'failed' AND push_attempts < ? AND received_at >= ? ORDER BY received_at LIMIT 10`)
+    .bind(MAX_PUSH_ATTEMPTS, nowSec - PUSH_RETRY_WINDOW_SECONDS)
+    .all<{ id: number; type: string; challenge_id: string | null; payload: string }>()
+  let sent = 0
+  for (const row of rows.results) {
+    const ev = parseJson<PoolEvent | null>(row.payload, null)
+    const payload = ev ? poolEventPushPayload(ev, now) : null
+    if (!ev || !payload) continue
+    if (ev.type === 'challenge.created' && row.challenge_id) {
+      const closed = await db
+        .prepare(`SELECT 1 AS x FROM pool_events WHERE challenge_id = ? AND type IN ('challenge.solved', 'challenge.expired') LIMIT 1`)
+        .bind(row.challenge_id)
+        .first<{ x: number }>()
+      const lapsed = ev.expiresAt ? Date.parse(ev.expiresAt) <= now.getTime() : false
+      if (closed || lapsed) {
+        await db.prepare(`UPDATE pool_events SET push_status = 'none' WHERE id = ?`).bind(row.id).run()
+        continue
+      }
+    }
+    if ((await deliver(env, Number(row.id), payload, nowSec, opts)) === 'sent') sent++
+  }
+  if (rows.results.length) opts.log?.info('pool.push_retries', { retried: rows.results.length, sent })
+  return { retried: rows.results.length, sent }
+}
+
+/** Daily: drop events older than 90 days (the audit horizon everywhere else). */
+export async function prunePoolEvents(env: Env, nowSec = Math.floor(Date.now() / 1000)): Promise<number> {
+  const r = await dbOf(env).prepare('DELETE FROM pool_events WHERE received_at < ?').bind(nowSec - 90 * 86400).run()
+  return r.meta.changes ?? 0
 }
 
 /** Newest events first, for the admin pages. */

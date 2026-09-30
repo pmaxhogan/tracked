@@ -367,7 +367,7 @@ export function mkvidRowCounts(rows: ReadonlyArray<ParsedTrack & { anonymous?: b
  * cannot be read — including before migration 0006 is applied, so a claim
  * never fails over the list.
  */
-export async function getMkvidTracks(env: Env, requestId: string): Promise<MkvidTrackList> {
+export async function getMkvidTracks(env: Env, requestId: string, opts: { setUrl?: string } = {}): Promise<MkvidTrackList> {
   let row: { tracks: string; trusted: number } | null
   try {
     row = await dbOf(env)
@@ -379,7 +379,10 @@ export async function getMkvidTracks(env: Env, requestId: string): Promise<Mkvid
   }
   const tracks = parseJson<MkvidTrack[] | null>(row?.tracks ?? null, null)
   if (!row || !Array.isArray(tracks)) return { tracks: [], tracksTrusted: false }
-  return { tracks, tracksTrusted: Number(row.trusted) === 1 && tracks.length > 0 }
+  // The stored flag alone is not enough: the set must be verified now too.
+  const setUrl = opts.setUrl ?? (await dbOf(env).prepare('SELECT set_url FROM mkvid_requests WHERE id = ?').bind(requestId).first<{ set_url: string }>())?.set_url
+  const verified = setUrl ? await isVerified(env, setUrl) : false
+  return { tracks, tracksTrusted: Number(row.trusted) === 1 && verified && tracks.length > 0 }
 }
 
 // ─── queue rows ─────────────────────────────────────────────────────────────

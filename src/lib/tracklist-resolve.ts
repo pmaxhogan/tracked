@@ -82,6 +82,9 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   return { tracks: [], setAppleLink: result.setAppleLink, setYoutubeLink: result.setYoutubeLink, setSoundcloudLink: result.setSoundcloudLink }
 }
 
+/** Most per-track link lookups one /tracklist call makes (the rest answer null links). */
+export const MAX_LINK_LOOKUPS_PER_REQUEST = 25
+
 /** One track in the flattened, link-enriched output shape. */
 export type TracklistTrackOut = {
   index: number
@@ -138,9 +141,17 @@ export async function resolveFullTracklist(
   const links = new Map<string, MediaLinks>()
   if (opts.resolveLinks) {
     const ids = [...new Set(scraped.tracks.filter((t) => !t.isUnidentified && t.trackId && /^\d+$/.test(t.trackId)).map((t) => t.trackId!))]
-    log.info('tracklist.links.plan', { eligible: ids.length })
-    const resolved = await Promise.all(ids.map(async (id) => [id, await resolveTrackMediaLinks(env, id, log)] as const))
-    for (const [id, ml] of resolved) links.set(id, ml)
+    const planned = ids.slice(0, MAX_LINK_LOOKUPS_PER_REQUEST)
+    log.info('tracklist.links.plan', { eligible: ids.length, planned: planned.length })
+    // One at a time, never a burst of pool fetches (review W4 #4); cached ids cost nothing.
+    for (const id of planned) {
+      try {
+        links.set(id, await resolveTrackMediaLinks(env, id, log))
+      } catch (e) {
+        log.warn('tracklist.links.stopped', { done: links.size, planned: planned.length, error: (e as Error).message })
+        break
+      }
+    }
   }
 
   const tracks: TracklistTrackOut[] = scraped.tracks.map((t, index) => {

@@ -68,6 +68,8 @@ const INIT_BATCH = 500
 const MKVID_WAITING_SPREAD_SECONDS = 2 * 24 * HOUR
 /** A discovery / backfill step that did not complete is retried after about this long, not a whole interval later. */
 const DJ_RETRY_SECONDS = HOUR
+/** CACHE KV: when ensureSetSchedules last ran (unix seconds). */
+export const ENSURE_STAMP_KEY = 'scheduler:ensure_at'
 
 // ─── set schedules ──────────────────────────────────────────────────────────
 
@@ -85,7 +87,7 @@ export async function ensureSetSchedules(env: Env, settings: PoolSettings, nowSe
               MAX(CASE WHEN t.video_known = 1 AND t.video_id IS NULL THEN 1 ELSE 0 END) AS no_video,
               EXISTS (SELECT 1 FROM mkvid_requests m WHERE m.set_url = t.url AND m.status IN ('pending', 'claimed')) AS mkvid_waiting
          FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
-        WHERE t.processed = 1 AND t.abandoned = 0 AND s.url IS NULL
+        WHERE t.processed = 1 AND t.abandoned = 0 AND s.url IS NULL AND t.slug IN (SELECT slug FROM subscriptions)
         GROUP BY t.url LIMIT ?`,
     )
     .bind(limit)
@@ -129,7 +131,7 @@ export async function scheduleAfterFetch(
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(url) DO UPDATE SET set_date = excluded.set_date, next_due_at = excluded.next_due_at,
          last_fetched_at = excluded.last_fetched_at, has_id_rows = excluded.has_id_rows,
-         no_good_video = excluded.no_good_video, updated_at = excluded.updated_at`,
+         no_good_video = excluded.no_good_video, retry_at = NULL, updated_at = excluded.updated_at`,
     )
     .bind(f.url, setDate, next, nowSec, f.hasIdRows ? 1 : 0, f.videoId ? 0 : 1, nowSec)
     .run()
@@ -146,11 +148,46 @@ export async function markSetDue(env: Env, url: string, atSec = nowSeconds()): P
     .prepare(
       `INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at)
        VALUES (?, ?, ?, NULL, 0, 0, ?)
-       ON CONFLICT(url) DO UPDATE SET next_due_at = excluded.next_due_at, updated_at = excluded.updated_at`,
+       ON CONFLICT(url) DO UPDATE SET next_due_at = excluded.next_due_at, retry_at = NULL, updated_at = excluded.updated_at`,
     )
     .bind(url, setDateFromUrl(url), atSec, nowSeconds())
     .run()
 }
+
+/** Most fetch attempts of one set page per UTC day (review W4 #3): a set that keeps failing is not refetched every tick. */
+export const MAX_SET_ATTEMPTS_PER_DAY = 3
+/** Wait after the Nth attempt before the next one: 15 min, 30 min, 60 min, … capped at 6 h. */
+export function attemptBackoffSeconds(attempt: number): number {
+  return Math.min(6 * HOUR, 15 * 60 * 2 ** Math.max(0, attempt - 1))
+}
+const utcDay = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
+
+/**
+ * Claim one fetch attempt of a set page before the tick runs it (new set,
+ * recheck or verification): it will not be picked again before `retry_at`,
+ * and not at all once it has had MAX_SET_ATTEMPTS_PER_DAY attempts today. A
+ * completed fetch clears `retry_at` (scheduleAfterFetch). Returns the attempt
+ * number for today.
+ */
+export async function claimSetAttempt(env: Env, url: string, nowSec = nowSeconds()): Promise<number> {
+  const day = utcDay(nowSec)
+  const db = dbOf(env)
+  const cur = await db.prepare('SELECT attempt_day, attempts_today FROM set_schedule WHERE url = ?').bind(url).first<{ attempt_day: string | null; attempts_today: number }>()
+  const attempt = cur && cur.attempt_day === day ? Number(cur.attempts_today) + 1 : 1
+  await db
+    .prepare(
+      `INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at, retry_at, attempt_day, attempts_today)
+       VALUES (?, ?, NULL, NULL, 0, 0, ?, ?, ?, ?)
+       ON CONFLICT(url) DO UPDATE SET retry_at = excluded.retry_at, attempt_day = excluded.attempt_day,
+         attempts_today = excluded.attempts_today, updated_at = excluded.updated_at`,
+    )
+    .bind(url, setDateFromUrl(url), nowSec, nowSec + attemptBackoffSeconds(attempt), day, attempt)
+    .run()
+  return attempt
+}
+
+/** SQL: the set (alias `s` = its set_schedule row, may be NULL) is not waiting out an attempt and has attempts left today. Binds now, today. */
+const ATTEMPT_OK_SQL = `(s.retry_at IS NULL OR s.retry_at <= ?) AND NOT (COALESCE(s.attempt_day, '') = ? AND s.attempts_today >= ${MAX_SET_ATTEMPTS_PER_DAY})`
 
 async function deferSetSchedule(env: Env, url: string, untilSec: number): Promise<void> {
   await dbOf(env).prepare('UPDATE set_schedule SET next_due_at = ? WHERE url = ? AND next_due_at IS NOT NULL AND next_due_at < ?').bind(untilSec, url, untilSec).run()
@@ -322,8 +359,15 @@ export async function pickTickItems(env: Env, settings: PoolSettings, n: number,
   for (const r of dueDiscovery) buckets.new.push({ cls: 'new', kind: 'discovery', slug: r.slug })
 
   // Never-fetched sets: youngest first; old ones are backfill.
+  // Unsubscribed DJs' rows are filtered in SQL, before the LIMIT (review W4 #2).
+  const today = utcDay(nowSec)
   const pending = await db
-    .prepare('SELECT slug, url FROM tracklists WHERE processed = 0 AND abandoned = 0 ORDER BY discovered_at DESC, position ASC LIMIT 1000')
+    .prepare(
+      `SELECT t.slug AS slug, t.url AS url FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
+        WHERE t.processed = 0 AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions) AND ${ATTEMPT_OK_SQL}
+        ORDER BY t.discovered_at DESC, t.position ASC LIMIT 1000`,
+    )
+    .bind(nowSec, today)
     .all<{ slug: string; url: string }>()
   const pend = pending.results
     .filter((r) => slugs.has(r.slug))
@@ -350,11 +394,12 @@ export async function pickTickItems(env: Env, settings: PoolSettings, n: number,
     .prepare(
       `SELECT t.url AS url, MIN(t.slug) AS slug, MIN(CASE WHEN t.checked_at = 0 THEN 0 ELSE COALESCE(s.next_due_at, 0) END) AS due
          FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
-        WHERE t.processed = 1 AND t.abandoned = 0
+        WHERE t.processed = 1 AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions)
           AND (t.checked_at = 0 OR (s.next_due_at IS NOT NULL AND s.next_due_at <= ?))
+          AND ${ATTEMPT_OK_SQL}
         GROUP BY t.url ORDER BY due LIMIT ?`,
     )
-    .bind(nowSec, lim)
+    .bind(nowSec, nowSec, today, lim)
     .all<{ url: string; slug: string }>()
   for (const r of rechecks.results) {
     if (!slugs.has(r.slug) || seenUrl.has(r.url)) continue
@@ -416,8 +461,14 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
   const subs = await listSubscriptions(env)
   const bySlug = new Map<string, Subscription>(subs.map((s) => [s.slug, s]))
   await ensureDjSchedules(env, settings, subs.map((s) => s.slug), nowSec, random)
-  const created = await ensureSetSchedules(env, settings, nowSec, random)
-  if (created > 0) log.info('scheduler.schedules_created', { created })
+  // Creating missing schedules scans tracklists: at most hourly, not every tick (review W4 #7).
+  const lastEnsure = Number((await env.CACHE.get(ENSURE_STAMP_KEY)) ?? 0) || 0
+  if (nowSec - lastEnsure >= HOUR) {
+    const created = await ensureSetSchedules(env, settings, nowSec, random)
+    if (created > 0) log.info('scheduler.schedules_created', { created })
+    // A full batch means more are missing: look again next tick.
+    await env.CACHE.put(ENSURE_STAMP_KEY, String(created >= INIT_BATCH ? 0 : nowSec), { expirationTtl: 2 * HOUR })
+  }
 
   const { minItems, maxItems } = settings.tick
   const drawn = minItems + Math.floor(random() * (maxItems - minItems + 1))
@@ -469,9 +520,11 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           }
         } else if (item.kind === 'recheck') {
           await deferSetSchedule(env, item.url, nowSec + CLAIM_RECHECK_SECONDS)
+          await claimSetAttempt(env, item.url, nowSec)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
         } else if (item.kind === 'verify') {
           await deferVerification(env, item.url, nowSec + CLAIM_VERIFY_SECONDS)
+          await claimSetAttempt(env, item.url, nowSec)
           res = await syncOne(env, sub, tokenInfo.accessToken, {
             log,
             trigger: 'cron.verify',
@@ -482,6 +535,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
             settings,
           })
         } else {
+          await claimSetAttempt(env, item.url, nowSec)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: PRIORITY_OF[item.cls], selection: { newUrls: [item.url], recheckUrls: [] }, settings })
         }
         r = { item, outcome: res.stoppedBy ? 'stopped' : res.ok ? 'ok' : 'failed', ...(res.stoppedBy ? { stopReason: res.stoppedBy.reason } : {}) }

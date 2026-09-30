@@ -54,6 +54,8 @@ import { isPaused } from './ban-state'
 import type { PoolPriority } from './pool'
 import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
 import { recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
+import { isVerified } from './verification'
+import { dbOf } from './db'
 
 import { getAccessToken } from './google-oauth'
 import {
@@ -89,7 +91,7 @@ import { pickSetVideo, rejectionNote } from './playlist-hygiene'
 import { combinedRefuses } from './playlist-blocklist'
 import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
-import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, mkvidTracksTrusted, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
+import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
   flushPlaylistAdditions,
@@ -175,6 +177,8 @@ export function dueRecheckUrls(
   tracklistVideos: Record<string, TracklistVideo>,
   now = nowSeconds(),
   settings: PoolSettings = DEFAULT_POOL_SETTINGS,
+  /** Sets whose last fetch had unidentified rows (set_schedule.has_id_rows): decision 13's 90-day exception. */
+  idRowUrls: ReadonlySet<string> = new Set(),
 ): string[] {
   const out: string[] = []
   for (const u of processed) {
@@ -184,10 +188,21 @@ export function dueRecheckUrls(
       out.push(u)
       continue
     }
-    const interval = recheckIntervalSeconds(settings, setAgeDays(setDateFromUrl(u), now), { noGoodVideo: !entry.videoId })
+    const interval = recheckIntervalSeconds(settings, setAgeDays(setDateFromUrl(u), now), { noGoodVideo: !entry.videoId, hasIdRows: idRowUrls.has(u) })
     if (interval !== null && now - entry.checkedAt >= interval) out.push(u)
   }
   return out
+}
+
+/** Set URLs whose last fetch had ID rows (set_schedule.has_id_rows). Empty on any read error. */
+async function idRowSets(env: Env, log?: Logger): Promise<Set<string>> {
+  try {
+    const r = await dbOf(env).prepare('SELECT url FROM set_schedule WHERE has_id_rows = 1').all<{ url: string }>()
+    return new Set(r.results.map((x) => x.url))
+  } catch (e) {
+    log?.warn('sync.id_rows_unreadable', errorFields(e))
+    return new Set()
+  }
 }
 
 export function dueRechecks(state: SubState, now = nowSeconds(), settings: PoolSettings = DEFAULT_POOL_SETTINGS): string[] {
@@ -782,7 +797,7 @@ export async function syncOne(
         tracksSaved = 'failed'
         log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
       }
-      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount, idedCount, tracksSaved, tracksTrusted: mkvidTracksTrusted(parsed.decoy) })
+      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount, idedCount, tracksSaved, verified: await isVerified(env, setUrl) })
       return r === 'queued' ? `queued for mkvid (${source.kind})` : `mkvid request already exists (${source.kind})`
     } catch (e) {
       log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
@@ -981,7 +996,7 @@ export async function syncOne(
   // is never starved by rechecks; the deadline guards both.
   const rechecksDue = opts.selection
     ? opts.selection.recheckUrls.filter((u) => processed.has(u) && !abandoned.has(u))
-    : dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings)
+    : dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings, await idRowSets(env, log))
   const rechecks = stopReason ? [] : rechecksDue.slice(0, maxRechecks)
   if (rechecksDue.length > 0) {
     log.info('sync.recheck_window', {
@@ -1190,7 +1205,7 @@ export async function syncOne(
       combinedVideoIdsAdded: combined.handle?.inserted ?? 0,
       tracklistsRechecked: setsRechecked,
       videosReplaced,
-      rechecksPending: dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings).length,
+      rechecksPending: dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings, await idRowSets(env, log)).length,
     },
     ...(stoppedBy ? { stoppedBy } : {}),
     ...(crawlStopReason ? { crawlStopReason } : {}),

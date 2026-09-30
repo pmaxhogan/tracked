@@ -103,7 +103,7 @@ describe('receivePoolEvent', () => {
   })
 
   it('account.flagged links to the accounts page (or the captcha when it names one)', () => {
-    expect(poolEventPushPayload(ev({ type: 'account.flagged', accountId: 'acct-1' }))).toMatchObject({ kind: 'pool_account', url: '/subscriptions/accounts' })
+    expect(poolEventPushPayload(ev({ type: 'account.flagged', accountId: 'acct-1' }))).toMatchObject({ kind: 'pool_account', url: '/subscriptions/pool' })
     expect(poolEventPushPayload(ev({ type: 'account.flagged', accountId: 'acct-1', challengeId: 'c2' }))!.url).toBe('/subscriptions/captcha/c2')
     expect(poolEventPushPayload(ev({ type: 'account.created', accountId: 'acct-1' }))).toBeNull()
   })
