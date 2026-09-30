@@ -55,6 +55,7 @@ import type { PoolPriority } from './pool'
 import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
 import { recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
 import { isVerified } from './verification'
+import { artistPlaylistTitle } from './playlist-rename'
 import { dbOf } from './db'
 
 import { getAccessToken } from './google-oauth'
@@ -127,7 +128,6 @@ function retryAfterOf(e: unknown): number | null {
   return typeof r === 'number' && Number.isFinite(r) ? r : null
 }
 
-const PLAYLIST_TITLE_SUFFIX = ' (1001tklists)'
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
 const playlistDescription = (artistName: string) =>
   `Every set ${artistName} has a YouTube recording for on 1001tracklists.`
@@ -602,7 +602,7 @@ export async function syncOne(
   }
 
   // 2. Resolve / create the playlist. State first, then YT lookup, then create.
-  const playlistTitle = `${artistName}${PLAYLIST_TITLE_SUFFIX}`
+  const playlistTitle = artistPlaylistTitle(artistName)
   // Empty until step 2 resolves it. Typed as a definite string so the insert
   // and removal closures below don't have to re-narrow it on every call.
   let playlistId: string = state.playlistId ?? ''

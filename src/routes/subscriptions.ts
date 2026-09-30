@@ -39,6 +39,7 @@ import {
 } from '../lib/sync'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
+import { fixPlaylistTitles } from '../lib/playlist-rename'
 import { purgeAndRefetch, resolvePurgeTarget } from '../lib/tracklist-purge'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
@@ -434,6 +435,36 @@ subscriptionsApp.post('/api/resync', async (c) => {
     }
     log.error('subs.resync_all_throw', errorFields(e))
     return c.json({ error: 'resync_failed', ...errorFields(e) }, 500)
+  }
+})
+
+/**
+ * "Fix playlist titles": rename managed DJ playlists still titled
+ * "Tracklists By X (1001tklists)" (the July 2026 redesign's H1 leaked into the
+ * stored artist names) to "X (1001tklists)" (lib/playlist-rename.ts). Body
+ * `{ dryRun?: boolean }`, default true: nothing is renamed unless dryRun is
+ * false. Answers the old and new titles.
+ */
+subscriptionsApp.post('/api/playlists/fix-titles', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.fix_titles', by: c.get('cfAccessEmail') })
+  const body = (await c.req.json().catch(() => ({}))) as { dryRun?: unknown }
+  if (body.dryRun !== undefined && typeof body.dryRun !== 'boolean') return c.json({ error: 'invalid_request', message: 'dryRun must be true or false' }, 400)
+  const dryRun = body.dryRun !== false
+  let tokenInfo
+  try {
+    tokenInfo = await getAccessToken(c.env)
+  } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    throw e
+  }
+  if (!tokenInfo) return c.json({ error: 'youtube_not_connected', message: 'connect YouTube first' }, 503)
+  try {
+    const r = await fixPlaylistTitles(c.env, tokenInfo.accessToken, { dryRun, log })
+    log.info('subs.fix_titles.done', { dryRun, checked: r.checked, fixes: r.fixes.length })
+    return c.json(r)
+  } catch (e) {
+    log.error('subs.fix_titles.throw', errorFields(e))
+    return c.json({ error: 'upstream_error', message: (e as Error).message }, 502)
   }
 })
 
@@ -1091,7 +1122,9 @@ ${ALERTS_ROW_HTML}
   <div id="list-actions" hidden>
     <button id="resync-all" title="Forget what the sync trusts about every DJ's sets and re-fetch them all: swapped recordings get replaced. Drains over a few cron ticks.">Invalidate video cache &amp; resync all</button>
     <button id="sync-all">Sync all</button>
+    <button id="fix-titles" class="ghost" title="Rename DJ playlists still titled &quot;Tracklists By …&quot; to the artist name (shows the list first)">Fix playlist titles</button>
   </div>
+  <div id="fix-titles-out" class="muted" hidden></div>
   <ul id="list"></ul>
   <div id="empty" class="empty" hidden>No subscriptions yet.</div>
 
@@ -1386,6 +1419,43 @@ ${BAN_HISTORY_HTML}
     } finally {
       $syncAll.disabled = false;
       $syncAll.textContent = original;
+    }
+  });
+
+  // "Fix playlist titles": a dry run first, then the rename after a confirm.
+  const $fixTitles = document.getElementById('fix-titles');
+  const $fixOut = document.getElementById('fix-titles-out');
+  async function fixTitles(dryRun) {
+    const r = await fetch('/subscriptions/api/playlists/fix-titles', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
+    return d;
+  }
+  function showFixes(d) {
+    $fixOut.hidden = false;
+    $fixOut.textContent = '';
+    if (!d.fixes.length) { $fixOut.textContent = 'All ' + d.checked + ' DJ playlist titles are fine.'; return; }
+    const ul = document.createElement('ul');
+    for (const f of d.fixes) {
+      const li = document.createElement('li');
+      li.textContent = f.oldTitle + ' → ' + f.newTitle + (f.status === 'failed' ? ' (failed: ' + (f.error || '') + ')' : f.status === 'renamed' ? ' (renamed)' : '');
+      ul.appendChild(li);
+    }
+    $fixOut.appendChild(ul);
+  }
+  $fixTitles.addEventListener('click', async () => {
+    $fixTitles.disabled = true;
+    showError('');
+    try {
+      const preview = await fixTitles(true);
+      showFixes(preview);
+      if (!preview.fixes.length) return;
+      if (!confirm('Rename ' + preview.fixes.length + ' playlist' + (preview.fixes.length === 1 ? '' : 's') + ' on YouTube (50 quota units each)?')) return;
+      showFixes(await fixTitles(false));
+    } catch (e) {
+      showError('fix playlist titles: ' + (e && e.message ? e.message : e));
+    } finally {
+      $fixTitles.disabled = false;
     }
   });
 
