@@ -13,6 +13,10 @@ afterEach(() => vi.unstubAllGlobals())
 
 /** Every shell page: path and the h1 text it must carry. Page tasks add rows. */
 export const PAGES: Array<[string, string]> = [
+  ['/ui/pool', 'Pool accounts'],
+  ['/ui/pool/settings', 'Pool settings'],
+  ['/ui/captcha', 'Captchas'],
+  ['/ui/captcha/ch-1', 'Captcha'],
 ]
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
@@ -129,6 +133,14 @@ describe.runIf(PAGES.length > 0)('every UI page', () => {
     expect((await app.request(`https://tracked.example${path}`, {}, lockedEnv())).status).toBe(401)
     expect(spy).not.toHaveBeenCalled()
   })
+})
+
+it('pool pages report the Challenges count themselves and keep the phone-critical ids', async () => {
+  const { POOL_PAGES } = await import('../src/routes/pool-ui')
+  for (const h of [POOL_PAGES.POOL_PAGE_HTML, POOL_PAGES.CAPTCHA_LIST_HTML, POOL_PAGES.captchaPageHtml('ch-1')]) expect(h).toContain('data-own-count="1"')
+  for (const id of ['add-btn', 'err', 'stats', 'prio', 'chals', 'accts', 'add-dlg', 'add-exit', 'add-passive', 'add-create', 'add-steps', 'add-captcha', 'add-msg', 'add-retry']) expect(POOL_PAGES.POOL_PAGE_HTML).toContain(`id="${id}"`)
+  expect(POOL_PAGES.SETTINGS_PAGE_HTML).toContain('id="feed"')
+  expect(POOL_PAGES.SETTINGS_PAGE_HTML).toContain('Render feeder: first fetches a day')
 })
 
 /** Every GET route the app registers under /ui, with sample values for its parameters. */
