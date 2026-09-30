@@ -35,8 +35,8 @@ import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-in
 import { findPlaylistByTitle, listPlaylistVideoIds } from '../src/lib/youtube-playlists'
 import { parseTracklist } from '../src/lib/tracklists1001'
 import { syncOne } from '../src/lib/sync'
-import { isVerified } from '../src/lib/verification'
-import { getMkvidRequestForSet } from '../src/lib/mkvid'
+import { isVerified, tracklistFingerprint } from '../src/lib/verification'
+import { getMkvidRequestForSet, saveMkvidTracks } from '../src/lib/mkvid'
 import { MkvidClaimResponse } from '../src/schemas'
 import { app } from '../src/index'
 
@@ -115,6 +115,118 @@ describe('seam 1: only a verified list is claimable (W4 isVerified behind W7 rea
     expect(await isVerified(env, SET)).toBe(false)
     expect(await trusted(env)).toBe(0)
     expect((await claim(env)).request).toBeNull()
+  })
+})
+
+describe('review N2: a stored mkvid list is trusted only when it IS the verified list', () => {
+  // List G: the habstrakt page with one title renamed everywhere it appears, so
+  // the page still passes the decoy check but fingerprints differently.
+  const F = realParse(SET, HTML)
+  const oldTitle = F.rows.find((r) => r.title && r.title.length > 6 && HTML.split(r.title).length > 1)!.title!
+  const NEW_TITLE = 'Totally Different Tune'
+  const HTML_G = HTML.split(oldTitle).join(NEW_TITLE)
+  const servedG = (accountId: string | undefined, hoursAgo: number) =>
+    mocked(fetch1001Html).mockResolvedValue({ html: HTML_G, via: 'pool', state: { cookie: '' }, accountId, exitLabel: 'exit-x', fetchedAt: at(hoursAgo) })
+  const storedTracks = async (env: Env) =>
+    (await env.DB.prepare('SELECT t.tracks AS tracks FROM mkvid_request_tracks t JOIN mkvid_requests r ON r.id = t.request_id WHERE r.set_url = ?').bind(SET).first<{ tracks: string }>())?.tracks ?? ''
+  /** env.DB, except statements whose SQL matches `re` fail like a D1 error. */
+  const failingDb = (db: D1Database, re: RegExp): D1Database => {
+    const fail = async () => {
+      throw new Error('D1_ERROR: simulated')
+    }
+    const broken = { bind: () => broken, first: fail, all: fail, run: fail, raw: fail }
+    return new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'prepare') return (sql: string) => (re.test(sql) ? broken : target.prepare(sql))
+        const v = Reflect.get(target, prop)
+        return typeof v === 'function' ? v.bind(target) : v
+      },
+    })
+  }
+  const verifyF = async (env: Env) => {
+    served('acct-1', 5)
+    await syncOne(env, sub, 'tok')
+    served('acct-2', 2)
+    await verifyRun(env, ['acct-1'])
+    expect(await isVerified(env, SET)).toBe(true)
+    expect(await trusted(env)).toBe(1)
+  }
+
+  it('precondition: list G passes the decoy check and differs from F', async () => {
+    const G = realParse(SET, HTML_G)
+    expect(G.decoy.suspected).toBe(false)
+    expect(G.decoy.mismatched).toBe(0)
+    expect(G.rows.some((r) => r.title === NEW_TITLE)).toBe(true)
+    expect(await tracklistFingerprint(G)).not.toBe(await tracklistFingerprint(F))
+  })
+
+  it('a D1 error inside the verification update (swallowed by recordSetFetch) cannot make list G trusted', async () => {
+    const env = makeEnv()
+    await verifyF(env)
+    // startOver's first write fails: the set stays verified as F.
+    servedG('acct-3', 0)
+    await verifyRun({ ...env, DB: failingDb(env.DB, /INSERT INTO set_verification/) }, [])
+    expect(await isVerified(env, SET)).toBe(true)
+    // The trusted F copy is kept; G never replaces it.
+    expect(await trusted(env)).toBe(1)
+    expect(await storedTracks(env)).not.toContain(NEW_TITLE)
+    const c = await claim(env)
+    expect(c.request?.tracksTrusted).toBe(true)
+    expect(c.request!.tracks.some((t) => t.title === NEW_TITLE)).toBe(false)
+  })
+
+  it('same D1 error with no stored list: G is stored untrusted and is not claimable', async () => {
+    const env = makeEnv()
+    await verifyF(env)
+    await env.DB.prepare('DELETE FROM mkvid_request_tracks').run()
+    servedG('acct-3', 0)
+    await verifyRun({ ...env, DB: failingDb(env.DB, /INSERT INTO set_verification/) }, [])
+    expect(await isVerified(env, SET)).toBe(true)
+    expect(await storedTracks(env)).not.toContain(NEW_TITLE) // names dropped: untrusted rows carry none
+    expect(await trusted(env)).toBe(0)
+    expect((await claim(env)).request).toBeNull()
+  })
+
+  it('a D1 error on the verification READ (getVerification) cannot make list G trusted either', async () => {
+    const env = makeEnv()
+    await verifyF(env)
+    await env.DB.prepare('DELETE FROM mkvid_request_tracks').run()
+    servedG('acct-3', 0)
+    await verifyRun({ ...env, DB: failingDb(env.DB, /SELECT \* FROM set_verification/) }, [])
+    expect(await trusted(env)).toBe(0)
+  })
+
+  it('a fetch without an account id (path a) cannot make list G trusted', async () => {
+    const env = makeEnv()
+    await verifyF(env)
+    servedG('unknown', 0)
+    await verifyRun(env, [])
+    expect(await isVerified(env, SET)).toBe(true)
+    expect(await trusted(env)).toBe(1)
+    expect(await storedTracks(env)).not.toContain(NEW_TITLE)
+    await env.DB.prepare('DELETE FROM mkvid_request_tracks').run()
+    servedG(undefined, 0)
+    await verifyRun(env, [])
+    expect(await trusted(env)).toBe(0)
+  })
+
+  it('fails closed when the verified fingerprint cannot be read, or is empty', async () => {
+    const env = makeEnv()
+    served('acct-1', 5)
+    await syncOne(env, sub, 'tok')
+    // The confirming fetch verifies the set, but the fingerprint read fails: stored untrusted.
+    served('acct-2', 2)
+    await verifyRun({ ...env, DB: failingDb(env.DB, /SELECT fingerprint FROM set_verification/) }, ['acct-1'])
+    expect(await isVerified(env, SET)).toBe(true)
+    expect(await trusted(env)).toBe(0)
+    // Direct: verified row with an empty fingerprint.
+    await env.DB.prepare(`UPDATE set_verification SET fingerprint = '' WHERE url = ?`).bind(SET).run()
+    expect(await saveMkvidTracks(env, SET, F)).toBe('saved')
+    expect(await trusted(env)).toBe(0)
+    // And with the real fingerprint restored, the same list is upgraded.
+    await env.DB.prepare(`UPDATE set_verification SET fingerprint = ? WHERE url = ?`).bind(await tracklistFingerprint(F), SET).run()
+    expect(await saveMkvidTracks(env, SET, F)).toBe('saved')
+    expect(await trusted(env)).toBe(1)
   })
 })
 

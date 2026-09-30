@@ -592,7 +592,7 @@ Tests run against the real schema: `test/helpers/fake-d1.ts` is an in-memory sql
 
 **One code path.** `fetch1001()` in `src/lib/upstream1001.ts` is the only route, with `src/lib/pool.ts` as the client:
 
-0. **Master switch.** While `ban:pause` (CACHE KV) is set nothing is fetched and the scheduler does nothing. The orchestrator sets and lifts it; the admin banner's *Dismiss* lifts it too (`POST /subscriptions/api/ban/clear`).
+0. **Master switch.** While `ban:pause` (CACHE KV) is set nothing is fetched and the scheduler does nothing. Only the operator sets and lifts it (wrangler, at pool launch). The admin banner's *Dismiss* (`POST /subscriptions/api/ban/clear`) hides the banner and never touches the switch.
 1. **`POST {TLPOOL_URL}/fetch`** `{ url, kind, priority, excludeAccounts?, maxWaitSeconds }` (plus `method` / `form` / `headers` for the two POST endpoints: search and the DJ "older sets" XHR). A phone fetch waits at most 25 s. tlpool answers every contract result **with HTTP 200**, a page or `{ error, retryAfterSeconds }`, so the client reads the body, never the status.
 
 | request | kind | priority |
@@ -640,7 +640,7 @@ tlpool posts `challenge.created` / `.solved` / `.expired` and `account.flagged` 
 
 ### Admin banner and pause
 
-`src/lib/ban-state.ts` keeps `ban:pause` (the master switch) and the banner's episodes (`ban:home`, `ban:ep:*`) in KV. Every admin page shows the banner while paused; the main page's history lists past episodes and whether tlpool is configured. Web Push needs `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (`node scripts/gen-vapid-keys.mjs mailto:you@example.com`); **Enable notifications** once per device, **Send test notification** proves delivery.
+`src/lib/ban-state.ts` keeps `ban:pause` (the master switch) and the banner's episodes (`ban:home`, `ban:ep:*`) in KV. Every admin page shows the banner while paused, until *Dismiss* hides it for that pause (`ban:pause:dismissed`; the pause itself stays); the main page's history lists past episodes and whether tlpool is configured. Web Push needs `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (`node scripts/gen-vapid-keys.mjs mailto:you@example.com`); **Enable notifications** once per device, **Send test notification** proves delivery.
 
 Admin endpoints (CF Access): `GET /subscriptions/api/ban/status[?live=1]`, `POST /subscriptions/api/ban/clear`, `POST /subscriptions/api/ban/simulate`, `POST /subscriptions/api/ban/requeue-victims[?days=14&dry=1]`, `GET/PUT /subscriptions/api/pool/settings`, `GET /subscriptions/api/push/config`, `POST /subscriptions/api/push/{subscribe,unsubscribe,test}`, `GET /subscriptions/sw.js`. Pool pages and their proxies to tlpool (accounts, add account, captchas, live view, tlpool settings) are listed in `src/routes/pool-ui.ts`.
 

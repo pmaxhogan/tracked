@@ -30,7 +30,7 @@ afterEach(() => {
 })
 
 describe('ban:pause — the master switch', () => {
-  it('setPause is idempotent inside the window and closeEpisode lifts it', async () => {
+  it('setPause is idempotent inside the window, and closing an episode leaves it alone', async () => {
     const env = makeEnv()
     const p1 = await setPause(env, 'manual', null)
     vi.setSystemTime(new Date('2026-09-10T15:20:00.000Z'))
@@ -38,7 +38,8 @@ describe('ban:pause — the master switch', () => {
     expect(p2.until).toBe(p1.until)
     await openEpisode(env, { ip: null, source: 'proxy', until: null, viaPool: false })
     await closeEpisode(env, 'auto')
-    expect(await getPause(env)).toBeNull()
+    expect(await getHomeBan(env)).toBeNull()
+    expect((await getPause(env))?.since).toBe(p1.since)
   })
 
   it('honours a pause the orchestrator wrote by hand, until its `until` passes', async () => {
@@ -64,7 +65,7 @@ describe('banner episodes and the admin status', () => {
     const env = makeEnv()
     await setPause(env, 'manual', null)
     const s = await getBanStatus(env)
-    expect(Object.keys(s).sort()).toEqual(['episodes', 'home', 'now', 'pause', 'pushConfigured'])
+    expect(Object.keys(s).sort()).toEqual(['episodes', 'home', 'now', 'pause', 'pauseDismissed', 'pushConfigured'])
     expect(s.pause?.reason).toBe('manual')
   })
 
@@ -76,5 +77,49 @@ describe('banner episodes and the admin status', () => {
     const ep = await manualClear(env)
     expect(ep?.clearedBy).toBe('manual')
     expect(await getHomeBan(env)).toBeNull()
+  })
+})
+
+describe('Dismiss (manualClear, POST /api/ban/clear) never lifts ban:pause', () => {
+  const OPERATOR_PAUSE = JSON.stringify({ since: '2026-09-10T00:00:00.000Z', until: '2026-10-01T00:00:00.000Z', reason: 'pool launch pending', ip: null })
+
+  it('with an open episode: the episode ends, the operator pause stays', async () => {
+    const env = makeEnv()
+    await env.CACHE.put('ban:pause', OPERATOR_PAUSE)
+    await simulateBan(env)
+    const ep = await manualClear(env)
+    expect(ep?.clearedBy).toBe('manual')
+    expect(await getHomeBan(env)).toBeNull()
+    expect(await env.CACHE.get('ban:pause')).toBe(OPERATOR_PAUSE)
+    _resetTallyForTests()
+    expect((await isPaused(env))?.reason).toBe('pool launch pending')
+  })
+
+  it('pause only: the banner is dismissed for this pause, fetching stays paused, a new pause shows again', async () => {
+    const env = makeEnv()
+    await env.CACHE.put('ban:pause', OPERATOR_PAUSE)
+    expect((await getBanStatus(env)).pauseDismissed).toBe(false)
+    expect(await manualClear(env)).toBeNull()
+    expect(await env.CACHE.get('ban:pause')).toBe(OPERATOR_PAUSE)
+    const s = await getBanStatus(env)
+    expect(s.pause?.reason).toBe('pool launch pending')
+    expect(s.pauseDismissed).toBe(true)
+    // The operator lifts it and later sets a new one: the banner comes back.
+    await env.CACHE.put('ban:pause', JSON.stringify({ since: '2026-09-10T15:00:00.000Z', until: '2026-10-02T00:00:00.000Z', reason: 'second pause', ip: null }))
+    expect((await getBanStatus(env)).pauseDismissed).toBe(false)
+  })
+
+  it('the route: POST /subscriptions/api/ban/clear answers and leaves the key', async () => {
+    const { app } = await import('../src/index')
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' } as Partial<Env>)
+    await env.CACHE.put('ban:pause', OPERATOR_PAUSE)
+    await simulateBan(env)
+    const r = await app.request('https://tracked.example/subscriptions/api/ban/clear', { method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: '{}' }, env)
+    expect(r.status).toBe(200)
+    expect(await r.json()).toMatchObject({ cleared: true })
+    expect(await env.CACHE.get('ban:pause')).toBe(OPERATOR_PAUSE)
+    const st = await (await app.request('https://tracked.example/subscriptions/api/ban/status', {}, env)).json() as { pause: unknown; pauseDismissed: boolean; home: unknown }
+    expect(st).toMatchObject({ home: null, pauseDismissed: true })
+    expect(st.pause).not.toBeNull()
   })
 })

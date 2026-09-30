@@ -548,7 +548,7 @@ subscriptionsApp.get('/api/ban/status', async (c) => {
   return c.json({ ...status, poolConfigured, pushSubscriptions })
 })
 
-/** Manual dismiss: ends the open episode (real or simulated) and lifts any pause. */
+/** Manual dismiss: ends the open episode (real or simulated) and hides the banner. Never lifts `ban:pause` (operator only). */
 subscriptionsApp.post('/api/ban/clear', async (c) => {
   const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.ban_clear', by: c.get('cfAccessEmail') })
   const ep = await manualClear(c.env, log)

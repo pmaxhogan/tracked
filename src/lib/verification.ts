@@ -66,8 +66,19 @@ type Parsed = Pick<ScrapedTracklist, 'rows' | 'decoy'>
 /** Case- and whitespace-insensitive, like the decoy detector's own comparison. */
 const norm = (s: string | null | undefined): string => (s ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim()
 
+/** What a fingerprint reads from a row (ScrapedTracklist rows, or the same rows as mkvid's saver takes them). */
+type FingerprintRow = {
+  artist?: string | null
+  title?: string | null
+  startSeconds?: number | null
+  ownStartSeconds?: number | null
+  isMashupLinked?: boolean
+  anonymous?: boolean
+}
+type FingerprintSource = { readonly rows: ReadonlyArray<FingerprintRow> }
+
 /** The rows reduced to what "the same list" means (decision 2). */
-export function fingerprintInput(parsed: Pick<ScrapedTracklist, 'rows'>): string {
+export function fingerprintInput(parsed: FingerprintSource): string {
   return JSON.stringify(
     parsed.rows.map((r) => [
       norm(r.artist),
@@ -75,12 +86,12 @@ export function fingerprintInput(parsed: Pick<ScrapedTracklist, 'rows'>): string
       r.startSeconds ?? null,
       r.ownStartSeconds ?? null,
       r.isMashupLinked ? 1 : 0,
-      (r as { anonymous?: boolean }).anonymous ? 1 : 0,
+      r.anonymous ? 1 : 0,
     ]),
   )
 }
 
-export async function tracklistFingerprint(parsed: Pick<ScrapedTracklist, 'rows'>): Promise<string> {
+export async function tracklistFingerprint(parsed: FingerprintSource): Promise<string> {
   const bytes = new TextEncoder().encode(fingerprintInput(parsed))
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -102,6 +113,23 @@ export async function isVerified(env: Env, setUrl: string): Promise<boolean> {
     return row?.state === 'verified'
   } catch {
     return false
+  }
+}
+
+/**
+ * The fingerprint of the set's VERIFIED list: what two accounts agreed on.
+ * null when the set is not verified, the fingerprint is empty, or the row
+ * cannot be read (fail closed: callers treat null as "not verified").
+ */
+export async function verifiedFingerprint(env: Env, setUrl: string): Promise<string | null> {
+  try {
+    const row = await dbOf(env)
+      .prepare(`SELECT fingerprint FROM set_verification WHERE url = ? AND state = 'verified'`)
+      .bind(setUrl)
+      .first<{ fingerprint: string | null }>()
+    return typeof row?.fingerprint === 'string' && row.fingerprint.length > 0 ? row.fingerprint : null
+  } catch {
+    return null
   }
 }
 

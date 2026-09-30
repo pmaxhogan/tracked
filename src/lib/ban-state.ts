@@ -3,8 +3,9 @@
  *
  *   - `ban:pause` is the MASTER SWITCH: while it is set (and its `until` is in
  *     the future) lib/upstream1001.ts fetches nothing and the scheduler tick
- *     does nothing. The orchestrator sets and lifts it; the admin page's
- *     "clear" button lifts it too.
+ *     does nothing. Only the operator sets and lifts it (wrangler, at pool
+ *     launch); the admin banner's "Dismiss" hides the banner and never
+ *     touches it (`ban:pause:dismissed` remembers which pause was dismissed).
  *   - `ban:home` + `ban:ep:<invTs>` are the admin banner and its history
  *     (an episode opened by hand or by the "simulate" test hook), with a Web
  *     Push when one starts and ends.
@@ -26,6 +27,8 @@ export const BAN_COOLDOWN_SECONDS = 60 * 60
 
 const HOME_KEY = 'ban:home'
 const PAUSE_KEY = 'ban:pause'
+/** The `since` of the pause whose banner the owner dismissed. */
+const PAUSE_DISMISSED_KEY = 'ban:pause:dismissed'
 const EPISODE_PREFIX = 'ban:ep:'
 const EPISODE_TTL_SECONDS = 180 * 24 * 60 * 60
 
@@ -76,6 +79,8 @@ export type BanStatus = {
   now: string
   home: HomeBan | null
   pause: Pause | null
+  /** The owner dismissed the banner for the current pause (the pause itself is untouched). */
+  pauseDismissed: boolean
   episodes: BanEpisode[]
   pushConfigured: boolean
 }
@@ -210,7 +215,7 @@ export async function openEpisode(
 }
 
 /**
- * End the open episode: stamp it, drop `ban:home` and any pause, fire the
+ * End the open episode: stamp it, drop `ban:home` (never `ban:pause`), fire the
  * "cleared" push. Returns the closed episode, or null if none was open.
  */
 export async function closeEpisode(env: BanEnv, clearedBy: NonNullable<BanEpisode['clearedBy']>, log?: Logger): Promise<BanEpisode | null> {
@@ -236,7 +241,7 @@ export async function closeEpisode(env: BanEnv, clearedBy: NonNullable<BanEpisod
   ep.blockedForMs = Math.max(0, Date.parse(endedAt) - Date.parse(ep.startedAt))
   ep.clearedBy = clearedBy
   await env.CACHE.delete(HOME_KEY).catch(() => {})
-  await clearPause(env, log)
+  // Not the pause: `ban:pause` is the operator's switch (set and lifted with wrangler).
   await putEpisode(env, ep)
   log?.warn('ban.episode_closed', { key: ep.key, ip: ep.ip, clearedBy, blockedForMs: ep.blockedForMs, poolRequests: ep.poolRequests, brightdataRequests: ep.brightdataRequests })
   try {
@@ -253,7 +258,7 @@ export async function closeEpisode(env: BanEnv, clearedBy: NonNullable<BanEpisod
 
 export async function getBanStatus(env: BanEnv, episodeLimit = 10): Promise<BanStatus> {
   const [home, pause, episodes] = await Promise.all([getHomeBan(env), getPause(env), listEpisodes(env, episodeLimit)])
-  return { now: nowIso(), home, pause, episodes, pushConfigured: pushConfigured(env as unknown as Env) }
+  return { now: nowIso(), home, pause, pauseDismissed: await pauseDismissed(env, pause), episodes, pushConfigured: pushConfigured(env as unknown as Env) }
 }
 
 /** Admin test hook: open a fake episode (banner + push) that only a manual clear ends. */
@@ -261,11 +266,32 @@ export async function simulateBan(env: BanEnv, log?: Logger): Promise<HomeBan> {
   return openEpisode(env, { ip: null, source: 'simulated', until: new Date(Date.now() + BAN_COOLDOWN_SECONDS * 1000).toISOString(), viaPool: true, simulated: true }, log)
 }
 
-/** Admin: end the open episode by hand (also used to dismiss a simulated one). */
+/**
+ * Admin "Dismiss": end the open episode by hand (also used to dismiss a
+ * simulated one) and hide the banner for the current pause. It NEVER lifts
+ * `ban:pause`: pausing and unpausing fetching is the operator's job (wrangler,
+ * at pool launch), so a tap on the banner cannot restart fetching. A later,
+ * different pause (another `since`) shows the banner again.
+ */
 export async function manualClear(env: BanEnv, log?: Logger): Promise<BanEpisode | null> {
   const ep = await closeEpisode(env, 'manual', log)
-  await clearPause(env, log)
+  const pause = await getPause(env)
+  if (pause) {
+    const ttl = Math.max(60, Math.ceil((Date.parse(pause.until) - Date.now()) / 1000) + 60)
+    await env.CACHE.put(PAUSE_DISMISSED_KEY, pause.since, { expirationTtl: ttl }).catch(() => {})
+    log?.info('ban.pause_banner_dismissed', { since: pause.since, until: pause.until })
+  }
   return ep
+}
+
+/** Whether the owner dismissed the banner for this very pause. */
+async function pauseDismissed(env: BanEnv, pause: Pause | null): Promise<boolean> {
+  if (!pause) return false
+  try {
+    return (await env.CACHE.get(PAUSE_DISMISSED_KEY)) === pause.since
+  } catch {
+    return false
+  }
 }
 
 /** Test helper: forget the memoised pause between vitest cases. */

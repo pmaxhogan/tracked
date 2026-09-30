@@ -42,7 +42,7 @@ import { addToCombined, flushCombined, openCombinedPlaylist, type CombinedAdditi
 import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds } from './playlist-cache'
 import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
-import { isVerified } from './verification'
+import { isVerified, tracklistFingerprint, verifiedFingerprint } from './verification'
 import { markInPlaylist } from './playlist-blocklist'
 import { CLAIM_READY_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 import { isOldStyle, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
@@ -320,9 +320,12 @@ export function toMkvidTracks(tracks: ReadonlyArray<ParsedTrack & { anonymous?: 
 /**
  * Store the track list of a queued set's page (sync: first queueing and every
  * recheck). Keyed by the request, so a set that is not queued stores nothing.
- * Trusted = verified (see mkvidTracksTrusted): the sync records the fetch in
+ * Trusted = these rows ARE the verified list (their fingerprint equals
+ * set_verification.fingerprint of a verified set) and the page passes the
+ * strict decoy check (mkvidTracksTrusted). The sync records the fetch in
  * lib/verification.ts before calling this, so the fetch that verifies a list
- * is the one that upgrades the stored copy.
+ * is the one that upgrades the stored copy; a list that differs from the
+ * verified one, or whose match cannot be read, is stored untrusted.
  * A trusted list is never replaced by an untrusted one — the next fetch may
  * well be a decoy — but an untrusted one is upgraded as soon as a clean page
  * turns up, and a trusted one refreshed (1001tl users add IDs over time).
@@ -337,7 +340,18 @@ export async function saveMkvidTracks(
   const db = dbOf(env)
   const req = await db.prepare('SELECT id FROM mkvid_requests WHERE set_url = ?').bind(setUrl).first<{ id: string }>()
   if (!req) return 'no_request'
-  const trusted = mkvidTracksTrusted(parsed.decoy, await isVerified(env, setUrl))
+  // N2: verified is not enough — THESE rows must be the list that was verified.
+  // A fetch that skipped verification (no account id, or a D1 error inside
+  // noteSetFetch, which recordSetFetch swallows) must not upgrade a different
+  // list to trusted. Any error here fails closed: the list is stored untrusted.
+  let matchesVerified = false
+  try {
+    const verifiedFp = await verifiedFingerprint(env, setUrl)
+    matchesVerified = verifiedFp !== null && verifiedFp === (await tracklistFingerprint(parsed))
+  } catch {
+    matchesVerified = false
+  }
+  const trusted = mkvidTracksTrusted(parsed.decoy, matchesVerified)
   const tracks = toMkvidTracks(parsed.rows, trusted)
   // ID rows of the list mkvid would draw — what the 7-day ID wait looks at (lib/mkvid-readiness.ts).
   const idRows = tracks.filter((t) => t.isId).length

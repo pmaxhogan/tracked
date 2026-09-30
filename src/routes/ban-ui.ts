@@ -115,7 +115,9 @@ export const BAN_JS = /* js */ `
   let lastStatus = null;
   function renderBanner(s) {
     if (!$banner) return;
-    const home = s.home, pause = s.pause;
+    const home = s.home;
+    // A dismissed pause keeps fetching paused (only the operator lifts it) but no longer shows the banner.
+    const pause = s.pause && !s.pauseDismissed ? s.pause : null;
     if (!home && !pause) { $banner.hidden = true; return; }
     const simulated = !!(home && home.simulated);
     $banner.classList.toggle('paused', !!pause);
@@ -124,7 +126,7 @@ export const BAN_JS = /* js */ `
     if (pause) {
       $icon.textContent = '⛔';
       $title.innerHTML = '1001tracklists is blocking every tracked account — fetching is paused' + (simulated ? '<span class="ban-badge">simulated</span>' : '');
-      $sub.innerHTML = 'Nothing is fetched from 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b> (' + esc(pause.reason) + '). The pool (tlpool) owns accounts, budgets and captchas; this switch stops the Worker from asking it at all. Clear it from here once you want fetching back.';
+      $sub.innerHTML = 'Nothing is fetched from 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b> (' + esc(pause.reason) + '). The pool (tlpool) owns accounts, budgets and captchas; this switch stops the Worker from asking it at all. The operator lifts it (Dismiss only hides this banner).';
     } else {
       $icon.textContent = '🚫';
       $title.innerHTML = '1001tracklists is blocking the tracked sessions' + (ip ? ' (last shown IP' + ip + ')' : '') + (simulated ? '<span class="ban-badge">simulated</span>' : '');
