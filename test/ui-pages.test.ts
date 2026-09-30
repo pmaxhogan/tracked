@@ -145,19 +145,20 @@ it('pool pages report the Challenges count themselves and keep the phone-critica
   expect(POOL_PAGES.SETTINGS_PAGE_HTML).toContain('Render feeder: first fetches a day')
 })
 
-/** Every GET route the app registers under /ui, with sample values for its parameters. */
-function uiGetPaths(): string[] {
+/** Every route with one of these methods under /ui, with sample values for its parameters. */
+function uiPaths(methods: string[]): string[] {
   const sample: Record<string, string> = { slug: 'some-dj', id: 'ch-1', videoId: 'abcdefghijk', playlistId: 'PL1', action: 'x' }
   const paths = new Set<string>()
   for (const r of app.routes) {
-    if (r.method !== 'GET' || !(r.path === '/ui' || r.path.startsWith('/ui/'))) continue
+    if (!methods.includes(r.method) || !(r.path === '/ui' || r.path.startsWith('/ui/'))) continue
     paths.add(r.path.replace(/:(\w+)(\{[^}]*\})?/g, (_m, name: string) => sample[name] ?? 'x').replace(/\*/g, 'x'))
   }
   return [...paths].sort()
 }
 
 describe('Access gate on every /ui route', () => {
-  const paths = uiGetPaths()
+  const paths = uiPaths(['GET'])
+  const writes = uiPaths(['POST', 'PUT', 'DELETE']).flatMap((p) => ['POST', 'PUT', 'DELETE'].filter((m) => app.routes.some((r) => r.method === m && uiPaths([m]).includes(p))).map((m) => [m, p] as const))
   it('finds the /ui routes', () => {
     expect(paths).toContain('/ui')
     expect(paths).toContain('/ui/')
@@ -167,6 +168,14 @@ describe('Access gate on every /ui route', () => {
     const spy = vi.fn(async () => new Response('{}'))
     vi.stubGlobal('fetch', spy)
     expect((await app.request(`https://tracked.example${path}`, {}, lockedEnv())).status).toBe(401)
+    expect(spy).not.toHaveBeenCalled()
+  })
+  it('finds the /ui write routes', () => expect(writes.length).toBeGreaterThan(5))
+  it.each(writes)('%s %s answers 401 without Access and never fetches', async (method, path) => {
+    const spy = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', spy)
+    const r = await app.request(`https://tracked.example${path}`, { method, headers: { 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: '{}' }, lockedEnv())
+    expect(r.status).toBe(401)
     expect(spy).not.toHaveBeenCalled()
   })
 })

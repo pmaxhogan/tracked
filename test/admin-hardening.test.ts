@@ -84,7 +84,7 @@ describe('old service worker cleanup', () => {
    * an installing worker that activates a macrotask later, and subscribe()
    * rejects until then (Chromium: "no active Service Worker").
    */
-  async function runMigration(opts: { old: boolean; install?: 'activated' | 'redundant' }) {
+  async function runMigration(opts: { old: boolean; install?: 'activated' | 'redundant' | 'stuck'; subscribeStatus?: number }) {
     const { BAN_JS } = await import('../src/routes/ban-ui')
     const posts: Array<{ url: string; body: string }> = []
     const registered: Array<[string, unknown]> = []
@@ -94,6 +94,7 @@ describe('old service worker cleanup', () => {
     let oldUnsubscribed = 0
     let requestPermission = 0
     let subscribeRejected = 0
+    const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = []
     const oldReg = {
       scope: 'https://tracked.example/subscriptions/',
       pushManager: { getSubscription: async () => ({ endpoint: 'https://push.example/old', unsubscribe: async () => { oldUnsubscribed++; log.push('old.unsubscribe'); return true } }) },
@@ -126,7 +127,7 @@ describe('old service worker cleanup', () => {
         getRegistrations: async () => (opts.old ? [oldReg] : []),
         register: async (url: string, o: unknown) => {
           registered.push([url, o])
-          if (!newReg.active) { worker = { ...worker, state: 'installing' }; newReg.installing = worker; setTimeout(activate, 0) } // Node's timer, not the page's
+          if (!newReg.active) { worker = { ...worker, state: 'installing' }; newReg.installing = worker; if (opts.install !== 'stuck') setTimeout(activate, 0) } // Node's timer, not the page's
           return newReg
         },
       },
@@ -142,15 +143,19 @@ describe('old service worker cleanup', () => {
       sessionStorage: { getItem: () => '1', setItem() {} },
       fetch: async (u: string, init?: { method?: string; body?: string }) => {
         if (init && init.method === 'POST') { posts.push({ url: u, body: String(init.body) }); log.push('POST ' + u) }
+        if (u === '/ui/api/push/subscribe' && opts.subscribeStatus) return new Response('{}', { status: opts.subscribeStatus })
         if (u === '/ui/api/push/config') return Response.json({ configured: true, publicKey: 'AQAB' })
         return Response.json({})
       },
-      setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, alert() {},
+      setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms, cleared: false }); return timers.length },
+      clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1]!.cleared = true },
+      setInterval: () => 0, alert() {},
     })
     vm.runInContext(BAN_JS, ctx)
     await settle()
+    const fireActivationTimeout = async () => { for (const t of timers) if (t.ms === 10000 && !t.cleared) { t.cleared = true; t.fn() } await settle() }
     const clickEnable = async () => { for (const f of enableClicks) await f(); await settle() }
-    return { posts, registered, log, els, clickEnable, oldUnregistered: () => oldUnregistered, newUnregistered: () => newUnregistered, oldUnsubscribed: () => oldUnsubscribed, requestPermission: () => requestPermission, subscribeRejected: () => subscribeRejected }
+    return { posts, registered, log, els, clickEnable, fireActivationTimeout, timers, oldUnregistered: () => oldUnregistered, newUnregistered: () => newUnregistered, oldUnsubscribed: () => oldUnsubscribed, requestPermission: () => requestPermission, subscribeRejected: () => subscribeRejected }
   }
 
   it('subscribes under /ui/ once the new worker is active, then drops the /subscriptions/ registration and its push subscription, without a prompt', async () => {
@@ -191,6 +196,32 @@ describe('old service worker cleanup', () => {
     await m.clickEnable()
     expect(m.registered).toHaveLength(2)
     expect(m.els['alerts-state']!.textContent).toBe('error')
+  })
+
+  it('a worker stuck in installing times out after 10 s: no subscribe, the old registration stays, the error shows, and Enable registers again', async () => {
+    const m = await runMigration({ old: true, install: 'stuck' })
+    expect(m.registered).toHaveLength(1)
+    expect(m.timers.some((t) => t.ms === 10000 && !t.cleared)).toBe(true)
+    expect(m.els['alerts-state']!.textContent).not.toBe('error') // still waiting
+    await m.fireActivationTimeout()
+    expect(m.subscribeRejected()).toBe(0)
+    expect(m.log).toEqual([])
+    expect(m.oldUnsubscribed()).toBe(0)
+    expect(m.oldUnregistered()).toBe(0)
+    expect(m.els['alerts-state']!.textContent).toBe('error')
+    expect(m.els['alerts-msg']!.textContent).toContain('did not activate')
+    await m.clickEnable()
+    expect(m.registered).toHaveLength(2)
+  })
+
+  it('when the subscribe POST fails (500), the old registration and its subscription are kept', async () => {
+    const m = await runMigration({ old: true, subscribeStatus: 500 })
+    expect(m.posts.filter((p) => p.url === '/ui/api/push/subscribe').length).toBeGreaterThan(0)
+    expect(m.posts.filter((p) => p.url === '/ui/api/push/unsubscribe')).toEqual([])
+    expect(m.oldUnsubscribed()).toBe(0)
+    expect(m.oldUnregistered()).toBe(0)
+    expect(m.log).not.toContain('old.unsubscribe')
+    expect(m.log).not.toContain('old.unregister')
   })
 })
 

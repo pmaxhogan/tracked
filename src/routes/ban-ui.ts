@@ -203,7 +203,9 @@ export const BAN_JS = /* js */ `
     const w = reg.installing || reg.waiting;
     if (!w || typeof w.addEventListener !== 'function') return Promise.resolve(reg); // let subscribe report it
     return new Promise((resolve, reject) => {
-      const done = () => { if (typeof w.removeEventListener === 'function') w.removeEventListener('statechange', check); };
+      // A worker stuck in 'installing' must not stall Enable forever (kept under the 15 s banner poll).
+      const timer = setTimeout(() => { done(); reject(new Error('the notification service worker did not activate in time')); }, 10000);
+      const done = () => { clearTimeout(timer); if (typeof w.removeEventListener === 'function') w.removeEventListener('statechange', check); };
       const check = () => {
         if (w.state === 'activated') { done(); resolve(reg); }
         else if (w.state === 'redundant') { done(); reject(new Error('the notification service worker failed to install')); }
