@@ -1,7 +1,7 @@
 # tracked web UI redesign: design spec
 
 Status: approved by the owner on 2026-09-30 (design artifact "tracked New UI", every proposed default accepted).
-Branch: `new-ui` in worktree `tracked-ui`, off `origin/main` at `d5ab9c4`.
+Branch: `new-ui` in worktree `tracked-ui`, rebased on `origin/main` at `02b883f` (the survey behind this spec was taken at `d5ab9c4`; main has since added the render feeder: `migrations/0012_render_feed.sql`, `src/lib/fetch-scheduler.ts`, `src/lib/pool-settings.ts`, and a `renderFeedPerDay` field on the pool settings form).
 Companion: `2026-09-30-tracked-ui-behaviour-contract.md` (the client-side behaviour every rebuilt page must keep).
 
 ## 1. Goal
@@ -38,7 +38,7 @@ Taken from the code and tests at `d5ab9c4`. They are spec, not folklore.
 6. `test/pool-ui.test.ts` imports `createPoolUiApp` and `POOL_PAGES` (`{ POOL_PAGE_HTML, CAPTCHA_LIST_HTML, SETTINGS_PAGE_HTML, captchaPageHtml }`) from `src/routes/pool-ui`; `test/admin-hardening.test.ts` dynamically imports `BAN_JS` from `src/routes/ban-ui`. Keep those exports.
 7. The banner's Dismiss hides the banner for this pause and never lifts `ban:pause`. The 409 `no_free_exit` message on Add account stays.
 8. Pool data only through `src/lib/pool-admin-client.ts`, `pool-events.ts`, `verification.ts`; accounts are `acct-N`, never a username, email or exit credential. Never call tlpool or 1001tracklists directly from UI code. Public repo: nothing sensitive in code, fixtures, docs or commits.
-9. No new writes on the hot paths (`*/5` tick, `/mkvid/claim`, `/now-playing`) except the search-index upsert inside `ctx.waitUntil` with errors swallowed. Migrations number from `0012`; send DDL to the pool session before writing it; apply to production (with a D1 export first) before the push that deploys it.
+9. No new writes on the hot paths (`*/5` tick, `/mkvid/claim`, `/now-playing`) except the search-index upsert inside `ctx.waitUntil` with errors swallowed. Migrations number from `0013` (main at `02b883f` already holds `0012_render_feed.sql`, applied to production); always check `npx wrangler d1 migrations list tracked --remote` first; send DDL to the pool session before writing it; apply to production (with a D1 export first) before the push that deploys it.
 10. No script/style CSP exists; inline CSS and JS stay inline. Do not add a CSP.
 
 ## 3a. Prefix move: `/subscriptions/**` to `/ui/**`
@@ -132,7 +132,7 @@ Filter chips: kind (request, playlist, hygiene, mkvid, pool, sync, ban), problem
 `GET /ui/api/activity?kind=a,b&problems=1&dj=&since=&cursor=&limit=50` returns `{ rows: [{ ts, kind, status, problem, title, detail, dj, setUrl, videoId, ref: { kind, key } }], cursor }`. Sources: `now_playing_audit` (request), `playlist_additions` (playlist), `playlist_removals` (hygiene), `mkvid_requests` transitions and `mkvid_claims` (mkvid), `pool_events` (pool), `sub_sync` last run and error (sync), KV `ban:ep:*` (ban). One SELECT per source with the same output columns, ordered and limited per source, merged in the Worker; keyset on `(ts, kind, key)`. No writes.
 
 ### Pool accounts, Challenges, Challenge, Pool settings
-Same content and behaviour, laid out for width: stat tiles and priority chips across the top, challenges as cards, the accounts table full width (cards under 700px, exit kind and passive as badges), the add-account `<dialog>` unchanged in ids and strings. Challenge page stays narrow and phone-first. Pool settings: the two forms side by side as cards, saved toasts.
+Same content and behaviour, laid out for width: stat tiles and priority chips across the top, challenges as cards, the accounts table full width (cards under 700px, exit kind and passive as badges), the add-account `<dialog>` unchanged in ids and strings. Challenge page stays narrow and phone-first. Pool settings: the two forms side by side as cards, saved toasts. The schedule form keeps the `renderFeedPerDay` field main added after `d5ab9c4` (input `#feed`, "Render feeder: first fetches a day", 0 to 500, default 40, 0 = off; loaded from and saved to `api/pool/settings`).
 
 ### Settings
 YouTube account card; Notifications (VAPID configured, Enable on this device, Send test, device list); Theme (system / dark / light); Integrations status (tlpool, mkvid token, Web Push); Ban episodes table.
@@ -185,7 +185,7 @@ Acceptance queries (from the owner): "lily plamer dont" must rank "Rian Wood & V
 
 Indexing: hook `noteSetFetch(env, input)` in `src/lib/verification.ts`; upsert only when the result says the list just became verified or is verified with an unchanged fingerprint (confirm with `verifiedFingerprint(env, setUrl)`); inside `ctx.waitUntil`, errors swallowed; never from `cacheParsedTracklist` or the `tl:` KV cache. Backfill: an admin button on Tools, 500 sets per press with a keyset cursor, from `mkvid_request_tracks` rows with `trusted=1` and sets whose `set_verification` row is verified with a matching fingerprint; never from KV; never on the cron. The index is not pruned; a set that verifies again is re-indexed.
 
-Tables (migration `0012`, DDL to the pool session before writing; must not collide with `0007_pool_scheduler`):
+Tables (migration `0013`, DDL to the pool session before writing; must not collide with `0007_pool_scheduler`):
 
 ```
 search_sets       (set_url PK, dj_slug, dj_name, title, set_date, video_id, video_source, track_count, ided_count, indexed_at)
@@ -226,7 +226,7 @@ src/routes/ban-ui.ts          keeps BAN_JS, SW_JS, banner markup and UNBLOCK_URL
 src/routes/playlist-hygiene.ts  REMOVED_PAGE_HTML (94-243) replaced by an import; API routes untouched
 src/routes/activity.ts        phase 2: GET api/activity, GET api/set
 src/lib/search/               phase 3: normalize.ts, score.ts, index.ts (upsert + backfill), query.ts
-migrations/0012_search.sql    phase 3
+migrations/0013_search.sql    phase 3 (0012 is taken by main's render feeder)
 ```
 
 No page constant in the current code uses any API-side helper; the only dynamic interpolation is `${JSON.stringify(id)}` in `captchaPageHtml(id)`, which stays a function. No UI handler reads `c.env`.
