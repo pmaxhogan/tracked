@@ -1264,7 +1264,7 @@ export type InvalidateResult = {
  * answering with a Cloudflare shell (what every set got during the 2026-09
  * ban once the home proxy was blocked), or a deliberate pause.
  */
-export const BLOCK_SHAPED_FAILURE = /ip.?block|rate-limited|blocked|home proxy|unlocker|cf shell|cloudflare|challenge|paused|403|no_body|unusable/i
+export const BLOCK_SHAPED_FAILURE = /ip.?block|rate-limited|blocked|home proxy|unlocker|cf shell|cloudflare|challenge|paused|\b403\b|no_body|unusable/i
 
 export type RequeueResult = {
   days: number

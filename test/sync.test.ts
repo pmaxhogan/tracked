@@ -21,6 +21,7 @@ import {
   resyncAll,
   syncOne,
   manualFetchBudget,
+  BLOCK_SHAPED_FAILURE,
   type SubState,
 } from '../src/lib/sync'
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
@@ -1826,5 +1827,15 @@ describe('full-recording gate inside a sync (lib/playlist-hygiene.ts)', () => {
 
     expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual(['PLartist'])
     expect((await playlistAdditions(env))[0]!.record.combinedStatus).toBe('unavailable')
+  })
+})
+
+describe('BLOCK_SHAPED_FAILURE', () => {
+  it('matches a bare 403 as a word (it held literal backspace bytes, so this alternative never matched)', () => {
+    expect(BLOCK_SHAPED_FAILURE.source).not.toMatch(/[ -]/)
+    expect(BLOCK_SHAPED_FAILURE.test('1001tracklists answered 403 to acct-1')).toBe(true)
+    expect(BLOCK_SHAPED_FAILURE.test('HTTP 403')).toBe(true)
+    expect(BLOCK_SHAPED_FAILURE.test('set id 14031 not found')).toBe(false)
+    expect(BLOCK_SHAPED_FAILURE.test('parse error on row 4030')).toBe(false)
   })
 })
