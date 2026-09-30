@@ -11,6 +11,8 @@ const BODY = /* html */ `
     <div class="tk-row"><span id="dj-sub" class="badge ok" hidden>subscribed</span></div>
     <p class="mono dj-slug"><span id="dj-slug"></span></p>
     <p id="counts" class="muted sub">Loading sets…</p>
+    <p id="dj-playlist" class="sub" hidden></p>
+    <p id="dj-last" class="sub" hidden></p>
     <p class="sub"><a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> · <a href="/ui/djs">All DJs</a></p>
     <div class="dj-actions">
       <button id="sync" type="button" class="btn primary" hidden>Sync</button>
@@ -50,6 +52,8 @@ const CSS = /* css */ `
   .set-meta { color: var(--muted); font-size: var(--fs-sm); display: flex; flex-wrap: wrap; gap: 4px var(--sp-3); margin-bottom: var(--sp-3); }
   .set-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-3); }
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
+  .set-card.unloaded { opacity: .75; }
+  .set-card .badge.neutral { text-transform: none; }
   .retry { margin-left: var(--sp-2); }
   .warn-text { color: var(--danger); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .loading-text { color: var(--muted); font-size: var(--fs-sm); }
@@ -68,10 +72,12 @@ const JS = /* js */ `
 ${TRACK_ROW_JS}
   const $ = TK.$;
   // The slug comes from the path (/ui/dj/<slug>).
-  const slug = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
+  let slug = '', badSlug = false;
+  try { slug = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || ''); } catch (e) { badSlug = true; }
 
   const $name = $('dj-name'), $sub = $('dj-sub'), $slug = $('dj-slug'), $link1001 = $('dj-1001'), $counts = $('counts');
   const $refresh = $('refresh'), $sync = $('sync'), $resync = $('resync'), $msg = $('dj-msg');
+  const $playlist = $('dj-playlist'), $last = $('dj-last');
   const $error = $('error'), $sets = $('sets'), $empty = $('empty'), $chips = $('chips'), $note = $('filter-note');
   let filter = 'all';
   let subscribed = false;
@@ -87,7 +93,7 @@ ${TRACK_ROW_JS}
   // ── filter chips (client-side, over the cards that have been opened) ──
   function matches(card) {
     if (filter === 'all') return true;
-    if (card.dataset.loaded !== '1') return false;
+    if (card.dataset.loaded !== '1') return true; // unopened cards stay visible
     if (filter === 'video') return card.dataset.video === '1';
     if (filter === 'novideo') return card.dataset.video === '0';
     return card.dataset.partial === '1';
@@ -98,11 +104,13 @@ ${TRACK_ROW_JS}
       if (card.dataset.loaded !== '1') unloaded++;
       const ok = matches(card);
       card.hidden = !ok;
+      card.classList.toggle('unloaded', card.dataset.loaded !== '1');
       if (ok) shown++;
     }
     if (filter === 'all' || !$sets.children.length) { $note.hidden = true; return; }
     $note.hidden = false;
-    $note.textContent = shown + ' set' + (shown === 1 ? '' : 's') + ' match' + (shown === 1 ? 'es' : '') + (unloaded ? ' · ' + unloaded + ' not opened yet (open a set to classify it)' : '');
+    const hit = shown - unloaded;
+    $note.textContent = hit + ' opened set' + (hit === 1 ? '' : 's') + ' match' + (hit === 1 ? 'es' : '') + (unloaded ? ' · ' + unloaded + ' not loaded yet (open a set to classify it)' : '');
   }
   $chips.addEventListener('click', (ev) => {
     const b = ev.target && ev.target.closest ? ev.target.closest('button[data-f]') : null;
@@ -220,20 +228,21 @@ ${TRACK_ROW_JS}
       head.setAttribute('role', 'button');
       const chev = document.createElement('span'); chev.className = 'chev'; chev.textContent = '▸'; head.appendChild(chev);
       const title = document.createElement('span'); title.className = 'title'; title.textContent = set.title; head.appendChild(title);
+      const nl = document.createElement('span'); nl.className = 'badge neutral nl'; nl.textContent = 'not loaded'; head.appendChild(nl);
       const date = document.createElement('span'); date.className = 'date'; date.textContent = set.date || ''; head.appendChild(date);
       card.appendChild(head);
       const body = document.createElement('div');
       body.className = 'body';
       body.hidden = true;
       card.appendChild(body);
-      let loaded = false, loading = false;
+      let loading = false;
       const toggle = async () => {
         body.hidden = !body.hidden;
         card.classList.toggle('open', !body.hidden);
         head.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
-        if (body.hidden || loaded || loading) return;
+        if (body.hidden || card.dataset.loaded === '1' || loading) return;
         loading = true;
-        loaded = await loadSetInto(card, body, head, set);
+        await loadSetInto(card, body, head, set);
         loading = false;
       };
       head.addEventListener('click', toggle);
@@ -258,6 +267,31 @@ ${TRACK_ROW_JS}
     $error.hidden = false;
   }
 
+  // Playlist link and last sync from the sync state. Independent of the crawl: a failure leaves the lines hidden.
+  async function loadState() {
+    try {
+      const res = await TK.api.get('/ui/api/state/' + encodeURIComponent(slug));
+      const st = res.ok && res.data ? res.data.state : null;
+      if (!st) return;
+      const href = st.playlistId ? TK.safeHref('https://www.youtube.com/playlist?list=' + encodeURIComponent(st.playlistId)) : null;
+      if (href) {
+        $playlist.textContent = '';
+        const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noreferrer noopener'; a.textContent = 'Playlist on YouTube ↗';
+        $playlist.appendChild(a);
+        $playlist.hidden = false;
+      }
+      if (st.lastRunAt) {
+        $last.textContent = 'Last sync ' + TK.fmt.rel(new Date(st.lastRunAt * 1000).toISOString()) + ' ';
+        if (st.lastError) {
+          const b = document.createElement('span'); b.className = 'badge bad'; b.textContent = 'error'; b.title = String(st.lastError);
+          $last.appendChild(b);
+        }
+        $last.hidden = false;
+      }
+      if (st.artistName && $name.textContent === slug) setTitle(st.artistName);
+    } catch (e) { /* the page works without it */ }
+  }
+
   async function load(refresh) {
     showError('');
     const run = async () => {
@@ -266,6 +300,7 @@ ${TRACK_ROW_JS}
       const data = res.data || {};
       if (!res.ok) {
         showError(TK.errText(res, 'failed (' + res.status + ')'));
+        $counts.textContent = $sets.children.length ? $counts.textContent : 'Could not load the sets.';
         if (!$sets.children.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
         return;
       }
@@ -326,9 +361,16 @@ ${TRACK_ROW_JS}
   $resync.addEventListener('click', () => syncOne(true, $resync));
   $refresh.addEventListener('click', () => load(true));
 
+  if (badSlug) {
+    $counts.textContent = 'Not a valid DJ address.';
+    $empty.textContent = 'Not a valid DJ address.'; $empty.hidden = false;
+    $chips.hidden = true;
+    return;
+  }
   $slug.textContent = slug;
   $link1001.href = 'https://www.1001tracklists.com/dj/' + encodeURIComponent(slug) + '/index.html';
   $name.textContent = slug;
+  loadState();
   load(false);
 })();
 `

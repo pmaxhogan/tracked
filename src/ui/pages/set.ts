@@ -146,7 +146,7 @@ export const SET_PAGE: UiPage = {
   html: shell({
     nav: null,
     title: 'Set',
-    description: 'Paste a 1001tracklists tracklist URL, or arrive with ?url=',
+    description: 'Paste a 1001tracklists tracklist URL to see its tracks and links.',
     body: BODY,
     css: CSS,
     js: JS,
