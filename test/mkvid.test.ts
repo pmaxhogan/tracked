@@ -158,6 +158,8 @@ describe('queue lifecycle', () => {
     await new Promise((r) => setTimeout(r, 5))
     // Same created_at second is possible; created_at ASC then falls back to insertion order.
     await enqueueMkvidRequest(env, { ...input, setUrl: 'https://x/tracklist/second' })
+    // Pin the tie: the two enqueues can straddle a second boundary, and then the newer one wins (created_at DESC).
+    await env.DB.prepare('UPDATE mkvid_requests SET created_at = ?').bind(NOW).run()
     const a = await claimMkvidRequest(env, log)
     expect(a).toMatchObject({ setUrl: 'https://x/tracklist/first', status: 'claimed', attempts: 1 })
     expect(a!.claimedAt).toBeGreaterThanOrEqual(NOW)
