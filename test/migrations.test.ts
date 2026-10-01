@@ -22,6 +22,16 @@ function rows(db: InstanceType<typeof SQL.Database>, sql: string): Record<string
 }
 
 describe('migrations on a copy of the pre-pool schema with data', () => {
+  it('0013 counts the base and timed rows of stored lists ("w/" rows not counted, row 0 always timed)', () => {
+    const db = new SQL.Database()
+    for (const f of upTo(12)) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    const t = (cueSeconds: number | null, layered = false) => ({ cueSeconds, artist: 'A', title: 'T', artworkUrl: null, isId: false, layered })
+    const tracks = JSON.stringify([t(null), t(null), t(120.5), t(null, true), t(300)])
+    db.exec(`INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at) VALUES ('r1', '${tracks}', 5, 1, 3, 0, 1)`)
+    for (const f of after(12)) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    expect(rows(db, 'SELECT base_rows, timed_rows FROM mkvid_request_tracks')).toEqual([{ base_rows: 4, timed_rows: 3 }])
+  })
+
   it('are numbered without gaps or duplicates', () => {
     const nums = files.map((f) => Number(f.slice(0, 4)))
     expect(nums).toEqual(nums.map((_, i) => i + 1))
@@ -44,6 +54,8 @@ describe('migrations on a copy of the pre-pool schema with data', () => {
     for (const f of after(6)) db.exec(readFileSync(join(DIR, f), 'utf8'))
 
     expect(rows(db, 'SELECT trusted, id_rows FROM mkvid_request_tracks')).toEqual([{ trusted: 0, id_rows: 1 }])
+    // 0013: all three rows are base rows and timed.
+    expect(rows(db, 'SELECT base_rows, timed_rows FROM mkvid_request_tracks')).toEqual([{ base_rows: 3, timed_rows: 3 }])
     expect(rows(db, 'SELECT track_count, ided_count, skip_id_wait FROM mkvid_requests')).toEqual([{ track_count: 3, ided_count: 2, skip_id_wait: 0 }])
     // The pool-era tables exist and the old rows are untouched.
     for (const t of ['set_schedule', 'set_verification', 'dj_schedule', 'pool_events', 'set_media_facts', 'mkvid_old_videos']) {

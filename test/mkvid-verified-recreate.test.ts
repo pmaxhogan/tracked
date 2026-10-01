@@ -19,7 +19,7 @@ import {
   saveMkvidTracks,
   supersedeMkvidRequestForSet,
 } from '../src/lib/mkvid'
-import { ID_WAIT_SECONDS, isVerified, mkvidReadiness, readinessFor, setAgeReference } from '../src/lib/mkvid-readiness'
+import { ID_WAIT_SECONDS, isVerified, mkvidReadiness, readinessFor, setAgeReference, timedRowCounts } from '../src/lib/mkvid-readiness'
 import {
   callMkvidDelete,
   countOldStyleVideos,
@@ -92,10 +92,10 @@ const input = (name: string, setDate: string | null = '2026-01-01') => ({
   idedCount: 3,
 })
 
-async function queue(env: Env, name: string, opts: { setDate?: string | null; verified?: boolean; idRows?: number } = {}) {
+async function queue(env: Env, name: string, opts: { setDate?: string | null; verified?: boolean; idRows?: number; rows?: number; untimedRows?: number } = {}) {
   const i = input(name, opts.setDate === undefined ? '2026-01-01' : opts.setDate)
   await enqueueMkvidRequest(env, i)
-  if (opts.verified !== false) await storeVerifiedList(env, i.setUrl, { idRows: opts.idRows ?? 0 })
+  if (opts.verified !== false) await storeVerifiedList(env, i.setUrl, { idRows: opts.idRows ?? 0, rows: opts.rows, untimedRows: opts.untimedRows })
   return (await getMkvidRequestForSet(env, i.setUrl))!
 }
 
@@ -116,7 +116,15 @@ afterEach(() => {
 // ─── readiness rules ────────────────────────────────────────────────────────
 
 describe('mkvidReadiness', () => {
-  const base = { status: 'pending', notBefore: null, setDate: null, discoveredAt: NOW - 30 * DAY, skipIdWait: false, verified: true, listRows: 10, idRows: 0 }
+  const base = { status: 'pending', notBefore: null, setDate: null, discoveredAt: NOW - 30 * DAY, skipIdWait: false, verified: true, listRows: 10, idRows: 0, baseRows: 10, timedRows: 10 }
+
+  it('a verified list under 90 % timed is held, whatever Render now says', () => {
+    expect(mkvidReadiness({ ...base, timedRows: 9 })).toEqual({ state: 'ready' })
+    expect(mkvidReadiness({ ...base, timedRows: 8 })).toEqual({ state: 'untimed', timedRows: 8, baseRows: 10 })
+    expect(mkvidReadiness({ ...base, timedRows: 2, baseRows: 33, skipIdWait: true })).toEqual({ state: 'untimed', timedRows: 2, baseRows: 33 })
+    // A list stored before migration 0013 has no counts: held until it is saved again.
+    expect(mkvidReadiness({ ...base, timedRows: 0, baseRows: 0 }).state).toBe('untimed')
+  })
 
   it('an unverified or empty list is never ready', () => {
     expect(mkvidReadiness({ ...base, verified: false })).toEqual({ state: 'unverified' })
@@ -146,6 +154,14 @@ describe('mkvidReadiness', () => {
     expect(setAgeReference('2026-09-01', 5)).toBe(Date.UTC(2026, 8, 1) / 1000)
     expect(setAgeReference('someday', 5)).toBe(5)
     expect(setAgeReference(null, 5)).toBe(5)
+  })
+})
+
+describe('timed rows are counted', () => {
+  it('counts base rows only ("w/" rows are not), row 0 always timed', () => {
+    const t = (cueSeconds: number | null, layered = false) => ({ cueSeconds, layered })
+    expect(timedRowCounts([t(null), t(null), t(120), t(null, true), t(300)])).toEqual({ baseRows: 4, timedRows: 3 })
+    expect(timedRowCounts([])).toEqual({ baseRows: 0, timedRows: 0 })
   })
 })
 
@@ -185,6 +201,17 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
     expect(await isVerified(env, a.setUrl)).toBe(false)
     expect(await isVerified(env, b.setUrl)).toBe(true)
+  })
+
+  it('passes over a verified list under 90 % timed (Render now included), and serves one at 90 %', async () => {
+    const env = makeEnv()
+    const a = await queue(env, 'a', { setDate: '2026-03-01', rows: 33, untimedRows: 31 })
+    await env.DB.prepare('UPDATE mkvid_requests SET skip_id_wait = 1 WHERE id = ?').bind(a.id).run()
+    const b = await queue(env, 'b', { setDate: '2026-02-01', rows: 10, untimedRows: 1 })
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(b.id)
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', attempts: 0, notBefore: null })
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
+    expect((await readinessFor(env, [a])).get(a.id)).toEqual({ state: 'untimed', timedRows: 2, baseRows: 33 })
   })
 
   it('an untrusted stored list is not claimable either (the stub reads trusted)', async () => {

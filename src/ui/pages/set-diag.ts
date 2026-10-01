@@ -133,6 +133,7 @@ export const SET_DIAG_JS = /* js */ `
       if (!r) { tone = 'info'; finding = pos + ' in the queue.'; }
       else if (r.state === 'ready') { tone = 'ok'; finding = pos + ' in the queue, ready.'; }
       else if (r.state === 'unverified') { tone = 'warn'; finding = pos + ' in the queue; waits because the track list is not verified.'; }
+      else if (r.state === 'untimed') { tone = 'warn'; finding = pos + '; held: only ' + r.timedRows + ' of ' + r.baseRows + ' tracks have cue times (90% needed). Rechecked weekly.'; }
       else if (r.state === 'waiting_ids') { tone = 'warn'; finding = pos + '; waits for IDs until ' + TK.fmt.until(r.until) + ' (' + r.idRows + ' ID rows).'; }
       else { tone = 'warn'; finding = pos + '; retry backoff until ' + TK.fmt.until(r.until) + '.'; }
     }

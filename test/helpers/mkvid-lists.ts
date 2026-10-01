@@ -2,16 +2,18 @@
  * Test helper: give a queued mkvid request a stored, verified (trusted) track
  * list and a verified set_verification row, so the claim gate
  * (lib/mkvid-readiness.ts + lib/verification.ts) lets it through. `idRows`
- * of the `rows` are ID rows (the 7-day wait then applies).
+ * of the `rows` are ID rows (the 7-day wait then applies); the last
+ * `untimedRows` have no cue time (the 90 % timed gate then may apply).
  */
 import type { Env } from '../../src/types'
 import type { MkvidTrack } from '../../src/lib/mkvid'
+import { timedRowCounts } from '../../src/lib/mkvid-readiness'
 
-export async function storeVerifiedList(env: Env, setUrl: string, opts: { rows?: number; idRows?: number; trusted?: boolean } = {}): Promise<void> {
+export async function storeVerifiedList(env: Env, setUrl: string, opts: { rows?: number; idRows?: number; trusted?: boolean; untimedRows?: number } = {}): Promise<void> {
   const rows = opts.rows ?? 3
   const idRows = opts.idRows ?? 0
   const tracks: MkvidTrack[] = Array.from({ length: rows }, (_, i) => ({
-    cueSeconds: i * 60,
+    cueSeconds: i > 0 && i >= rows - (opts.untimedRows ?? 0) ? null : i * 60,
     artist: i < idRows ? null : `Artist ${i}`,
     title: i < idRows ? null : `Title ${i}`,
     artworkUrl: null,
@@ -21,11 +23,12 @@ export async function storeVerifiedList(env: Env, setUrl: string, opts: { rows?:
   const req = await env.DB.prepare('SELECT id FROM mkvid_requests WHERE set_url = ?').bind(setUrl).first<{ id: string }>()
   if (!req) throw new Error(`no request for ${setUrl}`)
   await env.DB.prepare(
-    `INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at, id_rows)
-     VALUES (?, ?, ?, ?, 3, 0, 1, ?)
-     ON CONFLICT(request_id) DO UPDATE SET tracks = excluded.tracks, track_count = excluded.track_count, trusted = excluded.trusted, id_rows = excluded.id_rows`,
+    `INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at, id_rows, base_rows, timed_rows)
+     VALUES (?, ?, ?, ?, 3, 0, 1, ?, ?, ?)
+     ON CONFLICT(request_id) DO UPDATE SET tracks = excluded.tracks, track_count = excluded.track_count, trusted = excluded.trusted, id_rows = excluded.id_rows,
+       base_rows = excluded.base_rows, timed_rows = excluded.timed_rows`,
   )
-    .bind(req.id, JSON.stringify(tracks), rows, opts.trusted === false ? 0 : 1, idRows)
+    .bind(req.id, JSON.stringify(tracks), rows, opts.trusted === false ? 0 : 1, idRows, timedRowCounts(tracks).baseRows, timedRowCounts(tracks).timedRows)
     .run()
   // The claim also asks the fetch layer (lib/verification.ts isVerified): a
   // trusted list belongs to a verified set.

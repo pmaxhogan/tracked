@@ -192,6 +192,22 @@ describe('render feeder: what it feeds, in which order', () => {
     expect(await candidates(env)).toContain(young)
   })
 
+  it('leaves out a set whose known list is under 90 % timed (its weekly recheck fetches it instead)', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'dj')
+    const held = await waitingSet(env, 'held')
+    const timed = await waitingSet(env, 'timed')
+    const store = async (u: string, base: number, timedRows: number) => {
+      const req = await env.DB.prepare('SELECT id FROM mkvid_requests WHERE set_url = ?').bind(u).first<{ id: string }>()
+      await env.DB.prepare("INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, id_rows, scraped_at, base_rows, timed_rows) VALUES (?, '[]', ?, 0, 0, ?, ?, ?)").bind(req!.id, base, NOON, base, timedRows).run()
+    }
+    await store(held, 33, 2)
+    await store(timed, 10, 9)
+    const got = await candidates(env)
+    expect(got).not.toContain(held)
+    expect(got).toContain(timed)
+  })
+
   it('sits in the verify class: after new sets and due second fetches, before rechecks and backfill', async () => {
     const env = makeEnv()
     await subscribe(env, 'dj')

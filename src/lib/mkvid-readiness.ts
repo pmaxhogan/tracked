@@ -9,6 +9,12 @@
  *     it — so 1001tracklists users have time to fill the IDs in; then it
  *     renders with "ID" shown. The panel's "Render now" sets `skip_id_wait`
  *     on the request, which skips that wait (never the verification).
+ *   - A verified list whose base rows (every row but a "w/" one) are under
+ *     90 % timed is held: mkvid spreads untimed rows evenly between timed
+ *     neighbours, which is only a fair guess when they are few. The set is
+ *     rechecked at least weekly (lib/fetch-scheduler.ts scheduleAfterFetch)
+ *     and renders once 1001tracklists has the times. Render now does not
+ *     skip this.
  *   - Anything else that is pending and past its retry backoff is ready; the
  *     daily cap then decides whether it goes today.
  *
@@ -26,6 +32,29 @@ import { isVerified } from './verification'
 /** A verified list with ID rows is held until the set is this old. */
 export const ID_WAIT_SECONDS = 7 * 86400
 
+/** A list renders only when at least this share of its base rows has a cue time. */
+export const MIN_TIMED_SHARE = 0.9
+
+/** Base rows (every row but a "w/" one) and how many of them are timed; row 0 is always timed (mkvid starts it at 0). */
+export function timedRowCounts(tracks: ReadonlyArray<{ cueSeconds: number | null; layered: boolean }>): { baseRows: number; timedRows: number } {
+  let baseRows = 0
+  let timedRows = 0
+  tracks.forEach((t, i) => {
+    if (t.layered) return
+    baseRows++
+    if (i === 0 || (typeof t.cueSeconds === 'number' && Number.isFinite(t.cueSeconds))) timedRows++
+  })
+  return { baseRows, timedRows }
+}
+
+/** MIN_TIMED_SHARE in integers, the same test as TIMED_SQL. */
+export function isTimedEnough(baseRows: number, timedRows: number): boolean {
+  return baseRows > 0 && timedRows * 10 >= baseRows * 9
+}
+
+/** isTimedEnough over `mkvid_request_tracks t` (a list stored before migration 0013 counts as untimed until saved again). */
+export const TIMED_SQL = 't.base_rows > 0 AND t.timed_rows * 10 >= t.base_rows * 9'
+
 /** The fetch layer's verdict (lib/verification.ts), re-exported for the panel and tests. */
 export { isVerified }
 
@@ -33,6 +62,8 @@ export type MkvidReadiness =
   | { state: 'ready' }
   /** No verified track list yet: nothing is rendered until there is one. */
   | { state: 'unverified' }
+  /** Too few rows have cue times (under MIN_TIMED_SHARE): held until a recheck finds them. */
+  | { state: 'untimed'; timedRows: number; baseRows: number }
   /** Verified, but `idRows` rows are still ID: held until `until` (unix seconds) unless Render now is pressed. */
   | { state: 'waiting_ids'; until: number; idRows: number }
   /** A failed attempt's retry backoff. */
@@ -51,6 +82,9 @@ export type ReadinessInput = {
   listRows: number
   /** ID rows in the stored list. */
   idRows: number
+  /** Base rows of the stored list and how many of them are timed (timedRowCounts). */
+  baseRows: number
+  timedRows: number
 }
 
 /** Unix seconds the set's age is counted from: its date, else when it was discovered. */
@@ -64,6 +98,7 @@ export function setAgeReference(setDate: string | null, discoveredAt: number): n
 
 export function mkvidReadiness(r: ReadinessInput, now = Math.floor(Date.now() / 1000)): MkvidReadiness {
   if (!r.verified || r.listRows <= 0) return { state: 'unverified' }
+  if (!isTimedEnough(r.baseRows, r.timedRows)) return { state: 'untimed', timedRows: r.timedRows, baseRows: r.baseRows }
   if (r.idRows > 0 && !r.skipIdWait) {
     const until = setAgeReference(r.setDate, r.discoveredAt) + ID_WAIT_SECONDS
     if (now < until) return { state: 'waiting_ids', until, idRows: r.idRows }
@@ -78,10 +113,10 @@ export const DISCOVERED_SQL = '(COALESCE((SELECT MIN(tl.discovered_at) FROM trac
 /**
  * SQL condition (over `mkvid_requests r JOIN mkvid_request_tracks t`) for the
  * parts of readiness that live in D1: a stored, non-empty, trusted (=
- * verified, see above) list whose ID wait is over or skipped. Binds one
+ * verified, see above), timed-enough list whose ID wait is over or skipped. Binds one
  * value: the cut-off `now - ID_WAIT_SECONDS`.
  */
-export const CLAIM_READY_SQL = `t.track_count > 0 AND t.trusted = 1
+export const CLAIM_READY_SQL = `t.track_count > 0 AND t.trusted = 1 AND ${TIMED_SQL}
   AND (COALESCE(t.id_rows, 1) = 0 OR r.skip_id_wait = 1
        OR (CASE WHEN r.set_date IS NOT NULL AND r.set_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
                 THEN CAST(strftime('%s', r.set_date) AS INTEGER) ELSE ${DISCOVERED_SQL} END) <= ?)`
@@ -109,12 +144,13 @@ export async function readinessFor(
   if (!requests.length) return out
   const res = await dbOf(env)
     .prepare(
-      `SELECT r.id AS id, ${DISCOVERED_SQL} AS discovered, t.trusted AS trusted, t.track_count AS n, t.id_rows AS id_rows
+      `SELECT r.id AS id, ${DISCOVERED_SQL} AS discovered, t.trusted AS trusted, t.track_count AS n, t.id_rows AS id_rows,
+              t.base_rows AS base_rows, t.timed_rows AS timed_rows
          FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id
         WHERE r.id IN (${requests.map(() => '?').join(', ')})`,
     )
     .bind(...requests.map((r) => r.id))
-    .all<{ id: string; discovered: number; trusted: number | null; n: number | null; id_rows: number | null }>()
+    .all<{ id: string; discovered: number; trusted: number | null; n: number | null; id_rows: number | null; base_rows: number | null; timed_rows: number | null }>()
   const byId = new Map(res.results.map((x) => [x.id, x]))
   for (const r of requests) {
     const x = byId.get(r.id)
@@ -131,6 +167,8 @@ export async function readinessFor(
           listRows: Number(x?.n ?? 0),
           // Not counted yet (a list stored before migration 0009): assume IDs, the claim does the same.
           idRows: x?.id_rows == null ? (Number(x?.n ?? 0) > 0 ? 1 : 0) : Number(x.id_rows),
+          baseRows: Number(x?.base_rows ?? 0),
+          timedRows: Number(x?.timed_rows ?? 0),
         },
         now,
       ),

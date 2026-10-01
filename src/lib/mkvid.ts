@@ -20,8 +20,8 @@
  *   pending ──panel ✕──▶ banned ──panel Unban──▶ pending
  *   done ──panel "Delete and recreate"──▶ pending (back of the queue; lib/mkvid-recreate.ts)
  *
- * A pending request is only claimable once its track list is verified and
- * any wait for IDs is over (lib/mkvid-readiness.ts); until then the claim
+ * A pending request is only claimable once its track list is verified, at
+ * least 90 % timed, and any wait for IDs is over (lib/mkvid-readiness.ts); until then the claim
  * passes over it without using an attempt. mkvid refusing a list as
  * `unverified_tracklist` puts it back the same way.
  *
@@ -44,7 +44,7 @@ import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
 import { isVerified, tracklistFingerprint, verifiedFingerprint } from './verification'
 import { markInPlaylist } from './playlist-blocklist'
-import { CLAIM_READY_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
+import { CLAIM_READY_SQL, ID_WAIT_SECONDS, timedRowCounts } from './mkvid-readiness'
 import { isOldStyle, queueBannedUploadForDelete, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
 import { decodeEntities } from './html-entities'
 
@@ -346,16 +346,19 @@ export async function saveMkvidTracks(
   const tracks = toMkvidTracks(parsed.rows, trusted)
   // ID rows of the list mkvid would draw — what the 7-day ID wait looks at (lib/mkvid-readiness.ts).
   const idRows = tracks.filter((t) => t.isId).length
+  // How much of the list has cue times — what the 90 % timed gate looks at (lib/mkvid-readiness.ts).
+  const { baseRows, timedRows } = timedRowCounts(tracks)
   const r = await db
     .prepare(
-      `INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at, id_rows)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, named, mismatched, scraped_at, id_rows, base_rows, timed_rows)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(request_id) DO UPDATE SET
          tracks = excluded.tracks, track_count = excluded.track_count, trusted = excluded.trusted,
-         named = excluded.named, mismatched = excluded.mismatched, scraped_at = excluded.scraped_at, id_rows = excluded.id_rows
+         named = excluded.named, mismatched = excluded.mismatched, scraped_at = excluded.scraped_at, id_rows = excluded.id_rows,
+         base_rows = excluded.base_rows, timed_rows = excluded.timed_rows
        WHERE excluded.trusted >= mkvid_request_tracks.trusted`,
     )
-    .bind(req.id, JSON.stringify(tracks), tracks.length, trusted ? 1 : 0, parsed.decoy.named, parsed.decoy.mismatched, nowSeconds(), idRows)
+    .bind(req.id, JSON.stringify(tracks), tracks.length, trusted ? 1 : 0, parsed.decoy.named, parsed.decoy.mismatched, nowSeconds(), idRows, baseRows, timedRows)
     .run()
   if ((r.meta.changes ?? 0) === 0) return 'kept'
   // The request's counts follow the stored list: every row, anonymous "ID - ID" ones included.

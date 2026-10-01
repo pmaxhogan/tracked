@@ -18,6 +18,7 @@ export const MKVID_STATE_JS = /* js */ `
     if (!rd) return '';
     const day = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
     if (rd.state === 'unverified') return '<span class="why">not verified' + (short ? '' : ' — the track list needs a second matching fetch before anything is rendered') + '</span>';
+    if (rd.state === 'untimed') return '<span class="why">too few cue times' + (short ? '' : ' (' + TK.esc(rd.timedRows) + ' of ' + TK.esc(rd.baseRows) + ' tracks timed, 90% needed; rechecked weekly)') + '</span>';
     if (rd.state === 'waiting_ids') return '<span class="why">waiting for IDs until ' + TK.esc(day(rd.until)) + (short ? '' : ' (' + TK.esc(rd.idRows) + ' ID row' + (rd.idRows === 1 ? '' : 's') + '; Render now skips the wait)') + '</span>';
     if (rd.state === 'backoff') return '<span class="why">retry ' + untilTime(rd.until) + '</span>';
     if (capped) return '<span class="why">capped — today’s uploads are used</span>';

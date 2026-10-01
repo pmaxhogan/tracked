@@ -117,6 +117,25 @@ describe('scheduleAfterFetch / markSetDue', () => {
   })
 })
 
+describe('scheduleAfterFetch: a set held as untimed', () => {
+  it('is rechecked at least weekly while its pending request has a list under 90 % timed', async () => {
+    const env = makeEnv()
+    const u = setUrl('held', 400)
+    await env.DB.prepare("INSERT INTO mkvid_requests (id, slug, set_url, source, source_url, status, created_at, updated_at) VALUES ('r1', 'dj', ?, 'soundcloud', 's', 'pending', 1, 1)").bind(u).run()
+    const store = (base: number, timed: number) =>
+      env.DB.prepare("INSERT OR REPLACE INTO mkvid_request_tracks (request_id, tracks, track_count, trusted, scraped_at, base_rows, timed_rows) VALUES ('r1', '[]', ?, 1, 1, ?, ?)").bind(base, base, timed).run()
+    const next = () => scheduleAfterFetch(env, DEFAULT_POOL_SETTINGS, { url: u, videoId: null, hasIdRows: false, nowSec: NOW, random: () => 0.5 })
+    await store(33, 2)
+    expect(await next()).toBe(NOW + 7 * D)
+    await store(33, 30)
+    expect(await next()).toBe(NOW + 90 * D)
+    // A young set keeps its shorter interval.
+    await env.DB.prepare("UPDATE mkvid_requests SET set_url = ? WHERE id = 'r1'").bind(setUrl('young', 1)).run()
+    await store(33, 2)
+    expect(await scheduleAfterFetch(env, DEFAULT_POOL_SETTINGS, { url: setUrl('young', 1), videoId: null, hasIdRows: false, nowSec: NOW, random: () => 0.5 })).toBe(NOW + 12 * H)
+  })
+})
+
 describe('pickTickItems (decision 12 priorities)', () => {
   async function everythingDue(env: Env) {
     await subscribe(env, 'a')
