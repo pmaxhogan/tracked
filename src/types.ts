@@ -10,6 +10,8 @@ export type Env = {
    * tokens, push subscriptions and ban state — see README "Storage".
    */
   DB: D1Database
+  /** Search index (migrations-search/); optional so a Worker without it still serves everything else (search returns 503 search_unavailable). */
+  SEARCH_DB?: D1Database
   API_TOKEN: string
   /** Dedicated bearer for GET /liked-songs (agents that only need the liked list). Never accepted by the Tasker routes. */
   LIKED_SONGS_TOKEN?: string

@@ -381,7 +381,8 @@ export function normalizeTracklistUrl(input: string): string | null {
 }
 
 /** A page row: a ParsedTrack, or a fully anonymous "ID - ID" row with no microdata. */
-export type PageRow = ParsedTrack & { anonymous: boolean }
+/** `label` is the row's record label (null when none, "Not On Label", or anonymous); it lives on page rows only, never on `tracks`. */
+export type PageRow = ParsedTrack & { anonymous: boolean; label: string | null }
 
 export type ScrapedTracklist = {
   slug: string
@@ -569,7 +570,7 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
       prevTrack = false
       continue
     }
-    const { anonymous: _, ...track } = r
+    const { anonymous: _, label: _label, ...track } = r
     const t = unlinkedUnless(track, prevTrack && tracks.length > 0)
     prevTrack = true
     tracks.push(t)
@@ -778,6 +779,21 @@ export function extractSetAppleLink(html: string): string | null {
   return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ''}`
 }
 
+/**
+ * The row's record label(s): the `.trackLabel` text out of the entity-encoded
+ * `meta[itemprop=publisher]`, else the visible `span.trackLabel`. Several are
+ * joined with ' / '; "Not On Label" and empty give null.
+ */
+function parseRowLabel(row: HTMLElement): string | null {
+  const clean = (xs: string[]): string | null => {
+    const labels = xs.map((x) => decodeEntities(x).replace(/s+/g, ' ').trim()).filter((x) => x && !/^not on label$/i.test(x))
+    return labels.length ? labels.join(' / ') : null
+  }
+  const pub = row.querySelector('meta[itemprop="publisher"]')?.getAttribute('content')
+  if (pub) return clean(parse(decodeEntities(pub)).querySelectorAll('.trackLabel').map((e) => e.text))
+  return clean(row.querySelectorAll('span.trackLabel').map((e) => e.text))
+}
+
 function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: boolean }>): PageRow | null {
   const dataId = row.getAttribute('data-id') ?? null
   const cls = row.getAttribute('class') ?? ''
@@ -828,6 +844,7 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
       isMashupLinked,
       ownStartSeconds,
       anonymous: true,
+      label: null,
     }
   }
 
@@ -884,6 +901,7 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
     isMashupLinked,
     ownStartSeconds,
     anonymous: false,
+    label: parseRowLabel(row),
   }
 }
 

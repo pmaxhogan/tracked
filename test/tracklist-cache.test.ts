@@ -106,7 +106,7 @@ describe('tracklistCacheTtl (decision 19)', () => {
     expect(TRACKLIST_TTL.SHORT).toBe(6 * 3600)
   })
   it('6 hours when the page has an anonymous "ID - ID" row, even though every named track is identified', () => {
-    const rows = [{ ...track(), anonymous: false }, { ...track({ artist: 'ID', title: 'ID', isUnidentified: true }), anonymous: true }]
+    const rows = [{ ...track(), anonymous: false, label: null }, { ...track({ artist: 'ID', title: 'ID', isUnidentified: true }), anonymous: true, label: null }]
     expect(tracklistCacheTtl({ tracks: [track()], rows }, '2026-01-01', NOW)).toBe(TRACKLIST_TTL.SHORT)
   })
   it('6 hours when the set is under 2 days old, 3 days from the 2-day mark', () => {

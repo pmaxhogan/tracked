@@ -776,6 +776,20 @@ describe("parseTracklist: 'w/' (layered) rows", () => {
     expect(t.map((r) => [r.isMashupLinked, r.startSeconds, r.ownStartSeconds])).toEqual([[false, 30, 30], [true, 30, null]])
   })
 
+
+  it('rows carry their label (from the publisher meta); "Not On Label" and anonymous rows give null; tracks keep the ParsedTrack shape', () => {
+    const m = parseTracklist('https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html', fx('tracklist-matroda.html'))
+    expect(m.rows[0]!.label).toBeNull()
+    expect(m.rows[1]!.label).toBe('BLACK BOOK')
+    expect(m.rows.every((r) => r.label === null || r.label.length > 0)).toBe(true)
+    expect(m.rows.some((r) => r.label !== null)).toBe(true)
+    expect('label' in m.tracks[0]!).toBe(false)
+    expect(m.tracks.some((t) => 'label' in t)).toBe(false)
+    const d = p('tracklist-decoy-dcr839.html')
+    expect(d.rows.filter((r) => r.anonymous).every((r) => r.label === null)).toBe(true)
+    expect(d.rows.some((r) => r.label === 'Drumcode Records' || /drumcode/i.test(r.label ?? ''))).toBe(true)
+    expect(d.tracks.some((t) => 'label' in t)).toBe(false)
+  })
   it("rows: every page row in order, anonymous 'ID - ID' rows included and flagged; tracks: the same list without them", () => {
     const d = p('tracklist-decoy-dcr839.html')
     expect(d.rows).toHaveLength(41)
@@ -800,7 +814,7 @@ describe("parseTracklist: 'w/' (layered) rows", () => {
     // Real pages here have no anonymous rows: rows and tracks agree.
     for (const name of ['tracklist-matroda.html', 'tracklist-maxstyler.html', 'tracklist-habstrakt.html']) {
       const r = p(name)
-      expect(r.rows.map(({ anonymous, ...t }) => (expect(anonymous).toBe(false), t)), name).toEqual(r.tracks)
+      expect(r.rows.map(({ anonymous, label: _l, ...t }) => (expect(anonymous).toBe(false), t)), name).toEqual(r.tracks)
     }
   })
 

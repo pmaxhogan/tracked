@@ -28,6 +28,12 @@
       "database_name": "tracked",
       "database_id": "9c3d6c10-4a1e-47d0-869f-332a19d47828",
       "migrations_dir": "migrations"
+    },
+    {
+      "binding": "SEARCH_DB",
+      "database_name": "tracked-search",
+      "database_id": "4ee888df-562d-4937-9b25-8e1b4da2ea88",
+      "migrations_dir": "migrations-search"
     }
   ],
   "kv_namespaces": [
