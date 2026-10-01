@@ -20,16 +20,16 @@ const diag = async (env: Env, url = SET): Promise<SetDiagnostics> => {
   return (await r.json()) as SetDiagnostics
 }
 
-async function discover(env: Env, slug: string, videoId: string | null = null, url = SET) {
+async function discover(env: Env, slug: string, videoId: string | null = null, url = SET, source = '1001tl') {
   await env.DB.prepare(
     `INSERT INTO tracklists (slug, url, position, discovered_at, processed, abandoned, failure_count, video_known, video_id, video_source, checked_at)
      VALUES (?, ?, 0, 1000, 1, 0, 0, 1, ?, ?, 2000)`,
-  ).bind(slug, url, videoId, videoId ? '1001tl' : null).run()
+  ).bind(slug, url, videoId, videoId ? source : null).run()
 }
-async function facts(env: Env, lastCue: number, videoId: string | null = VID) {
+async function facts(env: Env, lastCue: number, videoId: string | null = VID, noFullNotice = false) {
   await env.DB.prepare(
-    `INSERT INTO set_media_facts (set_url, slug, video_id, no_full_notice, last_cue_seconds, last_cue_known, fetched_at) VALUES (?, 'dj-one', ?, 0, ?, 1, 3000)`,
-  ).bind(SET, videoId, lastCue).run()
+    `INSERT INTO set_media_facts (set_url, slug, video_id, no_full_notice, last_cue_seconds, last_cue_known, fetched_at) VALUES (?, 'dj-one', ?, ?, ?, 1, 3000)`,
+  ).bind(SET, videoId, noFullNotice ? 1 : 0, lastCue).run()
 }
 async function meta(env: Env, seconds: number) {
   await env.DB.prepare('INSERT INTO video_meta (video_id, duration_seconds, embed_width, embed_height, privacy, upload_status, alive, fetched_at) VALUES (?, ?, 480, 270, ?, ?, 1, 4000)')
@@ -87,7 +87,7 @@ describe('GET /ui/api/set', () => {
     const fetchSpy = vi.fn(() => { throw new Error('network during diagnostics') })
     vi.stubGlobal('fetch', fetchSpy)
     const d = await diag(env)
-    expect(d.video).toMatchObject({ id: VID, from: 'tracklists', override: false })
+    expect(d.video).toMatchObject({ id: VID, from: 'tracklists', source: '1001tl', current: true, exempt: null, override: false })
     expect(d.video?.meta).toMatchObject({ durationSeconds: 600, alive: true })
     expect(d.video?.verdict).toMatchObject({ ok: false, reason: 'short', label: REASON_LABELS.short })
     expect(d.media).toMatchObject({ lastCueSeconds: 3600, videoId: VID })
@@ -98,13 +98,32 @@ describe('GET /ui/api/set', () => {
     const env = makeEnv()
     await discover(env, 'dj-one')
     await facts(env, 3600)
-    expect((await diag(env)).video).toMatchObject({ id: VID, from: 'media', meta: null })
+    // A page video with no tracklists row is one pickSetVideo turned down: not the set's recording.
+    expect((await diag(env)).video).toMatchObject({ id: VID, from: 'media', source: '1001tl', current: false, exempt: null, meta: null })
     const env2 = makeEnv()
     await discover(env2, 'dj-one')
     await mkvidRow(env2, 'r1', SET, 'done', 1)
     await env2.DB.prepare("UPDATE mkvid_requests SET video_id = 'mkvidvideo01' WHERE id = 'r1'").run()
     const d = await diag(env2)
-    expect(d.video).toMatchObject({ id: 'mkvidvideo01', from: 'mkvid', verdict: null })
+    expect(d.video).toMatchObject({ id: 'mkvidvideo01', from: 'mkvid', source: 'mkvid', current: false, exempt: 'mkvid', verdict: null })
+  })
+
+  it('an mkvid render is the current recording and is not judged by the rule (the sweep never judges it)', async () => {
+    const env = makeEnv()
+    await discover(env, 'dj-one', VID, SET, 'mkvid')
+    await facts(env, 3600, null, true)
+    await meta(env, 3600)
+    const d = await diag(env)
+    expect(d.video).toMatchObject({ id: VID, from: 'tracklists', source: 'mkvid', current: true, exempt: 'mkvid', verdict: null })
+  })
+
+  it('a video mkvid uploaded counts as mkvid even when the tracklists row says 1001tl', async () => {
+    const env = makeEnv()
+    await discover(env, 'dj-one', VID)
+    await facts(env, 3600, null, true)
+    await mkvidRow(env, 'r9', 'https://www.1001tracklists.com/tracklist/zzz999/other.html', 'done', 1)
+    await env.DB.prepare('UPDATE mkvid_requests SET video_id = ? WHERE id = ?').bind(VID, 'r9').run()
+    expect((await diag(env)).video).toMatchObject({ id: VID, source: 'mkvid', current: true, exempt: 'mkvid', verdict: null })
   })
 
   it('an override wins', async () => {

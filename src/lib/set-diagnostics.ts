@@ -5,7 +5,7 @@
 import type { Env } from '../types'
 import { dbOf } from './db'
 import { getVerification } from './verification'
-import { loadSetFacts, judgeVideo, rejectVerticalEnabled, REASON_LABELS } from './playlist-hygiene'
+import { loadSetFacts, judgeVideo, rejectVerticalEnabled, mkvidUploadedIds, REASON_LABELS } from './playlist-hygiene'
 import { readCachedVideoMeta } from './video-meta'
 import { isOverridden } from './playlist-blocklist'
 import { getMkvidRequestForSet, mkvidQueuePosition } from './mkvid'
@@ -20,7 +20,18 @@ export type SetDiagnostics = {
   media: { videoId: string | null; noFullNotice: boolean; lastCueSeconds: number | null; audioMaxSeconds: number | null; audioKind: string | null; setTitle: string | null; setDate: string | null; trackCount: number | null; idedCount: number | null; fetchedAt: number } | null
   video: {
     id: string
+    /** Where the id was found: a discovered tracklists row, the set page's facts only, or the mkvid request only. */
     from: 'tracklists' | 'media' | 'mkvid'
+    /**
+     * Who made the video: 'mkvid' when the tracklists row says so or the id is
+     * one mkvid uploaded (mkvidUploadedIds, the sweep's own exemption list);
+     * otherwise '1001tl' (a missing video_source is 1001tl, as in the sweep).
+     */
+    source: '1001tl' | 'mkvid'
+    /** True when the id is a discovered tracklists row's video_id, i.e. the set's recording. A media-only id was turned down. */
+    current: boolean
+    /** 'mkvid' when the full-recording rule does not apply (the sweep never judges mkvid uploads); verdict is then null. */
+    exempt: 'mkvid' | null
     meta: { durationSeconds: number | null; embedWidth: number | null; embedHeight: number | null; privacy: string | null; uploadStatus: string | null; alive: boolean; fetchedAt: number } | null
     verdict: { ok: true } | { ok: false; reason: string; label: string; detail: string } | null
     override: boolean
@@ -133,8 +144,8 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
 
   let videoId: string | null = null
   let from: 'tracklists' | 'media' | 'mkvid' = 'tracklists'
-  const fromTracklists = discovered.find((d) => d.videoId)?.videoId ?? null
-  if (fromTracklists) videoId = fromTracklists
+  const tlRow = discovered.find((d) => d.videoId) ?? null
+  if (tlRow) videoId = tlRow.videoId
   else if (facts?.videoId) {
     videoId = facts.videoId
     from = 'media'
@@ -148,7 +159,7 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
   let removed: SetDiagnostics['hygiene']['removed'] = []
   let removals: SetDiagnostics['hygiene']['removals'] = []
   if (videoId) {
-    const [metaMap, override, conf, rem, rems] = await Promise.all([
+    const [metaMap, override, conf, rem, rems, mkvidOwn] = await Promise.all([
       readCachedVideoMeta(env, [videoId]),
       isOverridden(env, videoId),
       db
@@ -163,12 +174,18 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
         .prepare('SELECT id, at, source, status, playlist_kind, reason, detail FROM playlist_removals WHERE video_id = ? ORDER BY at DESC, id DESC LIMIT 20')
         .bind(videoId)
         .all<{ id: number; at: number; source: string; status: string; playlist_kind: string; reason: string; detail: string | null }>(),
+      mkvidUploadedIds(env),
     ])
     const meta = metaMap.get(videoId) ?? null
-    const v = facts || meta ? judgeVideo(facts, meta, { rejectVertical: rejectVerticalEnabled(env) }) : null
+    const source: '1001tl' | 'mkvid' = from === 'mkvid' || tlRow?.videoSource === 'mkvid' || mkvidOwn.has(videoId) ? 'mkvid' : '1001tl'
+    const exempt = source === 'mkvid' ? 'mkvid' : null
+    const v = !exempt && (facts || meta) ? judgeVideo(facts, meta, { rejectVertical: rejectVerticalEnabled(env) }) : null
     video = {
       id: videoId,
       from,
+      source,
+      current: from === 'tracklists',
+      exempt,
       meta: meta
         ? {
             durationSeconds: meta.durationSeconds,

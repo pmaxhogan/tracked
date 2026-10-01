@@ -5,9 +5,12 @@
 // TK and esc (= TK.esc) in scope; every upstream value goes through esc and
 // every external link through TK.safeHref.
 //
-// Home relies on this string for clock, setLabel and BIG_SKEW (its request
-// and addition rows use them) and declares none of them itself; a page that
-// splices this in must not declare those names (or link, dl) again.
+// Home and Activity both splice this in ahead of ACTIVITY_ROW_JS and
+// ACTIVITY_DRAWER_JS (src/ui/pages/activity.ts): their rows come from
+// activityRowHtml, and the shared drawer (openActivityRow) uses
+// auditDetailHtml, plDetailHtml, dl, link and setLabel from here. Neither page
+// declares these names itself; a page that splices this in must not declare
+// clock, setLabel, BIG_SKEW, link or dl again.
 
 export const ACTIVITY_DETAIL_CSS = /* css */ `
   .h-grp { color: var(--subtle); font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; margin: var(--sp-3) 0 var(--sp-2); }

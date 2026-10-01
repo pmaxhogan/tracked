@@ -490,6 +490,34 @@ describe('Activity page', () => {
     const { HOME_PAGE } = await import('../src/ui/pages/home')
     expect(HOME_PAGE.html).toContain(ACTIVITY_DETAIL_JS)
   })
+  // The phone block of a CSS string: everything inside `@media (max-width: 799px) { … }`.
+  const phoneBlock = (css: string) => /@media \(max-width: 799px\) \{([\s\S]*?)\n  \}/.exec(css)![1]!
+  const ruleOf = (css: string, sel: string) => {
+    const m = new RegExp('(?:^|\\n)\\s*' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' \\{([^}]*)\\}').exec(css)
+    return m ? m[1]! : ''
+  }
+  it('under 800px a row stacks: icon, badge and time, then title, detail and links, without breaking words', async () => {
+    const { ACTIVITY_ROW_CSS } = await import('../src/ui/pages/activity')
+    const phone = phoneBlock(ACTIVITY_ROW_CSS)
+    // The title/detail column takes a full line of its own under the icon/badge/time line.
+    expect(ruleOf(phone, '.a-main')).toContain('order: 1')
+    expect(ruleOf(phone, '.a-main')).toContain('flex-basis: 100%')
+    expect(ruleOf(phone, '.a-main')).toContain('flex-direction: column')
+    expect(ruleOf(phone, '.a-when')).toContain('margin-left: auto')
+    expect(ruleOf(phone, '.a-when')).not.toContain('flex-basis: 100%')
+    expect(ruleOf(phone, '.a-links')).toContain('flex-basis: 100%')
+    // Normal words never break mid-word; only a word too long for the line (an id, a URL) does.
+    expect(ruleOf(phone, '.a-title, .a-detail')).toContain('overflow-wrap: break-word')
+    expect(phone).not.toContain('overflow-wrap: anywhere')
+    expect(phone).not.toMatch(/word-break: break-all/)
+  })
+  it('under 800px the chip rows wrap instead of scrolling sideways', async () => {
+    const { ACTIVITY_PAGE_CSS } = await import('../src/ui/pages/activity')
+    const phone = phoneBlock(ACTIVITY_PAGE_CSS)
+    expect(ruleOf(phone, '.tk-filters .a-chips')).toContain('flex-wrap: wrap')
+    expect(phone).not.toContain('overflow-x')
+    expect(ACTIVITY_PAGE_CSS).not.toMatch(/\.a-chips[^}]*nowrap/)
+  })
 })
 
 describe('Set diagnostics', () => {
@@ -531,6 +559,18 @@ describe('Set diagnostics', () => {
     const h = byKey({ ...empty(), video: video(), hygiene: { removed: [{ playlistId: 'PL1', reason: 'owner', at: 1_790_000_000, slug: 'dj-one' }], removals: [] } }).hygiene
     expect(h.tone).toBe('bad')
     expect(h.finding).toContain('removed by you')
+  })
+  it('setDiagRows: an mkvid render is exempt from the rule, a turned-down page video is a warning', async () => {
+    const ctx = await diagCtx()
+    const byKey = (d: object) => Object.fromEntries(ctx.setDiagRows(d).map((r: any) => [r.key, r]))
+    const mk = byKey({ ...empty(), video: video({ source: 'mkvid', current: true, exempt: 'mkvid', verdict: null }) })
+    expect([mk.recording.tone, mk.recording.finding]).toEqual(['ok', 'YouTube abcdefghijk, rendered by mkvid.'])
+    expect([mk.rule.tone, mk.rule.finding]).toEqual(['ok', 'mkvid renders are not judged by the rule (the sweep never removes them).'])
+    const cur = byKey({ ...empty(), video: video({ source: '1001tl', current: true, exempt: null }) })
+    expect([cur.recording.tone, cur.recording.finding]).toEqual(['ok', 'YouTube abcdefghijk from the set page.'])
+    const down = byKey({ ...empty(), video: video({ from: 'media', source: '1001tl', current: false, exempt: null }) })
+    expect([down.recording.tone, down.recording.finding]).toEqual(['warn', 'The set page links YouTube abcdefghijk, but it was turned down (see Full-recording rule).'])
+    expect(down.rule.tone).toBe('bad')
   })
   it('setDiagRows: discovery, verification, playlist and mkvid tones', async () => {
     const ctx = await diagCtx()

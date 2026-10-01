@@ -38,7 +38,8 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
 .tk-main.narrow { max-width: 560px; margin-inline: auto; }
 .tk-top, .tk-tabs { display: none; }
 .tk-search { margin: 0 0 var(--sp-3); }
-.tk-search input { width: 100%; max-width: 22rem; }
+.tk-search input { appearance: none; font: inherit; color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); padding: 8px 10px; width: 100%; max-width: 22rem; min-width: 0; }
+.tk-search input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── page header ── */
 .tk-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4); }

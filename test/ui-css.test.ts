@@ -49,6 +49,12 @@ describe('shell chrome', () => {
     expect(BASE_CSS).toMatch(/\.tk-top-title \{[^}]*text-overflow: ellipsis/)
     expect(BASE_CSS).toMatch(/\.tk-drawer-head \{[^}]*display: flex/)
   })
+  it('styles the desktop "Filter DJs" box like the other text inputs', () => {
+    const rule = /\n\.tk-search input \{([^}]*)\}/.exec(BASE_CSS)![1]!
+    for (const d of ['font: inherit', 'color: var(--fg)', 'background: var(--page)', 'border: 1px solid var(--line-strong)', 'border-radius: var(--r-ctl)', 'padding: 8px 10px', 'appearance: none', 'max-width: 22rem'])
+      expect(rule).toContain(d)
+    expect(BASE_CSS).toMatch(/\.tk-search input:focus-visible \{[^}]*outline: 2px solid var\(--accent\)/)
+  })
   it('groups the phone menu like the sidebar: Settings and Tools are not under Pool', () => {
     const h = shell({ nav: 'home', title: 'Home', body: '' })
     const menu = h.slice(h.indexOf('<dialog id="tk-menu"'), h.indexOf('</dialog>', h.indexOf('<dialog id="tk-menu"')))

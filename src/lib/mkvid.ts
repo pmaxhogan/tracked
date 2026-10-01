@@ -762,7 +762,8 @@ export async function mkvidQueuePosition(env: Env, id: string): Promise<number |
     .first<{ position: number }>()
   return row ? Number(row.position) : null
 }
-/** The same order over the paged panel query, whose subquery exposes `rowid` as `rid`. */
+
+/** QUEUE_ORDER over the paged panel query, whose subquery exposes `rowid` as `rid`. */
 const QUEUE_PAGE_ORDER = 'ORDER BY sort_key DESC, created_at DESC, rid ASC'
 /** CLAIMABLE_WHERE and QUEUE_ORDER over `mkvid_requests r` joined to its track list. */
 const CLAIMABLE_WHERE_R = `(r.status = 'pending' AND (r.not_before IS NULL OR r.not_before <= ?))

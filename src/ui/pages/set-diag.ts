@@ -38,7 +38,9 @@ export const SET_DIAG_JS = /* js */ `
   function diagRecording(d) {
     const v = d.video, s = d.schedule;
     let tone, finding;
-    if (v && v.from === 'mkvid') { tone = 'ok'; finding = 'YouTube ' + v.id + ', rendered by mkvid.'; }
+    if (v && (v.source === 'mkvid' || v.from === 'mkvid')) { tone = 'ok'; finding = 'YouTube ' + v.id + ', rendered by mkvid.'; }
+    // A page video with no tracklists row is one the pipeline turned down.
+    else if (v && v.current === false) { tone = 'warn'; finding = 'The set page links YouTube ' + v.id + ', but it was turned down (see Full-recording rule).'; }
     else if (v) { tone = 'ok'; finding = 'YouTube ' + v.id + ' from the set page.'; }
     else if ((d.discovered || []).some((x) => x.videoKnown)) { tone = 'warn'; finding = 'The set page had no YouTube recording.'; }
     else { tone = 'info'; finding = 'Set page not fetched yet.'; }
@@ -75,6 +77,7 @@ export const SET_DIAG_JS = /* js */ `
     const v = d.video, m = d.media, meta = v && v.meta;
     let tone, finding;
     if (!v) { tone = 'neutral'; finding = 'No video to judge.'; }
+    else if (v.exempt === 'mkvid') { tone = 'ok'; finding = 'mkvid renders are not judged by the rule (the sweep never removes them).'; }
     else if (v.override) { tone = 'ok'; finding = 'Owner override: the rule is not applied to this video.'; }
     else if (!v.verdict) { tone = 'info'; finding = 'Not judged yet: the set page or the video facts have not been seen.'; }
     else if (v.verdict.ok) { tone = 'ok'; finding = 'Full recording.'; }

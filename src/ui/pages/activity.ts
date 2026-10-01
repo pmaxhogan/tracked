@@ -105,13 +105,17 @@ export const ACTIVITY_ROW_CSS = /* css */ `
   .a-detail { font-size: var(--fs-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 8rem; }
   .a-when { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; flex: none; }
   .a-links { display: flex; gap: var(--sp-2); padding-right: 8px; flex: none; font-size: var(--fs-xs); white-space: nowrap; }
+  /* Phone: stack the row. Line 1 is icon, badge and time; then the title, the
+     detail, and the DJ/set links, each on the full width. break-word only
+     splits a word too long for a line (an id, a URL), never a normal word. */
   @media (max-width: 799px) {
-    .a-item { flex-wrap: wrap; }
-    .a-row { flex-wrap: wrap; }
-    .a-main { flex-basis: calc(100% - 7rem); flex-wrap: wrap; }
-    .a-title, .a-detail { white-space: normal; overflow-wrap: anywhere; }
-    .a-when { flex-basis: 100%; padding-left: 26px; }
-    .a-links { padding: 0 8px 8px 34px; }
+    .a-item { flex-direction: column; align-items: stretch; gap: 0; }
+    .a-row { flex-wrap: wrap; row-gap: 4px; }
+    .a-main { order: 1; flex-basis: 100%; flex-direction: column; align-items: flex-start; gap: 2px; }
+    .a-title, .a-detail { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; max-width: 100%; }
+    .a-detail { flex: none; }
+    .a-when { margin-left: auto; }
+    .a-links { flex-basis: 100%; flex-wrap: wrap; padding: 0 8px 8px 8px; }
   }
 `
 
@@ -132,7 +136,7 @@ const BODY = /* html */ `
 <p class="a-foot"><button id="a-more" type="button" class="btn" hidden>Load older</button></p>
 `
 
-const CSS = /* css */ `
+export const ACTIVITY_PAGE_CSS = /* css */ `
   .tk-filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3); min-width: 0; }
   .a-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); min-width: 0; }
   .tk-filters .chips { margin-bottom: 0; }
@@ -147,7 +151,7 @@ const CSS = /* css */ `
   #a-empty .btn { margin-left: var(--sp-2); }
   @media (max-width: 799px) {
     .tk-filters, .a-ctl { flex-direction: column; align-items: stretch; flex-wrap: nowrap; }
-    .tk-filters .a-chips { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; padding-bottom: 2px; }
+    .tk-filters .a-chips { flex-wrap: wrap; max-width: 100%; }
     .tk-filters .chip { white-space: nowrap; flex: none; }
   }
 ${ACTIVITY_ROW_CSS}
@@ -278,7 +282,7 @@ export const ACTIVITY_PAGE: UiPage = {
     description: 'Everything tracked did, newest first: requests, playlist additions, hygiene, mkvid, pool, sync and IP blocks.',
     actions: '<button id="a-refresh" type="button" class="btn">Refresh</button>',
     body: BODY,
-    css: CSS,
+    css: ACTIVITY_PAGE_CSS,
     js: JS,
   }),
 }
