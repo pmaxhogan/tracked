@@ -415,14 +415,26 @@ export type ScrapedTracklist = {
  * names; within one row the microdata name (`meta[itemprop=name]`), the
  * visible text (`span.trackValue`) and the link slug disagree with each
  * other. On a real page all three agree on every row (0 of 89 rows across
- * the three real fixtures disagree). Anonymous access to tracklist pages is
+ * the three real fixtures disagree) bar the odd benign variant (one row in
+ * 16-46 on some live pages; see `isNearMismatch`), which is counted apart
+ * and never as decoy evidence. Anonymous access to tracklist pages is
  * a 401 image captcha at the same time, so there is no clean route around it.
  */
 export type DecoySignal = {
   /** Rows that had both a microdata name and visible text to compare. */
   named: number
-  /** Rows whose microdata name and visible text disagree. */
+  /**
+   * Rows whose microdata name and visible text disagree in substance ("far",
+   * see `isNearMismatch`). This is the decoy evidence every check reads.
+   */
   mismatched: number
+  /**
+   * Rows whose two names differ only in a benign way: the visible text adds a
+   * parenthetical ("(USA)", "(Start The Dance)") or repeats an artist. Real
+   * pages have the odd one of these; they never count as decoy evidence.
+   * Diagnostics only.
+   */
+  nearMismatched: number
   /** `looksLikeDecoy` of the two counts. */
   suspected: boolean
 }
@@ -443,6 +455,7 @@ export class DecoyTracklistError extends Error {
   readonly named: number
   readonly mismatched: number
   constructor(url: string, d: { named: number; mismatched: number }) {
+    // `mismatched` counts far mismatches only (DecoySignal).
     super(`decoy — 1001tracklists is serving randomized track names to our accounts (${d.mismatched} of ${d.named} rows contradict themselves); refusing to show wrong names`)
     this.name = 'DecoyTracklistError'
     this.url = url
@@ -480,6 +493,7 @@ export async function fetchTracklist(
     mashupLinkedCount: result.tracks.filter((t) => t.isMashupLinked).length,
     decoyNamed: result.decoy.named,
     decoyMismatched: result.decoy.mismatched,
+    decoyNearMismatched: result.decoy.nearMismatched,
     ms: Date.now() - start,
   })
   if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
@@ -491,6 +505,7 @@ export async function fetchTracklist(
       exitLabel: r.exitLabel,
       named: result.decoy.named,
       mismatched: result.decoy.mismatched,
+      nearMismatched: result.decoy.nearMismatched,
       sample: result.tracks.slice(0, 3).map((t) => `${t.artist} - ${t.title} @ ${t.trackUrl?.split('/track/')[1]?.split('/index')[0] ?? '?'}`),
     })
   }
@@ -534,6 +549,7 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
   const tracks: ParsedTrack[] = []
   let named = 0
   let mismatched = 0
+  let nearMismatched = 0
   // Whether the page row right before this one made it into the list being
   // built. A "w/" row is only linked when its base did — otherwise linking it
   // to whatever row came before would put it on top of the wrong track.
@@ -557,13 +573,15 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     prevTrack = true
     tracks.push(t)
     // Decoy check: the row's microdata name against the text the page shows.
-    // On a real page they are the same string; on a decoy page each was
-    // randomized on its own.
+    // On a real page they are the same string (bar the odd benign variant,
+    // see isNearMismatch); on a decoy page each was randomized on its own.
     const metaName = normalizeName(decodeEntities(row.querySelector('meta[itemprop="name"]')?.getAttribute('content') ?? ''))
     const visible = normalizeName(decodeEntities(row.querySelector('span.trackValue')?.text ?? ''))
     if (!metaName || !visible) continue
     named++
-    if (metaName !== visible) mismatched++
+    if (metaName === visible) continue
+    if (isNearMismatch(metaName, visible)) nearMismatched++
+    else mismatched++
   }
 
   return {
@@ -573,7 +591,7 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     setSoundcloudLink: extractSetSoundcloudLink(html),
     tracks,
     rows: pageRows,
-    decoy: { named, mismatched, suspected: looksLikeDecoy({ named, mismatched }) },
+    decoy: { named, mismatched, nearMismatched, suspected: looksLikeDecoy({ named, mismatched }) },
   }
 }
 
@@ -609,6 +627,42 @@ function unlinkedUnless<T extends ParsedTrack>(t: T, hasBase: boolean): T {
 /** Case- and whitespace-insensitive form of a track name for the decoy comparison. */
 function normalizeName(s: string): string {
   return s.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+/** The distinct word tokens of a track name: lowercased, accents folded, punctuation dropped, "feat"/"featuring" read as "ft". */
+function nameTokens(s: string): Set<string> {
+  const words = s
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map((w) => (w === 'feat' || w === 'featuring' ? 'ft' : w))
+  return new Set(words)
+}
+
+/**
+ * Whether a row's microdata name and visible text, which differ, differ only
+ * in a way real pages do: every word of the microdata name is also in the
+ * visible text (which adds a parenthetical such as "(USA)" or "(Start The
+ * Dance)", or repeats an artist). Live examples, 2026-09-30:
+ *   "Truth x Lies & KLP - Smile"           / "Truth x Lies & KLP & Lies - Smile"
+ *   "The Prodigy - No Good (ALOK Remix)"   / "The Prodigy - No Good (Start The Dance) (ALOK Remix)"
+ *   "Adam Beyer & Charles D - Rave Repeat" / "Adam Beyer & Charles D (USA) - Rave Repeat"
+ *
+ * Deliberately a subset test in one direction and not a similarity score: a
+ * decoy row swaps one part of the name (the artist, or the remixer) and keeps
+ * the rest, so its two names overlap a lot (Jaccard up to 0.71 on the decoy
+ * fixture, e.g. "... Set Me Free (TAIGA Remix)" / "... Set Me Free (Figure &
+ * 2FAC3D Remix)") but never have one inside the other. Visible text that
+ * DROPS words (say, a remix credit) is not treated as benign.
+ */
+export function isNearMismatch(metaName: string, visible: string): boolean {
+  const meta = nameTokens(metaName)
+  if (meta.size < 2) return false
+  const shown = nameTokens(visible)
+  for (const w of meta) if (!shown.has(w)) return false
+  return true
 }
 
 /**

@@ -56,7 +56,7 @@ describe('fingerprint (decision 2: same artist and title on every row, same coun
   it('the decoy fixture fails the decoy check; the real one passes', () => {
     expect(passesDecoyCheck(real)).toBe(true)
     expect(passesDecoyCheck(decoy)).toBe(false)
-    expect(passesDecoyCheck({ rows: [], decoy: { named: 0, mismatched: 0, suspected: false } })).toBe(false)
+    expect(passesDecoyCheck({ rows: [], decoy: { named: 0, mismatched: 0, nearMismatched: 0, suspected: false } })).toBe(false)
   })
 })
 

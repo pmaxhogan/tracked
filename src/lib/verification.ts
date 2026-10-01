@@ -100,7 +100,14 @@ export async function tracklistFingerprint(parsed: FingerprintSource): Promise<s
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-/** A fetch whose rows may count towards verification: rows present, not one of them contradicting itself. */
+/**
+ * A fetch whose rows may count towards verification: rows present, not one of
+ * them contradicting itself. `decoy.mismatched` counts FAR mismatches only;
+ * a benign near mismatch (DecoySignal.nearMismatched, e.g. the visible text
+ * adding "(USA)") never fails a page. Zero far mismatches are tolerated: the
+ * decoy generator alters one part of a row's name, so a page with only a few
+ * randomized rows must still fail.
+ */
 export function passesDecoyCheck(parsed: Parsed): boolean {
   return parsed.rows.length > 0 && !parsed.decoy.suspected && parsed.decoy.mismatched === 0
 }
@@ -185,7 +192,7 @@ export async function noteSetFetch(env: Env, input: NoteInput): Promise<Verifica
   }
   if (!passesDecoyCheck(parsed)) {
     if (parsed.decoy.suspected || parsed.decoy.mismatched > 0) {
-      log?.error('verify.decoy_fetch', { setUrl, accountId: account, named: parsed.decoy.named, mismatched: parsed.decoy.mismatched })
+      log?.error('verify.decoy_fetch', { setUrl, accountId: account, named: parsed.decoy.named, mismatched: parsed.decoy.mismatched, nearMismatched: parsed.decoy.nearMismatched })
       await poolRetestAccount(pool, account, 'decoy page', log)
       return { outcome: 'decoy', verified: wasVerified, reported: account }
     }

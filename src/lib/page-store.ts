@@ -121,9 +121,9 @@ export async function classifyPage(c: Pick<PageCapture, 'kind' | 'status' | 'htm
   const { parseTracklist } = await import('./tracklists1001')
   const parsed = parseTracklist(c.url, c.html)
   const d = parsed.decoy
-  if (d.suspected || d.mismatched > 0) return { verdict: 'decoy', detail: `named=${d.named} mismatched=${d.mismatched} rows=${parsed.rows.length}` }
+  if (d.suspected || d.mismatched > 0) return { verdict: 'decoy', detail: `named=${d.named} mismatched=${d.mismatched} near=${d.nearMismatched} rows=${parsed.rows.length}` }
   if (parsed.rows.length === 0) return { verdict: 'error', detail: 'no track rows' }
-  return { verdict: 'clean', detail: `rows=${parsed.rows.length}` }
+  return { verdict: 'clean', detail: d.nearMismatched > 0 ? `rows=${parsed.rows.length} near=${d.nearMismatched}` : `rows=${parsed.rows.length}` }
 }
 
 async function gzip(text: string): Promise<Uint8Array> {

@@ -290,6 +290,8 @@ export const MKVID_MAX_TRACKS = 300
  *   - the page itself must pass the strict in-page check: at least three rows
  *     compared and not one of them contradicting itself (stricter than
  *     `looksLikeDecoy`, which needs a majority to *refuse* a page).
+ *     `mismatched` counts far mismatches only; benign near ones
+ *     (`nearMismatched`) never count.
  */
 export function mkvidTracksTrusted(d: { named: number; mismatched: number; suspected: boolean }, verified = false): boolean {
   return verified && !d.suspected && d.named >= 3 && d.mismatched === 0
