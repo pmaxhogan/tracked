@@ -345,6 +345,22 @@ describe('delete video (unpublish)', () => {
     expect((await postUi(env, '/ui/api/mkvid/unpublish/nope')).status).toBe(404)
   })
 
+  it('a late complete or fail for the unpublished job changes nothing', async () => {
+    const env = makeEnv({ MKVID_URL: 'https://mkvid.example/' })
+    const a = await doneRequest(env, 'set', 'scene')
+    await env.DB.prepare("UPDATE mkvid_requests SET job_id = 'job-old' WHERE id = ?").bind(a.id).run()
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set([OLD]))
+    stubMkvid(() => json({ ok: true, outcome: 'deleted' }))
+    expect((await postUi(env, `/ui/api/mkvid/unpublish/${a.id}`)).status).toBe(200)
+    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockClear()
+    const late = await post(env, '/mkvid/complete', { id: a.id, jobId: 'job-old', videoId: OLD, videoUrl: `https://youtu.be/${OLD}`, privacy: 'unlisted', style: 'scene' })
+    expect(await late.json()).toMatchObject({ status: 'banned', videoId: OLD })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    await post(env, '/mkvid/fail', { id: a.id, jobId: 'job-old', error: 'boom' })
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', videoId: null, attempts: 0, notBefore: null, error: null })
+    expect(await env.DB.prepare('SELECT video_id FROM tracklists WHERE url = ?').bind(a.setUrl).first()).toEqual({ video_id: null })
+  })
+
   it('an untimed list stays held after unpublishing, its set due within a week; the operator route needs the API token', async () => {
     const env = makeEnv({ MKVID_URL: 'https://mkvid.example/' })
     const a = await doneRequest(env, 'set', 'scene')

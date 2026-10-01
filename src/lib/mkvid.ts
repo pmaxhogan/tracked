@@ -1058,8 +1058,9 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
     return { status: 'banned', videoId: input.videoId }
   }
   // The same upload redelivered after an unban (mkvid never saw the banned
-  // answer): it is already queued for deletion, so it never goes live.
-  const doomed = await db.prepare("SELECT 1 AS x FROM mkvid_old_videos WHERE video_id = ? AND replaced_by = 'banned'").bind(input.videoId).first()
+  // answer), or after "Delete video" took it down (the request is pending
+  // again): it is already queued for deletion, so it never goes live.
+  const doomed = await db.prepare("SELECT 1 AS x FROM mkvid_old_videos WHERE video_id = ? AND replaced_by IN ('banned', 'unpublished')").bind(input.videoId).first()
   if (doomed) return { status: 'banned', videoId: input.videoId }
 
   const tl = await getTracklistRow(env, req.slug, req.setUrl)
@@ -1227,6 +1228,9 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   const req = await getMkvidRequest(env, input.id)
   if (!req) return null
   if (req.status === 'done' || req.status === 'superseded') return { status: req.status, attempts: req.attempts }
+  // A late report for a job the request has moved on from (e.g. its video was
+  // unpublished, which clears job_id): nothing to refund or count.
+  if (req.status === 'pending' && input.jobId && req.jobId !== input.jobId) return { status: req.status, attempts: req.attempts }
   const now = nowSeconds()
   // Banned while it rendered: a failure report never lifts the ban.
   if (req.status === 'banned') {
