@@ -100,7 +100,8 @@ const CSS = /* css */ `
   .tk-filters .chips { margin-bottom: 0; }
   .chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
   #a-dj { font: inherit; font-size: var(--fs-sm); color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); padding: 5px 8px; min-width: 0; max-width: 100%; }
-  .a-list { padding: 0; overflow: hidden; }
+  .a-list { padding: 0; overflow: hidden; transition: opacity .15s; }
+  .a-list.busy { opacity: .5; }
   .a-link { color: var(--accent); }
   .a-foot { margin: var(--sp-3) 0 0; }
   .a-foot .btn { width: 100%; }
@@ -159,15 +160,25 @@ ${ACTIVITY_ROW_JS}
     $empty.textContent = filtered() ? 'Nothing matches these filters in this range.' : 'Nothing in this range.';
   }
   // A new filter or Refresh replaces the list; Load older appends. A response
-  // to a request that a newer one has overtaken is dropped.
+  // to a request that a newer one has overtaken is dropped. While a replace
+  // is in flight the list is marked busy and there is no cursor, so Load
+  // older cannot page the old filter's rows with the new filter.
+  function setBusy(on) {
+    $list.className = 'tk-card a-list' + (on ? ' busy' : '');
+    if (typeof $list.setAttribute === 'function') { if (on) $list.setAttribute('aria-busy', 'true'); else $list.removeAttribute('aria-busy'); }
+  }
   async function load(more) {
+    if (more && !cursor) return;
     const my = ++seq;
     lastMore = !!more;
-    const res = await TK.api.get(apiUrl(more ? cursor : null));
+    const from = more ? cursor : null;
+    if (!more) { cursor = null; $more.hidden = true; setBusy(true); }
+    const res = await TK.api.get(apiUrl(from));
     if (my !== seq) return;
+    setBusy(false);
     const d = res.ok && res.data && Array.isArray(res.data.rows) ? res.data : null;
     if (!d) {
-      if (!more) { rows = []; cursor = null; $list.innerHTML = ''; $list.hidden = true; $more.hidden = true; }
+      if (!more) { rows = []; $list.innerHTML = ''; $list.hidden = true; }
       $empty.hidden = false;
       $empty.innerHTML = '<span class="error">' + esc(TK.errText(res, 'Could not load activity (' + (res.status || 'offline') + ')')) + '</span><button type="button" id="a-retry" class="btn">Retry</button>';
       return;
@@ -193,7 +204,7 @@ ${ACTIVITY_ROW_JS}
   $more.addEventListener('click', () => TK.busy($more, 'Loading…', () => load(true)));
   $empty.addEventListener('click', (ev) => {
     const b = ev.target && ev.target.closest ? ev.target.closest('#a-retry') : null;
-    if (b) TK.busy(b, 'Retrying…', () => load(lastMore && rows.length > 0));
+    if (b) TK.busy(b, 'Retrying…', () => load(lastMore && rows.length > 0 && !!cursor));
   });
 
   // ── the drawer ──
@@ -243,7 +254,8 @@ ${ACTIVITY_ROW_JS}
   }
 
   renderFilters();
-  load(false).then(loadDjs);
+  // The DJ options load after the first page, whatever happened to it.
+  load(false).catch(() => {}).then(loadDjs);
 })();
 `
 

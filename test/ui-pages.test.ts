@@ -370,24 +370,28 @@ describe('Activity page', () => {
     { ts: Date.now() - 60_000, kind: 'request', status: 'no_video', problem: true, title: 'Bad <img src=x onerror=1>', detail: 'no match', dj: null, setUrl: null, videoId: null, ref: { kind: 'audit', key: '11' } },
     { ts: Date.now() - 120_000, kind: 'playlist', status: 'added', problem: false, title: 'Some set', detail: 'added to PL1', dj: 'dj-one', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', videoId: 'abcdefghijk', ref: { kind: 'addition', key: '12' } },
   ]
-  async function run(search: string) {
+  const poolRow = { ts: Date.now() - 30_000, kind: 'pool', status: 'account.flagged', problem: true, title: 'acct-3 flagged <b>', detail: 'too many', dj: null, setUrl: null, videoId: null, ref: { kind: 'pool', key: '7' } }
+  type Answer = (u: string) => Promise<Response> | Response
+  async function run(search: string, activity: Answer = () => Response.json({ rows, cursor: 'x' })) {
     const fetches: string[] = []
     const { ctx, els } = richStub(async (u: string) => {
       fetches.push(u)
-      if (u.startsWith('/ui/api/activity?')) return Response.json({ rows, cursor: 'x' })
+      if (u.startsWith('/ui/api/activity?')) return activity(u)
       if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-one', sourceUrl: 'https://x', addedAt: 1 }] })
       if (u === '/ui/api/audit-detail?key=11') return Response.json({ record: { t: 'now', reqId: 'r1', status: 'no_video', input: { videoTitle: 'Bad <img src=x onerror=1>' }, youtube: {}, search: { attempts: [] }, meta: {} } })
+      if (u === '/ui/api/playlist-addition-detail?key=12') return Response.json({ record: { t: 'now', status: 'added', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', slug: 'dj-one', videoId: 'abcdefghijk', playlistId: 'PL1', playlistTitle: 'PL <one>', combinedStatus: 'added', meta: { ms: 5 } } })
       return new Response('{}', { status: 404 })
     }, '/ui/activity')
     ;(ctx as any).URL = URL
     ;(ctx as any).location.search = search
     const clicks: Record<string, (ev: unknown) => void> = {}
-    ;(ctx as any).document.getElementById('a-list').addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks.list = fn }
+    for (const [id, name] of [['a-list', 'list'], ['a-filters', 'filters'], ['a-more', 'more']] as const) (ctx as any).document.getElementById(id).addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks[name] = fn }
     const html = await (await app.request('https://tracked.example/ui/activity', {}, env())).text()
     for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
     for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
     return { fetches, els, clicks, html }
   }
+  const tick = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise((res) => setTimeout(res, 0)) }
   it('renders the rows from one GET /ui/api/activity, escaped, with DJ and set links and Load older', async () => {
     const { fetches, els, clicks, html } = await run('')
     expect(html).toContain('id="a-filters"')
@@ -413,7 +417,45 @@ describe('Activity page', () => {
     expect(els.get('tk-drawer-body').innerHTML).toContain('YouTube match')
     clicks.list!({ target: { closest: () => ({ dataset: { i: '1' } }) } })
     for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
-    expect(fetches.some((u) => u.startsWith('/ui/api/playlist-addition-detail?key=12'))).toBe(true)
+    expect(fetches).toContain('/ui/api/playlist-addition-detail?key=12')
+    const pl = els.get('tk-drawer-body').innerHTML as string
+    expect(pl).toContain('Playlist') // plDetailHtml's group heading
+    expect(pl).toContain('PL &lt;one&gt;')
+    expect(pl).toContain('https://www.youtube.com/playlist?list=PL1')
+  })
+  it('a row with no detail endpoint opens its own fields without a fetch', async () => {
+    const { fetches, els, clicks } = await run('', () => Response.json({ rows: [poolRow], cursor: null }))
+    const before = fetches.length
+    clicks.list!({ target: { closest: () => ({ dataset: { i: '0' } }) } })
+    await tick()
+    expect(fetches.length).toBe(before)
+    expect(els.get('tk-drawer-title').textContent).toBe('acct-3 flagged <b>')
+    const body = els.get('tk-drawer-body').innerHTML as string
+    expect(body).toContain('acct-3 flagged &lt;b&gt;')
+    expect(body).toContain('account.flagged')
+    expect(els.get('a-more').hidden).toBe(true)
+  })
+  it('Load older during a filter change does nothing: the list ends with only the new filter rows', async () => {
+    let release: (() => void) | null = null
+    const { fetches, els, clicks } = await run('', (u) => {
+      if (!u.includes('kind=')) return Response.json({ rows, cursor: 'x' })
+      return new Promise<Response>((res) => { release = () => res(Response.json({ rows: [poolRow], cursor: null })) })
+    })
+    expect(els.get('a-more').hidden).toBe(false)
+    clicks.filters!({ target: { closest: () => ({ dataset: { kind: 'pool' }, id: '' }) } })
+    await tick(3)
+    expect(els.get('a-more').hidden).toBe(true)
+    expect(els.get('a-list').className).toContain('busy')
+    clicks.more!({})
+    await tick(3)
+    expect(fetches.some((u) => u.includes('cursor='))).toBe(false)
+    release!()
+    await tick()
+    const list = els.get('a-list').innerHTML as string
+    expect(list).toContain('acct-3 flagged')
+    expect(list).not.toContain('Some set')
+    expect(list.split('class="a-item"').length - 1).toBe(1)
+    expect(els.get('a-list').className).not.toContain('busy')
   })
   it('reads kind, problems, DJ and range from the query string', async () => {
     const { fetches, els } = await run('?kind=pool,ban,bogus&problems=1&range=24h&dj=dj-one')
