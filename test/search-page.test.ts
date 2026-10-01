@@ -25,7 +25,7 @@ const response = (over: Record<string, unknown> = {}) => ({
 
 type Fn = (ev?: any) => void
 /** A stub DOM with recorded listeners and timers, running the shell scripts and the page's. */
-async function open(search: string, answer: (u: string) => Promise<Response> | Response) {
+async function open(search: string, answer: (u: string) => Promise<Response> | Response, globals: Record<string, unknown> = {}) {
   const els = new Map<string, any>()
   const listeners = new Map<string, Fn>()
   const el = (id: string): any => ({ innerHTML: '', textContent: '', value: '', hidden: false, checked: false, disabled: false, className: '', src: '', dataset: {}, style: {}, options: [],
@@ -40,7 +40,7 @@ async function open(search: string, answer: (u: string) => Promise<Response> | R
   const ctx = vm.createContext({ document, console, Date, URLSearchParams, URL, AbortController, location, history,
     fetch: async (u: string) => { fetches.push(u); return answer(u) },
     setTimeout: (fn: () => void, ms: number) => { timers.set(++tid, { fn, ms }); return tid }, clearTimeout: (n: number) => { timers.delete(n) }, setInterval: () => 0, clearInterval() {},
-    Option: function (t: string, v: string) { return { text: t, value: v } } })
+    Option: function (t: string, v: string) { return { text: t, value: v } }, ...globals })
   const html = await (await app.request('https://tracked.example/ui/search', {}, env())).text()
   for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
   await tick()
@@ -115,6 +115,42 @@ describe('Search page script', () => {
     expect(out).toContain('Second reply')
     expect(out).not.toContain('First reply')
     expect(p.history.urls.at(-1)).toBe('/ui/search?q=mau+p')
+  })
+
+  it('keeps the previous results while a search is pending: an expand click repaints them', async () => {
+    let first = true
+    const p = await open('?q=mau', (u) => {
+      if (!u.startsWith('/ui/api/search')) return new Response('{}', { status: 404 })
+      if (first) { first = false; return Response.json(response()) }
+      return new Promise<Response>(() => {})
+    })
+    expect(p.els.get('sq-results').innerHTML).toContain('Drugs from Amsterdam')
+    p.els.get('sq').value = 'mau p'; p.fire('sq', 'input')
+    await p.runDebounced()
+    expect(p.searchFetches()).toHaveLength(2)
+    p.fire('sq-results', 'click', { target: { closest: (s: string) => (s === '[data-exp]' ? { dataset: { exp: 'k1' } } : null) } })
+    const out = p.els.get('sq-results').innerHTML as string
+    expect(out).toContain('Drugs from Amsterdam')
+    expect(out).toContain('class="sq-sets"')
+  })
+
+  it('a new search aborts the previous request', async () => {
+    const aborted: number[] = []
+    let made = 0
+    class StubAbortController {
+      n = ++made
+      signal = { n: this.n }
+      abort() { aborted.push(this.n) }
+    }
+    const p = await open('', (u) => (u.startsWith('/ui/api/search') ? new Promise<Response>(() => {}) : new Response('{}', { status: 404 })), { AbortController: StubAbortController })
+    p.els.get('sq').value = 'mau'; p.fire('sq', 'input')
+    await p.runDebounced()
+    expect(made).toBe(1)
+    expect(aborted).toEqual([])
+    p.els.get('sq').value = 'mau p'; p.fire('sq', 'input')
+    await p.runDebounced()
+    expect(made).toBe(2)
+    expect(aborted).toEqual([1])
   })
 
   it('a track with no YouTube link and a numeric id gets a links button; one with a link gets a YouTube pill', async () => {

@@ -208,15 +208,16 @@ ${TRACK_ROW_JS}
     const my = ++seq;
     if (ctl) { try { ctl.abort(); } catch (e) {} ctl = null; }
     sync(q);
-    data = null; active = -1; primaries = [];
-    if (!q) { $res.innerHTML = ''; $note.hidden = true; showEmpty(EMPTY_HINT); return; }
+    // The previous results stay (and stay usable: expand, links) until the reply lands.
+    if (!q) { data = null; active = -1; primaries = []; $res.innerHTML = ''; $note.hidden = true; showEmpty(EMPTY_HINT); return; }
     if (typeof AbortController !== 'undefined') ctl = new AbortController();
     const res = await TK.api.get(searchUrl(q, kind, exact), ctl ? { signal: ctl.signal } : undefined);
     if (my !== seq || res.aborted) return;
     ctl = null;
     const d = res.ok && res.data && Array.isArray(res.data.tracks) ? res.data : null;
+    active = -1; primaries = [];
     if (!d) {
-      $res.innerHTML = ''; $note.hidden = true;
+      data = null; $res.innerHTML = ''; $note.hidden = true;
       showEmpty(res.status === 503 ? 'The search index is not set up on this Worker.' : TK.errText(res, 'Search failed (' + (res.status || 'offline') + ')'));
       return;
     }

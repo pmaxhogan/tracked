@@ -730,6 +730,54 @@ describe('Settings and Tools pages', () => {
     const c = minimalStub()
     for (const s of scriptsOf(html)) expect(() => vm.runInContext(s, c)).not.toThrow()
   })
+  /** Runs the Tools script with backfill replies from `reply` (by request number); returns a press() and what was seen. */
+  async function toolsBackfill(reply: (n: number) => Response) {
+    const posts: Array<{ cursor: string | null; limit: number }> = []
+    const { ctx, els } = richStub((async (u: string, init?: { body?: string }) => {
+      if (u === '/ui/api/search/backfill') { posts.push(JSON.parse(init?.body ?? '{}')); return reply(posts.length) }
+      if (u === '/ui/api/search/status') return Response.json({ sets: 1, tracks: 2, vocab: 3, lastIndexedAt: null })
+      return new Response('{}', { status: 404 })
+    }) as (u: string) => Promise<Response>, '/ui/tools')
+    let click: (() => void) | null = null
+    ctx.document.getElementById('si-rebuild').addEventListener = (t: string, fn: () => void) => { if (t === 'click') click = fn }
+    const statuses: string[] = []
+    const st = ctx.document.getElementById('si-status')
+    Object.defineProperty(st, 'textContent', { get() { return statuses.at(-1) ?? '' }, set(v: string) { statuses.push(v) } })
+    const html = await (await app.request('https://tracked.example/ui/tools', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    const settle = async () => { for (let i = 0; i < 60; i++) await new Promise((res) => setTimeout(res, 0)) }
+    await settle()
+    return { posts, statuses, els, press: async () => { click!(); await settle() } }
+  }
+  it('Tools Rebuild loops requests until done, showing running totals, and resets the cursor when done', async () => {
+    const replies = [
+      { indexed: 50, skipped: 10, cursor: 'c1', done: false },
+      { indexed: 55, skipped: 5, cursor: 'c2', done: false },
+      { indexed: 3, skipped: 0, cursor: 'c3', done: true },
+    ]
+    const t = await toolsBackfill((n) => Response.json(replies[(n - 1) % 3]))
+    await t.press()
+    expect(t.posts).toEqual([{ cursor: null, limit: 500 }, { cursor: 'c1', limit: 440 }, { cursor: 'c2', limit: 380 }])
+    expect(t.statuses).toContain('Indexed 50, skipped 10…')
+    expect(t.statuses).toContain('Indexed 105, skipped 15…')
+    expect(t.statuses.at(-1)).toBe('Indexed 108, skipped 15. Done: every trusted list is indexed.')
+    // done reset the cursor: the next press starts over.
+    await t.press()
+    expect(t.posts[3]).toEqual({ cursor: null, limit: 500 })
+  })
+  it('Tools Rebuild stops at 500 sets per press and on an error, keeping the cursor', async () => {
+    const t = await toolsBackfill((n) => Response.json({ indexed: 60, skipped: 40, cursor: 'c' + n, done: false }))
+    await t.press()
+    expect(t.posts.map((p) => p.limit)).toEqual([500, 400, 300, 200, 100])
+    expect(t.statuses.at(-1)).toBe('Indexed 300, skipped 200. Press again for more.')
+    const e = await toolsBackfill((n) => (n === 1 ? Response.json({ indexed: 60, skipped: 0, cursor: 'c1', done: false }) : Response.json({ error: 'boom', message: 'D1 down' }, { status: 500 })))
+    await e.press()
+    expect(e.posts).toHaveLength(2)
+    expect(e.statuses.at(-1)).toBe('Indexed 60, skipped 0, then D1 down')
+    expect(e.els.get('si-status').className).toContain('bad')
+    await e.press()
+    expect(e.posts[2]).toEqual({ cursor: 'c1', limit: 500 })
+  })
   it('Tools script prints the migration status and requeues with dry=1 only when checked', async () => {
     const seen: string[] = []
     const { ctx, els } = richStub(async (u: string) => {

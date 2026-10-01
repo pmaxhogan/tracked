@@ -189,6 +189,17 @@ describe('GET /ui/api/search', () => {
     expect(c.tracks[0]?.artist).toBe('Lilly Palmer')
   })
 
+  it('a partial word that begins a vocabulary term is not reported as corrected', async () => {
+    // "dol" is not a term but begins "dolla": the user is still typing.
+    const r = await search(env, 'q=' + encodeURIComponent('dom dol'))
+    expect(r.corrected).toEqual([])
+    expect(r.tracks[0]?.trackKey).toBe('t:1007')
+    // Misspellings that begin no term are still reported.
+    const c = await search(env, 'q=' + encodeURIComponent('lily plamer dont'))
+    expect(c.corrected).toContainEqual({ from: 'lily', to: 'lilly' })
+    expect(c.corrected).toContainEqual({ from: 'plamer', to: 'palmer' })
+  })
+
   it('kind=sets returns only sets', async () => {
     const r = await search(env, 'q=neck&kind=sets')
     expect(r.tracks).toEqual([])

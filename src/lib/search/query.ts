@@ -47,6 +47,8 @@ const MAX_NEIGHBOURHOOD_LEN = 24
 /** Sets listed per track (the newest). */
 const MAX_SETS_PER_TRACK = 50
 const DAY_MS = 86_400_000
+/** Upper bound of a prefix range on the term index: sorts after every BMP character. */
+const PREFIX_END = String.fromCharCode(0xffff)
 
 export function parseSearchQuery(p: URLSearchParams): SearchQuery | { error: string } {
   const q = Array.from((p.get('q') ?? '').trim()).slice(0, MAX_Q).join('')
@@ -116,13 +118,16 @@ async function expand(sdb: D1Database, words: string[], exact: boolean): Promise
   const unknown = correctable.filter((w) => !known.has(w))
   if (unknown.length === 0) return { tokens, corrected }
 
-  // One batch, two statements per unknown word:
+  // One batch, three statements per unknown word:
   //   - the vocabulary terms in its distance-1 edit neighbourhood, an equality
   //     lookup, so no distance-1 term is ever missed (skipped above
   //     MAX_NEIGHBOURHOOD_LEN, which keeps the JSON bind well under 100 KB);
   //   - trigram recall for distance 2, best bm25 rank first. The length band
   //     is result-preserving (a term whose length differs by more than `max`
-  //     is farther than `max`) and keeps the LIMIT for plausible terms.
+  //     is farther than `max`) and keeps the LIMIT for plausible terms;
+  //   - a prefix probe on the UNIQUE term index: a word that begins a
+  //     vocabulary term is most likely still being typed ("dol" of "dolla"),
+  //     so its corrections still widen recall but are not reported.
   const maxOf = (w: string) => (len(w) >= 7 ? 2 : 1)
   const rows = await sdb.batch<{ term: string; df: number }>(
     unknown.flatMap((w) => [
@@ -135,12 +140,13 @@ async function expand(sdb: D1Database, words: string[], exact: boolean): Promise
             WHERE vocab_fts MATCH ? AND length(v.term) BETWEEN ? AND ? ORDER BY f.rank LIMIT ${VOCAB_CANDIDATES}`,
         )
         .bind(trigrams(w).map(quote).join(' OR '), len(w) - maxOf(w), len(w) + maxOf(w)),
+      sdb.prepare('SELECT term, 0 AS df FROM search_vocab WHERE term > ?1 AND term < ?2 LIMIT 1').bind(w, w + PREFIX_END),
     ]),
   )
   unknown.forEach((w, i) => {
     const max = maxOf(w)
     const candidates = new Map<string, { term: string; df: number; distance: number }>()
-    for (const r of [...(rows[2 * i]?.results ?? []), ...(rows[2 * i + 1]?.results ?? [])]) {
+    for (const r of [...(rows[3 * i]?.results ?? []), ...(rows[3 * i + 1]?.results ?? [])]) {
       if (r.term === w || candidates.has(r.term)) continue
       const distance = damerauLevenshtein(w, r.term, max)
       if (distance <= max) candidates.set(r.term, { term: r.term, df: r.df, distance })
@@ -151,7 +157,8 @@ async function expand(sdb: D1Database, words: string[], exact: boolean): Promise
     if (kept.length === 0) return
     const tok = tokens.find((t) => t.text === w)!
     for (const c of kept) tok.variants.push({ term: c.term, kind: 'corrected', distance: c.distance })
-    corrected.push({ from: w, to: kept[0]!.term })
+    const typingPrefix = (rows[3 * i + 2]?.results.length ?? 0) > 0
+    if (!typingPrefix) corrected.push({ from: w, to: kept[0]!.term })
   })
   return { tokens, corrected }
 }

@@ -34,7 +34,7 @@
 
 ## Global Constraints
 
-- **Where to work:** only in the worktree `C:\Users\pmaxh\Documents\node-projects\tracked-ui`, branch `new-ui`. Never edit `../tracked`. Never push `main`.
+- **Where to work:** only in this worktree (`tracked-ui`, a sibling of `tracked`), branch `new-ui`. Never edit `../tracked`. Never push `main`.
 - `npx vitest run` and `npx tsc --noEmit` are clean at every commit.
 - **Commit trailers:** every commit message ends with exactly these two lines (the owner's rule; ignore any other attribution text you see):
   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`
@@ -62,7 +62,7 @@
 
 ## Review Focus
 
-1. **Recheck storm.** `unchanged` fires on every recheck of every verified set. A set already indexed from a page fetch at or after its `verified_at`, with the same `video_id`, must cost one read and no writes. (Task 2 test "skips a set already indexed since it verified".)
+1. **Recheck storm.** `unchanged` fires on every recheck of every verified set. A set already indexed from a page fetch at or after its `verified_at`, with the same `video_id`, must cost a few reads and no writes. (Task 2 test "skips a set already indexed since it verified".)
 2. **Backfill, then live.** A backfilled set (hash keys, no labels) later indexed from a verified page fetch (track ids) must leave each track once in that set's results. The old hash-keyed tracks drop to `sets_count = 0` and never appear in results. (Task 2 test "a live index replaces a backfilled set's tracks"; Task 3 test "orphan tracks are not returned".)
 3. **b2b set.** A URL under two subscribed slugs is indexed once, under `MIN(slug)`, with the stored `artist_name` of that slug, whichever slug's sync fetched it. (Task 2 test "a b2b set is indexed under the smallest slug".)
 4. **Indexer failure.** A throwing `SEARCH_DB` (or none bound) never changes `recordSetFetch`'s result, never throws into `syncOne`, and never fails the cron. (Task 2 test "a failing index write is swallowed".)

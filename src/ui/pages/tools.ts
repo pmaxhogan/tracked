@@ -49,7 +49,7 @@ const BODY = /* html */ `
 </div>
 <div class="tk-card" id="search-card">
   <h2>Search index</h2>
-  <p class="muted tl-note">Verified track lists are indexed as they verify. Rebuild adds sets from trusted mkvid track lists, 500 per press.</p>
+  <p class="muted tl-note">Verified track lists are indexed as they verify. Rebuild adds sets from trusted mkvid track lists, 500 per press, in requests of about 60.</p>
   <dl class="si-dl" id="si-stats"><dt>Sets</dt><dd id="si-sets">—</dd><dt>Tracks</dt><dd id="si-tracks">—</dd><dt>Last indexed</dt><dd id="si-last">—</dd></dl>
   <button class="btn primary" id="si-rebuild" type="button">Rebuild 500 more</button>
   <div class="tl-status muted" id="si-status" role="status"></div>
@@ -183,13 +183,31 @@ const JS = /* js */ `
     $siTracks.textContent = String(d.tracks);
     $siLast.textContent = d.lastIndexedAt ? new Date(d.lastIndexedAt * 1000).toLocaleString() : 'never';
   }
+  // One press handles up to SI_PER_PRESS sets. Each request is its own Worker
+  // invocation with its own D1 query budget (about 60 sets), so the press
+  // loops until the backfill is done, the press total is reached, a request
+  // fails, or a request makes no progress.
+  const SI_PER_PRESS = 500;
   $siGo.addEventListener('click', () => {
     TK.busy($siGo, 'Rebuilding…', async () => {
-      const res = await TK.api.post('/ui/api/search/backfill', { cursor: siCursor, limit: 500 });
-      if (!res.ok) { siMsg(res.status === 503 ? 'Search index not bound' : TK.errText(res, 'failed (' + res.status + ')'), true); return; }
-      const d = res.data || {};
-      siCursor = d.cursor == null ? null : d.cursor;
-      siMsg('Indexed ' + d.indexed + ', skipped ' + d.skipped + '. ' + (d.done ? 'Done: every trusted list is indexed.' : 'Press again for more.'), false);
+      let indexed = 0, skipped = 0, done = false;
+      while (!done && indexed + skipped < SI_PER_PRESS) {
+        const res = await TK.api.post('/ui/api/search/backfill', { cursor: siCursor, limit: SI_PER_PRESS - indexed - skipped });
+        if (!res.ok) {
+          siMsg((indexed + skipped ? 'Indexed ' + indexed + ', skipped ' + skipped + ', then ' : '') + (res.status === 503 ? 'Search index not bound' : TK.errText(res, 'failed (' + res.status + ')')), true);
+          await loadSearchStatus();
+          return;
+        }
+        const d = res.data || {};
+        const n = (Number(d.indexed) || 0) + (Number(d.skipped) || 0);
+        indexed += Number(d.indexed) || 0;
+        skipped += Number(d.skipped) || 0;
+        done = d.done === true;
+        siCursor = done || d.cursor == null ? null : d.cursor;
+        siMsg('Indexed ' + indexed + ', skipped ' + skipped + (done ? '.' : '…'), false);
+        if (!done && n === 0) break;
+      }
+      siMsg('Indexed ' + indexed + ', skipped ' + skipped + '. ' + (done ? 'Done: every trusted list is indexed.' : 'Press again for more.'), false);
       await loadSearchStatus();
     });
   });

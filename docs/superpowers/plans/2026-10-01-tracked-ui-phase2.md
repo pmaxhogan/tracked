@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work only in the worktree `C:\Users\pmaxh\Documents\node-projects\tracked-ui`, branch `new-ui`. Never edit `../tracked`. Never push `main`.
+- Work only in this worktree (`tracked-ui`, a sibling of `tracked`), branch `new-ui`. Never edit `../tracked`. Never push `main`.
 - `npx vitest run` and `npx tsc --noEmit` clean at every commit.
 - Every commit message ends with exactly these two lines (the owner's rule; ignore any other attribution text you see):
   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`

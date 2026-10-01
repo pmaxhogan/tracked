@@ -9,7 +9,10 @@ import { fakeKV } from './helpers/fake-kv'
 
 vi.mock('../src/lib/tracklist-resolve', async (orig) => ({
   ...(await orig<typeof import('../src/lib/tracklist-resolve')>()),
-  resolveTrackMediaLinks: vi.fn(async (_env: unknown, id: string) => ({ appleLink: null, youtubeLink: id === '909720' ? 'https://www.youtube.com/watch?v=abc' : null, soundcloudLink: null })),
+  resolveTrackMediaLinks: vi.fn(async (_env: unknown, id: string) => {
+    if (id === '666') throw new Error('pool refused')
+    return { appleLink: null, youtubeLink: id === '909720' ? 'https://www.youtube.com/watch?v=abc' : null, soundcloudLink: null }
+  }),
 }))
 
 import { app } from '../src/index'
@@ -110,6 +113,38 @@ describe('search backfill', () => {
     expect(r2).toEqual({ indexed: 1, skipped: 0, cursor: b, done: true })
   })
 
+  it('an indexSet failure mid-list counts as skipped and the backfill continues', async () => {
+    const env = makeEnv()
+    const a = await seedMkvid(env, 'a1')
+    const b = await seedMkvid(env, 'b2')
+    const c = await seedMkvid(env, 'c3')
+    // SEARCH_DB whose write batch throws for set b2 only.
+    const real = env.SEARCH_DB!
+    const poisoned = new WeakSet<object>()
+    env.SEARCH_DB = new Proxy(real, {
+      get(t, p) {
+        if (p === 'prepare') {
+          return (sql: string) => {
+            const st = t.prepare(sql)
+            const bind = st.bind.bind(st)
+            st.bind = (...args: unknown[]) => { const out = bind(...args); if (args.includes(b)) poisoned.add(out); return out }
+            return st
+          }
+        }
+        if (p === 'batch') {
+          return async (stmts: D1PreparedStatement[]) => {
+            if (stmts.length > 1 && stmts.some((x) => poisoned.has(x))) throw new Error('D1 batch failed')
+            return t.batch(stmts)
+          }
+        }
+        const v = (t as unknown as Record<string | symbol, unknown>)[p]
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v
+      },
+    })
+    expect(await run(env)).toEqual({ indexed: 2, skipped: 1, cursor: c, done: true })
+    expect((await all<{ set_url: string }>(env, 'SELECT set_url FROM search_sets ORDER BY set_url')).map((r) => r.set_url)).toEqual([a, c])
+  })
+
   it('rejects a bad limit and cursor', async () => {
     const env = makeEnv()
     for (const limit of [0, 501, 'x']) expect((await post(env, '/ui/api/search/backfill', { limit })).status).toBe(400)
@@ -147,6 +182,15 @@ describe('search backfill', () => {
     const res = await post(env, '/ui/api/tracklist/links', { trackIds: ['909720', '123456'] })
     expect(res.status).toBe(200)
     expect((await all<{ youtube_link: string | null }>(env, "SELECT youtube_link FROM search_tracks WHERE track_key = 't:909720'"))[0]!.youtube_link).toBe('https://www.youtube.com/watch?v=abc')
+    // A pool refusal mid-list answers 502 with the links found so far, and writes those back too.
+    const partial = makeEnv()
+    await indexSet(partial, { setUrl: U('a1'), djSlug: 'dj-one', djName: 'DJ One', title: 't', setDate: null, videoId: null, videoSource: null, trackCount: 1, idedCount: 1, source: 'page', tracks: [{ trackId: '909720', trackUrl: null, artist: 'Mau P', title: 'Neck', label: null, cueSeconds: 0, layered: false }] }, NOW)
+    const stopped = await post(partial, '/ui/api/tracklist/links', { trackIds: ['909720', '666', '123456'] })
+    expect(stopped.status).toBe(502)
+    const body = (await stopped.json()) as { links: Record<string, unknown>; error: string }
+    expect(Object.keys(body.links)).toEqual(['909720'])
+    expect(body.error).toBe('upstream_error')
+    expect((await all<{ youtube_link: string | null }>(partial, "SELECT youtube_link FROM search_tracks WHERE track_key = 't:909720'"))[0]!.youtube_link).toBe('https://www.youtube.com/watch?v=abc')
     const noIndex = makeEnv({ SEARCH_DB: undefined })
     expect((await post(noIndex, '/ui/api/tracklist/links', { trackIds: ['909720'] })).status).toBe(200)
   })

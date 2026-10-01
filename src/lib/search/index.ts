@@ -22,8 +22,9 @@
  *     per-track and per-term write is one set-based statement over
  *     `json_each(?)` with one JSON array bind, so indexing never spends the
  *     invocation's D1 query budget per track. At most MAX_TRACKS_PER_SET (500)
- *     distinct tracks are indexed per set, which keeps each JSON bind well
- *     under D1's 100 KB statement limit.
+ *     distinct tracks are indexed per set. D1's 100 KB limit applies to the
+ *     SQL text, and bound values are counted separately; the 500-track cap
+ *     keeps the largest JSON bind near 84 KB.
  *   - Fire-and-forget from the sync path (`queueSearchIndex`), drained via
  *     ctx.waitUntil (`drainSearchIndex`). Errors never reach the caller: they
  *     are logged at warn as `search.index_failed`.
