@@ -1,11 +1,11 @@
 /**
- * Shared admin-page UI for the 1001tracklists IP-ban state: the big red
- * banner (all three admin pages), the alerts row + ban history section
- * (main page only), the client JS that drives them, and the service worker
- * that turns a Web Push into a Notification.
+ * Shared admin-page UI for the 1001tracklists IP-ban state: the banner (the
+ * shell puts it on every page), the client JS that drives it and the Settings
+ * page's alerts and history panels, and the service worker that turns a Web
+ * Push into a Notification. The styles live in the shell CSS (src/ui/base.ts).
  *
  * Everything is inline (no bundler, no static assets — same as the pages
- * themselves). The pages interpolate these constants; `BAN_JS` reads
+ * themselves). The shell interpolates these constants; `BAN_JS` reads
  * `document.body.dataset.banPage` to know what to do:
  *   main      the old main page: history + auto-prompt
  *   settings  route, devices and episode history (live status)
@@ -16,48 +16,6 @@
  */
 
 export const UNBLOCK_URL = 'https://www.1001tracklists.com/info/unblock_ip.html'
-
-export const BAN_CSS = /* css */ `
-  /* ── IP-ban banner (lib/ban-state.ts) ── */
-  .ban-alert { display: block; margin: 0 0 1.25rem; padding: 0.9rem 1rem 0.8rem; border-radius: 8px; background: #b91c1c; color: #fff; border: 2px solid #ef4444; box-shadow: 0 6px 24px rgba(185, 28, 28, 0.35); }
-  .ban-alert[hidden] { display: none !important; }
-  .ban-alert.paused { background: #7f1d1d; border-color: #b91c1c; }
-  .ban-alert.simulated { border-style: dashed; }
-  .ban-alert a { color: #fff; }
-  .ban-head { display: flex; align-items: flex-start; gap: 0.7rem; }
-  .ban-icon { font-size: 1.6rem; line-height: 1; margin-top: 0.05rem; }
-  .ban-title { font-size: 1.15rem; font-weight: 800; letter-spacing: 0.01em; line-height: 1.25; }
-  .ban-title .ban-badge { display: inline-block; margin-left: 0.5rem; padding: 0.1rem 0.45rem; font-size: 0.7rem; font-weight: 700; vertical-align: middle; border-radius: 999px; background: rgba(255,255,255,0.22); text-transform: uppercase; }
-  .ban-sub { margin-top: 0.3rem; font-size: 0.9rem; line-height: 1.45; opacity: 0.95; }
-  .ban-sub code { background: rgba(0,0,0,0.25); padding: 0 0.3rem; border-radius: 3px; font-size: 0.85em; }
-  .ban-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
-  .ban-btn { display: inline-block; padding: 0.5rem 0.8rem; font: inherit; font-size: 0.9rem; font-weight: 600; border-radius: 6px; border: 1px solid rgba(255,255,255,0.7); background: transparent; color: #fff; cursor: pointer; text-decoration: none; }
-  .ban-btn.primary { background: #fff; color: #991b1b; border-color: #fff; }
-  .ban-btn.subtle { opacity: 0.8; font-weight: 500; }
-  .ban-btn:disabled { opacity: 0.5; cursor: progress; }
-  .ban-btn[hidden] { display: none !important; }
-  .ban-foot { margin-top: 0.6rem; font-size: 0.78rem; opacity: 0.85; min-height: 1em; }
-  /* ── alerts row (main page) ── */
-  .alerts-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin: -0.75rem 0 1.25rem; font-size: 0.85rem; color: var(--muted); }
-  .alerts-row .alerts-label { font-weight: 600; color: var(--fg); }
-  .alerts-row .alerts-state.on { color: #16a34a; }
-  .alerts-row .alerts-state.off, .alerts-row .alerts-state.err { color: var(--danger); }
-  .alerts-row button { padding: 0.25rem 0.55rem; font-size: 0.8rem; }
-  .alerts-msg { font-size: 0.8rem; }
-  /* ── ban history (main page) ── */
-  section#banhist { margin-top: 2.25rem; }
-  .ban-route { border: 1px solid var(--border); border-radius: 6px; background: var(--card); padding: 0.6rem 0.8rem; font-size: 0.85rem; line-height: 1.55; margin-bottom: 0.5rem; }
-  .ban-route .ok { color: #16a34a; font-weight: 600; }
-  .ban-route .bad { color: var(--danger); font-weight: 600; }
-  .ban-route .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
-  .ban-eps { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-  .ban-eps th, .ban-eps td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
-  .ban-eps th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
-  .ban-eps td.open { color: var(--danger); font-weight: 600; }
-  .ban-eps .muted { color: var(--muted); }
-  .ban-debug { margin-top: 0.6rem; font-size: 0.78rem; color: var(--muted); }
-  .ban-debug a { color: var(--muted); }
-`
 
 export const BAN_BANNER_HTML = /* html */ `
   <div id="ban-banner" class="ban-alert" role="alert" hidden>
@@ -75,31 +33,6 @@ export const BAN_BANNER_HTML = /* html */ `
     </div>
     <div class="ban-foot" id="ban-foot"></div>
   </div>`
-
-/** Main page only: the always-visible notifications control. */
-export const ALERTS_ROW_HTML = /* html */ `
-  <div id="alerts-row" class="alerts-row">
-    <span class="alerts-label">🔔 IP-ban alerts</span>
-    <span id="alerts-state" class="alerts-state">checking…</span>
-    <button id="alerts-enable" class="ghost" type="button" hidden>Enable on this device</button>
-    <button id="alerts-test" class="ghost" type="button">Send test notification</button>
-    <span id="alerts-msg" class="alerts-msg"></span>
-  </div>`
-
-/** Main page only: live route status + episode history. */
-export const BAN_HISTORY_HTML = /* html */ `
-  <section id="banhist">
-    <div class="audit-head">
-      <h2>IP-ban history</h2>
-      <div class="audit-actions">
-        <button id="ban-refresh" class="ghost" type="button">Refresh</button>
-      </div>
-    </div>
-    <div id="ban-route" class="ban-route"><span class="muted">loading…</span></div>
-    <div id="ban-devices" class="ban-route" hidden></div>
-    <div id="ban-episodes"></div>
-    <div class="ban-debug">Test the whole alert path without a real ban: <a href="#" id="ban-simulate">simulate a ban</a> (banner + push; dismiss from the banner).</div>
-  </section>`
 
 export const BAN_JS = /* js */ `
 (() => {

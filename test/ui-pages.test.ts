@@ -13,6 +13,8 @@ afterEach(() => vi.unstubAllGlobals())
 
 /** Every shell page: path and the h1 text it must carry. Page tasks add rows. */
 export const PAGES: Array<[string, string]> = [
+  ['/ui', 'Home'],
+  ['/ui/', 'Home'],
   ['/ui/pool', 'Pool accounts'],
   ['/ui/pool/settings', 'Pool settings'],
   ['/ui/captcha', 'Captchas'],
@@ -273,6 +275,73 @@ describe('Playlists page script', () => {
     expect(els.get('rows').innerHTML).toContain('DJ 1 (1001tklists)')
     expect(els.get('hygiene').innerHTML).toContain('DRY RUN')
     expect(els.get('hygiene').innerHTML).toContain('1 held')
+  })
+})
+
+describe('Home page', () => {
+  it('/ui is the Home page and auto-prompts for notifications (ban page "home")', async () => {
+    const html = await (await app.request('https://tracked.example/ui', {}, env())).text()
+    expect(html).toContain('data-ban-page="home"')
+    expect(html).toContain('<h1>Home</h1>')
+    expect(html).not.toMatch(/quiet/i)
+    for (const id of ['h-sync-all', 'h-backfill', 'h-compare', 'attn', 'req-list', 'pl-list']) expect(html).toContain(`id="${id}"`)
+  })
+  it('loads every source in parallel and lists what needs attention, each row linking to its fix', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const fetches: string[] = []
+    const { ctx, els } = richStub(async (u: string) => {
+      fetches.push(u)
+      if (u === '/ui/api/pool/status') return Response.json({ status: { accounts: [{ id: 'acct-1', state: 'active', budget: 40, usedToday: 15 }, { id: 'acct-2', state: 'active', flagged: true, flagReason: 'too_many' }] }, challenges: [], challengesError: null })
+      if (u === '/ui/api/pool/challenges') return Response.json({ challenges: [{ id: 'ch-1', state: 'pending', ready: true, type: 'image', expiresAt: new Date(Date.now() + 20 * 60000).toISOString(), createdAt: new Date().toISOString() }, { id: 'ch-2', state: 'solved' }] })
+      if (u === '/ui/api/combined') return Response.json({ connected: true, title: 'All DJs', playlistId: 'PLc', videoCount: 12, missingTotal: 0, sources: [], dailyInsertCap: 100, dailyInsertsUsed: 25 })
+      if (u.startsWith('/ui/api/mkvid')) return Response.json({ enabled: true, dailyClaimCap: 30, dailyClaims: 3, now, quotaResetsAt: now + 3600, counts: { pending: 0, claimed: 0, done: 4, failed: 2 }, accounts: [{ account: 'primary', label: 'primary', cap: 24, used: 3 }, { account: 'shared', label: 'shared', cap: 6, used: 0 }], lastPoll: { at: now, outcome: 'ok', accounts: ['primary', 'shared'] }, oldVideos: [{ videoId: 'v1' }], queue: [], settled: [] })
+      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }, { slug: 'dj-2', sourceUrl: 'https://y', addedAt: 2 }] })
+      if (u === '/ui/api/state/dj-1') return Response.json({ state: { lastRunAt: now - 60, lastError: 'boom <b>' } })
+      if (u === '/ui/api/state/dj-2') return Response.json({ state: { lastRunAt: now - 60 } })
+      if (u.startsWith('/ui/api/removals')) return Response.json({ holds: [{ kind: 'artist', slug: 'dj-1', playlistId: 'PL1', missing: 5, expected: 40, at: new Date().toISOString() }] })
+      if (u.startsWith('/ui/api/audit?')) return Response.json({ records: [{ key: '1', status: 'ok', title: 'A <set>', via: 'yt', cs: 4000, dur: 3600, impossible: true, skew: 900, t: new Date().toISOString() }], cursor: null })
+      if (u === '/ui/api/audit-detail?key=1') return Response.json({ record: { t: 'now', reqId: 'r1', status: 'ok', input: { videoTitle: 'A <set>' }, youtube: { videoId: 'abcdefghijk' }, search: { attempts: [] }, meta: {} } })
+      if (u.startsWith('/ui/api/playlist-addition-detail')) return Response.json({ error: 'not_found' }, { status: 404 })
+      if (u.startsWith('/ui/api/playlist-additions?')) return Response.json({ records: [{ key: '2', status: 'failed', set: 'https://www.1001tracklists.com/tracklist/x/some-set.html', slug: 'dj-1', vid: 'abcdefghijk', t: new Date().toISOString() }], cursor: null })
+      return new Response('{}', { status: 404 })
+    }, '/ui')
+    ;(ctx as any).URL = URL // TK.fmt.setLabel parses the set URL
+    const clicks: Record<string, (ev: unknown) => void> = {}
+    for (const id of ['req-list', 'pl-list']) (ctx as any).document.getElementById(id).addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks[id] = fn }
+    const html = await (await app.request('https://tracked.example/ui', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0))
+    for (const u of ['/ui/api/ban/status', '/ui/api/pool/status', '/ui/api/pool/challenges', '/ui/api/youtube/status', '/ui/api/combined', '/ui/api/list', '/ui/api/state/dj-1']) expect(fetches).toContain(u)
+    expect(fetches).toContain('/ui/api/mkvid?limit=1')
+    expect(fetches).toContain('/ui/api/audit?limit=6')
+    expect(fetches).toContain('/ui/api/playlist-additions?limit=6')
+    const attn = els.get('attn').innerHTML as string
+    expect(attn).toContain('href="/ui/captcha/ch-1"')
+    expect(attn).toContain('href="/ui/removed"')
+    expect(attn).toContain('href="/ui/dj/dj-1"')
+    expect(attn).not.toContain('href="/ui/dj/dj-2"')
+    expect(attn).toContain('href="/ui/pool"')
+    expect(attn).toContain('/ui/mkvid?status=failed')
+    expect(attn).toContain('/ui/mkvid?tab=old')
+    expect(attn).toContain('boom &lt;b&gt;')
+    expect(attn).not.toContain('<b>')
+    expect(els.get('t-fetch').innerHTML).toContain('15 / 40')
+    expect(els.get('t-chal').innerHTML).toContain('1')
+    expect(els.get('t-yt').innerHTML).toContain('25 / 100')
+    expect(els.get('t-mk').innerHTML).toContain('primary 3 / 24')
+    const req = els.get('req-list').innerHTML as string
+    expect(req).toContain('A &lt;set&gt;')
+    expect(req).toContain('title="reported position is past the end of the video"')
+    expect(req).toContain('Δ15:00')
+    expect(els.get('pl-list').innerHTML).toContain('some set')
+    const row = { target: { closest: () => ({ dataset: { i: '0' } }) } }
+    clicks['req-list']!(row)
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(els.get('tk-drawer-body').innerHTML).toContain('YouTube match')
+    expect(els.get('tk-drawer-body').innerHTML).toContain('A &lt;set&gt;')
+    clicks['pl-list']!(row)
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(els.get('tk-drawer-body').innerHTML).toContain('detail not found')
   })
 })
 

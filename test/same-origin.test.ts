@@ -90,7 +90,7 @@ describe('the admin pages send what the guard wants', () => {
     }
     expect(bad).toEqual([])
     // The scan really sees the fetches (the pool pages build theirs with jsonInit, which sets the type).
-    if (path === '/ui/djs') expect(seen).toBeGreaterThan(2)
+    if (path === '/ui') expect(seen).toBeGreaterThan(2)
     if (path === '/ui/pool') expect(scripts).toContain("headers: { 'content-type': 'application/json' }")
   })
 })
