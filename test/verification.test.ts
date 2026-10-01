@@ -105,6 +105,20 @@ describe('noteSetFetch', () => {
     expect((await note(env, withTitle(real, 5, 'Randomized Name'), 'acct-3', T0 + 6 * H, pool)).outcome).toBe('verified')
   })
 
+  it('a disagreeing second fetch that carries a near-mismatch row starts over without reporting the first account', async () => {
+    const env = makeEnv()
+    const { retests, pool } = retestRecorder()
+    await note(env, real, 'acct-1', T0, pool)
+    const second = { ...withTitle(real, 5, 'Randomized Name'), decoy: { ...real.decoy, nearMismatched: 1 } }
+    expect(passesDecoyCheck(second)).toBe(true)
+    const r = await note(env, second, 'acct-2', T0 + 3 * H, pool)
+    expect(r).toEqual({ outcome: 'mismatch', verified: false, reported: null })
+    expect(retests).toEqual([])
+    const row = (await getVerification(env, URL1))!
+    expect(row).toMatchObject({ state: 'pending', first_account: 'acct-2', mismatches: 1 })
+    expect(excludeAccountsOf(row).sort()).toEqual(['acct-1', 'acct-2'])
+  })
+
   it('a verified list that changes later (users identify IDs) resets without accusing anyone', async () => {
     const env = makeEnv()
     const { retests, pool } = retestRecorder()

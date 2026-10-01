@@ -643,26 +643,56 @@ function nameTokens(s: string): Set<string> {
 
 /**
  * Whether a row's microdata name and visible text, which differ, differ only
- * in a way real pages do: every word of the microdata name is also in the
- * visible text (which adds a parenthetical such as "(USA)" or "(Start The
- * Dance)", or repeats an artist). Live examples, 2026-09-30:
+ * in the way real pages sometimes do. Live examples, 2026-09-30:
  *   "Truth x Lies & KLP - Smile"           / "Truth x Lies & KLP & Lies - Smile"
  *   "The Prodigy - No Good (ALOK Remix)"   / "The Prodigy - No Good (Start The Dance) (ALOK Remix)"
  *   "Adam Beyer & Charles D - Rave Repeat" / "Adam Beyer & Charles D (USA) - Rave Repeat"
  *
- * Deliberately a subset test in one direction and not a similarity score: a
- * decoy row swaps one part of the name (the artist, or the remixer) and keeps
- * the rest, so its two names overlap a lot (Jaccard up to 0.71 on the decoy
- * fixture, e.g. "... Set Me Free (TAIGA Remix)" / "... Set Me Free (Figure &
- * 2FAC3D Remix)") but never have one inside the other. Visible text that
- * DROPS words (say, a remix credit) is not treated as benign.
+ * Both names are split at the first " - " (as parseRow splits the name) and
+ * each side is compared on its own:
+ *   - every word of the microdata side is on the same side of the visible text;
+ *   - every word the visible side adds is inside parentheses or brackets, or
+ *     repeats a word of the microdata side ("& Lies").
+ * So an added artist ("Modjo & Someone"), an added title, an artist/title
+ * swap or the meta words turning up only in a remix credit are all far.
+ *
+ * Not a similarity score: a decoy row swaps one part of the name (the artist
+ * or the remixer) and keeps the rest, so its two names overlap a lot (Jaccard
+ * up to 0.71 on the decoy fixture). None of the 24 decoy rows in that one
+ * fixture is near under this rule, but a decoy that only adds a parenthetical
+ * would be; what keeps such a row from reaching users is the strict 0-far
+ * check on the rest of the page plus verification (a second account's fetch
+ * must give the same rows).
  */
 export function isNearMismatch(metaName: string, visible: string): boolean {
-  const meta = nameTokens(metaName)
-  if (meta.size < 2) return false
-  const shown = nameTokens(visible)
-  for (const w of meta) if (!shown.has(w)) return false
-  return true
+  const meta = splitName(metaName)
+  const shown = splitName(visible)
+  if (meta.length !== shown.length) return false
+  let metaWords = 0
+  for (let i = 0; i < meta.length; i++) {
+    const m = nameTokens(meta[i]!)
+    metaWords += m.size
+    const s = nameTokens(shown[i]!)
+    for (const w of m) if (!s.has(w)) return false
+    for (const w of nameTokens(withoutParentheticals(shown[i]!))) if (!m.has(w)) return false
+  }
+  return metaWords >= 2
+}
+
+/** [artist, title] at the first " - ", or [name] when there is none. */
+function splitName(s: string): string[] {
+  const dash = s.indexOf(' - ')
+  return dash >= 0 ? [s.slice(0, dash), s.slice(dash + 3)] : [s]
+}
+
+/** The text with every (...) and [...] group removed, innermost first. */
+function withoutParentheticals(s: string): string {
+  let prev: string
+  do {
+    prev = s
+    s = s.replace(/\([^()]*\)|\[[^[\]]*\]/g, ' ')
+  } while (s !== prev)
+  return s
 }
 
 /**

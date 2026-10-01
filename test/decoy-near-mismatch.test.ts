@@ -85,6 +85,37 @@ describe('near mismatches (benign meta/visible name differences)', () => {
     expect(isNearMismatch('energy', 'monococ - energy')).toBe(false)
   })
 
+  it('compares artist and title separately and only allows parenthetical or repeated additions', () => {
+    const far: Array<[string, string]> = [
+      // An added artist outside parentheses (the shape that would reach users via byArtist).
+      ['modjo - lady', 'modjo & someone - lady'],
+      ['inch - mindflow', 'patti day & inch - mindflow'],
+      // A different track whose remix credit happens to hold the meta words.
+      ['a - b', 'x - y (a b remix)'],
+      // Artist and title swapped, or a word moved across the separator.
+      ['daft punk - one more time', 'one more time - daft punk'],
+      ['daft punk one - more time', 'daft punk - one more time'],
+      // A title added around a meta "ID".
+      ['artist - id', 'artist - real song (id remix)'],
+      // One side has a separator and the other does not.
+      ['artist - title', 'artist title'],
+    ]
+    for (const [m, s] of far) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(false)
+    // A parenthetical added to the title is harmless (the shown title comes from the meta name): near.
+    expect(isNearMismatch('monococ - energy', 'monococ - energy (extended mix)')).toBe(true)
+    expect(isNearMismatch('monococ - energy', 'monococ - energy [extended mix]')).toBe(true)
+  })
+
+  it('a superset decoy (shown text adds an artist on most rows) fails every check', async () => {
+    const rows: Array<[string, string]> = Array.from({ length: 20 }, (_, i) => [`Artist ${i} - Title ${i}`, `Artist ${i} &amp; Guest ${i + 50} - Title ${i}`])
+    const html = page(0, rows)
+    const p = parseTracklist(URL, html)
+    expect(p.decoy).toMatchObject({ named: 20, mismatched: 20, nearMismatched: 0, suspected: true })
+    expect(passesDecoyCheck(p)).toBe(false)
+    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false)
+    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('decoy')
+  })
+
   it('reads feat/featuring as ft and ignores accents and punctuation', () => {
     expect(isNearMismatch('artist feat. singer - song', 'artist ft. singer (uk) - song')).toBe(true)
     expect(isNearMismatch('beyonce - halo', 'beyoncé - halo (live)')).toBe(true)

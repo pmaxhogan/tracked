@@ -268,10 +268,15 @@ export async function noteSetFetch(env: Env, input: NoteInput): Promise<Verifica
     // The pair disagrees. Which side is the decoy is unknown; the spec says the
     // first account is the one to report. Start over from this fetch and make
     // a third account confirm it.
-    log?.error('verify.mismatch', { setUrl, firstAccount: row.first_account, secondAccount: account, rowsFirst: row.row_count, rowsSecond: rowCount })
-    await poolRetestAccount(pool, row.first_account, 'verification mismatch', log)
+    // Exception: this fetch passed the decoy check with a near-mismatch row,
+    // which may itself be a decoy row that differs from the first fetch. Then
+    // the disagreement is no evidence against the first account: start over
+    // without reporting anyone.
+    const near = parsed.decoy.nearMismatched
+    log?.error('verify.mismatch', { setUrl, firstAccount: row.first_account, secondAccount: account, rowsFirst: row.row_count, rowsSecond: rowCount, nearMismatched: near })
+    if (near === 0) await poolRetestAccount(pool, row.first_account, 'verification mismatch', log)
     await startOver([account, row.first_account, ...excludeAccountsOf(row)], row.mismatches + 1)
-    return { outcome: 'mismatch', verified: false, reported: row.first_account }
+    return { outcome: 'mismatch', verified: false, reported: near === 0 ? row.first_account : null }
   }
   // Same account, different rows: the list was edited in between (or the
   // account turned). Restart from the newer rows without accusing anyone.
