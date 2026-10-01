@@ -9,7 +9,7 @@
  *                              (lib/pool-events.ts). Answers 200
  *                              `{ ok, duplicate, push }`, 400 on a bad body.
  *   - `poolSettingsApp`, mounted at `/api/pool` inside the CF Access-gated
- *     subscriptions app:
+ *     admin app:
  *       GET  /ui/api/pool/settings   `{ settings, defaults }`
  *       PUT  /ui/api/pool/settings   partial or full settings,
  *                              deep-merged over the current ones, validated

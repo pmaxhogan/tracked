@@ -1,7 +1,7 @@
 /**
  * Admin pages for the tlpool browser pool, and the `/ui/api/pool/*`
  * routes they call. Mounted at `/ui` (in `index.ts`, ahead of the
- * main subscriptions app), gated by Cloudflare Access like every other admin
+ * main admin app), gated by Cloudflare Access like every other admin
  * page, and never by the bearer token.
  *
  *   GET  /pool                          accounts + pool status (+ Add account dialog)

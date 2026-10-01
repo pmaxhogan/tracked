@@ -2,7 +2,7 @@ export type Env = {
   CACHE: KVNamespace
   /** R2 bucket tracked-pages: every page tlpool returned (lib/page-store.ts). Optional: unset = nothing is kept. */
   PAGES?: R2Bucket
-  /** Durable list of DJ subscriptions for the /ui mini-app. */
+  /** Durable list of DJ subscriptions for the /ui admin app. */
   SUBS: KVNamespace
   /**
    * D1 database (schema in `migrations/`): subscriptions, per-tracklist sync
