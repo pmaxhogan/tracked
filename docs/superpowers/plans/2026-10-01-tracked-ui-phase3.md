@@ -55,7 +55,7 @@
   - The index is only ever written from verified lists. Never from `cacheParsedTracklist`, the `tl:` KV cache, or any KV.
   - It is never written on the cron except by that hook.
   - It is never pruned. A set that verifies again is re-indexed.
-- **Read-only main DB:** the search code only reads `DB`, and writes only `SEARCH_DB`. The one exception is none: no main-DB writes at all.
+- **Read-only main DB:** the search code only reads `DB` (no main-DB writes at all) and writes only `SEARCH_DB`.
 - **Public repo:** no secrets, emails or usernames in code, fixtures, docs or commits. Pool account ids never appear in search data. Test fixtures are synthetic rows; artist and set names are public and fine, but never commit scraped HTML.
 - **Bad input:** malformed query parameters return `400 { error: 'invalid_request', message }`. An empty `q` returns `200` with empty groups.
 - **SDD ledger:** `.superpowers/sdd/2026-10-01-tracked-ui-phase3/` (gitignored).
