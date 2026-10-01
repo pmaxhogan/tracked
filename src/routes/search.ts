@@ -6,8 +6,12 @@ import type { Env } from '../types'
 import { parseSearchQuery, search } from '../lib/search/query'
 import { normalizeText } from '../lib/search/normalize'
 import { backfillSearch, searchIndexStatus } from '../lib/search/backfill'
+import { servePage } from '../ui/pages'
+import { SEARCH_PAGE } from '../ui/pages/search'
 
 export const searchApp = new Hono<{ Bindings: Env; Variables: { cfAccessEmail: string } }>()
+
+searchApp.get(SEARCH_PAGE.path, (c) => servePage(c, SEARCH_PAGE.html))
 
 searchApp.get('/api/search', async (c) => {
   const q = parseSearchQuery(new URL(c.req.url).searchParams)

@@ -249,6 +249,7 @@ OpenAPI spec: `GET /openapi.json` (bearer-gated).
 | `/ui/djs` | DJs: the list (table on desktop, cards on a phone) with the add form in the header |
 | `/ui/dj/<slug>` | DJ profile: summary column and expandable set cards |
 | `/ui/activity` | Activity: one newest-first log of requests, playlist additions, hygiene, mkvid, pool, sync and IP blocks. Filters (kind, Problems only, DJ, range 24h/7d/30d/90d) live in the URL; Load older pages back through the log; a row opens a drawer (the full detail for requests and additions, the row's own fields for the rest) |
+| `/ui/search` | Search: tracks, sets and DJs as you type (150 ms debounce), with All / Tracks / Sets / DJs tabs, typo correction with a "Search exactly" escape, highlighted matches and Up/Down/Enter/Escape keyboard navigation. `q` and `kind` live in the URL |
 | `/ui/set?url=` | Set: the tracklist viewer (`?url=` deep link kept) and a diagnostics column (discovery, recording, verification, full-recording rule, playlist, hygiene, mkvid). The diagnostics read only stored data: nothing is fetched from YouTube, tlpool or 1001tracklists |
 | `/ui/playlists` | Playlists: YouTube connection, combined playlist, per-DJ playlists, fix titles, hygiene strip |
 | `/ui/removed` | Removed videos (the push target for removals) |
@@ -260,7 +261,23 @@ OpenAPI spec: `GET /openapi.json` (bearer-gated).
 | `/ui/settings` | Settings: YouTube account, notifications and devices, theme, integration status, IP-ban episodes |
 | `/ui/tools` | Tools: YouTube video JSON, purge a tracklist, simulate a ban, requeue victims, migration status |
 
-Not built yet: **Search** (`/ui/search`, sets, tracks and DJs; phase 3). In phase 1 the search box at the top of the page, the Search tab and the `/` key all open the DJs filter.
+Search lives at `/ui/search` (see [Search](#search)); the search box at the top of the page, the Search tab and the `/` key all open it.
+
+### Search
+
+`/ui/search` searches every verified track list: tracks (artist, title, label, with the sets they were played in), sets and DJs. It reads `GET /ui/api/search?q=&kind=all|sets|tracks|djs&limit=1..20&exact=1`, which normalizes the query (case, diacritics, apostrophes, `ft`/`feat`), corrects likely typos against the index's own vocabulary (the page says "Showing results for ..." and offers "Search exactly for ..." with `exact=1`) and re-ranks in the Worker.
+
+**What is indexed, and when.** Only trusted lists: a set is indexed after a fetch that verified against its recording, in the background (`waitUntil`, one batch per set, skipped when it was already indexed since that verification), and lists that mkvid uploaded from a trusted track list are added by the rebuild below. Sets with more than 500 tracks keep their first 500. Unverified lists are never indexed, so a wrong guess cannot surface in search.
+
+**Rebuild.** The Tools page has a Search index card with the counts (sets, tracks, last indexed) and a "Rebuild 500 more" button: each press indexes up to 500 trusted mkvid lists and remembers where it stopped, so press it until it says done. It is safe to repeat.
+
+**A separate database.** The index lives in its own D1 database, `tracked-search` (binding `SEARCH_DB`, `migrations-search/`), not in the main one: D1 cannot export a database that holds FTS5 virtual tables, and `wrangler d1 export` is how the main database is backed up. Everything in the index can be rebuilt from verified lists, so it is never exported. Without the binding `/ui/api/search` answers 503 `search_unavailable` and the page says the index is not set up. To create the tables on a deploy:
+
+```
+npx wrangler d1 migrations apply tracked-search --remote
+```
+
+Locally, `npx wrangler d1 migrations apply tracked-search --local` does the same for `wrangler dev`.
 
 ### The shell
 

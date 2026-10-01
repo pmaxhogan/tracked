@@ -29,8 +29,8 @@ export interface NavItem {
   extra?: string
 }
 
-/** Where "search" goes until the Search page ships (phase 3). */
-export const SEARCH_HREF = '/ui/djs?focus=filter'
+/** The Search page (phase 3): the nav item, the phone tab and the top search box. */
+export const SEARCH_HREF = '/ui/search'
 
 export const NAV: NavItem[] = [
   { key: 'home', label: 'Home', href: '/ui/', icon: 'home', group: null, tab: 'Home' },
@@ -139,7 +139,7 @@ export const SHELL_JS = /* js */ `
     if (!e || e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
     const t = e.target;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''))) return;
-    const box = $('tk-search');
+    const box = $('sq') || $('tk-search');
     if (box && typeof box.focus === 'function') { e.preventDefault(); box.focus(); return; }
     if (typeof location !== 'undefined') { e.preventDefault(); location.href = ${JSON.stringify(SEARCH_HREF)}; }
   });
@@ -189,7 +189,7 @@ export function shell(o: ShellOptions): string {
   </aside>
   <header class="tk-top"><button type="button" class="btn icon" id="tk-menu-btn" aria-label="Menu">${icon('menu')}</button><span class="tk-top-title">${title}</span></header>
   <main class="tk-main${o.width === 'narrow' ? ' narrow' : ''}" id="main">
-    <form class="tk-search" action="/ui/djs" method="get" role="search"><input id="tk-search" name="q" type="search" placeholder="Filter DJs" aria-label="Filter DJs"></form>
+    <form class="tk-search" action="/ui/search" method="get" role="search"><input id="tk-search" name="q" type="search" placeholder="Search tracks, sets, DJs" aria-label="Search tracks, sets, DJs"></form>
     ${BAN_BANNER_HTML}
     <div class="tk-head"><div><h1${o.h1Id ? ` id="${esc(o.h1Id)}"` : ''}>${title}</h1>${o.description ? `<p class="desc">${o.description}</p>` : ''}</div><div class="actions">${o.actions ?? ''}</div></div>
     ${o.body}

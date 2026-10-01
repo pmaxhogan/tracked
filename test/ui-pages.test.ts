@@ -24,6 +24,7 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/removed', 'Removed videos'],
   ['/ui/mkvid', 'mkvid'],
   ['/ui/activity', 'Activity'],
+  ['/ui/search', 'Search'],
   ['/ui/settings', 'Settings'],
   ['/ui/tools', 'Tools'],
 ]
@@ -55,10 +56,10 @@ describe('shell()', () => {
     for (const s of scripts) expect(() => new vm.Script(s)).not.toThrow()
     expect(html).not.toMatch(/<script [^>]/)
   })
-  it('has a GET search form for the DJs filter (desktop only) and no POST form', () => {
+  it('has a GET search form for the Search page (desktop only) and no POST form', () => {
     const h = shell({ nav: 'home', title: 'Home', body: '' })
-    expect(h).toContain('<form class="tk-search" action="/ui/djs" method="get" role="search">')
-    expect(h).toContain('<input id="tk-search" name="q" type="search" placeholder="Filter DJs" aria-label="Filter DJs">')
+    expect(h).toContain('<form class="tk-search" action="/ui/search" method="get" role="search">')
+    expect(h).toContain('<input id="tk-search" name="q" type="search" placeholder="Search tracks, sets, DJs" aria-label="Search tracks, sets, DJs">')
     expect(h).not.toMatch(/<form[^>]*method="?post/i)
     expect(h).toContain('href="/ui/" title="tracked"')
   })
@@ -69,8 +70,7 @@ describe('shell()', () => {
   it('narrow pages get the 560px column and phone tabs list the five destinations', () => {
     const h = shell({ nav: 'captcha', title: 'Captcha', body: '', width: 'narrow' })
     expect(h).toContain('tk-main narrow')
-    // Search is its own page from phase 3; until then it opens the DJs filter.
-    for (const p of ['/ui/', '/ui/djs', '/ui/djs?focus=filter', '/ui/mkvid', '/ui/pool']) expect(h).toContain(`href="${p}"`)
+    for (const p of ['/ui/', '/ui/djs', '/ui/search', '/ui/mkvid', '/ui/pool']) expect(h).toContain(`href="${p}"`)
     // Activity is in the sidebar and the menu, never a phone tab.
     const tabBar = /<nav class="tk-tabs"[^>]*>([\s\S]*?)<\/nav>/.exec(h)![1]!
     expect(tabBar.match(/href="/g)!.length).toBe(5)

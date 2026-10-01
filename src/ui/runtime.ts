@@ -34,14 +34,20 @@ var TK = (() => {
   // content type, then credentials: the same-origin guard requires both.
   async function send(path, init) {
     let r;
-    try { r = await fetch(path, init); } catch (e) { return { ok: false, status: 0, data: { error: 'network' }, raw: '' }; }
+    const aborted = () => !!(init && init.signal && init.signal.aborted);
+    try { r = await fetch(path, init); } catch (e) {
+      if (aborted() || (e && e.name === 'AbortError')) return { ok: false, status: 0, aborted: true, data: null, raw: '' };
+      return { ok: false, status: 0, data: { error: 'network' }, raw: '' };
+    }
     const raw = await r.text().catch(() => '');
+    if (aborted()) return { ok: false, status: 0, aborted: true, data: null, raw: '' };
     let data = null; try { data = raw ? JSON.parse(raw) : null; } catch (e) { data = null; }
     return { ok: r.ok, status: r.status, data, raw };
   }
   const body = (b) => JSON.stringify(b === undefined ? {} : b);
   const api = {
-    get: (path) => send(path, { credentials: 'same-origin' }),
+    // opts.signal (an AbortSignal) cancels the request: it then resolves to { ok: false, status: 0, aborted: true }, no toast, never a throw.
+    get: (path, opts) => send(path, opts && opts.signal ? { credentials: 'same-origin', signal: opts.signal } : { credentials: 'same-origin' }),
     post: (path, b) => send(path, { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: body(b) }),
     put: (path, b) => send(path, { method: 'PUT', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: body(b) }),
     del: (path, b) => send(path, { method: 'DELETE', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: body(b) }),
