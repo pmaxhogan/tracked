@@ -217,6 +217,37 @@ describe('DJs page script', () => {
   })
 })
 
+describe('DJs page ?focus=filter and bulk actions', () => {
+  it('focuses the filter only after it is shown, and locks row buttons while Sync all runs', async () => {
+    const { ctx, els } = richStub(async (u: string) => {
+      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }] })
+      if (u.startsWith('/ui/api/state/')) return Response.json({ state: null })
+      if (u.startsWith('/ui/api/sync/')) { await new Promise((res) => setTimeout(res, 20)); return Response.json({ stats: {} }) }
+      return new Response('{}', { status: 404 })
+    }, '/ui/djs')
+    ;(ctx as any).location.search = '?focus=filter'
+    const doc = (ctx as any).document
+    const mk = (): any => ({ innerHTML: '', textContent: '', className: '', children: [] as any[], appendChild(c: any) { this.children.push(c) }, setAttribute() {} })
+    doc.createElement = mk
+    doc.getElementById('tk-toasts').appendChild = () => {}
+    const seen: boolean[] = []
+    doc.getElementById('f-text').focus = () => seen.push(doc.getElementById('filters').hidden)
+    const handlers: Record<string, () => void> = {}
+    doc.getElementById('sync-all').addEventListener = (_t: string, fn: () => void) => { handlers.syncAll = fn }
+    const html = await (await app.request('https://tracked.example/ui/djs', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(seen).toEqual([false])
+    handlers.syncAll!()
+    await new Promise((res) => setTimeout(res, 5))
+    expect(els.get('resync-all').disabled).toBe(true)
+    expect(els.get('rows').innerHTML).toContain('disabled')
+    await new Promise((res) => setTimeout(res, 60))
+    expect(els.get('resync-all').disabled).toBe(false)
+    expect(els.get('rows').innerHTML).not.toContain('disabled')
+  })
+})
+
 describe('Playlists page script', () => {
   it('fills the connection card, the combined card with its meter, the DJ playlists and the hygiene strip', async () => {
     const { ctx, els } = richStub(async (u: string) => {
@@ -237,6 +268,7 @@ describe('Playlists page script', () => {
     expect(els.get('cmb-body').innerHTML).toContain('75/100 inserts left today')
     expect(els.get('cmb-fill').style.width).toBe('25%')
     expect(els.get('rows').innerHTML).toContain('https://www.youtube.com/playlist?list=PL1')
+    expect(els.get('rows').innerHTML).toContain('DJ 1 (1001tklists)')
     expect(els.get('hygiene').innerHTML).toContain('DRY RUN')
     expect(els.get('hygiene').innerHTML).toContain('1 held')
   })

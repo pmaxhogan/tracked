@@ -117,6 +117,22 @@ describe('TK basics', () => {
     t.children[2].onclick()
     expect(box.children.length).toBe(0)
   })
+  it('toast renders an optional link (same-origin path or http(s) only) and never throws in the stub', () => {
+    const node = (tag: string) => { const n: any = { tag, children: [] as any[], textContent: '', className: '', href: '', parentNode: null,
+      appendChild(ch: any) { ch.parentNode = n; n.children.push(ch) }, removeChild() {}, setAttribute() {} }; return n }
+    const { c, els } = ctx({})
+    const box = node('div'); els.set('tk-toasts', box)
+    ;(c as any).document.createElement = node
+    vm.runInContext(RUNTIME_JS, c)
+    vm.runInContext("TK.toast('Token rejected', 'bad', null, { href: '/ui/oauth/start', text: 'Reconnect YouTube' })", c)
+    const a = box.children[0].children.find((x: any) => x.tag === 'a')
+    expect(a).toMatchObject({ href: '/ui/oauth/start', textContent: 'Reconnect YouTube' })
+    vm.runInContext("TK.toast('x', 'bad', null, { href: 'javascript:alert(1)', text: 'no' })", c)
+    expect(box.children[1].children.some((x: any) => x.tag === 'a')).toBe(false)
+    const plain = ctx({})
+    vm.runInContext(RUNTIME_JS, plain.c)
+    expect(() => vm.runInContext("TK.toast('x', 'bad', null, { href: '/a', text: 'b' })", plain.c)).not.toThrow()
+  })
   it('toast goes inside the topmost open dialog (one region, reused), else #tk-toasts', () => {
     const node = (tag: string) => { const n: any = { tag, children: [] as any[], attrs: {} as Record<string, string>, textContent: '', className: '', parentNode: null,
       appendChild(ch: any) { ch.parentNode = n; n.children.push(ch) }, removeChild(ch: any) { n.children = n.children.filter((x: any) => x !== ch); ch.parentNode = null },

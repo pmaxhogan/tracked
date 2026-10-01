@@ -30,15 +30,7 @@ export const DJ_ACTIONS_JS = /* js */ `
 
     // The server cleared the stored tokens: say so, with a way back to the sign-in.
     function reauthToast() {
-      TK.toast(REAUTH_TEXT, 'bad');
-      const box = TK.$('tk-toasts');
-      const t = box ? box.lastChild : null;
-      if (t && typeof t.appendChild === 'function' && typeof document.createElement === 'function') {
-        const a = document.createElement('a');
-        a.href = '/ui/oauth/start';
-        a.textContent = 'Reconnect YouTube';
-        t.appendChild(a);
-      }
+      TK.toast(REAUTH_TEXT, 'bad', null, { href: '/ui/oauth/start', text: 'Reconnect YouTube' });
     }
 
     // Sync or Invalidate & resync one DJ. btn is optional (rows that track their own busy state pass null).

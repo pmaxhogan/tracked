@@ -59,6 +59,8 @@ ${DJ_ACTIONS_JS}
   // One entry per subscription: { slug, sourceUrl, addedAt, state, busy, confirming }.
   // state: undefined = loading (skeleton), null = no sync state yet, object = loaded; failed = state call failed.
   let rows = [];
+  let bulk = null; // 'sync' | 'resync' while a bulk action runs
+  let focused = false;
   $text.value = TK.qs.get('q') || '';
   $errOnly.checked = TK.qs.get('errors') === '1';
 
@@ -98,7 +100,7 @@ ${DJ_ACTIONS_JS}
         '<button type="button" class="btn small danger" data-act="remove-yes" data-slug="' + slug + '">Yes, remove</button>' +
         '<button type="button" class="btn small" data-act="remove-no" data-slug="' + slug + '">Cancel</button></span>';
     } else {
-      const dis = r.busy ? ' disabled' : '';
+      const dis = r.busy || bulk ? ' disabled' : '';
       actions = '<span class="dj-actions">' +
         '<button type="button" class="btn small" data-act="sync" data-slug="' + slug + '"' + dis + '>' + (r.busy === 'sync' ? 'Syncing…' : 'Sync') + '</button>' +
         '<button type="button" class="btn small" data-act="resync" data-slug="' + slug + '"' + dis + ' title="Forget the cached video for every set and re-check them all">' + (r.busy === 'resync' ? 'Resyncing…' : 'Invalidate &amp; resync') + '</button>' +
@@ -113,6 +115,9 @@ ${DJ_ACTIONS_JS}
     $filters.hidden = !rows.length;
     $syncAll.hidden = !rows.length;
     $resyncAll.hidden = !rows.length;
+    // One bulk action at a time: the other bulk button waits (the pressed one is TK.busy's).
+    if (bulk !== 'sync') $syncAll.disabled = !!bulk;
+    if (bulk !== 'resync') $resyncAll.disabled = !!bulk;
     $wrap.hidden = !list.length;
     $rows.innerHTML = list.map(rowHtml).join('');
     if (!rows.length) { $empty.textContent = 'No subscriptions yet.'; $empty.hidden = false; }
@@ -150,6 +155,8 @@ ${DJ_ACTIONS_JS}
       return { slug: s.slug, sourceUrl: s.sourceUrl, addedAt: s.addedAt, state: old ? old.state : undefined, failed: old ? old.failed : false, busy: old ? old.busy : null, confirming: false };
     });
     render();
+    // ?focus=filter: the filter row is only shown once there are rows to filter.
+    if (!focused && rows.length && TK.qs.get('focus') === 'filter') { focused = true; $text.focus(); }
     // At most four state calls at a time; each row shows a skeleton until its own arrives.
     await DJA.pool(rows.filter((r) => r.state === undefined), 4, loadRowState);
   }
@@ -178,7 +185,7 @@ ${DJ_ACTIONS_JS}
     const b = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
     if (!b) return;
     const r = find(b.dataset.slug);
-    if (!r || r.busy) return;
+    if (!r || r.busy || bulk) return;
     const act = b.dataset.act;
     if (act === 'sync' || act === 'resync') syncRow(r, act === 'resync');
     else if (act === 'remove') { r.confirming = true; render(); }
@@ -187,18 +194,28 @@ ${DJ_ACTIONS_JS}
   });
 
   // Serial, never parallel: it keeps us under YouTube quota and the 1001tracklists rate limits.
-  $syncAll.addEventListener('click', () => TK.busy($syncAll, 'Syncing all…', async () => {
-    for (const r of rows.slice()) {
-      if (r.busy) continue;
-      const out = await syncRow(r, false);
-      if (out && out.reauth) break;
-    }
-  }));
+  $syncAll.addEventListener('click', () => {
+    if (bulk) return;
+    bulk = 'sync';
+    render();
+    return TK.busy($syncAll, 'Syncing all…', async () => {
+      try {
+        for (const r of rows.slice()) {
+          if (r.busy) continue;
+          const out = await syncRow(r, false);
+          if (out && out.reauth) break;
+        }
+      } finally { bulk = null; render(); }
+    });
+  });
 
   $resyncAll.addEventListener('click', async () => {
-    const out = await DJA.resyncAll($resyncAll, rows.length);
-    if (out && out.ok) for (const r of rows) r.state = undefined;
-    if (out && out.ok) { render(); await DJA.pool(rows, 4, loadRowState); }
+    if (bulk) return;
+    bulk = 'resync';
+    render();
+    let out = null;
+    try { out = await DJA.resyncAll($resyncAll, rows.length); } finally { bulk = null; render(); }
+    if (out && out.ok) { for (const r of rows) r.state = undefined; render(); await DJA.pool(rows, 4, loadRowState); }
   });
 
   $fix.addEventListener('click', () => DJA.fixTitles($fix));
@@ -223,7 +240,6 @@ ${DJ_ACTIONS_JS}
   $errOnly.addEventListener('change', mirror);
 
   load();
-  if (TK.qs.get('focus') === 'filter') $text.focus();
 })();
 `
 

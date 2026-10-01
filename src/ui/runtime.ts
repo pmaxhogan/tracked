@@ -94,7 +94,8 @@ var TK = (() => {
     return $('tk-toasts');
   }
 
-  function toast(msg, kind, detail) {
+  // link: optional { href, text } rendered as an anchor under the message (href must pass safeHref).
+  function toast(msg, kind, detail, link) {
     kind = kind === 'bad' ? 'bad' : 'ok';
     if (typeof document.createElement !== 'function') {
       const plain = $('tk-toasts');
@@ -113,6 +114,13 @@ var TK = (() => {
       const pre = document.createElement('pre');
       pre.textContent = String(detail);
       t.appendChild(pre);
+    }
+    const href = link ? safeHref(link.href) || (typeof link.href === 'string' && link.href.charAt(0) === '/' && link.href.charAt(1) !== '/' ? link.href : null) : null;
+    if (href) {
+      const a = document.createElement('a');
+      a.href = href;
+      a.textContent = String(link.text == null ? href : link.text);
+      t.appendChild(a);
     }
     const remove = () => { if (t.parentNode) t.parentNode.removeChild(t); };
     if (kind === 'ok') {

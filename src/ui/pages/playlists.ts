@@ -28,7 +28,7 @@ ${YOUTUBE_CARD_HTML}
   <div id="error" class="err-state" role="alert" hidden></div>
   <div id="wrap" class="tk-table-wrap" hidden>
     <table class="tk-table">
-      <thead><tr><th>Playlist</th><th>DJ</th><th class="num">Videos</th><th>Last addition</th><th class="num">mkvid videos</th></tr></thead>
+      <thead><tr><th>Playlist</th><th>DJ</th><th class="num">Videos</th><th>Last run</th><th class="num">mkvid videos</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -132,7 +132,7 @@ ${YOUTUBE_CARD_JS}
     const st = r.state, sum = DJA.summarize(st);
     const name = esc((st && st.artistName) || r.slug);
     const href = DJA.playlistHref(st);
-    const title = href ? link(href, (st && st.artistName) || r.slug) : '<span class="muted">' + name + ' · not created yet</span>';
+    const title = href ? link(href, ((st && st.artistName) || r.slug) + ' (1001tklists)') : '<span class="muted">' + name + ' · not created yet</span>';
     const dj = '<a href="/ui/dj/' + esc(encodeURIComponent(r.slug)) + '">' + esc(r.slug) + '</a>';
     let videos, last, mk;
     if (r.state === undefined) { videos = last = mk = SKEL; }
@@ -146,7 +146,7 @@ ${YOUTUBE_CARD_JS}
       mk = sum.mkvid ? String(sum.mkvid) : '—';
     }
     return '<tr><td data-label="Playlist">' + title + '</td><td data-label="DJ">' + dj + '</td><td data-label="Videos" class="num">' + videos +
-      '</td><td data-label="Last addition">' + last + '</td><td data-label="mkvid videos" class="num">' + mk + '</td></tr>';
+      '</td><td data-label="Last run">' + last + '</td><td data-label="mkvid videos" class="num">' + mk + '</td></tr>';
   }
   function render() {
     $wrap.hidden = !rows.length;
