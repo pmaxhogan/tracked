@@ -527,6 +527,25 @@ describe('completeMkvidRequest', () => {
     expect((await loadSubState(env, 'lillypalmer'))!.playlistId).toBe('PLnew')
   })
 
+  it('a request banned while it rendered stays banned: the upload is kept out of the playlists and queued for deletion (2026-10-01)', async () => {
+    const env = makeEnv()
+    playlistsExist()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    // the panel's Retry put it back to pending, then it was banned, while mkvid kept rendering
+    expect(await retryMkvidRequest(env, req.id)).toBe(true)
+    expect(await banMkvidRequest(env, req.id)).toBe(true)
+    const r = await completeMkvidRequest(env, { id: req.id, videoId: 'banned12345', style: 'scene', jobId: 'job7' }, 'tok', log)
+    expect(r).toEqual({ status: 'banned', videoId: 'banned12345' })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'banned', videoId: null, jobId: 'job7' })
+    const old = await env.DB.prepare('SELECT state, replaced_by, style FROM mkvid_old_videos WHERE video_id = ?').bind('banned12345').first()
+    expect(old).toEqual({ state: 'pending', replaced_by: 'banned', style: 'scene' })
+    // a failure report never lifts a ban either
+    expect(await failMkvidRequest(env, { id: req.id, error: 'yt-dlp exit 1' }, log)).toEqual({ status: 'banned', attempts: expect.any(Number) })
+    expect((await getMkvidRequest(env, req.id))!.status).toBe('banned')
+  })
+
   it('supersedes instead of inserting when the set gained a real recording mid-render', async () => {
     const env = makeEnv()
     await saveSubState(env, 'lillypalmer', {

@@ -45,7 +45,7 @@ import { getTracklistRow, setTracklistVideo } from './sync-store'
 import { isVerified, tracklistFingerprint, verifiedFingerprint } from './verification'
 import { markInPlaylist } from './playlist-blocklist'
 import { CLAIM_READY_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
-import { isOldStyle, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
+import { isOldStyle, queueBannedUploadForDelete, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
 import { decodeEntities } from './html-entities'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
@@ -1014,6 +1014,8 @@ export type CompleteResult =
       replacedVideoId?: string
     }
   | { status: 'superseded'; videoId: string; existingVideoId: string }
+  /** Banned while it rendered: the upload is kept out of the playlists and queued for deletion. */
+  | { status: 'banned'; videoId: string }
   | { status: 'not_found' }
   | { status: 'invalid_state'; current: MkvidStatus }
 
@@ -1033,6 +1035,13 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
   if (!req) return { status: 'not_found' }
   if (req.status === 'done' || req.status === 'superseded') return { status: 'invalid_state', current: req.status }
   const now = nowSeconds()
+  // Banned from the panel while mkvid rendered it (2026-10-01): the ban wins.
+  if (req.status === 'banned') {
+    await queueBannedUploadForDelete(env, { requestId: req.id, slug: req.slug, setUrl: req.setUrl, videoId: input.videoId, style: input.style ?? null })
+    await dbOf(env).prepare('UPDATE mkvid_requests SET job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?').bind(v(input.jobId), now, req.id).run()
+    log.warn('mkvid.complete_banned', { id: req.id, slug: req.slug, setUrl: req.setUrl, videoId: input.videoId })
+    return { status: 'banned', videoId: input.videoId }
+  }
 
   const tl = await getTracklistRow(env, req.slug, req.setUrl)
   // A recreation: the set still resolving to the mkvid video being replaced is expected, not a real recording.
@@ -1200,6 +1209,11 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   if (!req) return null
   if (req.status === 'done' || req.status === 'superseded') return { status: req.status, attempts: req.attempts }
   const now = nowSeconds()
+  // Banned while it rendered: a failure report never lifts the ban.
+  if (req.status === 'banned') {
+    await refundLatestClaim(env, req.id, now)
+    return { status: 'banned', attempts: req.attempts }
+  }
   // mkvid refused before downloading because the list it was handed is not
   // verified (a race with a re-fetch, or tracked and mkvid disagreeing): back
   // to pending without using an attempt; the claim gate decides when it is ready.

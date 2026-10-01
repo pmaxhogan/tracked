@@ -191,6 +191,17 @@ export async function retireSupersededOldVideo(
 }
 
 /**
+ * An upload finished for a request that was banned while it rendered: the
+ * video never enters a playlist and is queued for deletion from YouTube.
+ */
+export async function queueBannedUploadForDelete(
+  env: Env,
+  a: { requestId: string; slug: string; setUrl: string; videoId: string; style: string | null },
+): Promise<void> {
+  await markOldVideoForDelete(env, { requestId: a.requestId, slug: a.slug, setUrl: a.setUrl, oldVideoId: a.videoId, oldStyle: a.style, replacedBy: 'banned' })
+}
+
+/**
  * Supersede without a YouTube token (the sync noticing an official recording,
  * the claim finding one): the sync's recheck swap has already taken the old
  * mkvid video out of the playlists; queue its deletion.

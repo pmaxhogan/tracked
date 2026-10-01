@@ -124,8 +124,9 @@ mkvidApp.post('/complete', async (c) => {
     if (r.status === 'invalid_state') return c.json({ error: 'invalid_state', current: r.current }, 409)
     // A recreation: ask mkvid to delete the old video once this answer is out
     // (the cron retries it if this attempt fails).
-    if (r.status === 'done' && r.replacedVideoId) {
-      const job = deleteOldVideo(c.env, r.replacedVideoId, log, fetch, { dueOnly: true }).catch((e) => log.warn('mkvid.old_video_delete_threw', errorFields(e)))
+    const doomed = r.status === 'done' ? r.replacedVideoId : r.status === 'banned' ? r.videoId : undefined
+    if (doomed) {
+      const job = deleteOldVideo(c.env, doomed, log, fetch, { dueOnly: true }).catch((e) => log.warn('mkvid.old_video_delete_threw', errorFields(e)))
       try {
         c.executionCtx.waitUntil(job)
       } catch {
