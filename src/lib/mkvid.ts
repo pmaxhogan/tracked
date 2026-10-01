@@ -1314,18 +1314,26 @@ export type MkvidUploadMatch = { videoId: string; setUrl: string; setTitle: stri
  * video is still watchable, so it still counts.
  */
 export async function findMkvidUploadByTitle(env: Env, title: string): Promise<MkvidUploadMatch | null> {
-  // Decoded: uploads made before 2026-10-01 carry raw entities in their YouTube
-  // title ("Gek&auml;") while set_title is stored decoded ("Geká").
-  const needle = decodeEntities(title).trim()
+  const raw = title.trim()
+  if (!raw) return null
+  // Uploads made before 2026-10-01 carry raw entities in their YouTube title
+  // ("Gek&auml;"), cut at 100 characters of the RAW text; set_title is stored
+  // decoded ("Gekä") since then. Compare decoded text, and when the raw title
+  // is at YouTube's 100-character cut, as a prefix (a cut can split an entity:
+  // drop that tail).
+  const cut = raw.length >= 95 && raw.length <= 100 // at the cut (a trailing space there is trimmed); YouTube titles never exceed 100
+  const needle = decodeEntities(cut ? raw.replace(/&[#a-z0-9]*$/i, '') : raw).trim()
   if (!needle) return null
+  const like = needle.replace(/[\\%_]/g, (c) => '\\' + c) + '%'
   const row = await dbOf(env)
     .prepare(
       `SELECT slug, set_url, set_title, video_id FROM mkvid_requests
        WHERE video_id IS NOT NULL AND set_title IS NOT NULL AND (status IN ('done', 'superseded') OR replaces_video_id IS NOT NULL)
-         AND lower(substr(trim(set_title), 1, 100)) = lower(?)
+         AND (lower(substr(trim(set_title), 1, 100)) = lower(?1) OR lower(substr(trim(set_title), 1, 100)) = lower(?4)
+              OR (?2 = 1 AND trim(set_title) LIKE ?3 ESCAPE '\\'))
        ORDER BY updated_at DESC LIMIT 1`,
     )
-    .bind(needle)
+    .bind(needle, cut ? 1 : 0, like, raw)
     .first<{ slug: string; set_url: string; set_title: string; video_id: string }>()
   return row ? { videoId: row.video_id, setUrl: row.set_url, setTitle: row.set_title, slug: row.slug } : null
 }

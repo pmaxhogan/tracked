@@ -139,6 +139,8 @@ describe('extractSetTitle / lastCueSeconds', () => {
     )
     expect(extractSetTitle('<title>MARTEN H&Oslash;RGER @ Ushua&iuml;a, R&iacute;o &#8211; S&#xF3;nar</title>')).toBe('MARTEN HØRGER @ Ushuaïa, Río – Sónar')
     expect(extractSetTitle('<title>A &amp;auml; B&nbsp;C</title>')).toBe('A &auml; B C')
+    // only complete entities: text that was already decoded once stays as is
+    expect(extractSetTitle('<title>Rock&reggae & Love&paradise &copy B</title>')).toBe('Rock&reggae & Love&paradise &copy B')
   })
 
   it('lastCueSeconds is the largest cue, null when nothing is cued', () => {
@@ -582,6 +584,28 @@ describe('findMkvidUploadByTitle — /now-playing resolving a set we uploaded ou
     await done(env, 'r1', 'Charlotte de Witte @ SonarClub, Sónar Festival, Spain 2026-06-19', '_hD21bvOepA')
     expect((await findMkvidUploadByTitle(env, 'Charlotte de Witte @ SonarClub, S&oacute;nar Festival, Spain 2026-06-19'))?.videoId).toBe('_hD21bvOepA')
     expect((await findMkvidUploadByTitle(env, 'Charlotte de Witte @ SonarClub, Sónar Festival, Spain 2026-06-19'))?.videoId).toBe('_hD21bvOepA')
+  })
+
+  it('matches a long raw-entity YouTube title cut at 100 raw characters, even through an entity', async () => {
+    const env = makeEnv()
+    const raw = 'MOGUAI & Eli Brown & MARTEN H&Oslash;RGER @ Ushua&iuml;a Ibiza, Club Room, R&iacute;o, S&oacute;nar, Spain 2023-07-15'
+    expect(raw.length).toBeGreaterThan(100)
+    const decoded = 'MOGUAI & Eli Brown & MARTEN HØRGER @ Ushuaïa Ibiza, Club Room, Río, Sónar, Spain 2023-07-15'
+    await done(env, 'r1', decoded, 'aaaaaaaaaaa')
+    expect((await findMkvidUploadByTitle(env, raw.slice(0, 100)))?.videoId).toBe('aaaaaaaaaaa')
+    // a cut that splits an entity ("... S&o")
+    const raw2 = 'A'.repeat(96) + ' S&oacute;nar 2023'
+    await done(env, 'r2', 'A'.repeat(96) + ' Sónar 2023', 'bbbbbbbbbbb', 'done', NOW + 1)
+    expect(raw2.slice(0, 100).endsWith(' S&o')).toBe(true)
+    expect((await findMkvidUploadByTitle(env, raw2.slice(0, 100)))?.videoId).toBe('bbbbbbbbbbb')
+    // a short title is never a prefix match
+    expect(await findMkvidUploadByTitle(env, 'MOGUAI & Eli Brown')).toBeNull()
+  })
+
+  it('still matches a row stored before the decode fix', async () => {
+    const env = makeEnv()
+    await done(env, 'r1', 'GENESI @ R&iacute;o Electronic Music Buenos Aires, Argentina 2026-02-08', 'qZIE-7dFx-Q')
+    expect((await findMkvidUploadByTitle(env, 'GENESI @ R&iacute;o Electronic Music Buenos Aires, Argentina 2026-02-08'))?.videoId).toBe('qZIE-7dFx-Q')
   })
 
   it('matches the 100-character title YouTube actually shows for a long set title', async () => {

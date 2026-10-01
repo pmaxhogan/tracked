@@ -7,6 +7,11 @@
  */
 import he from 'he'
 
+// Only complete, `;`-terminated entities: several call sites get text that
+// node-html-parser already decoded, and a second pass must not turn a literal
+// "Rock&reggae" into "Rock®gae" (he's legacy semicolon-less rule).
+const ENTITY_RE = /&(?:#\d{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{1,31});/gi
+
 export function decodeEntities(s: string): string {
-  return he.decode(s).replace(/ /g, ' ') // &nbsp; stays a plain space, as before
+  return s.replace(ENTITY_RE, (m) => he.decode(m)).replace(/ /g, ' ') // &nbsp; stays a plain space, as before
 }
