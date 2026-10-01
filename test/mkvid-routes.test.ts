@@ -93,7 +93,7 @@ describe('/mkvid routes', () => {
 
   it('complete for a request banned mid-render answers banned and asks mkvid to delete the upload', async () => {
     const calls: string[] = []
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => { calls.push(String(url)); return new Response(JSON.stringify({ ok: true, deleted: true }), { headers: { 'content-type': 'application/json' } }) }))
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => { calls.push(String(url)); return new Response(JSON.stringify({ ok: true, outcome: 'deleted' }), { headers: { 'content-type': 'application/json' } }) }))
     try {
       const env = makeEnv({ MKVID_URL: 'https://mkvid.example' })
       await enqueueMkvidRequest(env, input)
@@ -105,6 +105,7 @@ describe('/mkvid routes', () => {
       expect(await res.json()).toEqual({ status: 'banned', videoId: 'banned12345' })
       expect(addVideoToPlaylist).not.toHaveBeenCalled()
       expect(calls.some((u) => u === 'https://mkvid.example/api/videos/banned12345/delete')).toBe(true)
+      expect(await env.DB.prepare('SELECT state FROM mkvid_old_videos WHERE video_id = ?').bind('banned12345').first()).toEqual({ state: 'deleted' })
     } finally {
       vi.unstubAllGlobals()
     }

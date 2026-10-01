@@ -530,9 +530,16 @@ describe('completeMkvidRequest', () => {
   it('a request banned while it rendered stays banned: the upload is kept out of the playlists and queued for deletion (2026-10-01)', async () => {
     const env = makeEnv()
     playlistsExist()
+    await saveSubState(env, 'lillypalmer', {
+      playlistId: 'PLartist',
+      artistName: 'Lilly Palmer',
+      processedTracklistUrls: [input.setUrl],
+      tracklistVideos: { [input.setUrl]: { videoId: null, checkedAt: NOW - 100 } },
+    })
     await enqueueMkvidRequest(env, input)
     const req = (await claimMkvidRequest(env, log))!
     const tlBefore = await env.DB.prepare('SELECT video_id, video_source FROM tracklists WHERE url = ?').bind(input.setUrl).first()
+    expect(tlBefore).not.toBeNull()
     // the panel's Retry put it back to pending, then it was banned, while mkvid kept rendering
     expect(await retryMkvidRequest(env, req.id)).toBe(true)
     expect(await banMkvidRequest(env, req.id)).toBe(true)
