@@ -20,7 +20,7 @@ function rows(db: ReturnType<typeof openRawDb>, sql: string): Record<string, unk
 
 describe('migrations on a copy of the pre-pool schema with data', () => {
   it('0013 counts the base and timed rows of stored lists ("w/" rows not counted, row 0 always timed)', () => {
-    const db = new SQL.Database()
+    const db = openRawDb()
     for (const f of upTo(12)) db.exec(readFileSync(join(DIR, f), 'utf8'))
     const t = (cueSeconds: number | null, layered = false) => ({ cueSeconds, artist: 'A', title: 'T', artworkUrl: null, isId: false, layered })
     const tracks = JSON.stringify([t(null), t(null), t(120.5), t(null, true), t(300)])
