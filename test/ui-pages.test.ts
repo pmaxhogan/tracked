@@ -724,6 +724,12 @@ describe('Settings and Tools pages', () => {
     expect(els.get('int-push').textContent).toBe('not configured')
     expect(els.get('int-mkvid').textContent).toBe('configured')
   })
+  it('Tools carries the Search index card and its script runs in the minimal stub', async () => {
+    const html = await (await app.request('https://tracked.example/ui/tools', {}, env())).text()
+    for (const id of ['search-card', 'si-sets', 'si-tracks', 'si-last', 'si-rebuild', 'si-status']) expect(html).toContain(`id="${id}"`)
+    const c = minimalStub()
+    for (const s of scriptsOf(html)) expect(() => vm.runInContext(s, c)).not.toThrow()
+  })
   it('Tools script prints the migration status and requeues with dry=1 only when checked', async () => {
     const seen: string[] = []
     const { ctx, els } = richStub(async (u: string) => {

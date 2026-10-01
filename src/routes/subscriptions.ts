@@ -1,3 +1,4 @@
+import { noteTrackYoutubeLinks } from '../lib/search/backfill'
 import { Hono } from 'hono'
 import { unpublishResponse } from './mkvid-ops'
 import type { Env } from '../types'
@@ -239,9 +240,11 @@ subscriptionsApp.post('/api/tracklist/links', async (c) => {
       links[id] = await resolveTrackMediaLinks(c.env, id, log, 'recheck')
     } catch (e) {
       log.warn('subs.tracklist_links.stopped', { id, done: Object.keys(links).length, ...errorFields(e) })
+      try { await noteTrackYoutubeLinks(c.env, links) } catch {}
       return c.json({ links, error: 'upstream_error', message: `stopped after ${Object.keys(links).length} of ${ids.length}: ${(e as Error).message}` }, 502)
     }
   }
+  try { await noteTrackYoutubeLinks(c.env, links) } catch {}
   return c.json({ links })
 })
 

@@ -47,6 +47,13 @@ const BODY = /* html */ `
   </div>
   <pre id="mig-out" class="tl-pre" hidden></pre>
 </div>
+<div class="tk-card" id="search-card">
+  <h2>Search index</h2>
+  <p class="muted tl-note">Verified track lists are indexed as they verify. Rebuild adds sets from trusted mkvid track lists, 500 per press.</p>
+  <dl class="si-dl" id="si-stats"><dt>Sets</dt><dd id="si-sets">—</dd><dt>Tracks</dt><dd id="si-tracks">—</dd><dt>Last indexed</dt><dd id="si-last">—</dd></dl>
+  <button class="btn primary" id="si-rebuild" type="button">Rebuild 500 more</button>
+  <div class="tl-status muted" id="si-status" role="status"></div>
+</div>
 `
 
 const CSS = /* css */ `
@@ -60,6 +67,9 @@ const CSS = /* css */ `
   .tl-status { font-size: var(--fs-sm); min-height: 1.2em; margin-top: var(--sp-2); }
   .tl-status .bad { color: var(--danger); }
   .tl-status .mono { font-family: var(--mono); }
+  .si-dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px var(--sp-3); margin: 0 0 var(--sp-3); font-size: var(--fs-sm); }
+  .si-dl dt { color: var(--muted); }
+  .si-dl dd { margin: 0; }
   .tl-pre { margin: var(--sp-3) 0 0; padding: var(--sp-3); max-height: 28rem; overflow: auto; font-family: var(--mono); font-size: var(--fs-xs); line-height: 1.45; background: var(--page); border: 1px solid var(--line); border-radius: var(--r-ctl); white-space: pre-wrap; overflow-wrap: anywhere; }
 `
 
@@ -159,6 +169,31 @@ const JS = /* js */ `
   }
   $migGo.addEventListener('click', loadMigration);
   loadMigration();
+
+  // ── search index ──
+  const $siSets = $('si-sets'), $siTracks = $('si-tracks'), $siLast = $('si-last'), $siGo = $('si-rebuild'), $siStatus = $('si-status');
+  let siCursor = null;
+  function siMsg(msg, bad) { $siStatus.className = 'tl-status ' + (bad ? 'bad' : 'muted'); $siStatus.textContent = msg; }
+  async function loadSearchStatus() {
+    const res = await TK.api.get('/ui/api/search/status');
+    if (res.status === 503) { siMsg('Search index not bound', true); return; }
+    if (!res.ok) { siMsg(TK.errText(res, 'failed (' + res.status + ')'), true); return; }
+    const d = res.data || {};
+    $siSets.textContent = String(d.sets);
+    $siTracks.textContent = String(d.tracks);
+    $siLast.textContent = d.lastIndexedAt ? new Date(d.lastIndexedAt * 1000).toLocaleString() : 'never';
+  }
+  $siGo.addEventListener('click', () => {
+    TK.busy($siGo, 'Rebuilding…', async () => {
+      const res = await TK.api.post('/ui/api/search/backfill', { cursor: siCursor, limit: 500 });
+      if (!res.ok) { siMsg(res.status === 503 ? 'Search index not bound' : TK.errText(res, 'failed (' + res.status + ')'), true); return; }
+      const d = res.data || {};
+      siCursor = d.cursor == null ? null : d.cursor;
+      siMsg('Indexed ' + d.indexed + ', skipped ' + d.skipped + '. ' + (d.done ? 'Done: every trusted list is indexed.' : 'Press again for more.'), false);
+      await loadSearchStatus();
+    });
+  });
+  loadSearchStatus();
 })();
 `
 
