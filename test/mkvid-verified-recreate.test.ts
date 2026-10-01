@@ -258,7 +258,7 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     const ids = p.queue.find((q: any) => q.setUrl.endsWith('ids.html'))
     expect(ids.readiness.until).toBe(setAgeReference(isoDay(NOW - DAY), 0) + ID_WAIT_SECONDS)
     // The page carries the "Render now" / "Delete and recreate" / bulk controls.
-    const html = await (await app.request('http://x/ui', {}, env)).text()
+    const html = await (await app.request('http://x/ui/mkvid', {}, env)).text()
     for (const s of ['Render now', 'Delete and recreate', 'Recreate all old-style videos', 'waiting for IDs until', 'not verified', 'capped']) expect(html).toContain(s)
   })
 })

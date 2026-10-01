@@ -4,6 +4,7 @@ import { cfAccess } from '../middleware/cf-access'
 import { servePage } from '../ui/pages'
 import { SET_PAGE } from '../ui/pages/set'
 import { DJ_PAGE } from '../ui/pages/dj'
+import { MKVID_PAGE_HTML } from '../ui/pages/mkvid'
 import {
   addSubscription,
   djUrlFor,
@@ -96,7 +97,9 @@ subscriptionsApp.route('/', hygieneApp)
 subscriptionsApp.get('/', (c) => servePage(c, HOME_HTML))
 // The old main page also answers at the pages it is being split into, so links
 // work while the redesign lands; each route goes when its real page is built.
-for (const p of ['/djs', '/playlists', '/mkvid', '/settings', '/tools']) subscriptionsApp.get(p, (c) => servePage(c, PAGE_HTML))
+for (const p of ['/djs', '/playlists', '/settings', '/tools']) subscriptionsApp.get(p, (c) => servePage(c, PAGE_HTML))
+// The mkvid queue: status line, caps, filters, tabs and a detail drawer (ui/pages/mkvid.ts).
+subscriptionsApp.get('/mkvid', (c) => servePage(c, MKVID_PAGE_HTML))
 
 // Standalone "tracklist viewer" page: paste a 1001tracklists URL, get a clean
 // per-song list with a YouTube icon-link and an Apple Music button when 1001tl
@@ -999,46 +1002,19 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .yt button.connect { background: #c4302b; }
   /* ── Combined playlist ── */
   section#combined { margin-top: 2.25rem; }
+  p.mk-link { margin: 2.25rem 0 0; font-weight: 600; }
   #cmb-body { border: 1px solid var(--border); border-radius: 6px; background: var(--card); padding: 0.7rem 0.8rem; font-size: 0.88rem; line-height: 1.55; }
   #cmb-body .headline { font-weight: 600; }
   #cmb-body .counts { color: var(--muted); font-size: 0.82rem; }
   #cmb-body .counts .warn { color: var(--danger); }
   #cmb-body a { color: var(--accent); }
   /* ── YouTube video inspector ── */
-  /* ── mkvid uploads ── */
-  section#mkvid { margin-top: 2.25rem; }
-  #mkvid-summary { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.6rem; }
-  #mkvid-filters { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.6rem; }
-  #mkvid-filters input, #mkvid-filters select { font: inherit; font-size: 0.82rem; padding: 0.3rem 0.45rem; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; }
-  #mkvid-filters input { flex: 1 1 12rem; min-width: 0; }
-  #mkvid-filters input:focus, #mkvid-filters select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  #mkvid-filters button { padding: 0.3rem 0.6rem; font-size: 0.82rem; }
-  button.mk-more { width: 100%; margin-top: 0.25rem; }
-  .mk-state { border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; padding: 0.5rem 0.7rem; margin-bottom: 0.6rem; font-size: 0.88rem; line-height: 1.4; }
-  .mk-state.ok { border-left-color: #3fb950; }
-  .mk-state.wait { border-left-color: #d29922; }
-  .mk-state.bad { border-left-color: var(--danger); }
-  .mk-state .sub { display: block; color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
-  .mk-grp { color: var(--muted); font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin: 0.9rem 0 0.4rem; }
-  .mk-main { flex: 1; min-width: 0; }
-  .mk-main .title { display: block; }
-  .mk-meta { color: var(--muted); font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mk-meta .flag { font-weight: 400; }
-  .mk-meta .why { color: #d29922; }
-  .mk-meta .why.ready { color: #3fb950; }
   .arow-head a { color: var(--accent); font-size: 0.78rem; white-space: nowrap; }
   .badge.pending { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.claimed { background: rgba(210,153,34,0.18); color: #d29922; }
   .badge.done { background: rgba(63,185,80,0.18); color: #3fb950; }
   .badge.superseded { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--muted); }
   .badge.banned { background: rgba(248,81,73,0.12); color: var(--danger); }
-  .mk-acts { display: flex; gap: 0.15rem; flex-shrink: 0; }
-  .mk-act { background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0.1rem 0.4rem; font-size: 0.85rem; line-height: 1.3; cursor: pointer; }
-  .mk-act:hover { color: var(--fg); border-color: var(--muted); }
-  .mk-act:disabled { opacity: 0.4; cursor: default; }
-  .mk-act.ban { color: var(--danger); }
-  /* On a phone the five buttons would leave the title a few letters; drop them to their own line. */
-  @media (max-width: 520px) { .arow-head:has(.mk-acts) { flex-wrap: wrap; } .mk-acts { flex-basis: 100%; justify-content: flex-end; } }
   .arow .src { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
   .arow-detail .retry { margin-top: 0.4rem; }
   section#ytjson { margin-top: 2.25rem; }
@@ -1135,39 +1111,7 @@ ${ALERTS_ROW_HTML}
     <div id="cmb-body"><span class="counts">loading…</span></div>
   </section>
 
-  <section id="mkvid">
-    <div class="audit-head">
-      <h2>mkvid uploads</h2>
-      <div class="audit-actions">
-        <button id="mkvid-recreate-old" class="ghost" hidden title="Delete and recreate every done video made with a style other than scene">Recreate all old-style videos</button>
-        <button id="mkvid-refresh" class="ghost">Refresh</button>
-      </div>
-    </div>
-    <div id="mkvid-state" class="mk-state" hidden></div>
-    <div id="mkvid-filters">
-      <input id="mkvid-q" type="search" placeholder="search set, DJ or URL" aria-label="Search the mkvid queue" />
-      <select id="mkvid-status" aria-label="Status">
-        <option value="">any status</option>
-        <option value="pending">waiting</option>
-        <option value="claimed">rendering</option>
-        <option value="done">uploaded</option>
-        <option value="failed">failed</option>
-        <option value="superseded">superseded</option>
-        <option value="banned">banned</option>
-        <option value="failed,banned">problems only</option>
-      </select>
-      <select id="mkvid-source" aria-label="Source">
-        <option value="">any source</option>
-        <option value="soundcloud">SoundCloud</option>
-        <option value="hearthis">hearthis.at</option>
-      </select>
-      <select id="mkvid-dj" aria-label="DJ"><option value="">any DJ</option></select>
-      <button id="mkvid-clear" class="ghost" hidden>Clear</button>
-    </div>
-    <div id="mkvid-summary" class="counts">loading…</div>
-    <div id="mkvid-list"></div>
-    <div id="mkvid-empty" class="empty" hidden>No sets queued for mkvid yet.</div>
-  </section>
+  <p class="mk-link"><a href="/ui/mkvid">mkvid →</a></p>
 
   <section id="ytjson">
     <div class="audit-head">
@@ -2004,381 +1948,12 @@ ${BAN_HISTORY_HTML}
     }
   });
 
-  // ── mkvid uploads ────────────────────────────────────────────────────────
-  // Sets with no YouTube recording but a SoundCloud / hearthis.at one, handed
-  // to mkvid (the NAS render/upload service) to turn into an unlisted video.
-  // mkvid polls the Worker; this view just shows where each request stands.
-  const $mkList = document.getElementById('mkvid-list');
-  const $mkEmpty = document.getElementById('mkvid-empty');
-  const $mkSummary = document.getElementById('mkvid-summary');
-  const $mkState = document.getElementById('mkvid-state');
-  const $mkRefresh = document.getElementById('mkvid-refresh');
-  const $mkQ = document.getElementById('mkvid-q');
-  const $mkStatus = document.getElementById('mkvid-status');
-  const $mkSource = document.getElementById('mkvid-source');
-  const $mkDj = document.getElementById('mkvid-dj');
-  const $mkClear = document.getElementById('mkvid-clear');
-  const $mkRecreateOld = document.getElementById('mkvid-recreate-old');
-  const MK_PROBLEM = new Set(['failed']);
-
-  // The waiting line and the settled list are paged separately (keyset cursors
-  // from the API) and narrowed by the filter bar. Only a whole-view load
-  // (section=all) refreshes the header; "Load more" appends to one list.
-  const MK_PAGE = 25;
-  let mkHeader = null;
-  // Typing in the search box fires overlapping loads; only the newest wins.
-  let mkSeq = 0;
-  let mkQueue = [], mkQueueCursor = null, mkQueueTotal = 0;
-  let mkSettled = [], mkSettledCursor = null, mkSettledTotal = 0;
-
-  const mkFiltered = () => !!($mkStatus.value || $mkSource.value || $mkDj.value || $mkQ.value.trim());
-
-  function mkParams(section) {
-    const p = new URLSearchParams({ limit: String(MK_PAGE), section: section });
-    if ($mkStatus.value) p.set('status', $mkStatus.value);
-    if ($mkSource.value) p.set('source', $mkSource.value);
-    if ($mkDj.value) p.set('dj', $mkDj.value);
-    const q = $mkQ.value.trim();
-    if (q) p.set('q', q);
-    if (section === 'queue' && mkQueueCursor) p.set('queueCursor', mkQueueCursor);
-    if (section === 'settled' && mkSettledCursor) p.set('settledCursor', mkSettledCursor);
-    return p;
-  }
-
-  // Every DJ the queue has ever held. One being filtered on that no longer has
-  // a row is kept as an option, so the filter does not silently turn itself off.
-  function mkDjOptions(djs) {
-    const keep = $mkDj.value;
-    $mkDj.innerHTML = '<option value="">any DJ</option>' +
-      (djs || []).map((d) => '<option value="' + esc(d.slug) + '">' + esc(d.label) + ' (' + d.count + ')</option>').join('');
-    $mkDj.value = keep;
-    if (keep && $mkDj.value !== keep) {
-      $mkDj.insertAdjacentHTML('beforeend', '<option value="' + esc(keep) + '">' + esc(keep) + '</option>');
-      $mkDj.value = keep;
-    }
-  }
-
-  function mkDetailHtml(r) {
-    const out = [];
-    out.push('<div class="grp">Set</div>');
-    out.push(dl([
-      ['tracklist', link(r.setUrl, setLabel(r.setUrl))],
-      ['title', r.setTitle ? esc(r.setTitle) : '—'],
-      ['set date', r.setDate ? esc(r.setDate) : '— <span class="when">(undated sets are queued last)</span>'],
-      ['DJ', esc(r.artistLabel || r.artistName || r.slug) + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
-      ['source', esc(r.sourceLabel || r.source) + ' ' + link(r.sourceUrl, 'open')],
-      r.trackCount != null ? ['tracklist', esc(r.idedCount) + '/' + esc(r.trackCount) + ' IDed' + (r.lastCueSeconds != null ? ' · last cue ' + clock(r.lastCueSeconds) : '')] : null,
-    ]));
-    out.push('<div class="grp">Upload</div>');
-    out.push(dl([
-      ['status', '<span class="badge ' + esc(r.status) + '">' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(r.error) + '</span>' : '')],
-      ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'open') : '—'],
-      r.privacy ? ['privacy', esc(r.privacy) + (r.privacy !== 'unlisted' ? ' <span class="warn">(unlisted was requested — an unverified OAuth app forces private)</span>' : '')] : null,
-      ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + relTime(new Date(r.notBefore * 1000).toISOString()) : '')],
-      r.status !== 'pending' ? ['project', esc(r.accountLabel || r.account)] : null,
-      r.videoId ? ['style', r.style ? esc(r.style) : '<span class="warn">unknown (old style)</span>'] : null,
-      r.replacesVideoId ? ['recreating', 'replaces <span class="mono">' + esc(r.replacesVideoId) + '</span> ' + link('https://youtu.be/' + r.replacesVideoId, 'open') + ' <span class="when">(stays up until the new video is in the playlists, then is deleted)</span>'] : null,
-      r.readiness ? ['waiting', mkWhy(r.readiness, false)] : null,
-      r.skipIdWait ? ['ID wait', 'skipped (Render now)'] : null,
-      r.jobId ? ['mkvid job', '<span class="mono">' + esc(r.jobId) + '</span>'] : null,
-      ['queued', esc(new Date(r.createdAt * 1000).toISOString())],
-      ['updated', esc(new Date(r.updatedAt * 1000).toISOString())],
-    ]));
-    if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed' || r.status === 'banned') {
-      out.push('<button class="ghost retry" data-id="' + esc(r.id) + '">' + (r.status === 'claimed' ? 'Release & retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
-    }
-    if (r.readiness && r.readiness.state === 'waiting_ids' && !r.skipIdWait) {
-      out.push(' <button class="ghost render-now" title="Render with the IDs shown instead of waiting until the set is 7 days old">Render now</button>');
-    }
-    if (r.status === 'done' && r.videoId && !r.replacesVideoId) {
-      out.push(' <button class="ghost recreate" title="Render the set again (back of the queue, counts against the daily cap); the old video is deleted once the new one is in the playlists">Delete and recreate</button>');
-    }
-    return out.join('');
-  }
-
-  function untilTime(sec) {
-    const m = Math.max(1, Math.round((sec - Date.now() / 1000) / 60));
-    if (m < 60) return 'in ' + m + 'm';
-    return 'in ' + Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
-  }
-
-  // Why one waiting set is (not) next. Capped only matters for a set that is otherwise ready.
-  let mkCapped = false;
-  function mkWhy(rd, short) {
-    if (!rd) return '';
-    const day = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
-    if (rd.state === 'unverified') return '<span class="why">not verified' + (short ? '' : ' — the track list needs a second matching fetch before anything is rendered') + '</span>';
-    if (rd.state === 'waiting_ids') return '<span class="why">waiting for IDs until ' + esc(day(rd.until)) + (short ? '' : ' (' + esc(rd.idRows) + ' ID row' + (rd.idRows === 1 ? '' : 's') + '; Render now skips the wait)') + '</span>';
-    if (rd.state === 'backoff') return '<span class="why">retry ' + untilTime(rd.until) + '</span>';
-    if (mkCapped) return '<span class="why">capped — today’s uploads are used</span>';
-    return '<span class="why ready">ready</span>';
-  }
-
-  // The one line that answers "why is nothing uploading?" — first match wins.
-  // The caps that actually apply: only the accounts mkvid offered on its last
-  // poll can be claimed against. (A heartbeat from before accounts existed
-  // names none — treat that as all of them.)
-  function mkEffective(d) {
-    const all = d.accounts || [];
-    const offered = d.lastPoll && d.lastPoll.accounts ? d.accounts.filter((a) => d.lastPoll.accounts.includes(a.account)) : all;
-    const sum = (xs, k) => xs.reduce((n, a) => n + (a[k] || 0), 0);
-    return { cap: sum(offered, 'cap'), used: sum(offered, 'used'), idle: all.filter((a) => a.cap > a.used && !offered.includes(a)) };
-  }
-
-  function mkState(d) {
-    const c = d.counts || {};
-    const cap = d.dailyClaimCap, used = d.dailyClaims || 0;
-    const poll = d.lastPoll;
-    const eff = mkEffective(d);
-    // An account with slots left that mkvid is not offering: it has no YouTube token for it.
-    const idleNote = eff.idle.length ? ' ' + eff.idle.map((a) => a.label + ' has ' + (a.cap - a.used) + ' more, but mkvid has not connected that account.').join(' ') : '';
-    // The heartbeat is rewritten at most every 10 min, so only a longer silence means anything.
-    const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
-    if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
-    if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'MKVID_DAILY_CLAIM_CAP (and MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Set MKVID_DAILY_CLAIM_CAP to 24 (or delete the secret) to resume.'];
-    // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
-    if (c.claimed) return ['ok', 'Rendering ' + c.claimed + ' set' + (c.claimed === 1 ? '' : 's') + ' now', used + '/' + cap + ' of today’s uploads used.'];
-    if (silent) return ['bad', poll ? 'mkvid last polled ' + relTime(new Date(poll.at * 1000).toISOString()) : 'mkvid has not polled yet', 'It normally polls every minute. Check the mkvid container on the NAS and that it can reach this Worker (TRACKED_URL / TRACKED_TOKEN).'];
-    if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
-    if (poll.outcome === 'not_connected') return ['bad', 'mkvid has no YouTube account connected', 'Its token expired or was revoked. Open mkvid.maxhogan.dev and connect YouTube again.'];
-    if (!c.pending) return ['ok', 'Queue empty', 'Nothing is waiting for mkvid.'];
-    if (eff.used >= eff.cap || poll.outcome === 'capped') return ['wait', 'Today’s ' + eff.cap + ' upload' + (eff.cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each project allows 100 uploads a day; the caps here keep it to 30 in total).' + idleNote];
-    return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.' + idleNote];
-  }
-
-  // Reorder / ban buttons on an "Up next" row. The list reloads after each, so
-  // positions and the next-up line stay honest.
-  const MK_ACTS = [['top', '⤒', 'Move to the top'], ['up', '↑', 'Move up one'], ['down', '↓', 'Move down one'], ['bottom', '⤓', 'Move to the bottom'], ['ban', '✕', 'Never upload this set via mkvid']];
-  function mkActsHtml() {
-    return '<span class="mk-acts">' + MK_ACTS.map((a) => '<button class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '" title="' + a[2] + '" aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
-  }
-  async function mkAct(id, act) {
-    const url = act === 'ban' ? '/ui/api/mkvid/ban/' + encodeURIComponent(id) : '/ui/api/mkvid/move/' + encodeURIComponent(id);
-    const init = { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: act === 'ban' ? '{}' : JSON.stringify({ to: act }) };
-    const resp = await fetch(url, init);
-    if (!resp.ok) showError((act === 'ban' ? 'ban' : 'move') + ' failed (' + resp.status + ')');
-  }
-
-  function mkRow(r, pos) {
-    const row = document.createElement('div');
-    row.className = 'arow' + (MK_PROBLEM.has(r.status) ? ' err' : '');
-    const head = document.createElement('div');
-    head.className = 'arow-head';
-    const backoff = r.status === 'pending' && r.notBefore && r.notBefore > Date.now() / 1000;
-    const meta = [r.setDate, r.artistLabel || r.artistName || r.slug, r.sourceLabel || r.source].filter(Boolean).map(esc);
-    if (r.status === 'pending' && r.readiness) meta.push(mkWhy(r.readiness, true));
-    else if (backoff) meta.push('retry ' + untilTime(r.notBefore));
-    else if (r.status !== 'pending') meta.push(esc(relTime(new Date(r.updatedAt * 1000).toISOString())));
-    if (r.replacesVideoId) meta.push('<span class="why">recreating</span>');
-    if (r.status === 'done' && r.oldStyle) meta.push('old style');
-    if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(r.error) + '</span>');
-    head.innerHTML =
-      (pos ? '<span class="pos">#' + pos + '</span>' : '<span class="badge ' + esc(r.status) + '">' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>') +
-      '<div class="mk-main"><span class="title">' + esc(r.setTitle || setLabel(r.setUrl)) + '</span>' +
-      '<div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
-      (r.videoId ? link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'watch') : '') +
-      (pos ? mkActsHtml() : '');
-    row.appendChild(head);
-    for (const btn of head.querySelectorAll('button.mk-act')) btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      for (const b of head.querySelectorAll('button.mk-act')) b.disabled = true;
-      try { await mkAct(r.id, btn.dataset.act); await loadMkvid(); }
-      finally { for (const b of head.querySelectorAll('button.mk-act')) b.disabled = false; }
-    });
-    const detail = document.createElement('div');
-    detail.className = 'arow-detail';
-    detail.hidden = true;
-    detail.innerHTML = mkDetailHtml(r);
-    row.appendChild(detail);
-    head.addEventListener('click', (e) => { if (e.target.closest('a, button')) return; detail.hidden = !detail.hidden; });
-    const post = async (btn, url, what) => {
-      btn.disabled = true;
-      try {
-        const resp = await fetch(url, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
-        if (!resp.ok) showError(what + ' failed (' + resp.status + ')');
-        await loadMkvid();
-      } finally { btn.disabled = false; }
-    };
-    const renderNow = detail.querySelector('button.render-now');
-    if (renderNow) renderNow.addEventListener('click', () => post(renderNow, '/ui/api/mkvid/render-now/' + encodeURIComponent(r.id), 'render now'));
-    const recreate = detail.querySelector('button.recreate');
-    if (recreate) recreate.addEventListener('click', () => {
-      if (!confirm('Delete and recreate this video? The set is rendered again at the back of the queue; the current video stays up until the new one is in the playlists, then it is deleted from YouTube.')) return;
-      post(recreate, '/ui/api/mkvid/recreate/' + encodeURIComponent(r.id), 'recreate');
-    });
-    const retry = detail.querySelector('button.retry');
-    if (retry) retry.addEventListener('click', async () => {
-      retry.disabled = true;
-      try {
-        const resp = await fetch('/ui/api/mkvid/retry/' + encodeURIComponent(r.id), { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
-        if (!resp.ok) showError('retry failed (' + resp.status + ')');
-        await loadMkvid();
-      } finally { retry.disabled = false; }
-    });
-    return row;
-  }
-
-  // A video a recreation replaced: out of the playlists, waiting for mkvid to delete it (the cron retries).
-  function mkOldRow(o) {
-    const row = document.createElement('div');
-    row.className = 'arow' + (o.state === 'refused' || o.attempts > 0 ? ' err' : '');
-    const head = document.createElement('div');
-    head.className = 'arow-head';
-    const meta = [esc(setLabel(o.setUrl)), 'replaced by <span class="mono">' + esc(o.replacedBy) + '</span>'];
-    if (o.state === 'refused') meta.push('<span class="flag">mkvid refused: ' + esc(o.lastError || '') + '</span>');
-    else if (o.lastError) meta.push('<span class="flag">' + esc(o.lastError) + '</span>', 'try ' + (o.attempts + 1) + ' ' + untilTime(o.nextTryAt));
-    else meta.push('deleting');
-    head.innerHTML = '<span class="badge ' + (o.state === 'refused' ? 'failed' : 'pending') + '">' + esc(o.state) + '</span>' +
-      '<div class="mk-main"><span class="title mono">' + esc(o.videoId) + '</span><div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
-      link('https://youtu.be/' + o.videoId, 'watch') + ' <button class="ghost">Retry now</button>';
-    const b = head.querySelector('button');
-    b.addEventListener('click', async () => {
-      b.disabled = true;
-      try {
-        const resp = await fetch('/ui/api/mkvid/old-videos/' + encodeURIComponent(o.videoId) + '/retry', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
-        if (!resp.ok) showError('delete retry failed (' + resp.status + ')');
-        await loadMkvid();
-      } finally { b.disabled = false; }
-    });
-    row.appendChild(head);
-    return row;
-  }
-
-  function mkGroup(label) {
-    const h = document.createElement('div');
-    h.className = 'mk-grp';
-    h.textContent = label;
-    $mkList.appendChild(h);
-  }
-
-  const mkShowing = (shown, total) => (total > shown ? ' · showing ' + shown + ' of ' + total : '');
-
-  function mkMore(section, left) {
-    const b = document.createElement('button');
-    b.className = 'ghost mk-more';
-    b.textContent = left > 0 ? 'Load ' + Math.min(left, MK_PAGE) + ' more (' + left + ' left)' : 'Load more';
-    b.addEventListener('click', async () => {
-      b.disabled = true;
-      b.textContent = 'Loading…';
-      await loadMkvid(section);
-    });
-    return b;
-  }
-
-  function renderMkvid() {
-    const d = mkHeader;
-    if (!d) return;
-    const c = d.counts || {};
-    const cap = d.dailyClaimCap;
-    const st = mkState(d);
-    const effNow = mkEffective(d);
-    mkCapped = effNow.cap === 0 || effNow.used >= effNow.cap || (d.lastPoll && d.lastPoll.outcome === 'capped');
-    $mkRecreateOld.hidden = !(d.oldStyleCount > 0);
-    $mkRecreateOld.textContent = 'Recreate all old-style videos (' + (d.oldStyleCount || 0) + ')';
-    $mkState.hidden = false;
-    $mkState.className = 'mk-state ' + st[0];
-    $mkState.innerHTML = '<strong>' + esc(st[1]) + '</strong><span class="sub">' + esc(st[2]) + '</span>';
-
-    const bits = [(c.done || 0) + ' uploaded', (c.pending || 0) + ' waiting'];
-    if (c.failed) bits.push('<span class="warn">' + c.failed + ' failed</span>');
-    if (c.superseded) bits.push(c.superseded + ' superseded');
-    if (c.banned) bits.push(c.banned + ' banned');
-    for (const a of d.accounts || []) bits.push('<span title="uploads through the ' + esc(a.label) + ' Google project today">' + esc(a.label) + ' ' + a.used + '/' + a.cap + '</span>');
-    const perDay = mkEffective(d).cap || cap;
-    if (perDay > 0 && c.pending) bits.push('<span title="' + c.pending + ' sets at ' + perDay + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + perDay + '/day</span>');
-    if (d.lastPoll) bits.push('<span title="refreshed at most every 10 min">mkvid seen ' + esc(relTime(new Date(d.lastPoll.at * 1000).toISOString())) + '</span>');
-    if ((d.oldVideos || []).length) bits.push('<span class="warn">' + d.oldVideos.length + ' replaced video' + (d.oldVideos.length === 1 ? '' : 's') + ' not deleted yet</span>');
-    if (mkFiltered()) bits.unshift('<strong>' + (mkQueueTotal + mkSettledTotal) + ' match this filter</strong>');
-    $mkSummary.innerHTML = bits.join(' · ');
-    $mkClear.hidden = !mkFiltered();
-
-    $mkList.innerHTML = '';
-    $mkEmpty.textContent = mkFiltered() ? 'No requests match this filter.' : 'No sets queued for mkvid yet.';
-    $mkEmpty.hidden = mkSettled.length + mkQueue.length > 0;
-    const active = mkSettled.filter((r) => r.status === 'claimed');
-    const finished = mkSettled.filter((r) => r.status !== 'claimed');
-    if (active.length) {
-      mkGroup('Rendering now');
-      for (const r of active) $mkList.appendChild(mkRow(r, 0));
-    }
-    if (mkQueue.length) {
-      // Positions come from the API: they are places in the whole queue, which
-      // neither the filter nor the page boundary shifts.
-      mkGroup('Up next · newest set first' + mkShowing(mkQueue.length, mkQueueTotal));
-      for (const r of mkQueue) $mkList.appendChild(mkRow(r, r.position));
-      if (mkQueueCursor) $mkList.appendChild(mkMore('queue', mkQueueTotal - mkQueue.length));
-    }
-    const olds = d.oldVideos || [];
-    if (olds.length) {
-      mkGroup('Replaced videos to delete from YouTube');
-      for (const o of olds) $mkList.appendChild(mkOldRow(o));
-    }
-    if (finished.length) {
-      mkGroup('Finished' + mkShowing(finished.length, mkSettledTotal - active.length));
-      for (const r of finished) $mkList.appendChild(mkRow(r, 0));
-      if (mkSettledCursor) $mkList.appendChild(mkMore('settled', mkSettledTotal - mkSettled.length));
-    }
-  }
-
-  /**
-   * section: 'queue' / 'settled' appends that list's next page; anything else
-   * (a refresh, a filter change, an action that moved a row) reloads both
-   * lists' first page and the header with them.
-   */
-  async function loadMkvid(section) {
-    const sec = section === 'queue' || section === 'settled' ? section : 'all';
-    const seq = ++mkSeq;
-    try {
-      const r = await fetch('/ui/api/mkvid?' + mkParams(sec).toString(), { credentials: 'same-origin' });
-      if (seq !== mkSeq) return;
-      if (!r.ok) { $mkSummary.textContent = 'status unavailable (' + r.status + ')'; return; }
-      const d = await r.json();
-      if (seq !== mkSeq) return;
-      if (sec !== 'settled') {
-        mkQueue = sec === 'all' ? (d.queue || []) : mkQueue.concat(d.queue || []);
-        mkQueueCursor = d.queueCursor || null;
-        mkQueueTotal = d.queueTotal || 0;
-      }
-      if (sec !== 'queue') {
-        mkSettled = sec === 'all' ? (d.settled || []) : mkSettled.concat(d.settled || []);
-        mkSettledCursor = d.settledCursor || null;
-        mkSettledTotal = d.settledTotal || 0;
-      }
-      if (sec === 'all') { mkHeader = d; mkDjOptions(d.djs); }
-      renderMkvid();
-    } catch { $mkSummary.textContent = 'status unavailable'; }
-  }
-  $mkRefresh.addEventListener('click', () => loadMkvid());
-  // Bulk recreate: confirm with the live count, and send it back so a count that changed meanwhile is refused.
-  $mkRecreateOld.addEventListener('click', async () => {
-    $mkRecreateOld.disabled = true;
-    try {
-      const c = await fetch('/ui/api/mkvid/recreate-old-style', { credentials: 'same-origin' }).then((r) => r.json());
-      if (!c.count) { showError('no old-style videos to recreate'); return; }
-      if (!confirm('Recreate ' + c.count + ' old-style video' + (c.count === 1 ? '' : 's') + '? Each set is rendered again at the back of the queue (they count against the daily cap); every old video stays up until its new one is in the playlists, then it is deleted from YouTube.')) return;
-      const resp = await fetch('/ui/api/mkvid/recreate-old-style', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expect: c.count }) });
-      if (!resp.ok) showError(resp.status === 409 ? 'the number of old-style videos changed — try again' : 'recreate failed (' + resp.status + ')');
-      await loadMkvid();
-    } finally { $mkRecreateOld.disabled = false; }
-  });
-  for (const el of [$mkStatus, $mkSource, $mkDj]) el.addEventListener('change', () => loadMkvid());
-  let mkQTimer = null;
-  $mkQ.addEventListener('input', () => { clearTimeout(mkQTimer); mkQTimer = setTimeout(() => loadMkvid(), 250); });
-  $mkClear.addEventListener('click', () => {
-    $mkQ.value = '';
-    $mkStatus.value = '';
-    $mkSource.value = '';
-    $mkDj.value = '';
-    loadMkvid();
-  });
-
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
   load();
   loadYouTubeStatus();
   loadCombined();
-  loadMkvid();
   loadAudit(true);
   loadPlaylistAdds(true);
 })();

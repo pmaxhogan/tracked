@@ -20,6 +20,7 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/set', 'Set'],
   ['/ui/dj/some-dj', ''],
   ['/ui/removed', 'Removed videos'],
+  ['/ui/mkvid', 'mkvid'],
 ]
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
@@ -144,6 +145,46 @@ it('pool pages report the Challenges count themselves and keep the phone-critica
   for (const id of ['add-btn', 'err', 'stats', 'prio', 'chals', 'accts', 'add-dlg', 'add-exit', 'add-passive', 'add-create', 'add-steps', 'add-captcha', 'add-msg', 'add-retry']) expect(POOL_PAGES.POOL_PAGE_HTML).toContain(`id="${id}"`)
   expect(POOL_PAGES.SETTINGS_PAGE_HTML).toContain('id="feed"')
   expect(POOL_PAGES.SETTINGS_PAGE_HTML).toContain('Render feeder: first fetches a day')
+})
+
+/** The minimal stub plus createElement, location, history and URLSearchParams: enough for a page script to run. */
+function richStub(fetchImpl: (u: string) => Promise<Response>, pathname: string) {
+  const el = (): any => ({ innerHTML: '', textContent: '', value: '', hidden: false, checked: false, disabled: false, className: '', src: '', dataset: {}, style: {}, options: [],
+    addEventListener() {}, focus() {}, add() {}, remove() {}, showModal() {}, close() {}, querySelector: () => el(), querySelectorAll: () => [], closest: () => null })
+  const els = new Map<string, any>()
+  const document = { hidden: false, getElementById: (id: string) => (els.has(id) ? els.get(id) : (els.set(id, el()), els.get(id))), querySelector: () => null, addEventListener() {}, createElement: () => el() }
+  const ctx = vm.createContext({ document, fetch: fetchImpl, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, console, Date, URLSearchParams,
+    location: { search: '', pathname }, history: { replaceState() {} },
+    Option: function (t: string, v: string) { return { text: t, value: v } } })
+  return { ctx, els }
+}
+
+describe('mkvid page script', () => {
+  it('renders the status line and the queue from one GET /ui/api/mkvid, with the server position', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const fixture = {
+      enabled: true, dailyClaimCap: 30, dailyClaims: 3, now, quotaResetsAt: now + 3600,
+      counts: { pending: 1, claimed: 0, done: 0, failed: 0, superseded: 0, banned: 0 },
+      accounts: [{ account: 'primary', label: 'primary', cap: 24, used: 3 }],
+      lastPoll: { at: now, outcome: 'ok', accounts: ['primary'] },
+      oldStyleCount: 0, oldVideos: [], djs: [{ slug: 'some-dj', label: 'Some DJ', count: 1 }],
+      queue: [{ id: 'r1', slug: 'some-dj', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', setTitle: 'Some Set', setDate: '2026-09-01', source: 'soundcloud', sourceLabel: 'SoundCloud',
+        sourceUrl: 'https://soundcloud.com/x/y', status: 'pending', account: 'primary', attempts: 0, notBefore: null, createdAt: now, updatedAt: now, skipIdWait: false, style: null, replacesVideoId: null,
+        position: 7, readiness: { state: 'waiting_ids', until: now + 86400 * 3, idRows: 2 } }],
+      queueCursor: null, queueTotal: 1, settled: [], settledCursor: null, settledTotal: 0,
+    }
+    const fetches: string[] = []
+    const { ctx, els } = richStub(async (u: string) => (fetches.push(u), u.startsWith('/ui/api/mkvid') ? Response.json(fixture) : new Response('{}', { status: 404 })), '/ui/mkvid')
+    const r = await app.request('https://tracked.example/ui/mkvid', {}, env())
+    for (const s of scriptsOf(await r.text())) vm.runInContext(s, ctx)
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(fetches.some((u) => u.startsWith('/ui/api/mkvid?'))).toBe(true)
+    expect(fetches.filter((u) => u.startsWith('/ui/api/mkvid')).every((u) => !/account=(?!primary|shared)/.test(u))).toBe(true)
+    const queue = els.get('mk-queue').innerHTML as string
+    expect(queue).toContain('#7')
+    expect(queue).toContain('waiting for IDs until')
+    expect(els.get('mk-state').innerHTML).toContain('Ready — mkvid takes the next set on its next poll')
+  })
 })
 
 /** Every route with one of these methods under /ui, with sample values for its parameters. */
