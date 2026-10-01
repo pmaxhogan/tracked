@@ -298,7 +298,7 @@ describe('Home page', () => {
       if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }, { slug: 'dj-2', sourceUrl: 'https://y', addedAt: 2 }] })
       if (u === '/ui/api/state/dj-1') return Response.json({ state: { lastRunAt: now - 60, lastError: 'boom <b>' } })
       if (u === '/ui/api/state/dj-2') return Response.json({ state: { lastRunAt: now - 60 } })
-      if (u.startsWith('/ui/api/removals')) return Response.json({ holds: [{ kind: 'artist', slug: 'dj-1', playlistId: 'PL1', missing: 5, expected: 40, at: new Date().toISOString() }] })
+      if (u.startsWith('/ui/api/removals')) return Response.json({ holds: [{ kind: 'artist', slug: 'dj-1', playlistId: 'PL1', missing: 5, expected: 40, at: now - 3600 }] })
       if (u.startsWith('/ui/api/audit?')) return Response.json({ records: [{ key: '1', status: 'ok', title: 'A <set>', via: 'yt', cs: 4000, dur: 3600, impossible: true, skew: 900, t: new Date().toISOString() }], cursor: null })
       if (u === '/ui/api/audit-detail?key=1') return Response.json({ record: { t: 'now', reqId: 'r1', status: 'ok', input: { videoTitle: 'A <set>' }, youtube: { videoId: 'abcdefghijk' }, search: { attempts: [] }, meta: {} } })
       if (u.startsWith('/ui/api/playlist-addition-detail')) return Response.json({ error: 'not_found' }, { status: 404 })

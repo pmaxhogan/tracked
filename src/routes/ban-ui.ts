@@ -7,7 +7,7 @@
  * Everything is inline (no bundler, no static assets — same as the pages
  * themselves). The shell interpolates these constants; `BAN_JS` reads
  * `document.body.dataset.banPage` to know what to do:
- *   main      the old main page: history + auto-prompt
+ *   main      history + auto-prompt (no page emits it since Home replaced the old main page; kept for the tests)
  *   settings  route, devices and episode history (live status)
  *   home      auto-prompt for notifications once per session
  *   other     banner only (the default, and the pool pages' stub DOM)

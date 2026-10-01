@@ -259,7 +259,7 @@ ${DJ_ACTIONS_JS}
     if (!Array.isArray(holds)) { setAttn('holds', { error: failText(res) }); return; }
     setAttn('holds', { items: holds.map((h) => item('/ui/removed', 'bad',
       (h.kind === 'combined' ? 'Combined playlist' : (h.slug || h.playlistId || 'A playlist')) + ' is held',
-      (h.missing || 0) + ' of ' + (h.expected || 0) + ' missing' + (h.at ? ' since ' + TK.fmt.time(h.at) : ''), 'Removed videos')) });
+      (h.missing || 0) + ' of ' + (h.expected || 0) + ' missing' + (h.at ? ' since ' + TK.fmt.time(isoOf(h.at)) : ''), 'Removed videos')) });
   }
 
   // ── DJs whose last sync errored ──
