@@ -133,6 +133,14 @@ describe('extractSetTitle / lastCueSeconds', () => {
     expect(extractSetTitle('<html></html>')).toBeNull()
   })
 
+  it('decodes every named entity, once (2026-10-01: "Chris Gek&auml;")', () => {
+    expect(extractSetTitle('<title>Chris Gek&auml; &amp; Lilly Palmer - One Hour With Chris Gek&auml; 199 2018-08-31</title>')).toBe(
+      'Chris Gekä & Lilly Palmer - One Hour With Chris Gekä 199 2018-08-31',
+    )
+    expect(extractSetTitle('<title>MARTEN H&Oslash;RGER @ Ushua&iuml;a, R&iacute;o &#8211; S&#xF3;nar</title>')).toBe('MARTEN HØRGER @ Ushuaïa, Río – Sónar')
+    expect(extractSetTitle('<title>A &amp;auml; B&nbsp;C</title>')).toBe('A &auml; B C')
+  })
+
   it('lastCueSeconds is the largest cue, null when nothing is cued', () => {
     expect(lastCueSeconds([{ startSeconds: 10 }, { startSeconds: null }, { startSeconds: 4500 }, { startSeconds: 300 }])).toBe(4500)
     expect(lastCueSeconds([{ startSeconds: null }])).toBeNull()
@@ -567,6 +575,13 @@ describe('findMkvidUploadByTitle — /now-playing resolving a set we uploaded ou
     expect(hit).toEqual({ videoId: '7-HvbsxBq-4', setUrl: 'https://www.1001tracklists.com/tracklist/r1/x.html', setTitle: 'Mau P @ Panorama Festival, Italy 2026-08-16', slug: 'maup' })
     expect(await findMkvidUploadByTitle(env, 'Mau P @ Panorama Festival, Italy 2026-08-17')).toBeNull()
     expect(await findMkvidUploadByTitle(env, '   ')).toBeNull()
+  })
+
+  it('matches an upload whose YouTube title still carries raw entities', async () => {
+    const env = makeEnv()
+    await done(env, 'r1', 'Charlotte de Witte @ SonarClub, Sónar Festival, Spain 2026-06-19', '_hD21bvOepA')
+    expect((await findMkvidUploadByTitle(env, 'Charlotte de Witte @ SonarClub, S&oacute;nar Festival, Spain 2026-06-19'))?.videoId).toBe('_hD21bvOepA')
+    expect((await findMkvidUploadByTitle(env, 'Charlotte de Witte @ SonarClub, Sónar Festival, Spain 2026-06-19'))?.videoId).toBe('_hD21bvOepA')
   })
 
   it('matches the 100-character title YouTube actually shows for a long set title', async () => {

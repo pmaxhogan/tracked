@@ -46,6 +46,7 @@ import { isVerified, tracklistFingerprint, verifiedFingerprint } from './verific
 import { markInPlaylist } from './playlist-blocklist'
 import { CLAIM_READY_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 import { isOldStyle, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
+import { decodeEntities } from './html-entities'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
@@ -243,18 +244,6 @@ function isPlausibleDate(d: string): boolean {
   return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d && t > Date.UTC(1990, 0, 1) && t < Date.now() + 366 * 86400 * 1000
 }
 
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#0?39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&sdot;/g, '⋅')
-    .replace(/&#(\d+);/g, (_, n: string) => String.fromCodePoint(Number(n)))
-}
 
 /** Largest cue on the tracklist (seconds), or null when nothing is cued. */
 export function lastCueSeconds(tracks: ReadonlyArray<Pick<ParsedTrack, 'startSeconds'>>): number | null {
@@ -1325,7 +1314,9 @@ export type MkvidUploadMatch = { videoId: string; setUrl: string; setTitle: stri
  * video is still watchable, so it still counts.
  */
 export async function findMkvidUploadByTitle(env: Env, title: string): Promise<MkvidUploadMatch | null> {
-  const needle = title.trim()
+  // Decoded: uploads made before 2026-10-01 carry raw entities in their YouTube
+  // title ("Gek&auml;") while set_title is stored decoded ("Geká").
+  const needle = decodeEntities(title).trim()
   if (!needle) return null
   const row = await dbOf(env)
     .prepare(

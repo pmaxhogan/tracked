@@ -20,6 +20,7 @@ import { parse } from 'node-html-parser'
 import type { ChallengeState } from './fetch'
 import { fetch1001, type Fetch1001Opts as CascadeOpts, type Via } from './upstream1001'
 import type { Logger } from './log'
+import { decodeEntities } from './html-entities'
 
 const ORIGIN = 'https://www.1001tracklists.com'
 const TRACKLIST_HREF_RE = /href="(\/tracklist\/[^"#?]+\.html)"/g
@@ -136,16 +137,6 @@ function isYouTubeChannelLike(id: string): boolean {
   return /^UC/.test(id) && id.length !== 11
 }
 
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-}
 
 // 1001tl's DJ-index page is JS infinite-scroll: the initial HTML renders the
 // 15 newest sets, and framework.js's `InfiniteScrollEvent` POSTs to

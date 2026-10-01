@@ -5,6 +5,7 @@ import { fetch1001, isStopTheBatchError, type Fetch1001Opts as CascadeOpts } fro
 import { parseSetYouTubeId } from './dj-index'
 import type { Logger } from './log'
 import { parseTime } from './timestamp'
+import { decodeEntities } from './html-entities'
 
 const ORIGIN = 'https://www.1001tracklists.com'
 
@@ -924,17 +925,6 @@ function formatCue(seconds: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
 }
 
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&sdot;/g, '·')
-}
 
 export type MediaLinks = {
   appleLink: string | null
