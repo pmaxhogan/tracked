@@ -8,6 +8,7 @@ import { MKVID_STATE_JS } from './mkvid-state'
 
 const BODY = /* html */ `
   <div id="mk-state" class="mk-state" role="status"><span class="skel" style="width: 18rem"></span></div>
+  <div id="mk-run" class="mk-run" hidden></div>
   <div id="mk-tiles" class="tk-tiles"></div>
   <div id="mk-summary" class="mk-summary">loading…</div>
   <div id="mk-error" class="err-state" role="alert" hidden><span id="mk-error-text" class="grow"></span><button type="button" id="mk-error-retry" class="btn">Retry</button></div>
@@ -58,6 +59,29 @@ const CSS = /* css */ `
   .tk-tabbar .n { color: var(--subtle); font-weight: 500; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .tk-tabbar .n:empty { display: none; }
   .mk-derr { margin-top: var(--sp-3); }
+  /* The running render: one rail, a tie at every stage boundary, section widths ~ each stage's share of the job. */
+  .mk-run { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-tile); padding: 10px var(--sp-3) 6px; margin-bottom: var(--sp-3); }
+  .mk-run-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--sp-2); }
+  .mk-run-head .k { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--subtle); font-weight: 600; }
+  .mk-run-head .t { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+  .mk-run-head .pct { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .mk-run .sub { color: var(--muted); font-size: var(--fs-sm); margin-top: 2px; }
+  .mk-rail { position: relative; height: 10px; margin: 16px 1px 0; }
+  .mk-rail .bar { display: flex; height: 100%; border-radius: 3px; overflow: hidden; background: var(--line); }
+  .mk-rail .sec { height: 100%; min-width: 0; }
+  .mk-rail .fill { height: 100%; background: var(--accent-fill); transition: width .6s ease; }
+  .mk-rail .sec.indet .fill { width: 100%; background: repeating-linear-gradient(-45deg, var(--accent-soft) 0 6px, transparent 6px 12px); background-size: 17px 17px; animation: mk-rail-slide 1s linear infinite; }
+  @keyframes mk-rail-slide { to { background-position: 17px 0; } }
+  .mk-rail .tie { position: absolute; top: -6px; bottom: -6px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--line-strong); }
+  .mk-rail .tie.past { background: var(--accent-fill); }
+  .mk-stations { position: relative; height: 2.7em; margin-top: 8px; font-size: var(--fs-xs); color: var(--subtle); }
+  .mk-stations span { position: absolute; top: 0; white-space: nowrap; transform: translateX(-50%); }
+  .mk-stations span.row2 { top: 1.35em; }
+  .mk-stations span.l { transform: none; }
+  .mk-stations span.r { transform: translateX(-100%); }
+  .mk-stations span.on { color: var(--fg); font-weight: 600; }
+  @media (max-width: 640px) { .mk-stations span.narrow:not(.on) { display: none; } }
+  @media (prefers-reduced-motion: reduce) { .mk-rail .sec.indet .fill { animation: none; } .mk-rail .fill { transition: none; } }
   .mk-grp { color: var(--subtle); font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; margin: var(--sp-4) 0 var(--sp-2); }
   .mk-grp:first-child { margin-top: 0; }
   .mk-list { padding: 0; overflow: hidden; }
@@ -128,6 +152,74 @@ ${MKVID_STATE_JS}
   $q.value = f.q; $status.value = f.status; $source.value = f.source; $account.value = f.account; $dj.value = f.dj;
 
   let header = null, capped = false;
+
+  // ── the render mkvid is working on now (GET /ui/api/mkvid/progress, every 15 s while visible) ──
+  const $run = $('mk-run');
+  const RUN_MIN_SHARE = 6; // narrow stages (download ~2% of a job) still get a visible section
+  const RUN_SUB = {
+    download: 'Downloading the audio',
+    analyse: 'Fetching artwork and analysing the audio',
+    render: 'Rendering the video',
+    assemble: 'Joining the segments and adding the audio',
+    upload: 'Uploading to YouTube',
+  };
+  function renderRun(p) {
+    const st = p.stages;
+    const vis = st.map((s) => Math.max(Number(s.weight) || 0, RUN_MIN_SHARE));
+    const tot = vis.reduce((n, w) => n + w, 0);
+    let acc = 0;
+    const pos = vis.map((w) => { const left = (acc / tot) * 100; acc += w; return { left, width: (w / tot) * 100 }; });
+    const ai = st.findIndex((s) => s.state === 'active');
+    const pct = Math.round((Number(p.fraction) || 0) * 100);
+    const secs = st.map((s, i) => {
+      const w = s.state === 'done' ? 100 : s.state === 'active' && s.progress != null ? Math.round(s.progress * 1000) / 10 : 0;
+      const indet = s.state === 'active' && s.progress == null;
+      return '<div class="sec ' + esc(s.state) + (indet ? ' indet' : '') + '" style="flex: 0 0 ' + pos[i].width.toFixed(3) + '%" title="' + esc(s.label) + (s.state === 'active' && !indet ? ' ' + Math.round(w) + '%' : '') + '"><div class="fill" style="width: ' + w + '%"></div></div>';
+    }).join('');
+    const ties = st.map((_, i) => pos[i].left).concat([100]).map((left, i) =>
+      '<span class="tie' + (i <= ai ? ' past' : '') + '" style="left: ' + left.toFixed(3) + '%"></span>').join('');
+    // Wide stages label the first row; narrow ones drop to the second, except right after another
+    // narrow one (download, analyse), which takes the first row so the two never overlap.
+    let prevLow = false;
+    const stations = st.map((s, i) => {
+      const c = pos[i].left + pos[i].width / 2;
+      const narrow = pos[i].width < 12;
+      const low = narrow && !prevLow;
+      prevLow = low;
+      const cls = (narrow ? 'narrow' : '') + (low ? ' row2' : '') + (i === ai ? ' on' : '') + (c < 6 ? ' l' : c > 94 ? ' r' : '');
+      const at = c < 6 ? pos[i].left : c > 94 ? pos[i].left + pos[i].width : c;
+      return '<span class="' + cls.trim() + '" style="left: ' + at.toFixed(3) + '%">' + esc(s.label) + '</span>';
+    }).join('');
+    const cur = st[ai] || null;
+    const bits = [RUN_SUB[p.stage] || (cur ? cur.label : '')];
+    if (p.stage === 'render' && p.segments) bits.push('segment ' + p.segments.done + ' of ' + p.segments.total);
+    if (p.stage === 'render' && p.renderMinutesLeft != null) bits.push('~' + p.renderMinutesLeft + ' min left in the render');
+    if (p.stage !== 'render' && cur && cur.progress != null) bits.push(Math.round(cur.progress * 100) + '%');
+    if (p.startedAt) bits.push('started ' + TK.fmt.rel(new Date(p.startedAt * 1000).toISOString()));
+    const title = p.setUrl
+      ? '<a class="t" href="/ui/set?url=' + encodeURIComponent(p.setUrl) + '">' + esc(p.title || TK.fmt.setLabel(p.setUrl)) + '</a>'
+      : '<span class="t">' + esc(p.title || 'a set') + '</span>';
+    $run.innerHTML =
+      '<div class="mk-run-head"><span class="k">Rendering now</span>' + title + '<span class="pct">' + pct + '%</span></div>' +
+      '<div class="sub">' + bits.filter(Boolean).map(esc).join(' · ') + '</div>' +
+      '<div class="mk-rail" role="progressbar" aria-label="Render progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" aria-valuetext="' + esc(pct + '%, ' + (cur ? cur.label : '')) + '">' +
+        '<div class="bar">' + secs + '</div>' + ties + '</div>' +
+      '<div class="mk-stations" aria-hidden="true">' + stations + '</div>';
+    $run.hidden = false;
+  }
+  async function loadRun() {
+    const res = await TK.api.get('/ui/api/mkvid/progress');
+    const p = res.ok && res.data && res.data.running;
+    if (!p || !Array.isArray(p.stages) || !p.stages.length) { $run.hidden = true; $run.innerHTML = ''; return; }
+    renderRun(p);
+  }
+  let runTimer = null;
+  function scheduleRun() {
+    clearTimeout(runTimer);
+    if (document.hidden) return;
+    runTimer = setTimeout(() => { loadRun().finally(scheduleRun); }, 15000);
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) clearTimeout(runTimer); else { loadRun(); scheduleRun(); } });
   // Overlapping loads (typing in the search box): only the newest renders.
   // A whole-view load supersedes everything before it; an append is dropped
   // while one is pending, or when one started after it (its cursor and filter
@@ -536,6 +628,8 @@ ${MKVID_STATE_JS}
 
   renderTabs(false);
   load('all');
+  loadRun(); scheduleRun();
+  if ($refresh) $refresh.addEventListener('click', () => { loadRun(); });
 })();
 `
 

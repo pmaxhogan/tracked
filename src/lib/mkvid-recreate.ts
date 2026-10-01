@@ -346,14 +346,22 @@ export type DeleteCallOutcome = { kind: 'deleted' } | { kind: 'already_gone' } |
  * sent too, otherwise the tunnel's Access app needs a bypass for
  * /api/videos/*. The bearer is MKVID_TOKEN (mkvid's TRACKED_TOKEN).
  */
-export async function callMkvidDelete(env: Env, videoId: string, requestId: string, fetcher: typeof fetch = fetch): Promise<DeleteCallOutcome> {
+/** mkvid's base URL and the headers for a call into its /api/videos/* routes, or null when MKVID_URL / MKVID_TOKEN are not set. */
+export function mkvidCall(env: Env): { base: string; headers: Record<string, string> } | null {
   const base = (env.MKVID_URL ?? '').trim().replace(/\/$/, '')
-  if (!base || !env.MKVID_TOKEN) return { kind: 'retry', error: 'MKVID_URL / MKVID_TOKEN not set' }
+  if (!base || !env.MKVID_TOKEN) return null
   const headers: Record<string, string> = { authorization: `Bearer ${env.MKVID_TOKEN}`, 'content-type': 'application/json' }
   if (env.MKVID_ACCESS_CLIENT_ID && env.MKVID_ACCESS_CLIENT_SECRET) {
     headers['cf-access-client-id'] = env.MKVID_ACCESS_CLIENT_ID
     headers['cf-access-client-secret'] = env.MKVID_ACCESS_CLIENT_SECRET
   }
+  return { base, headers }
+}
+
+export async function callMkvidDelete(env: Env, videoId: string, requestId: string, fetcher: typeof fetch = fetch): Promise<DeleteCallOutcome> {
+  const call = mkvidCall(env)
+  if (!call) return { kind: 'retry', error: 'MKVID_URL / MKVID_TOKEN not set' }
+  const { base, headers } = call
   let res: Response
   try {
     res = await fetcher(`${base}/api/videos/${encodeURIComponent(videoId)}/delete`, {

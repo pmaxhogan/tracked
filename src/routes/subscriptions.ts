@@ -19,6 +19,7 @@ import {
   removeSubscription,
 } from '../lib/subscriptions'
 import { getDjSets } from '../lib/dj-sets'
+import { fetchMkvidRenderProgress } from '../lib/mkvid-progress'
 import { extractVideoId, fetchVideoDetails, YouTubeApiError } from '../lib/youtube'
 import {
   buildAuthUrl,
@@ -825,6 +826,13 @@ subscriptionsApp.post('/api/mkvid/recreate/:id', async (c) => {
   log.info('subs.mkvid_recreate', { id, ...r })
   if (r.ok) return c.json(r)
   return c.json({ ...r, id }, r.error === 'not_found' ? 404 : 409)
+})
+
+/** The render mkvid is working on now, as weighted stages (the page's progress bar); `running: null` when it is idle. */
+subscriptionsApp.get('/api/mkvid/progress', async (c) => {
+  const r = await fetchMkvidRenderProgress(c.env)
+  if (!r.ok) return c.json({ error: 'mkvid_unavailable', message: r.error }, 503)
+  return c.json({ running: r.running })
 })
 
 /** How many videos "Recreate all old-style videos" would queue — the confirm step. */
