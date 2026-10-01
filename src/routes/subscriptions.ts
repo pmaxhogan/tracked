@@ -7,6 +7,8 @@ import { DJ_PAGE } from '../ui/pages/dj'
 import { MKVID_PAGE_HTML } from '../ui/pages/mkvid'
 import { DJS_PAGE } from '../ui/pages/djs'
 import { PLAYLISTS_PAGE } from '../ui/pages/playlists'
+import { SETTINGS_PAGE } from '../ui/pages/settings'
+import { TOOLS_PAGE } from '../ui/pages/tools'
 import {
   addSubscription,
   djUrlFor,
@@ -66,7 +68,7 @@ import {
   sendPushToAll,
   testPayload,
 } from '../lib/web-push'
-import { ALERTS_ROW_HTML, BAN_BANNER_HTML, BAN_CSS, BAN_HISTORY_HTML, BAN_JS, SW_JS } from './ban-ui'
+import { BAN_BANNER_HTML, BAN_CSS, BAN_JS, SW_JS } from './ban-ui'
 import { hygieneApp } from './playlist-hygiene'
 
 const STATE_COOKIE = 'yt_oauth_state'
@@ -101,7 +103,8 @@ subscriptionsApp.get('/', (c) => servePage(c, HOME_HTML))
 // work while the redesign lands; each route goes when its real page is built.
 subscriptionsApp.get('/djs', (c) => servePage(c, DJS_PAGE.html))
 subscriptionsApp.get('/playlists', (c) => servePage(c, PLAYLISTS_PAGE.html))
-for (const p of ['/settings', '/tools']) subscriptionsApp.get(p, (c) => servePage(c, PAGE_HTML))
+subscriptionsApp.get('/settings', (c) => servePage(c, SETTINGS_PAGE.html))
+subscriptionsApp.get('/tools', (c) => servePage(c, TOOLS_PAGE.html))
 // The mkvid queue: status line, caps, filters, tabs and a detail drawer (ui/pages/mkvid.ts).
 subscriptionsApp.get('/mkvid', (c) => servePage(c, MKVID_PAGE_HTML))
 
@@ -997,20 +1000,6 @@ const PAGE_HTML = /* html */ `<!doctype html>
   .badge.banned { background: rgba(248,81,73,0.12); color: var(--danger); }
   .arow .src { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
   .arow-detail .retry { margin-top: 0.4rem; }
-  section#ytjson { margin-top: 2.25rem; }
-  #ytjson-form { display: flex; gap: 0.5rem; margin: 0 0 0.5rem; }
-  /* type="text", not "url", so a bare 11-char video id is accepted too — hence
-     it doesn't pick up the input[type="url"] rule above. */
-  #ytjson-url { flex: 1; min-width: 0; padding: 0.6rem 0.75rem; font: inherit; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; }
-  #ytjson-url:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  #ytjson-status { color: var(--muted); font-size: 0.82rem; min-height: 1.2em; margin-bottom: 0.4rem; }
-  #ytjson-status .warn { color: var(--danger); }
-  #ytjson-status .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  #ytjson-status a { color: var(--accent); }
-  #ytjson-out { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; line-height: 1.45;
-    white-space: pre; overflow: auto; max-height: 28em; margin: 0; padding: 0.6rem 0.7rem;
-    border: 1px solid var(--border); border-radius: 6px; background: var(--card); }
-  /* ── Recent requests (audit trail) ── */
   section#audit { margin-top: 2.25rem; }
   .audit-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
   .audit-head h2 { font-size: 1.05rem; margin: 0; }
@@ -1058,23 +1047,7 @@ ${BAN_CSS}
 ${BAN_BANNER_HTML}
   <h1>DJ subscriptions</h1>
   <p class="lead"><a href="/ui/djs">DJs →</a> &nbsp;·&nbsp; <a href="/ui/playlists">Playlists →</a> &nbsp;·&nbsp; <a href="/ui/set">Tracklist viewer →</a> &nbsp;·&nbsp; <a href="/ui/pool">Pool accounts →</a></p>
-${ALERTS_ROW_HTML}
   <p class="mk-link"><a href="/ui/mkvid">mkvid →</a></p>
-
-  <section id="ytjson">
-    <div class="audit-head">
-      <h2>YouTube video JSON</h2>
-      <div class="audit-actions">
-        <button id="ytjson-copy" class="ghost" hidden>Copy</button>
-      </div>
-    </div>
-    <form id="ytjson-form">
-      <input id="ytjson-url" type="text" placeholder="https://www.youtube.com/watch?v=… (or a bare video id)" />
-      <button type="submit">Fetch</button>
-    </form>
-    <div id="ytjson-status"></div>
-    <pre id="ytjson-out" hidden></pre>
-  </section>
 
   <section id="audit">
     <div class="audit-head">
@@ -1102,76 +1075,10 @@ ${ALERTS_ROW_HTML}
     <button id="pl-more" class="ghost" hidden>Load older</button>
   </section>
 
-${BAN_HISTORY_HTML}
   <footer>Signed in as <span id="who"></span></footer>
 </main>
 <script>
 (() => {
-  // ── YouTube video JSON inspector ───────────────────────────────────────
-  // Paste any watch/youtu.be/shorts URL (or a bare id) and dump the raw
-  // videos.list payload. Read-only: it touches nothing else in the app.
-  const $yjForm = document.getElementById('ytjson-form');
-  const $yjUrl = document.getElementById('ytjson-url');
-  const $yjBtn = $yjForm.querySelector('button');
-  const $yjStatus = document.getElementById('ytjson-status');
-  const $yjOut = document.getElementById('ytjson-out');
-  const $yjCopy = document.getElementById('ytjson-copy');
-
-  function yjStatus(html) { $yjStatus.innerHTML = html || ''; }
-
-  async function fetchVideoJson(input) {
-    yjStatus('fetching…');
-    $yjBtn.disabled = true;
-    try {
-      const r = await fetch('/ui/api/youtube/video?url=' + encodeURIComponent(input), {
-        credentials: 'same-origin',
-      });
-      const raw = await r.text();
-      let data = null;
-      try { data = raw ? JSON.parse(raw) : null; } catch { /* non-JSON body */ }
-      if (!r.ok) {
-        $yjOut.hidden = true;
-        $yjCopy.hidden = true;
-        const msg = (data && (data.message || data.error)) || raw || ('failed (' + r.status + ')');
-        yjStatus('<span class="warn">' + esc(msg) + '</span>');
-        return;
-      }
-      // Pretty-print the whole envelope (videoId + watchUrl + the API item).
-      // textContent, never innerHTML — the payload is third-party text.
-      $yjOut.textContent = JSON.stringify(data, null, 2);
-      $yjOut.hidden = false;
-      $yjCopy.hidden = false;
-      const sn = (data && data.video && data.video.snippet) || {};
-      yjStatus(
-        '<span class="mono">' + esc(data.videoId) + '</span> · ' +
-        link(data.watchUrl, 'open on YouTube') +
-        (sn.title ? ' · ' + esc(sn.title) : '')
-      );
-    } catch (e) {
-      $yjOut.hidden = true;
-      $yjCopy.hidden = true;
-      yjStatus('<span class="warn">' + esc(e && e.message ? e.message : String(e)) + '</span>');
-    } finally {
-      $yjBtn.disabled = false;
-    }
-  }
-
-  $yjForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const v = $yjUrl.value.trim();
-    if (!v) return;
-    fetchVideoJson(v);
-  });
-
-  $yjCopy.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText($yjOut.textContent);
-      const original = $yjCopy.textContent;
-      $yjCopy.textContent = 'Copied';
-      setTimeout(() => { $yjCopy.textContent = original; }, 1200);
-    } catch { yjStatus('<span class="warn">clipboard blocked — select the JSON and copy manually</span>'); }
-  });
-
   // ── Recent requests (audit trail) ──────────────────────────────────────
   const $auditList = document.getElementById('audit-list');
   const $auditEmpty = document.getElementById('audit-empty');

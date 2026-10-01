@@ -21,6 +21,8 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/dj/some-dj', ''],
   ['/ui/removed', 'Removed videos'],
   ['/ui/mkvid', 'mkvid'],
+  ['/ui/settings', 'Settings'],
+  ['/ui/tools', 'Tools'],
 ]
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
@@ -271,6 +273,54 @@ describe('Playlists page script', () => {
     expect(els.get('rows').innerHTML).toContain('DJ 1 (1001tklists)')
     expect(els.get('hygiene').innerHTML).toContain('DRY RUN')
     expect(els.get('hygiene').innerHTML).toContain('1 held')
+  })
+})
+
+describe('Settings and Tools pages', () => {
+  it('Settings carries the ban-script ids and the cards; Tools carries the simulate link', async () => {
+    const s = await (await app.request('https://tracked.example/ui/settings', {}, env())).text()
+    expect(s).toContain('data-ban-page="settings"')
+    for (const id of ['alerts-state', 'alerts-enable', 'alerts-test', 'alerts-msg', 'ban-refresh', 'ban-route', 'ban-devices', 'ban-episodes', 'yt-card', 'int-pool', 'int-push', 'int-mkvid']) expect(s).toContain(`id="${id}"`)
+    const t = await (await app.request('https://tracked.example/ui/tools', {}, env())).text()
+    expect(t).toContain('id="ban-simulate"')
+    expect(t).not.toMatch(/quiet/i)
+    expect(s).not.toMatch(/quiet/i)
+  })
+  it('Settings script fills the integrations and the theme radios', async () => {
+    const { ctx, els } = richStub(async (u: string) => {
+      if (u === '/ui/api/youtube/status') return Response.json({ connected: false })
+      if (u === '/ui/api/ban/status') return Response.json({ poolConfigured: true, pushConfigured: false })
+      if (u.startsWith('/ui/api/mkvid')) return Response.json({ enabled: true })
+      return new Response('{}', { status: 404 })
+    }, '/ui/settings')
+    const html = await (await app.request('https://tracked.example/ui/settings', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(els.get('int-pool').textContent).toBe('configured')
+    expect(els.get('int-push').textContent).toBe('not configured')
+    expect(els.get('int-mkvid').textContent).toBe('configured')
+  })
+  it('Tools script prints the migration status and requeues with dry=1 only when checked', async () => {
+    const seen: string[] = []
+    const { ctx, els } = richStub(async (u: string) => {
+      seen.push(u)
+      if (u === '/ui/api/migration') return Response.json({ done: false })
+      if (u.startsWith('/ui/api/ban/requeue-victims')) return Response.json({ requeued: 0 })
+      return new Response('{}', { status: 404 })
+    }, '/ui/tools')
+    const listeners: Record<string, () => void> = {}
+    const form = () => (ctx.document.getElementById('rq-form'))
+    form().addEventListener = (t: string, fn: any) => { if (t === 'submit') listeners.rq = () => fn({ preventDefault() {} }) }
+    const html = await (await app.request('https://tracked.example/ui/tools', {}, env())).text()
+    ctx.document.getElementById('rq-days').value = '7'
+    ctx.document.getElementById('rq-dry').checked = true
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(els.get('mig-out').textContent).toContain('"done": false')
+    listeners.rq!()
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(seen).toContain('/ui/api/ban/requeue-victims?days=7&dry=1')
+    expect(els.get('rq-out').textContent).toContain('"requeued": 0')
   })
 })
 
