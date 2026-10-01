@@ -202,15 +202,15 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       }
       // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
       await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) })
-      // Search index writes started by this tick's verified fetches (they swallow their own errors).
-      try {
-        await drainSearchIndex()
-      } catch (e) {
-        log.warn('cron.search_drain_threw', errorFields(e))
-      }
       } finally {
         // Stored pages finish even when the tick threw.
         await drainPageCaptures()
+        // Search index writes started by this tick's verified fetches, likewise (they swallow their own errors).
+        try {
+          await drainSearchIndex()
+        } catch (e) {
+          log.warn('cron.search_drain_threw', errorFields(e))
+        }
       }
     })(),
   )

@@ -18,6 +18,12 @@
  *     indexed from a page (`source = 'page'`), at or after its verification
  *     (`indexed_at >= verified_at`), with the same video. A backfilled set
  *     ('mkvid') is always replaced by a live verified fetch.
+ *   - A fixed number of statements per set (11), whatever its length: every
+ *     per-track and per-term write is one set-based statement over
+ *     `json_each(?)` with one JSON array bind, so indexing never spends the
+ *     invocation's D1 query budget per track. At most MAX_TRACKS_PER_SET (500)
+ *     distinct tracks are indexed per set, which keeps each JSON bind well
+ *     under D1's 100 KB statement limit.
  *   - Fire-and-forget from the sync path (`queueSearchIndex`), drained via
  *     ctx.waitUntil (`drainSearchIndex`). Errors never reach the caller: they
  *     are logged at warn as `search.index_failed`.
@@ -59,6 +65,9 @@ const nowSeconds = () => Math.floor(Date.now() / 1000)
 /** Vocabulary terms are normalized words of at least this many characters. */
 const MIN_TERM = 3
 
+/** Distinct tracks indexed per set; the rest of a longer list is dropped (see the header). */
+export const MAX_TRACKS_PER_SET = 500
+
 /**
  * The indexable tracks of a page, in page order: anonymous and unidentified
  * rows and rows without an artist or title are dropped. A layered ("w/") row
@@ -90,17 +99,19 @@ function addTerms(into: Set<string>, ...texts: Array<string | null | undefined>)
 }
 
 /**
- * Write one set and its tracks: one SEARCH_DB batch (a transaction) plus at
- * most two reads before it. Throws on DB errors; callers swallow them.
+ * Write one set and its tracks: one SEARCH_DB batch (a transaction) of 11
+ * statements, plus at most two reads before it. Throws on DB errors; callers
+ * swallow them.
  */
 export async function indexSet(env: Env, input: IndexSetInput, nowSec: number): Promise<{ tracks: number }> {
   const sdb = searchDbOf(env)
   const { setUrl } = input
 
-  // New tracks, first occurrence of a key only.
+  // New tracks, first occurrence of a key only, capped.
   const tracks: Array<IndexTrack & { key: string; pos: number }> = []
   const seen = new Set<string>()
   for (const t of input.tracks) {
+    if (tracks.length >= MAX_TRACKS_PER_SET) break
     const key = await trackKey(t)
     if (seen.has(key)) continue
     seen.add(key)
@@ -130,10 +141,26 @@ export async function indexSet(env: Env, input: IndexSetInput, nowSec: number): 
     for (const r of rows) storedLabel.set(r.track_key, r.label)
   }
 
-  const stmts: D1PreparedStatement[] = []
+  // Touched tracks (old ∪ new) with the normalized text of their FTS row.
+  const touched = new Map<string, [string, string, string]>()
+  for (const o of old) touched.set(o.track_key, [normalizedJoin(o.artist), normalizedJoin(o.title), normalizedJoin(o.label)])
+  for (const t of tracks) touched.set(t.key, [normalizedJoin(t.artist), normalizedJoin(t.title), normalizedJoin(t.label ?? storedLabel.get(t.key))])
 
-  // Set row and its FTS row.
-  stmts.push(
+  // JSON array binds, rows as positional arrays to keep them small:
+  //   trackRows  [key, track_url, artist, title, label]
+  //   linkRows   [key, pos, cue_seconds, layered]
+  //   ftsRows    [key, artist, title, label] (normalized), one per touched key
+  //   terms      [term, ...]
+  const trackRows = JSON.stringify(tracks.map((t) => [t.key, t.trackUrl, t.artist, t.title, t.label]))
+  const linkRows = JSON.stringify(tracks.map((t) => [t.key, t.pos, t.cueSeconds, t.layered ? 1 : 0]))
+  const ftsRows = JSON.stringify([...touched].map(([k, v]) => [k, ...v]))
+  const termSet = new Set<string>()
+  addTerms(termSet, input.title, input.djName)
+  for (const t of tracks) addTerms(termSet, t.artist, t.title, t.label)
+  const terms = JSON.stringify([...termSet])
+
+  await sdb.batch([
+    // 1-3. Set row and its FTS row.
     sdb
       .prepare(
         `INSERT INTO search_sets (set_url, dj_slug, dj_name, title, set_date, video_id, video_source, track_count, ided_count, source, indexed_at)
@@ -148,56 +175,65 @@ export async function indexSet(env: Env, input: IndexSetInput, nowSec: number): 
     sdb
       .prepare('INSERT INTO sets_fts (rowid, title, dj, slug_words) SELECT id, ?, ?, ? FROM search_sets WHERE set_url = ?')
       .bind(normalizedJoin(input.title), `${normalizedJoin(input.djName)} ${normalizedJoin(input.djSlug.replace(/[._-]+/g, ' '))}`, slugWords(setUrl), setUrl),
-  )
-
-  // Old links out, new tracks and links in.
-  stmts.push(sdb.prepare('DELETE FROM search_track_sets WHERE set_url = ?').bind(setUrl))
-  const upsertTrack = sdb.prepare(
-    `INSERT INTO search_tracks (track_key, track_id, track_url, artist, title, label, sets_count, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?)
-     ON CONFLICT(track_key) DO UPDATE SET
-       artist = excluded.artist, title = excluded.title,
-       track_url = COALESCE(excluded.track_url, track_url), label = COALESCE(excluded.label, label),
-       updated_at = excluded.updated_at`,
-  )
-  const insertLink = sdb.prepare('INSERT INTO search_track_sets (track_key, set_url, pos, cue_seconds, layered) VALUES (?, ?, ?, ?, ?)')
-  for (const t of tracks) {
-    stmts.push(
-      upsertTrack.bind(t.key, t.key.startsWith('t:') ? t.trackId : null, t.trackUrl, t.artist, t.title, t.label, nowSec),
-      insertLink.bind(t.key, setUrl, t.pos, t.cueSeconds, t.layered ? 1 : 0),
-    )
-  }
-
-  // Every touched track (old ∪ new): its count, then its FTS row (none once it is in no set).
-  const fts = new Map<string, { artist: string; title: string; label: string | null }>()
-  for (const o of old) fts.set(o.track_key, { artist: o.artist, title: o.title, label: o.label })
-  for (const t of tracks) fts.set(t.key, { artist: t.artist, title: t.title, label: t.label ?? storedLabel.get(t.key) ?? null })
-  const updateCount = sdb.prepare('UPDATE search_tracks SET sets_count = (SELECT COUNT(*) FROM search_track_sets WHERE track_key = ?) WHERE track_key = ?')
-  const deleteFts = sdb.prepare('DELETE FROM tracks_fts WHERE rowid = (SELECT id FROM search_tracks WHERE track_key = ?)')
-  const insertFts = sdb.prepare(
-    `INSERT INTO tracks_fts (rowid, artist, title, label, djs, set_titles)
-     SELECT t.id, ?, ?, ?,
-            (SELECT group_concat(DISTINCT f.dj) FROM search_track_sets ts JOIN search_sets s ON s.set_url = ts.set_url JOIN sets_fts f ON f.rowid = s.id WHERE ts.track_key = t.track_key),
-            (SELECT group_concat(f.title, ' ') FROM search_track_sets ts JOIN search_sets s ON s.set_url = ts.set_url JOIN sets_fts f ON f.rowid = s.id WHERE ts.track_key = t.track_key)
-       FROM search_tracks t WHERE t.track_key = ? AND t.sets_count > 0`,
-  )
-  for (const [key, v] of fts) {
-    stmts.push(
-      updateCount.bind(key, key),
-      deleteFts.bind(key),
-      insertFts.bind(normalizedJoin(v.artist), normalizedJoin(v.title), normalizedJoin(v.label), key),
-    )
-  }
-
-  // Vocabulary: the set title, the DJ name, each new track's artist, title and label.
-  const terms = new Set<string>()
-  addTerms(terms, input.title, input.djName)
-  for (const t of tracks) addTerms(terms, t.artist, t.title, t.label)
-  const upsertTerm = sdb.prepare('INSERT INTO search_vocab (term, df) VALUES (?, 1) ON CONFLICT(term) DO UPDATE SET df = df + 1')
-  const insertTermFts = sdb.prepare('INSERT INTO vocab_fts (rowid, term) SELECT id, term FROM search_vocab WHERE term = ? AND id NOT IN (SELECT rowid FROM vocab_fts)')
-  for (const term of terms) stmts.push(upsertTerm.bind(term), insertTermFts.bind(term))
-
-  await sdb.batch(stmts)
+    // 4. Old links out.
+    sdb.prepare('DELETE FROM search_track_sets WHERE set_url = ?').bind(setUrl),
+    // 5. New tracks in. track_id only for a 't:<id>' key; youtube_link is never
+    //    written here. `WHERE true` keeps ON CONFLICT from parsing as a join constraint.
+    sdb
+      .prepare(
+        `INSERT INTO search_tracks (track_key, track_id, track_url, artist, title, label, sets_count, updated_at)
+         SELECT json_extract(j.value, '$[0]'),
+                CASE WHEN json_extract(j.value, '$[0]') LIKE 't:%' THEN substr(json_extract(j.value, '$[0]'), 3) END,
+                json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]'), json_extract(j.value, '$[3]'), json_extract(j.value, '$[4]'),
+                0, ?1
+           FROM json_each(?2) j WHERE true
+         ON CONFLICT(track_key) DO UPDATE SET
+           artist = excluded.artist, title = excluded.title,
+           track_url = COALESCE(excluded.track_url, track_url), label = COALESCE(excluded.label, label),
+           updated_at = excluded.updated_at`,
+      )
+      .bind(nowSec, trackRows),
+    // 6. New links in.
+    sdb
+      .prepare(
+        `INSERT INTO search_track_sets (track_key, set_url, pos, cue_seconds, layered)
+         SELECT json_extract(j.value, '$[0]'), ?1, json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]'), json_extract(j.value, '$[3]')
+           FROM json_each(?2) j`,
+      )
+      .bind(setUrl, linkRows),
+    // 7-9. Every touched track: its count, then its FTS row (none once it is in no set).
+    sdb
+      .prepare(
+        `UPDATE search_tracks SET sets_count = (SELECT COUNT(*) FROM search_track_sets ts WHERE ts.track_key = search_tracks.track_key)
+          WHERE track_key IN (SELECT json_extract(value, '$[0]') FROM json_each(?))`,
+      )
+      .bind(ftsRows),
+    sdb
+      .prepare('DELETE FROM tracks_fts WHERE rowid IN (SELECT id FROM search_tracks WHERE track_key IN (SELECT json_extract(value, \'$[0]\') FROM json_each(?)))')
+      .bind(ftsRows),
+    sdb
+      .prepare(
+        `INSERT INTO tracks_fts (rowid, artist, title, label, djs, set_titles)
+         SELECT t.id, json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]'), json_extract(j.value, '$[3]'),
+                (SELECT group_concat(DISTINCT f.dj) FROM search_track_sets ts JOIN search_sets s ON s.set_url = ts.set_url JOIN sets_fts f ON f.rowid = s.id WHERE ts.track_key = t.track_key),
+                (SELECT group_concat(f.title, ' ') FROM search_track_sets ts JOIN search_sets s ON s.set_url = ts.set_url JOIN sets_fts f ON f.rowid = s.id WHERE ts.track_key = t.track_key)
+           FROM json_each(?) j JOIN search_tracks t ON t.track_key = json_extract(j.value, '$[0]')
+          WHERE t.sets_count > 0`,
+      )
+      .bind(ftsRows),
+    // 10-11. Vocabulary: the set title, the DJ name, each new track's artist,
+    // title and label. `df` counts index writes that carried the term (a
+    // re-index counts again), not documents: it is only a tie-break when
+    // ranking correction candidates.
+    sdb.prepare('INSERT INTO search_vocab (term, df) SELECT value, 1 FROM json_each(?) WHERE true ON CONFLICT(term) DO UPDATE SET df = df + 1').bind(terms),
+    sdb
+      .prepare(
+        `INSERT INTO vocab_fts (rowid, term)
+         SELECT v.id, v.term FROM search_vocab v
+          WHERE v.term IN (SELECT value FROM json_each(?)) AND NOT EXISTS (SELECT 1 FROM vocab_fts f WHERE f.rowid = v.id)`,
+      )
+      .bind(terms),
+  ])
   return { tracks: tracks.length }
 }
 

@@ -12,7 +12,7 @@ import { fakeKV } from './helpers/fake-kv'
 import { tracklistFingerprint } from '../src/lib/verification'
 import { DEFAULT_POOL_SETTINGS } from '../src/lib/pool-settings'
 import { recordSetFetch } from '../src/lib/fetch-scheduler'
-import { drainSearchIndex, indexSet, indexVerifiedFetch, queueSearchIndex, tracksFromRows } from '../src/lib/search/index'
+import { drainSearchIndex, indexSet, indexVerifiedFetch, MAX_TRACKS_PER_SET, queueSearchIndex, tracksFromRows, type IndexSetInput, type IndexTrack } from '../src/lib/search/index'
 
 const NOW = Math.floor(Date.now() / 1000)
 const VERIFIED_AT = NOW - 3600
@@ -373,5 +373,54 @@ describe('search indexer', () => {
     expect(out.verification?.outcome).toBe('verified')
     await drainSearchIndex()
     expect(await one(env, 'SELECT dj_name, video_id, source FROM search_sets WHERE set_url = ?', SET_EB)).toEqual({ dj_name: 'Eli Brown', video_id: 'yt1', source: 'page' })
+  })
+
+  describe('fixed statement count', () => {
+    /** n distinct synthetic tracks, every other one labeled, with a realistic track URL. */
+    const synth = (n: number): IndexTrack[] =>
+      Array.from({ length: n }, (_, i) => ({
+        trackId: String(100000 + i),
+        trackUrl: `https://www.1001tracklists.com/track/${(100000 + i).toString(36)}/artist-${i}-track-number-${i}/index.html`,
+        artist: `Artist ${i} & Friend ${i}`,
+        title: `Track Number ${i} (Extended Mix)`,
+        label: i % 2 ? `Label ${i} Records` : null,
+        cueSeconds: i * 60,
+        layered: false,
+      }))
+    const input = (setUrl: string, tracks: IndexTrack[]): IndexSetInput => ({
+      setUrl, djSlug: 'somedj', djName: 'Some DJ', title: 'Some DJ @ Big Festival 2026-05-16', setDate: '2026-05-16',
+      videoId: null, videoSource: null, trackCount: tracks.length, idedCount: tracks.length, source: 'page', tracks,
+    })
+    async function batchSizes(env: Env, ...inputs: IndexSetInput[]): Promise<number[]> {
+      const sizes: number[] = []
+      const sdb = env.SEARCH_DB!
+      const orig = sdb.batch.bind(sdb)
+      const spy = vi.spyOn(sdb, 'batch').mockImplementation(async (s) => {
+        sizes.push(s.length)
+        return orig(s)
+      })
+      for (const i of inputs) await indexSet(env, i, NOW)
+      spy.mockRestore()
+      return sizes
+    }
+
+    it('the batch for a 30-track set and for a 200-track set have the same statement count', async () => {
+      const env = makeEnv()
+      const sizes = await batchSizes(env, input(SET_LP, synth(30)), input(SET_EB, synth(200)), input(SET_LP, synth(200).slice(100)))
+      expect(sizes).toEqual([11, 11, 11])
+      // The re-index of SET_LP dropped tracks 0-29 (orphaned) and links 100-199.
+      expect(await one(env, 'SELECT COUNT(*) AS n FROM search_track_sets WHERE set_url = ?', SET_LP)).toEqual({ n: 100 })
+      expect(await one(env, `SELECT sets_count FROM search_tracks WHERE track_key = 't:100000'`)).toEqual({ sets_count: 1 })
+      expect(await one(env, `SELECT sets_count FROM search_tracks WHERE track_key = 't:100150'`)).toEqual({ sets_count: 2 })
+      expect(await one(env, 'SELECT COUNT(*) AS n FROM tracks_fts')).toEqual({ n: 200 })
+    })
+
+    it(`indexes at most ${MAX_TRACKS_PER_SET} tracks of a set`, async () => {
+      const env = makeEnv()
+      const r = await indexSet(env, input(SET_LP, synth(MAX_TRACKS_PER_SET + 100)), NOW)
+      expect(r.tracks).toBe(MAX_TRACKS_PER_SET)
+      expect(await one(env, 'SELECT COUNT(*) AS n, MAX(pos) AS maxPos FROM search_track_sets')).toEqual({ n: MAX_TRACKS_PER_SET, maxPos: MAX_TRACKS_PER_SET - 1 })
+      expect(await one(env, 'SELECT COUNT(*) AS n FROM tracks_fts')).toEqual({ n: MAX_TRACKS_PER_SET })
+    })
   })
 })
