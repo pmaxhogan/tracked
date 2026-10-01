@@ -219,7 +219,11 @@ ${MKVID_STATE_JS}
   function startRun() {
     if (runPoll) runPoll.stop();
     loadRun();
-    runPoll = TK.poll(loadRun, 15000, { onAuth: () => { $run.hidden = true; } });
+    // After TK.poll's 15-minute hard stop the bar would freeze mid-render: say so instead.
+    runPoll = TK.poll(loadRun, 15000, {
+      onAuth: () => { $run.hidden = true; },
+      onTimeout: () => { if (!$run.hidden) $run.innerHTML += '<p class="muted sub">Live updates paused. Press Refresh to resume.</p>'; },
+    });
   }
   // Overlapping loads (typing in the search box): only the newest renders.
   // A whole-view load supersedes everything before it; an append is dropped
