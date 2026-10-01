@@ -9,7 +9,7 @@ import type { Env } from '../src/types'
 import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import { indexSet, type IndexTrack } from '../src/lib/search/index'
-import type { SearchResponse } from '../src/lib/search/query'
+import { search as runSearch, type SearchResponse } from '../src/lib/search/query'
 
 const TL = 'https://www.1001tracklists.com/tracklist'
 const URLS = {
@@ -73,6 +73,14 @@ async function seed(env: Env): Promise<void> {
   await env.DB.prepare('INSERT INTO tracklists (slug, url, position, discovered_at, processed) VALUES (?, ?, 99, 0, 0)').bind('elibrown', `${TL}/7a7a7a/eli-brown-pending-2026-09-30.html`).run()
 }
 
+/** 300 six-letter terms "amer" + two characters, none within one edit of plamer. */
+function crowdTerms(): string[] {
+  const a = [...'bcdfghjkqvwxz0123456789']
+  const out: string[] = []
+  for (const x of a) for (const y of a) if (out.length < 300) out.push(`amer${x}${y}`)
+  return out
+}
+
 const get = (env: Env, qs: string) => app.request(`http://x/ui/api/search?${qs}`, { method: 'GET' }, env)
 async function search(env: Env, qs: string): Promise<SearchResponse> {
   const r = await get(env, qs)
@@ -99,7 +107,19 @@ describe('GET /ui/api/search', () => {
     expect(r.q).toBe('lily plamer dont')
   })
 
-  it('Eli Brown Ultra ranks the Ultra Miami 2026 set first', async () => {
+  it('Eli Brown Ultra ranks the Ultra Miami 2026 set first at a fixed clock, and still past 2028', async () => {
+    const q = { q: 'Eli Brown Ultra', kind: 'sets' as const, limit: 20, exact: false }
+    // At 2026-10-01 recency separates the two Ultra sets (×1.074 vs ×1.025).
+    // From 2028-03-28 both are over 730 days old, so neither gets a recency
+    // boost: they tie on score and the brief's tie-break (bm25, then id) keeps
+    // the 2026 set first because it was indexed first.
+    for (const now of ['2026-10-01', '2029-06-01']) {
+      const urls = (await runSearch(env, q, Date.parse(`${now}T12:00:00Z`))).sets.map((s) => s.url)
+      expect(urls, now).toEqual([URLS.ebUltra26, URLS.ebUltra25, URLS.ebIbiza, URLS.jsUltra])
+    }
+  })
+
+  it('Eli Brown Ultra ranks the Ultra Miami 2026 set first (route)', async () => {
     const r = await search(env, 'q=' + encodeURIComponent('Eli Brown Ultra'))
     const urls = r.sets.map((s) => s.url)
     expect(urls[0]).toBe(URLS.ebUltra26)
@@ -120,8 +140,9 @@ describe('GET /ui/api/search', () => {
     expect(r.tracks.findIndex((x) => x.trackKey === 't:1008')).not.toBe(0)
   })
 
-  it('djs match subscription names with corrections', async () => {
+  it('djs match subscription names with corrections: eli brwn corrects to brown', async () => {
     const r = await search(env, 'q=' + encodeURIComponent('eli brwn'))
+    expect(r.corrected).toEqual([{ from: 'brwn', to: 'brown' }])
     expect(r.djs[0]).toEqual({ slug: 'elibrown', name: 'Eli Brown', subscribed: true, sets: 3 })
     expect(r.djs.map((d) => d.slug)).not.toContain('johnsummit')
     // A corrected token matches a DJ name: "summt" -> "summit" (in the vocabulary from the set title).
@@ -130,10 +151,39 @@ describe('GET /ui/api/search', () => {
     expect(s.djs[0]).toMatchObject({ slug: 'johnsummit', sets: 1 })
   })
 
+  it('a crowded vocabulary still corrects plamer to palmer (distance-1 neighbourhood)', async () => {
+    // 300 terms sharing two of plamer's trigrams (ame, mer), all with rowids
+    // before palmer's, so trigram recall alone ranks them above palmer and
+    // fills its LIMIT 50.
+    const crowd = crowdTerms()
+    const crowded = makeEnv()
+    await crowded.SEARCH_DB!.prepare('INSERT INTO search_vocab (term, df) SELECT value, 1 FROM json_each(?)').bind(JSON.stringify(crowd)).run()
+    await crowded.SEARCH_DB!.prepare('INSERT INTO vocab_fts (rowid, term) SELECT id, term FROM search_vocab').run()
+    await seed(crowded)
+    const trigramOnly = (
+      await crowded.SEARCH_DB!.prepare(
+        `SELECT v.term AS term FROM vocab_fts f JOIN search_vocab v ON v.id = f.rowid
+          WHERE vocab_fts MATCH '"pla" OR "lam" OR "ame" OR "mer"' AND length(v.term) BETWEEN 5 AND 7 ORDER BY f.rank LIMIT 50`,
+      ).all<{ term: string }>()
+    ).results.map((x) => x.term)
+    expect(trigramOnly).toHaveLength(50)
+    expect(trigramOnly).not.toContain('palmer')
+
+    const r = await search(crowded, 'q=' + encodeURIComponent('lily plamer dont'))
+    expect(r.corrected).toContainEqual({ from: 'plamer', to: 'palmer' })
+    expect(r.corrected).toContainEqual({ from: 'lily', to: 'lilly' })
+    const keys = r.tracks.map((x) => x.trackKey)
+    expect(keys[0]).toBe('t:1001')
+    expect(keys.indexOf('t:1007')).toBeGreaterThan(0)
+  })
+
   it('exact=1 skips correction', async () => {
     const r = await search(env, 'q=plamer&exact=1')
     expect(r.corrected).toEqual([])
     expect(r.tracks[0]?.artist).not.toBe('Lilly Palmer')
+    expect(r.tracks).toEqual([])
+    expect(r.sets).toEqual([])
+    expect(r.djs).toEqual([])
     const c = await search(env, 'q=plamer')
     expect(c.corrected).toEqual([{ from: 'plamer', to: 'palmer' }])
     expect(c.tracks[0]?.artist).toBe('Lilly Palmer')
@@ -177,6 +227,12 @@ describe('GET /ui/api/search', () => {
     const bad = await get(env, 'q=neck&kind=bogus')
     expect(bad.status).toBe(400)
     expect(((await bad.json()) as { error: string }).error).toBe('invalid_request')
+    // A query with no words needs no index.
+    for (const q of ['', encodeURIComponent('"')]) {
+      const empty = await get(makeEnv({ SEARCH_DB: undefined }), `q=${q}`)
+      expect(empty.status).toBe(200)
+      expect(((await empty.json()) as SearchResponse).tracks).toEqual([])
+    }
     const none = await get(makeEnv({ SEARCH_DB: undefined }), 'q=neck')
     expect(none.status).toBe(503)
     expect(await none.json()).toEqual({ error: 'search_unavailable', message: 'The search index is not bound to this Worker.' })

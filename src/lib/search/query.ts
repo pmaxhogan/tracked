@@ -1,22 +1,11 @@
 /**
- * The search query pipeline (spec §9) behind GET /ui/api/search. Read-only:
- * it reads SEARCH_DB and the main DB (subscriptions, set counts), never writes.
- *
- *   1. Normalize q (normalize.ts), first 8 words, deduped.
- *   2. Expand each word: exact, prefix (≥ 3 chars), and unless `exact`, up to 5
- *      vocabulary corrections for a word not in search_vocab (trigram recall
- *      from vocab_fts, then Damerau-Levenshtein ≤ 1, or ≤ 2 from 7 chars).
- *   3. Recall with FTS5 bm25: the word groups ANDed, then ORed when AND finds
- *      fewer than 10 rows. 4. Re-rank in the Worker with `rankScore` (field
- *      weights, matched fraction², YouTube / recency / subscribed boosts).
- *   5. List every set of each returned track (one query), and match DJs
- *      against the subscription list with the same expanded words.
- *
- * Track recency and `subscribed` come from a track's sets, which are read
- * after recall. The two boosts together multiply by at most MAX_LATE_BOOST,
- * so only candidates whose score without them, times that factor, reaches the
- * limit-th score without them can still make the cut: the sets query reads
- * just those (exact, and one bounded query).
+ * GET /ui/api/search's pipeline (spec §9); reads SEARCH_DB and the main DB only.
+ * 1. Normalize q (≤ 8 words). 2. Expand: exact, prefix, and for words not in
+ * the vocabulary up to 5 corrections (the distance-1 edit neighbourhood, plus
+ * trigram recall for distance 2). 3. FTS5 bm25 recall, AND then OR under 10
+ * rows. 4. Re-rank with `rankScore`; recency/subscribed (≤ MAX_LATE_BOOST) need
+ * a track's sets, so sets are read only for candidates that can still make the
+ * cut. 5. Every set of each returned track; DJs from the subscription list.
  */
 import type { Env } from '../../types'
 import { dbOf } from '../db'
@@ -53,6 +42,8 @@ const RECALL_LIMIT = 200
 /** Correction candidates read from vocab_fts per word, and kept after the distance check. */
 const VOCAB_CANDIDATES = 50
 const MAX_CORRECTIONS = 5
+/** Longest word whose distance-1 edit neighbourhood is looked up (one JSON bind of ~73 terms per character). */
+const MAX_NEIGHBOURHOOD_LEN = 24
 /** Sets listed per track (the newest). */
 const MAX_SETS_PER_TRACK = 50
 const DAY_MS = 86_400_000
@@ -86,6 +77,28 @@ function trigrams(s: string): string[] {
   return [...out]
 }
 
+const EDIT_ALPHABET = [...'abcdefghijklmnopqrstuvwxyz0123456789']
+
+/**
+ * Every string one edit from `w` (deletion, adjacent transposition, and
+ * substitution or insertion of [a-z0-9]), by code point. Normalized words are
+ * lowercase and diacritic-free; other letters just get no new characters.
+ */
+export function editNeighbourhood(w: string): string[] {
+  const c = [...w]
+  const out = new Set<string>()
+  for (let i = 0; i < c.length; i++) out.add([...c.slice(0, i), ...c.slice(i + 1)].join(''))
+  for (let i = 0; i + 1 < c.length; i++) out.add([...c.slice(0, i), c[i + 1], c[i], ...c.slice(i + 2)].join(''))
+  for (let i = 0; i <= c.length; i++) {
+    for (const a of EDIT_ALPHABET) {
+      if (i < c.length && a !== c[i]) out.add([...c.slice(0, i), a, ...c.slice(i + 1)].join(''))
+      out.add([...c.slice(0, i), a, ...c.slice(i)].join(''))
+    }
+  }
+  out.delete(w)
+  return [...out]
+}
+
 /** Step 2: each word's variants, and the best correction per corrected word. */
 async function expand(sdb: D1Database, words: string[], exact: boolean): Promise<{ tokens: QueryToken[]; corrected: Array<{ from: string; to: string }> }> {
   const tokens: QueryToken[] = words.map((w) => ({
@@ -103,25 +116,36 @@ async function expand(sdb: D1Database, words: string[], exact: boolean): Promise
   const unknown = correctable.filter((w) => !known.has(w))
   if (unknown.length === 0) return { tokens, corrected }
 
-  // One candidate query per unknown word, in one batch. The length band is
-  // result-preserving (a term whose length differs by more than `max` is
-  // farther than `max`) and keeps the LIMIT for plausible terms.
+  // One batch, two statements per unknown word:
+  //   - the vocabulary terms in its distance-1 edit neighbourhood, an equality
+  //     lookup, so no distance-1 term is ever missed (skipped above
+  //     MAX_NEIGHBOURHOOD_LEN, which keeps the JSON bind well under 100 KB);
+  //   - trigram recall for distance 2, best bm25 rank first. The length band
+  //     is result-preserving (a term whose length differs by more than `max`
+  //     is farther than `max`) and keeps the LIMIT for plausible terms.
   const maxOf = (w: string) => (len(w) >= 7 ? 2 : 1)
-  const results = await sdb.batch<{ term: string; df: number }>(
-    unknown.map((w) =>
+  const rows = await sdb.batch<{ term: string; df: number }>(
+    unknown.flatMap((w) => [
+      sdb
+        .prepare('SELECT term, df FROM search_vocab WHERE term IN (SELECT value FROM json_each(?))')
+        .bind(JSON.stringify(len(w) <= MAX_NEIGHBOURHOOD_LEN ? editNeighbourhood(w) : [])),
       sdb
         .prepare(
           `SELECT v.term AS term, v.df AS df FROM vocab_fts f JOIN search_vocab v ON v.id = f.rowid
-            WHERE vocab_fts MATCH ? AND length(v.term) BETWEEN ? AND ? LIMIT ${VOCAB_CANDIDATES}`,
+            WHERE vocab_fts MATCH ? AND length(v.term) BETWEEN ? AND ? ORDER BY f.rank LIMIT ${VOCAB_CANDIDATES}`,
         )
         .bind(trigrams(w).map(quote).join(' OR '), len(w) - maxOf(w), len(w) + maxOf(w)),
-    ),
+    ]),
   )
   unknown.forEach((w, i) => {
     const max = maxOf(w)
-    const kept = (results[i]?.results ?? [])
-      .map((r) => ({ term: r.term, df: r.df, distance: damerauLevenshtein(w, r.term, max) }))
-      .filter((c) => c.distance <= max && c.term !== w)
+    const candidates = new Map<string, { term: string; df: number; distance: number }>()
+    for (const r of [...(rows[2 * i]?.results ?? []), ...(rows[2 * i + 1]?.results ?? [])]) {
+      if (r.term === w || candidates.has(r.term)) continue
+      const distance = damerauLevenshtein(w, r.term, max)
+      if (distance <= max) candidates.set(r.term, { term: r.term, df: r.df, distance })
+    }
+    const kept = [...candidates.values()]
       .sort((a, b) => a.distance - b.distance || b.df - a.df || (a.term < b.term ? -1 : a.term > b.term ? 1 : 0))
       .slice(0, MAX_CORRECTIONS)
     if (kept.length === 0) return

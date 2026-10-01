@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { damerauLevenshtein, rankScore, tokenFieldScore, type QueryToken } from '../src/lib/search/score'
-import { parseSearchQuery } from '../src/lib/search/query'
+import { editNeighbourhood, parseSearchQuery } from '../src/lib/search/query'
 
 const tok = (text: string, ...corrections: Array<[string, number]>): QueryToken => ({
   text,
@@ -100,5 +100,20 @@ describe('parseSearchQuery', () => {
     for (const bad of ['kind=bogus', 'kind=', 'limit=0', 'limit=21', 'limit=abc', 'limit=1.5', 'limit=', 'exact=2', 'exact=']) {
       expect(p(bad), bad).toHaveProperty('error')
     }
+  })
+})
+
+describe('editNeighbourhood', () => {
+  it('is every string one deletion, transposition, substitution or insertion away', () => {
+    const n = editNeighbourhood('brwn')
+    expect(n).toContain('brown') // insertion
+    expect(n).toContain('brn') // deletion
+    expect(n).toContain('bwrn') // transposition
+    expect(n).toContain('brwm') // substitution
+    expect(n).not.toContain('brwn')
+    expect(editNeighbourhood('plamer')).toContain('palmer')
+    expect(editNeighbourhood('lily')).toContain('lilly')
+    for (const x of editNeighbourhood('plamer')) expect(x.length === 6 || x.length === 5 || x.length === 7).toBe(true)
+    expect(new Set(editNeighbourhood('ab')).size).toBe(editNeighbourhood('ab').length)
   })
 })
