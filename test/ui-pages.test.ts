@@ -483,6 +483,116 @@ describe('Activity page', () => {
   })
 })
 
+describe('Set diagnostics', () => {
+  const XSS = '<img src=x onerror=1>'
+  const empty = () => ({ url: 'https://www.1001tracklists.com/tracklist/x/some-set.html', now: 1_790_000_000, discovered: [] as any[], schedule: null as any, verification: null as any, media: null as any, video: null as any,
+    playlist: { additions: [] as any[], confirmed: [] as any[] }, hygiene: { removed: [] as any[], removals: [] as any[] }, mkvid: null as any })
+  async function diagCtx() {
+    const { RUNTIME_JS } = await import('../src/ui/runtime')
+    const { SET_DIAG_JS } = await import('../src/ui/pages/set-diag')
+    const ctx = vm.createContext({ document: { getElementById: () => null }, console, Date })
+    vm.runInContext(RUNTIME_JS, ctx)
+    vm.runInContext("TK.fmt.rel = () => 'REL'; TK.fmt.until = () => 'UNTIL';", ctx)
+    vm.runInContext(SET_DIAG_JS, ctx)
+    return ctx as any
+  }
+  const verdict = { ok: false, reason: 'short', label: 'Shorter than the set', detail: 'video 10:00 < last cue 60:00 - 5:00' }
+  const video = (extra: object = {}) => ({ id: 'abcdefghijk', from: 'tracklists', meta: null, verdict, override: false, ...extra })
+  const pendingMkvid = (extra: object = {}) => ({ id: 'r1', status: 'pending', position: 3, readiness: { state: 'waiting_ids', until: 1_800_000_000, idRows: 2 }, attempts: 0, notBefore: null, error: null, videoId: null, style: null, account: 'primary', skipIdWait: false, list: null, ...extra })
+
+  it('setDiagRows: an empty response gives the seven rows in order with their tones', async () => {
+    const ctx = await diagCtx()
+    const rows = ctx.setDiagRows(empty())
+    expect(rows.map((r: any) => r.key)).toEqual(['discovered', 'recording', 'verification', 'rule', 'playlist', 'hygiene', 'mkvid'])
+    expect(rows.map((r: any) => r.tone)).toEqual(['warn', 'info', 'info', 'neutral', 'info', 'ok', 'neutral'])
+    for (const r of rows) { expect(typeof r.label).toBe('string'); expect(typeof r.finding).toBe('string'); expect(Array.isArray(r.facts)).toBe(true) }
+  })
+  it('setDiagRows: mkvid waiting for IDs, the rule verdict, the override and an owner removal', async () => {
+    const ctx = await diagCtx()
+    const byKey = (d: object) => Object.fromEntries(ctx.setDiagRows(d).map((r: any) => [r.key, r]))
+    const m = byKey({ ...empty(), mkvid: pendingMkvid() }).mkvid
+    expect(m.finding.startsWith('#3;')).toBe(true)
+    expect(m.finding).toContain('2 ID rows')
+    expect(m.finding).toContain('UNTIL')
+    const rule = byKey({ ...empty(), video: video() }).rule
+    expect(rule.tone).toBe('bad')
+    expect(rule.finding).toContain('Shorter than the set')
+    expect(rule.finding).toContain('video 10:00 < last cue 60:00 - 5:00')
+    expect(byKey({ ...empty(), video: video({ override: true }) }).rule.tone).toBe('ok')
+    const h = byKey({ ...empty(), video: video(), hygiene: { removed: [{ playlistId: 'PL1', reason: 'owner', at: 1_790_000_000, slug: 'dj-one' }], removals: [] } }).hygiene
+    expect(h.tone).toBe('bad')
+    expect(h.finding).toContain('removed by you')
+  })
+  it('renderDiag escapes upstream text and links DJs, removed videos and mkvid', async () => {
+    const ctx = await diagCtx()
+    const d = { ...empty(),
+      discovered: [{ slug: 'dj-one', artistName: XSS, discoveredAt: 1_790_000_000, processed: true, abandoned: false, failureCount: 0, videoKnown: true, videoId: 'abcdefghijk', videoSource: 'youtube', checkedAt: 1_790_000_000 }],
+      media: { videoId: 'abcdefghijk', noFullNotice: false, lastCueSeconds: 3600, audioMaxSeconds: null, audioKind: null, setTitle: XSS, setDate: null, trackCount: 10, idedCount: 9, fetchedAt: 1_790_000_000 },
+      video: video(),
+      playlist: { additions: [{ key: '1', ts: 1_790_000_000_000, status: 'failed', slug: 'dj-one', videoId: 'abcdefghijk', message: XSS }], confirmed: [] },
+      hygiene: { removed: [], removals: [{ id: 1, at: 1_790_000_000, source: 'sweep', status: 'failed', playlistKind: 'dj', reason: 'dead', detail: XSS }] },
+      mkvid: pendingMkvid({ status: 'failed', position: null, readiness: null, error: XSS }),
+    }
+    const html = ctx.renderDiag(d) as string
+    expect(html).not.toContain('<img')
+    expect(html).toContain('&lt;img src=x onerror=1&gt;')
+    expect(html).toContain('href="/ui/dj/dj-one"')
+    expect(html).toContain('href="/ui/removed"')
+    expect(html).toContain('href="/ui/mkvid"')
+    expect(html.split('class="diag-row"').length - 1).toBe(7)
+  })
+
+  async function runSet(answers: { tracklist: () => Response; set: () => Response }) {
+    const url = 'https://www.1001tracklists.com/tracklist/x/some-set.html'
+    const fetches: string[] = []
+    const { ctx, els } = richStub(async (u: string) => {
+      fetches.push(u)
+      if (u === '/ui/api/tracklist') return answers.tracklist()
+      if (u.startsWith('/ui/api/set?url=')) return answers.set()
+      return new Response('{}', { status: 404 })
+    }, '/ui/set')
+    ;(ctx as any).location.search = '?url=' + encodeURIComponent(url)
+    const html = await (await app.request('https://tracked.example/ui/set', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    return { fetches, els, html, url }
+  }
+  it('the page keeps its ids and carries the diagnostics column', async () => {
+    const html = await (await app.request('https://tracked.example/ui/set', {}, env())).text()
+    for (const id of ['load-form', 'url', 'load-btn', 'error', 'setmeta', 'cachebar', 'refresh', 'load-links', 'tracks', 'empty']) expect(html).toContain(`id="${id}"`)
+    expect(html).toContain('<aside id="diag" class="tk-card set-diag" aria-label="Diagnostics" hidden>')
+    expect(html).toContain('class="set-layout"')
+    expect(html).toContain('why it is or is not in your playlists')
+  })
+  it('diagnostics render when the track list fails', async () => {
+    const { fetches, els, url } = await runSet({
+      tracklist: () => Response.json({ error: 'upstream', message: 'Upstream failed' }, { status: 502 }),
+      set: () => Response.json(empty()),
+    })
+    expect(fetches).toContain('/ui/api/set?url=' + encodeURIComponent(url))
+    expect(fetches).toContain('/ui/api/tracklist')
+    expect(els.get('diag').hidden).toBe(false)
+    expect(els.get('diag').innerHTML).toContain('Discovered')
+    expect(els.get('error').textContent).toBe('Upstream failed')
+  })
+  it('a 400 hides the column', async () => {
+    const { els } = await runSet({
+      tracklist: () => Response.json({ error: 'invalid_request', message: 'not a tracklist' }, { status: 400 }),
+      set: () => Response.json({ error: 'invalid_request', message: 'not a tracklist' }, { status: 400 }),
+    })
+    expect(els.get('diag').hidden).toBe(true)
+  })
+  it('any other failure says so in the column; the track list still renders', async () => {
+    const { els } = await runSet({
+      tracklist: () => Response.json({ tracks: [], trackCount: 0 }),
+      set: () => Response.json({ error: 'internal' }, { status: 500 }),
+    })
+    expect(els.get('diag').hidden).toBe(false)
+    expect(els.get('diag').innerHTML).toContain('Diagnostics unavailable: Something went wrong in the Worker.')
+    expect(els.get('empty').textContent).toBe('No tracks found.')
+  })
+})
+
 describe('Settings and Tools pages', () => {
   it('Settings carries the ban-script ids and the cards; Tools carries the simulate link', async () => {
     const s = await (await app.request('https://tracked.example/ui/settings', {}, env())).text()

@@ -1,14 +1,21 @@
 // Set page: paste a 1001tracklists tracklist URL (or arrive with ?url=) and get
 // a clean per-song list. Data comes from the Access-gated POST /ui/api/tracklist.
+// Beside it (above it on narrow screens) the diagnostics column says why the
+// set is or is not in the playlists, from GET /ui/api/set (set-diag.ts); the
+// two calls run in parallel and either renders without the other.
 import { shell } from '../shell'
 import type { UiPage } from './index'
 import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
+import { SET_DIAG_CSS, SET_DIAG_JS } from './set-diag'
 
 const BODY = /* html */ `
   <form id="load-form" class="tk-card set-form">
     <div class="field grow"><label for="url">Tracklist URL</label><input id="url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" required autofocus /></div>
     <button id="load-btn" type="submit" class="btn primary">Load</button>
   </form>
+  <div class="set-layout">
+  <aside id="diag" class="tk-card set-diag" aria-label="Diagnostics" hidden></aside>
+  <div class="set-main">
   <div id="error" class="error" role="alert"></div>
   <div id="setmeta" class="tk-row muted set-meta" hidden></div>
   <div id="cachebar" class="tk-row cachebar" hidden>
@@ -19,6 +26,8 @@ const BODY = /* html */ `
   </div>
   <div id="tracks" class="tk-card" hidden></div>
   <div id="empty" class="empty" hidden></div>
+  </div>
+  </div>
 `
 
 const CSS = /* css */ `
@@ -28,16 +37,18 @@ const CSS = /* css */ `
   .cachebar { font-size: var(--fs-sm); margin-bottom: var(--sp-3); }
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
   #tracks .trk:last-child { border-bottom: 0; }
-${TRACK_ROW_CSS}`
+${TRACK_ROW_CSS}
+${SET_DIAG_CSS}`
 
 const JS = /* js */ `
 (() => {
 ${TRACK_ROW_JS}
+${SET_DIAG_JS}
   const $ = TK.$;
   const $form = $('load-form'), $url = $('url'), $btn = $('load-btn'), $error = $('error'), $setmeta = $('setmeta');
   const $tracks = $('tracks'), $empty = $('empty'), $cachebar = $('cachebar'), $cacheAge = $('cache-age');
-  const $refresh = $('refresh'), $loadLinks = $('load-links'), $result = $('refresh-result');
-  let currentUrl = null;
+  const $refresh = $('refresh'), $loadLinks = $('load-links'), $result = $('refresh-result'), $diag = $('diag');
+  let currentUrl = null, seq = 0;
 
   // One status line; a later success clears the failure colour.
   function setResult(msg, bad) { $result.className = 'result' + (bad ? ' bad' : ' muted'); $result.textContent = msg; }
@@ -70,12 +81,37 @@ ${TRACK_ROW_JS}
     $empty.hidden = true;
   }
 
+  // Diagnostics: a 400 means "not a tracklist URL" and hides the column.
+  async function loadDiag(url, my) {
+    const res = await TK.api.get('/ui/api/set?url=' + encodeURIComponent(url));
+    if (my !== seq) return;
+    if (res.status === 400) { $diag.innerHTML = ''; $diag.hidden = true; return; }
+    if (!res.ok || !res.data || typeof res.data !== 'object') {
+      $diag.innerHTML = '<p class="diag-err">Diagnostics unavailable: ' + TK.esc(TK.errText(res, 'failed (' + (res.status || 'offline') + ')')) + '</p>';
+      $diag.hidden = false;
+      return;
+    }
+    $diag.innerHTML = renderDiag(res.data);
+    $diag.hidden = false;
+  }
+
+  // The track list and the diagnostics load in parallel and independently; a
+  // newer load drops an older one's responses.
   async function load(url) {
     currentUrl = url;
+    const my = ++seq;
     $error.textContent = '';
     $empty.hidden = true;
+    // Never leave another set's diagnostics on screen while this one loads.
+    if (!$diag.hidden) $diag.innerHTML = '<p class="muted">Loading diagnostics…</p>';
+    loadDiag(url, my).catch((e) => {
+      if (my !== seq) return;
+      $diag.innerHTML = '<p class="diag-err">Diagnostics unavailable: ' + TK.esc(e && e.message ? e.message : e) + '</p>';
+      $diag.hidden = false;
+    });
     await TK.busy($btn, 'Loading…', async () => {
       const res = await TK.api.post('/ui/api/tracklist', { url });
+      if (my !== seq) return;
       const data = res.data || {};
       if (!res.ok) {
         $tracks.textContent = '';
@@ -146,7 +182,7 @@ export const SET_PAGE: UiPage = {
   html: shell({
     nav: null,
     title: 'Set',
-    description: 'Paste a 1001tracklists tracklist URL to see its tracks and links.',
+    description: 'Paste a 1001tracklists tracklist URL to see its tracks, links and why it is or is not in your playlists.',
     body: BODY,
     css: CSS,
     js: JS,
