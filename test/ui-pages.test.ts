@@ -523,6 +523,38 @@ describe('Set diagnostics', () => {
     expect(h.tone).toBe('bad')
     expect(h.finding).toContain('removed by you')
   })
+  it('setDiagRows: discovery, verification, playlist and mkvid tones', async () => {
+    const ctx = await diagCtx()
+    const byKey = (d: object) => Object.fromEntries(ctx.setDiagRows(d).map((r: any) => [r.key, r]))
+    const dj = (extra: object) => ({ slug: 'dj', artistName: null, discoveredAt: 1, processed: false, abandoned: false, failureCount: 0, videoKnown: false, videoId: null, videoSource: null, checkedAt: null, ...extra })
+    const disc = byKey({ ...empty(), discovered: [dj({ slug: 'a', failureCount: 9 }), dj({ slug: 'b', abandoned: true, failureCount: 4 })] }).discovered
+    expect([disc.tone, disc.finding]).toEqual(['bad', 'Given up after 4 failed fetches.'])
+    const ver = (extra: object) => ({ state: 'pending', rowCount: 30, firstAccount: 'acct-1', firstFetchedAt: 1, verifyDueAt: 1_800_000_000, secondAccount: null, secondFetchedAt: null, verifiedAt: null, mismatches: 0, ...extra })
+    const pending = byKey({ ...empty(), verification: ver({}) }).verification
+    expect([pending.tone, pending.finding]).toEqual(['warn', 'First fetch by acct-1, second fetch due UNTIL.'])
+    // A due time already past reads as "… ago", never "in 1m".
+    expect(byKey({ ...empty(), verification: ver({ verifyDueAt: 1_000_000 }) }).verification.finding).toBe('First fetch by acct-1, second fetch due REL.')
+    const verified = byKey({ ...empty(), verification: ver({ state: 'verified', verifiedAt: 1, secondAccount: 'acct-2', secondFetchedAt: 1, mismatches: 2 }) }).verification
+    expect([verified.tone, verified.finding]).toEqual(['ok', 'Verified REL (30 rows). 2 earlier pair(s) disagreed.'])
+    const add = (status: string, message: string | null = null) => ({ ...empty(), playlist: { additions: [{ key: '1', ts: 1_790_000_000_000, status, slug: 'dj', videoId: null, message }], confirmed: [] } })
+    expect([byKey(add('failed', 'quota')).playlist.tone, byKey(add('failed', 'quota')).playlist.finding]).toEqual(['bad', 'failed: quota.'])
+    expect(byKey(add('no_youtube')).playlist.tone).toBe('warn')
+    expect(byKey(add('added')).playlist.tone).toBe('ok')
+    const backoff = byKey({ ...empty(), mkvid: pendingMkvid({ readiness: { state: 'backoff', until: 1_800_000_000 } }) }).mkvid
+    expect([backoff.tone, backoff.finding]).toEqual(['warn', '#3; retry backoff until UNTIL.'])
+    const done = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'done', position: null, readiness: null, videoId: 'abcdefghijk' }) }).mkvid
+    expect([done.tone, done.finding]).toEqual(['ok', 'Uploaded abcdefghijk.'])
+    const sup = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'superseded', position: null, readiness: null }) }).mkvid
+    expect([sup.tone, sup.finding]).toEqual(['neutral', 'Superseded by an official recording.'])
+  })
+  it('the sticky column scrolls on its own from 1100px', async () => {
+    const { SET_DIAG_CSS } = await import('../src/ui/pages/set-diag')
+    const wide = /@media \(min-width: 1100px\) \{([\s\S]*?)\n  \}/.exec(SET_DIAG_CSS)![1]!
+    const rule = /\.set-diag \{([^}]*)\}/.exec(wide)![1]!
+    expect(rule).toContain('position: sticky')
+    expect(rule).toContain('max-height: calc(100vh - 2 * var(--sp-4))')
+    expect(rule).toContain('overflow-y: auto')
+  })
   it('renderDiag escapes upstream text and links DJs, removed videos and mkvid', async () => {
     const ctx = await diagCtx()
     const d = { ...empty(),
@@ -581,6 +613,32 @@ describe('Set diagnostics', () => {
       set: () => Response.json({ error: 'invalid_request', message: 'not a tracklist' }, { status: 400 }),
     })
     expect(els.get('diag').hidden).toBe(true)
+  })
+  it('a newer load drops the older diagnostics response', async () => {
+    const url2 = 'https://www.1001tracklists.com/tracklist/y/other-set.html'
+    let releaseOld!: () => void
+    const oldGate = new Promise<void>((r) => { releaseOld = r })
+    let submit: ((ev: unknown) => void) | undefined
+    const { ctx, els } = richStub(async (u: string) => {
+      if (u === '/ui/api/tracklist') return Response.json({ tracks: [], trackCount: 0 })
+      if (u === '/ui/api/set?url=' + encodeURIComponent(url2)) return Response.json({ ...empty(), url: url2, media: { setTitle: 'NEW SET' } })
+      if (u.startsWith('/ui/api/set?url=')) { await oldGate; return Response.json({ ...empty(), media: { setTitle: 'OLD SET' } }) }
+      return new Response('{}', { status: 404 })
+    }, '/ui/set')
+    ;(ctx as any).location.search = '?url=' + encodeURIComponent('https://www.1001tracklists.com/tracklist/x/some-set.html')
+    ;(ctx as any).document.getElementById('load-form').addEventListener = (t: string, fn: (ev: unknown) => void) => { if (t === 'submit') submit = fn }
+    const html = await (await app.request('https://tracked.example/ui/set', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    const tick = async () => { for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0)) }
+    await tick()
+    els.get('url').value = url2
+    submit!({ preventDefault() {} })
+    await tick()
+    expect(els.get('diag').innerHTML).toContain('NEW SET')
+    releaseOld()
+    await tick()
+    expect(els.get('diag').innerHTML).toContain('NEW SET')
+    expect(els.get('diag').innerHTML).not.toContain('OLD SET')
   })
   it('any other failure says so in the column; the track list still renders', async () => {
     const { els } = await runSet({

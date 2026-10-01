@@ -25,11 +25,12 @@ export const SET_DIAG_JS = /* js */ `
       facts.push(['Processed', x.abandoned ? 'abandoned' : diagYes(x.processed)]);
       facts.push(['Checked', x.checkedAt == null ? 'never' : x.checkedAt === 0 ? 'due now' : diagRel(x.checkedAt)]);
     }
-    const fails = Math.max(0, ...ds.map((x) => x.failureCount || 0));
+    const maxFails = (xs) => Math.max(0, ...xs.map((x) => x.failureCount || 0));
+    const abandoned = ds.filter((x) => x.abandoned);
     let tone, finding;
     if (!ds.length) { tone = 'warn'; finding = 'No subscribed DJ lists this set.'; }
-    else if (ds.some((x) => x.abandoned)) { tone = 'bad'; finding = 'Given up after ' + fails + ' failed fetches.'; }
-    else if (fails > 0) { tone = 'warn'; finding = fails + ' failed fetches so far.'; }
+    else if (abandoned.length) { tone = 'bad'; finding = 'Given up after ' + maxFails(abandoned) + ' failed fetches.'; }
+    else if (maxFails(ds) > 0) { tone = 'warn'; finding = maxFails(ds) + ' failed fetches so far.'; }
     else { tone = 'ok'; finding = 'Listed under ' + ds.map((x) => x.artistName || x.slug).join(', ') + '.'; }
     return { key: 'discovered', label: 'Discovered', tone, finding, facts };
   }
@@ -59,7 +60,7 @@ export const SET_DIAG_JS = /* js */ `
     if (v.state === 'verified') { tone = 'ok'; finding = 'Verified ' + diagRel(v.verifiedAt) + ' (' + v.rowCount + ' rows).'; }
     else {
       tone = 'warn';
-      finding = 'First fetch by ' + (v.firstAccount || 'an account') + ', ' + (v.verifyDueAt ? 'second fetch due ' + TK.fmt.until(v.verifyDueAt) : 'second fetch not scheduled') + '.';
+      finding = 'First fetch by ' + (v.firstAccount || 'an account') + ', ' + (v.verifyDueAt ? 'second fetch due ' + diagWhen(v.verifyDueAt) : 'second fetch not scheduled') + '.';
     }
     if (v.mismatches > 0) finding += ' ' + v.mismatches + ' earlier pair(s) disagreed.';
     const facts = [
@@ -181,7 +182,7 @@ export const SET_DIAG_CSS = /* css */ `
   @media (min-width: 1100px) {
     .set-layout { grid-template-columns: minmax(0, 1fr) 24rem; }
     .set-layout > .set-main { grid-column: 1; grid-row: 1; }
-    .set-layout > .set-diag { grid-column: 2; grid-row: 1; position: sticky; top: var(--sp-4); }
+    .set-layout > .set-diag { grid-column: 2; grid-row: 1; position: sticky; top: var(--sp-4); max-height: calc(100vh - 2 * var(--sp-4)); overflow-y: auto; }
   }
   .set-diag { padding: var(--sp-3) var(--sp-4); min-width: 0; }
   .set-diag[hidden] { display: none; }
