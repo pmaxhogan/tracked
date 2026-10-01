@@ -23,6 +23,7 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/dj/some-dj', ''],
   ['/ui/removed', 'Removed videos'],
   ['/ui/mkvid', 'mkvid'],
+  ['/ui/activity', 'Activity'],
   ['/ui/settings', 'Settings'],
   ['/ui/tools', 'Tools'],
 ]
@@ -70,6 +71,15 @@ describe('shell()', () => {
     expect(h).toContain('tk-main narrow')
     // Search is its own page from phase 3; until then it opens the DJs filter.
     for (const p of ['/ui/', '/ui/djs', '/ui/djs?focus=filter', '/ui/mkvid', '/ui/pool']) expect(h).toContain(`href="${p}"`)
+    // Activity is in the sidebar and the menu, never a phone tab.
+    const tabBar = /<nav class="tk-tabs"[^>]*>([\s\S]*?)<\/nav>/.exec(h)![1]!
+    expect(tabBar.match(/href="/g)!.length).toBe(5)
+    expect(tabBar).not.toContain('/ui/activity')
+  })
+  it('the Activity nav item sits in the Pipeline group and lights up on its page', () => {
+    const h = shell({ nav: 'activity', title: 'Activity', body: '' })
+    expect(h).toMatch(/<a [^>]*href="\/ui\/activity"[^>]*class="on"/)
+    expect(h).toMatch(/href="\/ui\/mkvid"[^>]*>(?:(?!<\/a>)[\s\S])*<\/a><a href="\/ui\/activity"/)
   })
 })
 
@@ -352,6 +362,82 @@ describe('Home page', () => {
     clicks['pl-list']!(row)
     for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
     expect(els.get('tk-drawer-body').innerHTML).toContain('detail not found')
+  })
+})
+
+describe('Activity page', () => {
+  const rows = [
+    { ts: Date.now() - 60_000, kind: 'request', status: 'no_video', problem: true, title: 'Bad <img src=x onerror=1>', detail: 'no match', dj: null, setUrl: null, videoId: null, ref: { kind: 'audit', key: '11' } },
+    { ts: Date.now() - 120_000, kind: 'playlist', status: 'added', problem: false, title: 'Some set', detail: 'added to PL1', dj: 'dj-one', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', videoId: 'abcdefghijk', ref: { kind: 'addition', key: '12' } },
+  ]
+  async function run(search: string) {
+    const fetches: string[] = []
+    const { ctx, els } = richStub(async (u: string) => {
+      fetches.push(u)
+      if (u.startsWith('/ui/api/activity?')) return Response.json({ rows, cursor: 'x' })
+      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-one', sourceUrl: 'https://x', addedAt: 1 }] })
+      if (u === '/ui/api/audit-detail?key=11') return Response.json({ record: { t: 'now', reqId: 'r1', status: 'no_video', input: { videoTitle: 'Bad <img src=x onerror=1>' }, youtube: {}, search: { attempts: [] }, meta: {} } })
+      return new Response('{}', { status: 404 })
+    }, '/ui/activity')
+    ;(ctx as any).URL = URL
+    ;(ctx as any).location.search = search
+    const clicks: Record<string, (ev: unknown) => void> = {}
+    ;(ctx as any).document.getElementById('a-list').addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks.list = fn }
+    const html = await (await app.request('https://tracked.example/ui/activity', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    return { fetches, els, clicks, html }
+  }
+  it('renders the rows from one GET /ui/api/activity, escaped, with DJ and set links and Load older', async () => {
+    const { fetches, els, clicks, html } = await run('')
+    expect(html).toContain('id="a-filters"')
+    expect(html).toContain('data-kind="request"')
+    // The page's own first fetch (BAN_JS reads the ban status on every page).
+    const first = fetches.find((u) => !u.startsWith('/ui/api/ban/')) ?? ''
+    expect(first.startsWith('/ui/api/activity?')).toBe(true)
+    expect(first).toContain('&since=')
+    expect(first).toContain('limit=50')
+    expect(first).not.toContain('kind=')
+    expect(fetches).toContain('/ui/api/list')
+    const list = els.get('a-list').innerHTML as string
+    expect(list.split('class="a-row err"').length - 1).toBe(1)
+    expect(list).toContain('/ui/dj/dj-one')
+    expect(list).toContain('/ui/set?url=')
+    expect(list).toContain('&lt;img')
+    expect(list).not.toContain('<img')
+    expect(els.get('a-more').hidden).toBe(false)
+    expect(els.get('a-dj').innerHTML).toContain('value="dj-one"')
+    clicks.list!({ target: { closest: () => ({ dataset: { i: '0' } }) } })
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(fetches).toContain('/ui/api/audit-detail?key=11')
+    expect(els.get('tk-drawer-body').innerHTML).toContain('YouTube match')
+    clicks.list!({ target: { closest: () => ({ dataset: { i: '1' } }) } })
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(fetches.some((u) => u.startsWith('/ui/api/playlist-addition-detail?key=12'))).toBe(true)
+  })
+  it('reads kind, problems, DJ and range from the query string', async () => {
+    const { fetches, els } = await run('?kind=pool,ban,bogus&problems=1&range=24h&dj=dj-one')
+    const u = fetches.find((x) => x.startsWith('/ui/api/activity?')) ?? ''
+    expect(u).toMatch(/kind=pool(%2C|,)ban(&|$)/)
+    expect(u).toContain('problems=1')
+    expect(u).toContain('dj=dj-one')
+    const since = Number(/since=(\d+)/.exec(u)![1])
+    expect(Math.abs(since - (Date.now() - 86_400_000))).toBeLessThan(1000)
+    expect(els.get('a-kinds').innerHTML).toMatch(/class="chip on" data-kind="pool" aria-pressed="true"/)
+    expect(els.get('a-ranges').innerHTML).toMatch(/class="chip on" data-range="24h" aria-pressed="true"/)
+  })
+  it('its page script runs in the minimal stub too', async () => {
+    const html = await (await app.request('https://tracked.example/ui/activity', {}, env())).text()
+    const c = minimalStub()
+    for (const s of scriptsOf(html)) expect(() => vm.runInContext(s, c)).not.toThrow()
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+  })
+  it('Home uses the shared detail renderers instead of its own copy', async () => {
+    const { readFileSync } = await import('node:fs')
+    expect(readFileSync('src/ui/pages/home.ts', 'utf8')).not.toContain('function auditDetailHtml')
+    const { ACTIVITY_DETAIL_JS } = await import('../src/ui/pages/activity-detail')
+    const { HOME_PAGE } = await import('../src/ui/pages/home')
+    expect(HOME_PAGE.html).toContain(ACTIVITY_DETAIL_JS)
   })
 })
 

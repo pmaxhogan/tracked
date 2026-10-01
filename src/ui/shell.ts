@@ -32,7 +32,6 @@ export interface NavItem {
 /** Where "search" goes until the Search page ships (phase 3). */
 export const SEARCH_HREF = '/ui/djs?focus=filter'
 
-// Activity (/ui/activity) joins the Pipeline group in phase 2.
 export const NAV: NavItem[] = [
   { key: 'home', label: 'Home', href: '/ui/', icon: 'home', group: null, tab: 'Home' },
   { key: 'djs', label: 'DJs', href: '/ui/djs', icon: 'djs', group: 'Library', tab: 'DJs' },
@@ -40,6 +39,7 @@ export const NAV: NavItem[] = [
   { key: 'playlists', label: 'Playlists', href: '/ui/playlists', icon: 'playlist', group: 'Library' },
   { key: 'removed', label: 'Removed videos', href: '/ui/removed', icon: 'removed', group: 'Library' },
   { key: 'mkvid', label: 'mkvid', href: '/ui/mkvid', icon: 'mkvid', group: 'Pipeline', tab: 'mkvid' },
+  { key: 'activity', label: 'Activity', href: '/ui/activity', icon: 'activity', group: 'Pipeline' },
   { key: 'pool', label: 'Accounts', href: '/ui/pool', icon: 'pool', group: 'Pool', tab: 'Pool' },
   { key: 'captcha', label: 'Challenges', href: '/ui/captcha', icon: 'captcha', group: 'Pool', extra: '<span class="count" id="nav-count-captcha" hidden></span>' },
   { key: 'pool-settings', label: 'Pool settings', href: '/ui/pool/settings', icon: 'sliders', group: 'Pool' },
