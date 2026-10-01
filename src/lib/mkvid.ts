@@ -753,6 +753,15 @@ export async function listPendingMkvidRequests(env: Env, limit = 50): Promise<Mk
 const CLAIMABLE_WHERE = `(status = 'pending' AND (not_before IS NULL OR not_before <= ?))
             OR (status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?)`
 const QUEUE_ORDER = 'ORDER BY sort_key DESC, created_at DESC, rowid ASC'
+
+/** 1-based place of a pending request in the whole queue (claim order); null when it is not pending. */
+export async function mkvidQueuePosition(env: Env, id: string): Promise<number | null> {
+  const row = await dbOf(env)
+    .prepare(`SELECT position FROM (SELECT id, ROW_NUMBER() OVER (${QUEUE_ORDER}) AS position FROM mkvid_requests WHERE status = 'pending') WHERE id = ?`)
+    .bind(id)
+    .first<{ position: number }>()
+  return row ? Number(row.position) : null
+}
 /** The same order over the paged panel query, whose subquery exposes `rowid` as `rid`. */
 const QUEUE_PAGE_ORDER = 'ORDER BY sort_key DESC, created_at DESC, rid ASC'
 /** CLAIMABLE_WHERE and QUEUE_ORDER over `mkvid_requests r` joined to its track list. */
