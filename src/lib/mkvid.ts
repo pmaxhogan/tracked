@@ -1331,7 +1331,7 @@ export async function findMkvidUploadByTitle(env: Env, title: string): Promise<M
        WHERE video_id IS NOT NULL AND set_title IS NOT NULL AND (status IN ('done', 'superseded') OR replaces_video_id IS NOT NULL)
          AND (lower(substr(trim(set_title), 1, 100)) = lower(?1) OR lower(substr(trim(set_title), 1, 100)) = lower(?4)
               OR (?2 = 1 AND trim(set_title) LIKE ?3 ESCAPE '\\'))
-       ORDER BY updated_at DESC LIMIT 1`,
+       ORDER BY (lower(substr(trim(set_title), 1, 100)) IN (lower(?1), lower(?4))) DESC, updated_at DESC LIMIT 1`,
     )
     .bind(needle, cut ? 1 : 0, like, raw)
     .first<{ slug: string; set_url: string; set_title: string; video_id: string }>()
