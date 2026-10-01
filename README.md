@@ -259,7 +259,7 @@ OpenAPI spec: `GET /openapi.json` (bearer-gated).
 | `/ui/settings` | Settings: YouTube account, notifications and devices, theme, integration status, IP-ban episodes |
 | `/ui/tools` | Tools: YouTube video JSON, purge a tracklist, simulate a ban, requeue victims, migration status |
 
-Not built yet: **Activity** (`/ui/activity`, a unified log with filters; phase 2, and the set diagnostics view) and **Search** (`/ui/search`, sets, tracks and DJs; phase 3). In phase 1 the search box in the shell links to the DJs filter.
+Not built yet: **Activity** (`/ui/activity`, a unified log with filters; phase 2, and the set diagnostics view) and **Search** (`/ui/search`, sets, tracks and DJs; phase 3). In phase 1 the search box at the top of the page, the Search tab and the `/` key all open the DJs filter.
 
 ### The shell
 

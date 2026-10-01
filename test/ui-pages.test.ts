@@ -54,6 +54,13 @@ describe('shell()', () => {
     for (const s of scripts) expect(() => new vm.Script(s)).not.toThrow()
     expect(html).not.toMatch(/<script [^>]/)
   })
+  it('has a GET search form for the DJs filter (desktop only) and no POST form', () => {
+    const h = shell({ nav: 'home', title: 'Home', body: '' })
+    expect(h).toContain('<form class="tk-search" action="/ui/djs" method="get" role="search">')
+    expect(h).toContain('<input id="tk-search" name="q" type="search" placeholder="Filter DJs" aria-label="Filter DJs">')
+    expect(h).not.toMatch(/<form[^>]*method="?post/i)
+    expect(h).toContain('href="/ui/" title="tracked"')
+  })
   it('its shared scripts run in the minimal pool stub', () => {
     const c = minimalStub()
     for (const s of scriptsOf(shell({ nav: 'pool', title: 'Pool accounts', body: '' })).slice(0, 4)) expect(() => vm.runInContext(s, c)).not.toThrow()
@@ -62,7 +69,7 @@ describe('shell()', () => {
     const h = shell({ nav: 'captcha', title: 'Captcha', body: '', width: 'narrow' })
     expect(h).toContain('tk-main narrow')
     // Search is its own page from phase 3; until then it opens the DJs filter.
-    for (const p of ['/ui', '/ui/djs', '/ui/djs?focus=filter', '/ui/mkvid', '/ui/pool']) expect(h).toContain(`href="${p}"`)
+    for (const p of ['/ui/', '/ui/djs', '/ui/djs?focus=filter', '/ui/mkvid', '/ui/pool']) expect(h).toContain(`href="${p}"`)
   })
 })
 

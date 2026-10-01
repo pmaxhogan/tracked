@@ -34,7 +34,7 @@ export const SEARCH_HREF = '/ui/djs?focus=filter'
 
 // Activity (/ui/activity) joins the Pipeline group in phase 2.
 export const NAV: NavItem[] = [
-  { key: 'home', label: 'Home', href: '/ui', icon: 'home', group: null, tab: 'Home' },
+  { key: 'home', label: 'Home', href: '/ui/', icon: 'home', group: null, tab: 'Home' },
   { key: 'djs', label: 'DJs', href: '/ui/djs', icon: 'djs', group: 'Library', tab: 'DJs' },
   { key: 'search', label: 'Search', href: SEARCH_HREF, icon: 'search', group: 'Library', tab: 'Search' },
   { key: 'playlists', label: 'Playlists', href: '/ui/playlists', icon: 'playlist', group: 'Library' },
@@ -179,7 +179,7 @@ export function shell(o: ShellOptions): string {
 <body data-ban-page="${o.banPage ?? 'other'}"${own}>
 <div class="tk-shell">
   <aside class="tk-side">
-    <a class="tk-brand" href="/ui" title="tracked">${icon('playlist')}<span class="lbl">tracked</span></a>
+    <a class="tk-brand" href="/ui/" title="tracked">${icon('playlist')}<span class="lbl">tracked</span></a>
     <nav class="tk-nav" aria-label="Pages">${sideNav(o.nav)}</nav>
     <div class="tk-side-foot">
       <span id="tk-status" class="badge neutral" title="Fetch status">…</span>
@@ -189,6 +189,7 @@ export function shell(o: ShellOptions): string {
   </aside>
   <header class="tk-top"><button type="button" class="btn icon" id="tk-menu-btn" aria-label="Menu">${icon('menu')}</button><span class="tk-top-title">${title}</span></header>
   <main class="tk-main${o.width === 'narrow' ? ' narrow' : ''}" id="main">
+    <form class="tk-search" action="/ui/djs" method="get" role="search"><input id="tk-search" name="q" type="search" placeholder="Filter DJs" aria-label="Filter DJs"></form>
     ${BAN_BANNER_HTML}
     <div class="tk-head"><div><h1${o.h1Id ? ` id="${esc(o.h1Id)}"` : ''}>${title}</h1>${o.description ? `<p class="desc">${o.description}</p>` : ''}</div><div class="actions">${o.actions ?? ''}</div></div>
     ${o.body}

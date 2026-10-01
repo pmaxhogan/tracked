@@ -37,6 +37,8 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
 .tk-main { max-width: 1400px; width: 100%; padding: var(--sp-5) var(--sp-6) 48px; min-width: 0; }
 .tk-main.narrow { max-width: 560px; margin-inline: auto; }
 .tk-top, .tk-tabs { display: none; }
+.tk-search { margin: 0 0 var(--sp-3); }
+.tk-search input { width: 100%; max-width: 22rem; }
 
 /* ── page header ── */
 .tk-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4); }
@@ -206,6 +208,7 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
   .tk-shell { display: block; }
   .tk-side { display: none; }
   .tk-top { display: flex; }
+  .tk-search { display: none; }
   .tk-tabs { display: grid; }
   .tk-main { padding: 12px var(--sp-4) calc(72px + env(safe-area-inset-bottom)); }
   .tk-head { flex-direction: column; }

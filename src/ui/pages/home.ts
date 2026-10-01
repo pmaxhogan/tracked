@@ -158,8 +158,8 @@ ${DJ_ACTIONS_JS}
     if (poolS) {
       const accts = (poolS.accounts || []).filter((a) => a.state !== 'retired');
       const fetching = accts.filter((a) => !a.passive && !a.flagged && (a.state === 'active' || a.state === 'warming' || a.state === 'ok' || a.state === 'healthy' || a.state === 'ramping'));
-      const budget = fetching.reduce((n, a) => n + (a.budget || 0), 0);
-      const used = fetching.reduce((n, a) => n + (a.usedToday || 0), 0);
+      const budget = fetching.reduce((n, a) => n + (Number(a.budget) || 0), 0);
+      const used = fetching.reduce((n, a) => n + (Number(a.usedToday) || 0), 0);
       s.push(used + ' / ' + budget + ' pages today');
       m = meter(used, budget);
     } else if (poolS === null) s.push('<span class="bad">pool ' + esc(poolErr) + '</span>');
@@ -218,8 +218,8 @@ ${DJ_ACTIONS_JS}
     if (ytS === null) s.push('<span class="bad">' + esc(ytErr) + '</span>');
     let m = '';
     if (cmbS && cmbS.connected !== false) {
-      const cap = cmbS.dailyInsertCap || 0, used = cmbS.dailyInsertsUsed || 0;
-      s.push(used + ' / ' + cap + ' combined inserts today' + (cmbS.missingTotal ? ' · ' + cmbS.missingTotal + ' still to add' : ''));
+      const cap = Number(cmbS.dailyInsertCap) || 0, used = Number(cmbS.dailyInsertsUsed) || 0;
+      s.push(used + ' / ' + cap + ' combined inserts today' + (Number(cmbS.missingTotal) ? ' · ' + Number(cmbS.missingTotal) + ' still to add' : ''));
       m = meter(used, cap);
     } else if (cmbS === null) s.push('<span class="bad">combined ' + esc(cmbErr) + '</span>');
     tileHtml('t-yt', v, s.join(' · '), { vcls: vcls + (ytS && ytS.connected ? ' small' : ''), meter: m });
@@ -445,7 +445,7 @@ ${DJ_ACTIONS_JS}
     const body = TK.drawer.open(title, '<span class="muted">loading…</span>');
     const res = await TK.api.get(path);
     if (seq !== drawerSeq || !body) return;
-    if (res.status === 0) { body.innerHTML = '<span class="warn">failed to load detail</span>'; return; }
+    if (!res.ok && res.status !== 404) { body.innerHTML = '<span class="warn">failed to load detail</span>'; return; }
     const rec = res.data && res.data.record;
     body.innerHTML = '<div class="h-detail">' + (rec ? render(rec) : '<span class="warn">detail not found</span>') + '</div>';
   }

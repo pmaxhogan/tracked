@@ -84,7 +84,7 @@ describe('old service worker cleanup', () => {
    * an installing worker that activates a macrotask later, and subscribe()
    * rejects until then (Chromium: "no active Service Worker").
    */
-  async function runMigration(opts: { old: boolean; install?: 'activated' | 'redundant' | 'stuck'; subscribeStatus?: number }) {
+  async function runMigration(opts: { old: boolean; install?: 'activated' | 'redundant' | 'stuck'; subscribeStatus?: number; existingSub?: boolean; storage?: Map<string, string> }) {
     const { BAN_JS } = await import('../src/routes/ban-ui')
     const posts: Array<{ url: string; body: string }> = []
     const registered: Array<[string, unknown]> = []
@@ -102,7 +102,7 @@ describe('old service worker cleanup', () => {
     }
     const listeners: Array<() => void> = []
     let worker = { state: 'installing', addEventListener: (type: string, fn: () => void) => { if (type === 'statechange') listeners.push(fn) } }
-    let newSub: { endpoint: string; toJSON: () => object } | null = null
+    let newSub: { endpoint: string; toJSON: () => object } | null = opts.existingSub ? { endpoint: 'https://push.example/new', toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } }) } : null
     const newReg: Record<string, unknown> = {
       scope: 'https://tracked.example/ui/',
       active: null, installing: null, waiting: null,
@@ -140,7 +140,7 @@ describe('old service worker cleanup', () => {
     const document = { hidden: false, body: { dataset: { banPage: 'other' } }, getElementById: (id: string) => (els[id] ??= el()), addEventListener() {} }
     const ctx = vm.createContext({
       document, navigator, window, Notification, atob, Uint8Array, console, Date,
-      sessionStorage: { getItem: () => '1', setItem() {} },
+      sessionStorage: opts.storage ? { getItem: (k: string) => opts.storage!.get(k) ?? null, setItem: (k: string, v: string) => { opts.storage!.set(k, v) } } : { getItem: () => '1', setItem() {} },
       fetch: async (u: string, init?: { method?: string; body?: string }) => {
         if (init && init.method === 'POST') { posts.push({ url: u, body: String(init.body) }); log.push('POST ' + u) }
         if (u === '/ui/api/push/subscribe' && opts.subscribeStatus) return new Response('{}', { status: opts.subscribeStatus })
@@ -212,6 +212,19 @@ describe('old service worker cleanup', () => {
     expect(m.els['alerts-msg']!.textContent).toContain('did not activate')
     await m.clickEnable()
     expect(m.registered).toHaveLength(2)
+  })
+
+  it('an existing subscription is re-sent once per browser session, not on every page view', async () => {
+    const storage = new Map<string, string>()
+    const first = await runMigration({ old: false, existingSub: true, storage })
+    expect(first.posts.filter((p) => p.url === '/ui/api/push/subscribe')).toHaveLength(1)
+    expect(storage.get('ban-push-synced')).toBe('1')
+    const second = await runMigration({ old: false, existingSub: true, storage })
+    expect(second.posts.filter((p) => p.url === '/ui/api/push/subscribe')).toHaveLength(0)
+    expect(second.els['alerts-state']!.textContent).toBe('on (this device)')
+    // A new session (empty storage) sends it again.
+    const third = await runMigration({ old: false, existingSub: true, storage: new Map() })
+    expect(third.posts.filter((p) => p.url === '/ui/api/push/subscribe')).toHaveLength(1)
   })
 
   it('when the subscribe POST fails (500), the old registration and its subscription are kept', async () => {

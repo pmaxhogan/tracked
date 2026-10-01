@@ -196,6 +196,10 @@ export const BAN_JS = /* js */ `
     return sub;
   }
 
+  // The re-POST resets the device's failure state in KV, so it runs once per browser session.
+  function pushSynced() { try { return typeof sessionStorage !== 'undefined' && sessionStorage.getItem('ban-push-synced') === '1'; } catch (e) { return false; } }
+  function markPushSynced() { try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem('ban-push-synced', '1'); } catch (e) {} }
+
   async function syncPush() {
     try {
       const olds = pushSupported ? await oldRegistrations() : [];
@@ -207,7 +211,7 @@ export const BAN_JS = /* js */ `
         sub = await enablePush();
       } else {
         setAlertsUI(st);
-        if (sub) await sendSubscription(sub); // keep the server copy fresh (endpoint rotation)
+        if (sub && !pushSynced()) { await sendSubscription(sub); markPushSynced(); } // keep the server copy fresh (endpoint rotation), once per session
         // Auto-prompt (main and home pages): first visit asks right away.
         if (prompts && st.showEnable && Notification.permission === 'default' && !sessionStorage.getItem('ban-push-prompted')) {
           sessionStorage.setItem('ban-push-prompted', '1');

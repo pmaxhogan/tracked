@@ -86,7 +86,7 @@ ${DJ_ACTIONS_JS}
     if (!name) return;
     $name.textContent = name;
     const top = document.querySelector('.tk-top-title');
-    if (top) top.textContent = name + ' · tracked';
+    if (top) top.textContent = name;
     document.title = name + ' · tracked';
   }
 

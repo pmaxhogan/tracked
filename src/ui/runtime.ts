@@ -52,6 +52,7 @@ var TK = (() => {
     youtube_reauth_required: 'YouTube token rejected by Google (refresh token expired or revoked). Reconnect to continue syncing.',
     network: 'Could not reach tracked. Check the connection and try again.',
     unauthorized: 'Your Cloudflare Access login has expired. Reload the page to sign in again.',
+    forbidden: 'This Cloudflare Access login is not allowed here.',
     internal: 'Something went wrong in the Worker.',
     json_required: 'The page sent a request the Worker refuses. Reload the page.',
     cross_origin: 'The Worker refused a request from another site.',
