@@ -56,6 +56,8 @@ const CSS = /* css */ `
   .mk-filters input, .mk-filters select { font: inherit; font-size: var(--fs-sm); color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); padding: 7px 9px; min-width: 0; max-width: 100%; }
   .mk-filters input { flex: 1 1 14rem; }
   .tk-tabbar .n { color: var(--subtle); font-weight: 500; margin-left: 4px; font-variant-numeric: tabular-nums; }
+  .tk-tabbar .n:empty { display: none; }
+  .mk-derr { margin-top: var(--sp-3); }
   .mk-grp { color: var(--subtle); font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; margin: var(--sp-4) 0 var(--sp-2); }
   .mk-grp:first-child { margin-top: 0; }
   .mk-list { padding: 0; overflow: hidden; }
@@ -127,7 +129,11 @@ ${MKVID_STATE_JS}
 
   let header = null, capped = false;
   // Overlapping loads (typing in the search box): only the newest renders.
-  let seq = 0;
+  // A whole-view load supersedes everything before it; an append is dropped
+  // while one is pending, or when one started after it (its cursor and filter
+  // belong to the lists it was asked for).
+  let allSeq = 0, allPending = false;
+  const appendSeq = { queue: 0, settled: 0 };
   let queue = [], queueCursor = null, queueTotal = 0;
   let settled = [], settledCursor = null, settledTotal = 0;
   let byId = {};
@@ -234,8 +240,8 @@ ${MKVID_STATE_JS}
     if (r.replacesVideoId) meta.push('<span class="why">recreating</span>');
     if (r.status === 'done' && r.oldStyle) meta.push('old style');
     if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(r.error) + '</span>');
-    const lead = withPos
-      ? '<span class="mk-pos">#' + esc(r.position != null ? r.position : '?') + '</span>'
+    const lead = withPos && r.position != null
+      ? '<span class="mk-pos">#' + esc(r.position) + '</span>'
       : '<span class="badge ' + (BADGE[r.status] || 'neutral') + '">' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>';
     return '<div class="mk-row' + (r.status === 'failed' ? ' err' : '') + '" data-id="' + esc(r.id) + '">' + lead +
       '<div class="mk-main"><button type="button" class="mk-title" data-open="' + esc(r.id) + '">' + esc(titleOf(r)) + '</button>' +
@@ -280,7 +286,7 @@ ${MKVID_STATE_JS}
       q.push('<div class="mk-grp">Up next · newest set first' + showing(queue.length, queueTotal) + '</div>', card(queue.map((r) => rowHtml(r, true))));
       if (queueCursor) q.push(moreHtml('queue', queueTotal - queue.length));
     }
-    $lists.queue.innerHTML = q.length ? q.join('') : emptyHtml(none);
+    $lists.queue.innerHTML = q.length ? q.join('') : emptyHtml(finished.length && !filtered() ? 'Nothing is waiting for mkvid.' : none);
 
     const s = [];
     if (finished.length) {
@@ -297,13 +303,25 @@ ${MKVID_STATE_JS}
   }
 
   // ── tabs (role=tablist, arrow keys) ──
+  // Built once, then updated in place, so a finished load never takes focus off a tab.
   let tabCounts = { queue: null, settled: null, old: null };
+  let tabsBuilt = false;
   function renderTabs(focus, counts) {
     if (counts) tabCounts = counts;
-    $tabs.innerHTML = TABS.map((t) => '<button type="button" role="tab" id="mk-tab-' + t[0] + '" data-tab="' + t[0] + '" aria-controls="mk-p-' + t[0] + '" aria-selected="' + (tab === t[0]) + '" tabindex="' + (tab === t[0] ? '0' : '-1') + '">' +
-      t[1] + (tabCounts[t[0]] != null ? '<span class="n">' + esc(tabCounts[t[0]]) + '</span>' : '') + '</button>').join('');
-    for (const t of TABS) $panels[t[0]].hidden = tab !== t[0];
-    if (focus) { const b = $tabs.querySelector('[data-tab="' + tab + '"]'); if (b) b.focus(); }
+    if (!tabsBuilt) {
+      $tabs.innerHTML = TABS.map((t) => '<button type="button" role="tab" id="mk-tab-' + t[0] + '" data-tab="' + t[0] + '" aria-controls="mk-p-' + t[0] + '" aria-selected="' + (tab === t[0]) + '" tabindex="' + (tab === t[0] ? '0' : '-1') + '">' +
+        t[1] + '<span class="n" id="mk-n-' + t[0] + '"></span></button>').join('');
+      tabsBuilt = true;
+    }
+    for (const t of TABS) {
+      const on = tab === t[0];
+      const b = $('mk-tab-' + t[0]);
+      if (b && typeof b.setAttribute === 'function') { b.setAttribute('aria-selected', String(on)); b.setAttribute('tabindex', on ? '0' : '-1'); }
+      const n = $('mk-n-' + t[0]);
+      if (n) n.textContent = tabCounts[t[0]] != null ? String(tabCounts[t[0]]) : '';
+      $panels[t[0]].hidden = !on;
+    }
+    if (focus) { const b = $('mk-tab-' + tab); if (b && typeof b.focus === 'function') b.focus(); }
   }
   function selectTab(name, focus) { tab = name; sync(); renderTabs(focus); }
   $tabs.addEventListener('click', (e) => {
@@ -327,9 +345,19 @@ ${MKVID_STATE_JS}
   // (a refresh, a filter change, an action) reloads both lists and the header.
   async function load(section) {
     const sec = section === 'queue' || section === 'settled' ? section : 'all';
-    const my = ++seq;
+    let stale;
+    if (sec === 'all') {
+      const my = ++allSeq;
+      allPending = true;
+      stale = () => my !== allSeq;
+    } else {
+      if (allPending) return;
+      const my = ++appendSeq[sec], at = allSeq;
+      stale = () => my !== appendSeq[sec] || at !== allSeq;
+    }
     const res = await TK.api.get('/ui/api/mkvid?' + params(sec));
-    if (my !== seq) return;
+    if (stale()) return;
+    if (sec === 'all') allPending = false;
     if (!res.ok || !res.data) {
       const msg = 'mkvid status unavailable: ' + TK.errText(res, 'failed (' + res.status + ')');
       if (sec === 'all') { $errText.textContent = msg; $err.hidden = false; $summary.textContent = ''; }
@@ -435,14 +463,21 @@ ${MKVID_STATE_JS}
       btns.push('<button type="button" class="btn danger" data-do="recreate" title="Render the set again (back of the queue, counts against the daily cap); the old video is deleted once the new one is in the playlists">Delete and recreate</button>');
     }
     btns.push('<a class="btn" href="/ui/set?url=' + encodeURIComponent(r.setUrl || '') + '">Open set page</a>');
+    // A failed action's reason, shown here: a toast would sit under the modal drawer.
+    out.push('<div class="err-state mk-derr" role="alert" data-derr hidden></div>');
     out.push('<div class="actions">' + btns.join('') + '</div>');
     return out.join('');
   }
 
   const RECREATE_ASK = 'Delete and recreate this video? The set is rendered again at the back of the queue; the current video stays up until the new one is in the playlists, then it is deleted from YouTube.';
-  function openDetail(r) {
+  // errMsg: the reason the last action on this request failed, shown in the drawer.
+  let drawerFor = null;
+  function openDetail(r, errMsg) {
+    drawerFor = r.id;
     const body = TK.drawer.open(titleOf(r), detailHtml(r));
     if (!body) return;
+    const errLine = typeof body.querySelector === 'function' ? body.querySelector('[data-derr]') : null;
+    if (errLine && errMsg) { errLine.textContent = errMsg; errLine.hidden = false; }
     body.onclick = async (e) => {
       const b = e.target && e.target.closest ? e.target.closest('button[data-do]') : null;
       if (!b) return;
@@ -450,27 +485,39 @@ ${MKVID_STATE_JS}
       const what = b.dataset.do;
       if (what === 'recreate' && !(await TK.ask(RECREATE_ASK, { yes: 'Delete and recreate', danger: true }))) return;
       const url = what === 'retry' ? '/ui/api/mkvid/retry/' + id : what === 'render-now' ? '/ui/api/mkvid/render-now/' + id : '/ui/api/mkvid/recreate/' + id;
-      await TK.busy(b, 'Working…', async () => {
-        const res = await post(url, {}, what === 'render-now' ? 'render now' : what);
-        if (res.ok) { TK.drawer.close(); await load('all'); }
-      });
+      if (errLine) errLine.hidden = true;
+      const res = await TK.busy(b, 'Working…', () => TK.api.post(url, {}));
+      if (res && res.ok) { TK.drawer.close(); await load('all'); return; }
+      // Failed: say why in the drawer, which stays open, and reload, as the old
+      // panel did; the drawer then shows the request as it is now.
+      const why = TK.errText(res, '');
+      const msg = (what === 'render-now' ? 'render now' : what) + ' failed (' + (res ? res.status : 0) + ')' + (why ? ': ' + why : '');
+      if (errLine) { errLine.textContent = msg; errLine.hidden = false; }
+      await load('all');
+      const dlg = $('tk-drawer');
+      if (dlg && dlg.open && drawerFor === r.id) openDetail(byId[r.id] || r, msg);
     };
   }
 
   // ── header actions ──
   $refresh.addEventListener('click', () => TK.busy($refresh, 'Refreshing…', () => load('all')));
   // Bulk recreate: confirm with the live count, and send it back so a count that changed meanwhile is refused.
-  $recreateOld.addEventListener('click', () => TK.busy($recreateOld, 'Checking…', async () => {
-    const c = await TK.api.get('/ui/api/mkvid/recreate-old-style');
-    if (!c.ok) { TK.toast('recreate failed (' + c.status + ')', 'bad', TK.errText(c, '')); return; }
-    const count = (c.data && c.data.count) || 0;
-    if (!count) { TK.toast('no old-style videos to recreate', 'bad'); return; }
-    const text = 'Recreate ' + count + ' old-style video' + (count === 1 ? '' : 's') + '? Each set is rendered again at the back of the queue (they count against the daily cap); every old video stays up until its new one is in the playlists, then it is deleted from YouTube.';
-    if (!(await TK.ask(text, { yes: 'Recreate', danger: true }))) return;
-    const res = await TK.api.post('/ui/api/mkvid/recreate-old-style', { expect: count });
-    if (!res.ok) TK.toast(res.status === 409 ? 'the number of old-style videos changed — try again' : 'recreate failed (' + res.status + ')', 'bad');
-    await load('all');
-  }));
+  // The reload runs after busy has put its saved label back, so the button
+  // ends up with the new count (or hidden at 0).
+  $recreateOld.addEventListener('click', async () => {
+    const reload = await TK.busy($recreateOld, 'Checking…', async () => {
+      const c = await TK.api.get('/ui/api/mkvid/recreate-old-style');
+      if (!c.ok) { TK.toast('recreate failed (' + c.status + ')', 'bad', TK.errText(c, '')); return false; }
+      const count = (c.data && c.data.count) || 0;
+      if (!count) { TK.toast('no old-style videos to recreate', 'bad'); return true; }
+      const text = 'Recreate ' + count + ' old-style video' + (count === 1 ? '' : 's') + '? Each set is rendered again at the back of the queue (they count against the daily cap); every old video stays up until its new one is in the playlists, then it is deleted from YouTube.';
+      if (!(await TK.ask(text, { yes: 'Recreate', danger: true }))) return false;
+      const res = await TK.api.post('/ui/api/mkvid/recreate-old-style', { expect: count });
+      if (!res.ok) TK.toast(res.status === 409 ? 'the number of old-style videos changed — try again' : 'recreate failed (' + res.status + ')', 'bad');
+      return true;
+    });
+    if (reload) await load('all');
+  });
   $errRetry.addEventListener('click', () => TK.busy($errRetry, 'Retrying…', () => load('all')));
 
   // ── filters ──

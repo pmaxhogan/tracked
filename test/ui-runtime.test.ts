@@ -117,6 +117,43 @@ describe('TK basics', () => {
     t.children[2].onclick()
     expect(box.children.length).toBe(0)
   })
+  it('toast goes inside the topmost open dialog (one region, reused), else #tk-toasts', () => {
+    const node = (tag: string) => { const n: any = { tag, children: [] as any[], attrs: {} as Record<string, string>, textContent: '', className: '', parentNode: null,
+      appendChild(ch: any) { ch.parentNode = n; n.children.push(ch) }, removeChild(ch: any) { n.children = n.children.filter((x: any) => x !== ch); ch.parentNode = null },
+      setAttribute(k: string, v: string) { n.attrs[k] = v },
+      querySelector(sel: string) { return sel === '[data-tk-toasts]' ? n.children.find((x: any) => 'data-tk-toasts' in x.attrs) ?? null : null } }; return n }
+    const { c, els } = ctx()
+    const shellBox = node('div'); els.set('tk-toasts', shellBox)
+    const below = node('dialog'), drawer = node('dialog')
+    let open: any[] = []
+    ;(c as any).document.createElement = node
+    ;(c as any).document.querySelectorAll = (sel: string) => (sel === 'dialog[open]' ? open : [])
+    vm.runInContext(RUNTIME_JS, c)
+    vm.runInContext("TK.toast('Saved')", c)
+    expect(shellBox.children.length).toBe(1)
+    open = [below, drawer]
+    vm.runInContext("TK.toast('retry failed (500)', 'bad')", c)
+    vm.runInContext("TK.toast('again', 'bad')", c)
+    expect(below.children.length).toBe(0)
+    expect(drawer.children.length).toBe(1)
+    const region = drawer.children[0]
+    expect(region).toMatchObject({ className: 'tk-toasts' })
+    expect(region.attrs['aria-live']).toBe('polite')
+    expect(region.children.map((t: any) => t.children[0].textContent)).toEqual(['retry failed (500)', 'again'])
+    expect(shellBox.children.length).toBe(1)
+    open = []
+    vm.runInContext("TK.toast('back')", c)
+    expect(shellBox.children.length).toBe(2)
+  })
+  it('toast uses #tk-toasts when document.querySelector finds no dialog (pool stub)', () => {
+    const node = (): any => { const n: any = { children: [] as any[], textContent: '', className: '', appendChild(ch: any) { n.children.push(ch) }, setAttribute() {} }; return n }
+    const { c, els } = ctx()
+    const box = node(); els.set('tk-toasts', box)
+    ;(c as any).document.createElement = node
+    vm.runInContext(RUNTIME_JS, c)
+    expect(() => vm.runInContext("TK.toast('x', 'bad')", c)).not.toThrow()
+    expect(box.children.length).toBe(1)
+  })
   it('ask resolves on yes, no and dialog close, and false without showModal', async () => {
     const { c, els } = ctx()
     vm.runInContext(RUNTIME_JS, c)

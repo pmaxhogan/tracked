@@ -65,11 +65,44 @@ var TK = (() => {
   }
 
   // ── feedback ──
+  // The topmost open <dialog>, if any. A modal dialog (the drawer, a confirm)
+  // sits in the top layer and makes everything outside it inert, so a toast
+  // shown in #tk-toasts would be hidden behind it.
+  function openDialog() {
+    try {
+      if (typeof document.querySelectorAll === 'function') {
+        const all = document.querySelectorAll('dialog[open]');
+        return all && all.length ? all[all.length - 1] : null;
+      }
+      return typeof document.querySelector === 'function' ? document.querySelector('dialog[open]') : null;
+    } catch (e) { return null; }
+  }
+  // Where a new toast goes: a toast region inside the open dialog (added once),
+  // else the shell's #tk-toasts.
+  function toastBox() {
+    const dlg = openDialog();
+    if (dlg && typeof dlg.appendChild === 'function') {
+      let box = typeof dlg.querySelector === 'function' ? dlg.querySelector('[data-tk-toasts]') : null;
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'tk-toasts';
+        if (typeof box.setAttribute === 'function') { box.setAttribute('data-tk-toasts', ''); box.setAttribute('aria-live', 'polite'); }
+        dlg.appendChild(box);
+      }
+      if (box && typeof box.appendChild === 'function') return box;
+    }
+    return $('tk-toasts');
+  }
+
   function toast(msg, kind, detail) {
     kind = kind === 'bad' ? 'bad' : 'ok';
-    const box = $('tk-toasts');
+    if (typeof document.createElement !== 'function') {
+      const plain = $('tk-toasts');
+      if (plain) plain.textContent = String(msg == null ? '' : msg);
+      return;
+    }
+    const box = toastBox();
     if (!box) return;
-    if (typeof document.createElement !== 'function') { box.textContent = String(msg == null ? '' : msg); return; }
     const t = document.createElement('div');
     t.className = 'toast ' + kind;
     if (kind === 'bad' && typeof t.setAttribute === 'function') t.setAttribute('role', 'alert');
@@ -127,6 +160,9 @@ var TK = (() => {
       if (b) b.innerHTML = html == null ? '' : String(html);
       if (x) x.onclick = () => drawer.close();
       if (dlg) {
+        // Toasts left over from the last time the drawer was open belong to another item.
+        const stale = typeof dlg.querySelector === 'function' ? dlg.querySelector('[data-tk-toasts]') : null;
+        if (stale) stale.innerHTML = '';
         dlg.onkeydown = (e) => { if (e && e.key === 'Escape') drawer.close(); };
         if (!dlg.open && typeof dlg.showModal === 'function') { try { dlg.showModal(); } catch (e) {} }
       }
