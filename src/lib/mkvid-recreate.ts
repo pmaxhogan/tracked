@@ -207,7 +207,8 @@ export type UnpublishResult =
  * that came out wrong, e.g. a list with too few cue times): out of the artist
  * and combined playlists now, queued for deletion from YouTube
  * (mkvid_old_videos, replaced_by 'unpublished'), the set's video cleared, and
- * the request back to `pending` in its natural place with no attempts used.
+ * the request back to `pending` in its natural place with no attempts used
+ * (job_id = 'unpublished', so a late /mkvid/fail for the old job is ignored).
  * It renders again whenever the claim's gates (verified, timed, ID wait)
  * pass. Needs the YouTube connection: an artist playlist failure throws
  * before anything is written, so it leaves everything as it was.
@@ -248,7 +249,7 @@ export async function unpublishMkvidRequest(env: Env, id: string, log: Logger, a
     db
       .prepare(
         `UPDATE mkvid_requests SET status = 'pending', video_id = NULL, video_url = NULL, attempts = 0, not_before = NULL,
-           claimed_at = NULL, job_id = NULL, error = NULL, unknown_failures = 0, updated_at = ?
+           claimed_at = NULL, job_id = 'unpublished', error = NULL, unknown_failures = 0, updated_at = ?
          WHERE id = ? AND status = 'done' AND video_id = ?`,
       )
       .bind(nowSeconds(), id, videoId),

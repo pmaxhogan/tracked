@@ -1228,9 +1228,10 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   const req = await getMkvidRequest(env, input.id)
   if (!req) return null
   if (req.status === 'done' || req.status === 'superseded') return { status: req.status, attempts: req.attempts }
-  // A late report for a job the request has moved on from (e.g. its video was
-  // unpublished, which clears job_id): nothing to refund or count.
-  if (req.status === 'pending' && input.jobId && req.jobId !== input.jobId) return { status: req.status, attempts: req.attempts }
+  // A late report for a job the request has moved on from (its video was
+  // unpublished, which leaves job_id = 'unpublished'): nothing to refund or
+  // count. A NULL job_id (mkvid had not said its job yet) is not "moved on".
+  if (req.status === 'pending' && input.jobId && req.jobId !== null && req.jobId !== input.jobId) return { status: req.status, attempts: req.attempts }
   const now = nowSeconds()
   // Banned while it rendered: a failure report never lifts the ban.
   if (req.status === 'banned') {
