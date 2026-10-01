@@ -532,18 +532,34 @@ describe('completeMkvidRequest', () => {
     playlistsExist()
     await enqueueMkvidRequest(env, input)
     const req = (await claimMkvidRequest(env, log))!
+    const tlBefore = await env.DB.prepare('SELECT video_id, video_source FROM tracklists WHERE url = ?').bind(input.setUrl).first()
     // the panel's Retry put it back to pending, then it was banned, while mkvid kept rendering
     expect(await retryMkvidRequest(env, req.id)).toBe(true)
     expect(await banMkvidRequest(env, req.id)).toBe(true)
-    const r = await completeMkvidRequest(env, { id: req.id, videoId: 'banned12345', style: 'scene', jobId: 'job7' }, 'tok', log)
+    const r = await completeMkvidRequest(env, { id: req.id, videoId: 'banned12345', videoUrl: 'https://youtu.be/banned12345', privacy: 'unlisted', jobId: 'job7' }, 'tok', log)
     expect(r).toEqual({ status: 'banned', videoId: 'banned12345' })
     expect(addVideoToPlaylist).not.toHaveBeenCalled()
     expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'banned', videoId: null, jobId: 'job7' })
-    const old = await env.DB.prepare('SELECT state, replaced_by, style FROM mkvid_old_videos WHERE video_id = ?').bind('banned12345').first()
-    expect(old).toEqual({ state: 'pending', replaced_by: 'banned', style: 'scene' })
-    // a failure report never lifts a ban either
-    expect(await failMkvidRequest(env, { id: req.id, error: 'yt-dlp exit 1' }, log)).toEqual({ status: 'banned', attempts: expect.any(Number) })
+    expect(await env.DB.prepare('SELECT video_id, video_source FROM tracklists WHERE url = ?').bind(input.setUrl).first()).toEqual(tlBefore)
+    const old = await env.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind('banned12345').first()
+    expect(old).toEqual({ state: 'pending', replaced_by: 'banned' })
+    // an unban, then mkvid redelivering the same upload (it never saw the answer): still never goes live
+    expect(await retryMkvidRequest(env, req.id)).toBe(true)
+    expect(await completeMkvidRequest(env, { id: req.id, videoId: 'banned12345' }, 'tok', log)).toEqual({ status: 'banned', videoId: 'banned12345' })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect((await getMkvidRequest(env, req.id))!.status).toBe('pending')
+  })
+
+  it('a failure report never lifts a ban, and refunds the claim', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    const used = await dailyClaimsUsed(env)
+    expect(await retryMkvidRequest(env, req.id)).toBe(true)
+    expect(await banMkvidRequest(env, req.id)).toBe(true)
+    expect(await failMkvidRequest(env, { id: req.id, error: 'yt-dlp exit 1' }, log)).toEqual({ status: 'banned', attempts: 0 })
     expect((await getMkvidRequest(env, req.id))!.status).toBe('banned')
+    expect(await dailyClaimsUsed(env)).toBe(used - 1)
   })
 
   it('supersedes instead of inserting when the set gained a real recording mid-render', async () => {

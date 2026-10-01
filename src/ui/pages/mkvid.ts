@@ -252,7 +252,7 @@ ${MKVID_STATE_JS}
 
   // A video a recreation replaced: out of the playlists, waiting for mkvid to delete it (the cron retries).
   function oldRowHtml(o) {
-    const meta = [esc(TK.fmt.setLabel(o.setUrl)), 'replaced by <span class="mono">' + esc(o.replacedBy) + '</span>'];
+    const meta = [esc(TK.fmt.setLabel(o.setUrl)), o.replacedBy === 'banned' ? 'banned while it rendered' : 'replaced by <span class="mono">' + esc(o.replacedBy) + '</span>'];
     if (o.state === 'refused') meta.push('<span class="flag">mkvid refused: ' + esc(o.lastError || '') + '</span>');
     else if (o.lastError) meta.push('<span class="flag">' + esc(o.lastError) + '</span>', 'try ' + esc((o.attempts || 0) + 1) + ' ' + untilTime(o.nextTryAt));
     else meta.push('deleting');

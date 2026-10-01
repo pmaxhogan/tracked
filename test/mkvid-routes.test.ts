@@ -4,7 +4,7 @@ import type { Env } from '../src/types'
 import type { StoredTokens } from '../src/lib/google-oauth'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
-import { enqueueMkvidRequest as enqueueRaw, getMkvidRequest, getMkvidRequestForSet, saveMkvidTracks } from '../src/lib/mkvid'
+import { banMkvidRequest, enqueueMkvidRequest as enqueueRaw, getMkvidRequest, getMkvidRequestForSet, retryMkvidRequest, saveMkvidTracks } from '../src/lib/mkvid'
 import { MkvidClaimResponse } from '../src/schemas'
 import { parseTracklist } from '../src/lib/tracklists1001'
 import { readFileSync } from 'node:fs'
@@ -89,6 +89,25 @@ describe('/mkvid routes', () => {
     expect(r.status).toBe(401)
     // Unconfigured token = 500 (never open).
     expect((await post(makeEnv({ MKVID_TOKEN: undefined }), '/mkvid/claim', {}, 'mk-secret')).status).toBe(500)
+  })
+
+  it('complete for a request banned mid-render answers banned and asks mkvid to delete the upload', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => { calls.push(String(url)); return new Response(JSON.stringify({ ok: true, deleted: true }), { headers: { 'content-type': 'application/json' } }) }))
+    try {
+      const env = makeEnv({ MKVID_URL: 'https://mkvid.example' })
+      await enqueueMkvidRequest(env, input)
+      const { request } = (await (await post(env, '/mkvid/claim', {})).json()) as { request: { id: string } }
+      expect(await retryMkvidRequest(env, request.id)).toBe(true)
+      expect(await banMkvidRequest(env, request.id)).toBe(true)
+      const res = await post(env, '/mkvid/complete', { id: request.id, videoId: 'banned12345', videoUrl: 'https://youtu.be/banned12345', privacy: 'unlisted' })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ status: 'banned', videoId: 'banned12345' })
+      expect(addVideoToPlaylist).not.toHaveBeenCalled()
+      expect(calls.some((u) => u === 'https://mkvid.example/api/videos/banned12345/delete')).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('claim → complete adds the video and answers with the playlist outcome', async () => {

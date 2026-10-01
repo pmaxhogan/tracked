@@ -1042,6 +1042,10 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
     log.warn('mkvid.complete_banned', { id: req.id, slug: req.slug, setUrl: req.setUrl, videoId: input.videoId })
     return { status: 'banned', videoId: input.videoId }
   }
+  // The same upload redelivered after an unban (mkvid never saw the banned
+  // answer): it is already queued for deletion, so it never goes live.
+  const doomed = await db.prepare("SELECT 1 AS x FROM mkvid_old_videos WHERE video_id = ? AND replaced_by = 'banned'").bind(input.videoId).first()
+  if (doomed) return { status: 'banned', videoId: input.videoId }
 
   const tl = await getTracklistRow(env, req.slug, req.setUrl)
   // A recreation: the set still resolving to the mkvid video being replaced is expected, not a real recording.
