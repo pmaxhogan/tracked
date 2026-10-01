@@ -187,6 +187,61 @@ describe('mkvid page script', () => {
   })
 })
 
+describe('DJs page script', () => {
+  it('renders one row per subscription from api/list and api/state, with profile links and the resync action', async () => {
+    const fetches: string[] = []
+    const state = (n: number) => ({ slug: `dj-${n}`, state: { playlistId: `PL${n}`, artistName: `DJ ${n}`, processedTracklistUrls: ['https://x/a'], discoveredTracklistUrls: ['https://x/a', 'https://x/b'], tracklistVideos: { 'https://x/a': { videoId: 'abcdefghijk', checkedAt: 1 } }, lastRunAt: Math.floor(Date.now() / 1000) - 120, lastError: n === 2 ? 'boom' : undefined } })
+    const { ctx, els } = richStub(async (u: string) => {
+      fetches.push(u)
+      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://www.1001tracklists.com/dj/dj-1/index.html', addedAt: 1 }, { slug: 'dj-2', sourceUrl: 'https://www.1001tracklists.com/dj/dj-2/index.html', addedAt: 2 }] })
+      const m = /^\/ui\/api\/state\/dj-(\d)$/.exec(u)
+      return m ? Response.json(state(Number(m[1]))) : new Response('{}', { status: 404 })
+    }, '/ui/djs')
+    const r = await app.request('https://tracked.example/ui/djs', {}, env())
+    const html = await r.text()
+    expect(html).toContain('id="fix-titles"')
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(fetches).toContain('/ui/api/list')
+    expect(fetches).toContain('/ui/api/state/dj-1')
+    expect(fetches).toContain('/ui/api/state/dj-2')
+    const body = els.get('rows').innerHTML as string
+    expect(body).toContain('/ui/dj/dj-1')
+    expect(body).toContain('/ui/dj/dj-2')
+    expect(body).toMatch(/Invalidate (&|&amp;) resync/)
+    expect(body).toContain('1 of 2')
+    expect(body).toContain('1 pending')
+    expect(body).toContain('https://www.youtube.com/playlist?list=PL1')
+    expect(body).toContain('badge bad')
+    expect(els.get('empty').hidden).toBe(true)
+  })
+})
+
+describe('Playlists page script', () => {
+  it('fills the connection card, the combined card with its meter, the DJ playlists and the hygiene strip', async () => {
+    const { ctx, els } = richStub(async (u: string) => {
+      if (u === '/ui/api/youtube/status') return Response.json({ connected: true, channelTitle: 'My channel', scope: 'youtube' })
+      if (u === '/ui/api/combined') return Response.json({ connected: true, title: 'All DJs', playlistId: 'PLc', playlistUrl: 'https://www.youtube.com/playlist?list=PLc', videoCount: 12, missingTotal: 3, sources: [{}], dailyInsertCap: 100, dailyInsertsUsed: 25 })
+      if (u === '/ui/api/removals?limit=1') return Response.json({ settings: { dryRun: true, dailyRemovals: 20 }, deletesUsedToday: 2, holds: [{}] })
+      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }] })
+      if (u === '/ui/api/state/dj-1') return Response.json({ state: { playlistId: 'PL1', artistName: 'DJ 1', processedTracklistUrls: [], tracklistVideos: { a: { videoId: 'v', checkedAt: 1, source: 'mkvid' } } } })
+      return new Response('{}', { status: 404 })
+    }, '/ui/playlists')
+    const html = await (await app.request('https://tracked.example/ui/playlists', {}, env())).text()
+    expect(html).toContain('id="fix-titles"')
+    expect(html).toContain('Sign in with YouTube')
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(els.get('yt-title').textContent).toBe('YouTube · My channel')
+    expect(els.get('cmb-body').innerHTML).toContain('3 still to add')
+    expect(els.get('cmb-body').innerHTML).toContain('75/100 inserts left today')
+    expect(els.get('cmb-fill').style.width).toBe('25%')
+    expect(els.get('rows').innerHTML).toContain('https://www.youtube.com/playlist?list=PL1')
+    expect(els.get('hygiene').innerHTML).toContain('DRY RUN')
+    expect(els.get('hygiene').innerHTML).toContain('1 held')
+  })
+})
+
 /** Every route with one of these methods under /ui, with sample values for its parameters. */
 function uiPaths(methods: string[]): string[] {
   const sample: Record<string, string> = { slug: 'some-dj', id: 'ch-1', videoId: 'abcdefghijk', playlistId: 'PL1', action: 'x' }

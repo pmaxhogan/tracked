@@ -5,6 +5,8 @@ import { servePage } from '../ui/pages'
 import { SET_PAGE } from '../ui/pages/set'
 import { DJ_PAGE } from '../ui/pages/dj'
 import { MKVID_PAGE_HTML } from '../ui/pages/mkvid'
+import { DJS_PAGE } from '../ui/pages/djs'
+import { PLAYLISTS_PAGE } from '../ui/pages/playlists'
 import {
   addSubscription,
   djUrlFor,
@@ -97,7 +99,9 @@ subscriptionsApp.route('/', hygieneApp)
 subscriptionsApp.get('/', (c) => servePage(c, HOME_HTML))
 // The old main page also answers at the pages it is being split into, so links
 // work while the redesign lands; each route goes when its real page is built.
-for (const p of ['/djs', '/playlists', '/settings', '/tools']) subscriptionsApp.get(p, (c) => servePage(c, PAGE_HTML))
+subscriptionsApp.get('/djs', (c) => servePage(c, DJS_PAGE.html))
+subscriptionsApp.get('/playlists', (c) => servePage(c, PLAYLISTS_PAGE.html))
+for (const p of ['/settings', '/tools']) subscriptionsApp.get(p, (c) => servePage(c, PAGE_HTML))
 // The mkvid queue: status line, caps, filters, tabs and a detail drawer (ui/pages/mkvid.ts).
 subscriptionsApp.get('/mkvid', (c) => servePage(c, MKVID_PAGE_HTML))
 
@@ -979,35 +983,11 @@ const PAGE_HTML = /* html */ `<!doctype html>
   button { padding: 0.6rem 1rem; font: inherit; background: var(--accent); color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: progress; }
   button.danger { background: transparent; color: var(--danger); border: 1px solid var(--border); padding: 0.3rem 0.6rem; }
-  ul { list-style: none; padding: 0; margin: 0; }
-  li { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); margin-bottom: 0.5rem; }
-  li .slug { font-weight: 600; }
-  li a { color: var(--accent); text-decoration: none; font-size: 0.85rem; }
-  li a.slug { color: var(--fg); font-size: 1rem; }
-  li a.slug:hover { color: var(--accent); }
-  li a:hover { text-decoration: underline; }
-  li .meta { flex: 1; min-width: 0; }
-  li .meta .added { color: var(--muted); font-size: 0.8rem; }
-  #list-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-bottom: 0.5rem; }
-  #list-actions button { background: transparent; color: var(--accent); border: 1px solid var(--border); padding: 0.3rem 0.6rem; }
-  li button.resync-btn { color: var(--muted); }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
   .error { color: var(--danger); margin: 0.5rem 0 1rem; min-height: 1.2em; }
   .error-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; color: var(--muted); white-space: pre-wrap; word-break: break-word; max-height: 16em; overflow: auto; margin: 0.4rem 0 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 4px; background: var(--card); }
   footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
-  .yt { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--card); margin-bottom: 1rem; }
-  .yt .info { flex: 1; min-width: 0; font-size: 0.9rem; }
-  .yt .info .title { font-weight: 600; }
-  .yt .info .sub { color: var(--muted); font-size: 0.8rem; }
-  .yt button.connect { background: #c4302b; }
-  /* ── Combined playlist ── */
-  section#combined { margin-top: 2.25rem; }
   p.mk-link { margin: 2.25rem 0 0; font-weight: 600; }
-  #cmb-body { border: 1px solid var(--border); border-radius: 6px; background: var(--card); padding: 0.7rem 0.8rem; font-size: 0.88rem; line-height: 1.55; }
-  #cmb-body .headline { font-weight: 600; }
-  #cmb-body .counts { color: var(--muted); font-size: 0.82rem; }
-  #cmb-body .counts .warn { color: var(--danger); }
-  #cmb-body a { color: var(--accent); }
   /* ── YouTube video inspector ── */
   .arow-head a { color: var(--accent); font-size: 0.78rem; white-space: nowrap; }
   .badge.pending { background: rgba(88,166,255,0.18); color: var(--accent); }
@@ -1077,40 +1057,8 @@ ${BAN_CSS}
 <main>
 ${BAN_BANNER_HTML}
   <h1>DJ subscriptions</h1>
-  <p class="lead">Paste a 1001tracklists DJ URL like <code>https://www.1001tracklists.com/dj/lillypalmer/index.html</code>. &nbsp;·&nbsp; <a href="/ui/set">Tracklist viewer →</a> &nbsp;·&nbsp; <a href="/ui/pool">Pool accounts →</a></p>
+  <p class="lead"><a href="/ui/djs">DJs →</a> &nbsp;·&nbsp; <a href="/ui/playlists">Playlists →</a> &nbsp;·&nbsp; <a href="/ui/set">Tracklist viewer →</a> &nbsp;·&nbsp; <a href="/ui/pool">Pool accounts →</a></p>
 ${ALERTS_ROW_HTML}
-  <div id="yt" class="yt" hidden>
-    <div class="info">
-      <div class="title" id="yt-title">YouTube</div>
-      <div class="sub" id="yt-sub"></div>
-    </div>
-    <button id="yt-action"></button>
-  </div>
-  <form id="add-form">
-    <input id="url" type="url" placeholder="https://www.1001tracklists.com/dj/.../index.html" required autofocus />
-    <button type="submit">Add</button>
-  </form>
-  <div id="error" class="error" role="alert"></div>
-  <div id="list-actions" hidden>
-    <button id="resync-all" title="Forget what the sync trusts about every DJ's sets and re-fetch them all: swapped recordings get replaced. Drains over a few cron ticks.">Invalidate video cache &amp; resync all</button>
-    <button id="sync-all">Sync all</button>
-    <button id="fix-titles" class="ghost" title="Rename DJ playlists still titled &quot;Tracklists By …&quot; to the artist name (shows the list first)">Fix playlist titles</button>
-  </div>
-  <div id="fix-titles-out" class="muted" hidden></div>
-  <ul id="list"></ul>
-  <div id="empty" class="empty" hidden>No subscriptions yet.</div>
-
-  <section id="combined">
-    <div class="audit-head">
-      <h2>Combined playlist</h2>
-      <div class="audit-actions">
-        <button id="cmb-backfill" class="ghost">Backfill now</button>
-        <button id="cmb-refresh" class="ghost">Refresh</button>
-      </div>
-    </div>
-    <div id="cmb-body"><span class="counts">loading…</span></div>
-  </section>
-
   <p class="mk-link"><a href="/ui/mkvid">mkvid →</a></p>
 
   <section id="ytjson">
@@ -1159,346 +1107,6 @@ ${BAN_HISTORY_HTML}
 </main>
 <script>
 (() => {
-  const $list = document.getElementById('list');
-  const $empty = document.getElementById('empty');
-  const $error = document.getElementById('error');
-  const $form = document.getElementById('add-form');
-  const $url = document.getElementById('url');
-  const $btn = $form.querySelector('button');
-  const $listActions = document.getElementById('list-actions');
-  const $syncAll = document.getElementById('sync-all');
-  const $resyncAll = document.getElementById('resync-all');
-
-  function showError(msg, detail) {
-    $error.textContent = msg ?? '';
-    if (detail) {
-      const pre = document.createElement('pre');
-      pre.className = 'error-detail';
-      pre.textContent = detail;
-      $error.appendChild(pre);
-    }
-  }
-
-  function showReauthError() {
-    $error.textContent = 'YouTube token rejected by Google (refresh token expired or revoked). Reconnect to continue syncing.';
-    const btn = document.createElement('button');
-    btn.textContent = 'Reconnect YouTube';
-    btn.className = 'connect';
-    btn.style.marginLeft = '0.5rem';
-    btn.addEventListener('click', () => { window.location.href = '/ui/oauth/start'; });
-    $error.appendChild(btn);
-  }
-
-  function fmtDate(epoch) {
-    if (!epoch) return '';
-    try { return new Date(epoch * 1000).toLocaleDateString(); } catch { return ''; }
-  }
-
-  function render(subs) {
-    $list.innerHTML = '';
-    if (!subs.length) { $empty.hidden = false; $listActions.hidden = true; return; }
-    $empty.hidden = true;
-    $listActions.hidden = false;
-    for (const s of subs) {
-      const li = document.createElement('li');
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      const slug = document.createElement('div');
-      slug.innerHTML = '<a class="slug"></a> · <a target="_blank" rel="noreferrer noopener"></a>';
-      // The DJ profile page: all of this DJ's tracklists as expandable cards.
-      const prof = slug.querySelector('.slug');
-      prof.textContent = s.slug;
-      prof.href = '/ui/dj/' + encodeURIComponent(s.slug);
-      const link = slug.querySelector('a:not(.slug)');
-      link.href = s.sourceUrl;
-      link.textContent = 'open';
-      meta.appendChild(slug);
-      const added = document.createElement('div');
-      added.className = 'added';
-      added.textContent = s.addedAt ? 'added ' + fmtDate(s.addedAt) : '';
-      meta.appendChild(added);
-      li.appendChild(meta);
-      const sync = document.createElement('button');
-      sync.className = 'danger sync-btn';
-      sync.textContent = 'Sync';
-      sync.dataset.slug = s.slug;
-      sync.addEventListener('click', () => syncSlug(s.slug, sync));
-      li.appendChild(sync);
-      // Re-fetch every one of this DJ's sets now (not just new ones), so a
-      // set whose recording was swapped on 1001tracklists gets the old
-      // video pulled and the new one added. Bounded per run; the cron
-      // continues it.
-      const resync = document.createElement('button');
-      resync.className = 'danger resync-btn';
-      resync.textContent = 'Invalidate & resync';
-      resync.title = 'Forget the cached video for every set and re-check them all';
-      resync.dataset.slug = s.slug;
-      resync.addEventListener('click', () => syncSlug(s.slug, resync, { resync: true }));
-      li.appendChild(resync);
-      const rm = document.createElement('button');
-      rm.className = 'danger';
-      rm.textContent = 'Remove';
-      rm.addEventListener('click', () => remove(s.slug, rm));
-      li.appendChild(rm);
-      $list.appendChild(li);
-    }
-  }
-
-  async function syncSlug(slug, btn, opts) {
-    const resync = !!(opts && opts.resync);
-    showError('');
-    btn.disabled = true;
-    const original = btn.textContent;
-    btn.textContent = resync ? 'Resyncing…' : 'Syncing…';
-    try {
-      const r = await fetch('/ui/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: '{}',
-      });
-      const raw = await r.text();
-      let data = {};
-      try { data = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON body, fall through */ }
-      if (!r.ok) {
-        if (r.status === 412 && data.error === 'youtube_reauth_required') {
-          showReauthError();
-          // The server has cleared stored tokens; refresh the YouTube
-          // panel so the "Sign in with YouTube" button reappears.
-          loadYouTubeStatus();
-          return;
-        }
-        const msg = data.errorMessage || data.message || data.error || ('sync failed (' + r.status + ')');
-        const detail = data.errorStack
-          || (data.errorName && data.errorName !== 'Error' ? data.errorName : null)
-          || (raw && raw !== msg ? raw : null);
-        showError('sync failed: ' + msg, detail);
-        return;
-      }
-      const stats = data.stats || {};
-      const pending = stats.tracklistsPending || 0;
-      const rechecksPending = stats.rechecksPending || 0;
-      const continuing = [];
-      if (pending > 0) continuing.push(pending + ' new pending');
-      if (rechecksPending > 0) continuing.push(rechecksPending + ' recheck' + (rechecksPending === 1 ? '' : 's') + ' pending');
-      const more = continuing.length ? ' · ' + continuing.join(', ') + ' — auto-continuing every 5 min' : '';
-      const combined = stats.combinedVideoIdsAdded ? ' · ' + stats.combinedVideoIdsAdded + ' into the combined playlist' : '';
-      const rechecked = stats.tracklistsRechecked
-        ? ' · rechecked ' + stats.tracklistsRechecked + ', replaced ' + (stats.videosReplaced || 0)
-        : '';
-      const inv = data.invalidated ? ' (invalidated ' + (data.invalidated.tracklistsMarked || 0) + ' cached videos)' : '';
-      showError(
-        (resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
-        (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
-        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + rechecked + combined + more
-      );
-      // The run may have created the combined playlist or mirrored into it.
-      loadCombined();
-    } finally {
-      btn.disabled = false;
-      btn.textContent = original;
-    }
-  }
-
-  async function load() {
-    showError('');
-    const r = await fetch('/ui/api/list', { credentials: 'same-origin' });
-    if (!r.ok) { showError('failed to load (' + r.status + ')'); return; }
-    const data = await r.json();
-    render(data.subscriptions || []);
-  }
-
-  async function add(url) {
-    showError('');
-    $btn.disabled = true;
-    try {
-      const r = await fetch('/ui/api/add', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ url }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) { showError(data.message || data.error || ('add failed (' + r.status + ')')); return; }
-      $url.value = '';
-      await load();
-    } finally {
-      $btn.disabled = false;
-    }
-  }
-
-  async function remove(slug, btn) {
-    showError('');
-    btn.disabled = true;
-    try {
-      const r = await fetch('/ui/api/remove', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ slug }),
-      });
-      if (!r.ok) {
-        const data = await r.json().catch(() => ({}));
-        showError(data.message || data.error || ('remove failed (' + r.status + ')'));
-        return;
-      }
-      await load();
-    } finally {
-      btn.disabled = false;
-    }
-  }
-
-  $syncAll.addEventListener('click', async () => {
-    const btns = Array.from($list.querySelectorAll('button.sync-btn'));
-    if (!btns.length) return;
-    $syncAll.disabled = true;
-    const original = $syncAll.textContent;
-    $syncAll.textContent = 'Syncing all…';
-    try {
-      // Serial: mirrors clicking each row's Sync one after the other, and
-      // keeps us under YouTube quota / 1001tracklists rate limits.
-      for (const b of btns) await syncSlug(b.dataset.slug, b);
-    } finally {
-      $syncAll.disabled = false;
-      $syncAll.textContent = original;
-    }
-  });
-
-  // "Fix playlist titles": a dry run first, then the rename after a confirm.
-  const $fixTitles = document.getElementById('fix-titles');
-  const $fixOut = document.getElementById('fix-titles-out');
-  async function fixTitles(dryRun) {
-    const r = await fetch('/ui/api/playlists/fix-titles', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }) });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.message || d.error || ('failed (' + r.status + ')'));
-    return d;
-  }
-  function showFixes(d) {
-    $fixOut.hidden = false;
-    $fixOut.textContent = '';
-    if (!d.fixes.length) { $fixOut.textContent = 'All ' + d.checked + ' DJ playlist titles are fine.'; return; }
-    const ul = document.createElement('ul');
-    for (const f of d.fixes) {
-      const li = document.createElement('li');
-      li.textContent = f.oldTitle + ' → ' + f.newTitle + (f.status === 'failed' ? ' (failed: ' + (f.error || '') + ')' : f.status === 'renamed' ? ' (renamed)' : '');
-      ul.appendChild(li);
-    }
-    $fixOut.appendChild(ul);
-  }
-  $fixTitles.addEventListener('click', async () => {
-    $fixTitles.disabled = true;
-    showError('');
-    try {
-      const preview = await fixTitles(true);
-      showFixes(preview);
-      if (!preview.fixes.length) return;
-      if (!confirm('Rename ' + preview.fixes.length + ' playlist' + (preview.fixes.length === 1 ? '' : 's') + ' on YouTube (50 quota units each)?')) return;
-      showFixes(await fixTitles(false));
-    } catch (e) {
-      showError('fix playlist titles: ' + (e && e.message ? e.message : e));
-    } finally {
-      $fixTitles.disabled = false;
-    }
-  });
-
-  $resyncAll.addEventListener('click', async () => {
-    const btns = Array.from($list.querySelectorAll('button.resync-btn'));
-    if (!btns.length) return;
-    if (!confirm('Re-fetch every set of every DJ? Swapped recordings get replaced in the playlists. This drains over the next few cron ticks.')) return;
-    $resyncAll.disabled = true;
-    btns.forEach((b) => { b.disabled = true; });
-    const original = $resyncAll.textContent;
-    $resyncAll.textContent = 'Resyncing all…';
-    showError('');
-    try {
-      // One server-side pass on a single shared fetch budget — NOT one
-      // request per row: that loop ran every DJ unpaced and got the
-      // 1001tracklists accounts banned (twice).
-      const r = await fetch('/ui/api/resync', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
-      const raw = await r.text();
-      let data = {};
-      try { data = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON body, fall through */ }
-      if (!r.ok) {
-        if (r.status === 412 && data.error === 'youtube_reauth_required') { showReauthError(); loadYouTubeStatus(); return; }
-        showError('resync all failed: ' + (data.errorMessage || data.message || data.error || ('resync failed (' + r.status + ')')), data.errorStack || null);
-        return;
-      }
-      if (data.paused) { showError('resync all: 1001tracklists fetching is paused (see the banner); nothing was fetched.'); return; }
-      const results = data.results || [];
-      const invalidated = (data.invalidated || []).reduce((a, x) => a + (x.tracklistsMarked || 0), 0);
-      const rechecked = results.reduce((a, x) => a + ((x.stats || {}).tracklistsRechecked || 0), 0);
-      const replaced = results.reduce((a, x) => a + ((x.stats || {}).videosReplaced || 0), 0);
-      const added = results.reduce((a, x) => a + ((x.stats || {}).videoIdsAdded || 0), 0);
-      const pending = results.reduce((a, x) => a + ((x.stats || {}).rechecksPending || 0) + ((x.stats || {}).tracklistsPending || 0), 0);
-      const failed = results.filter((x) => x.ok === false).map((x) => x.slug);
-      showError(
-        'resynced ' + results.length + ' of ' + btns.length + ' DJs this pass (invalidated ' + invalidated + ' cached videos) — rechecked ' + rechecked +
-        ', replaced ' + replaced + ', ' + added + ' new' +
-        (pending ? ' · ' + pending + ' still pending — auto-continuing every 5 min' : '') +
-        (failed.length ? ' · failed: ' + failed.join(', ') : ''),
-      );
-      loadCombined();
-    } catch (e) {
-      showError('resync all failed: ' + (e && e.message || e));
-    } finally {
-      $resyncAll.disabled = false;
-      btns.forEach((b) => { b.disabled = false; });
-      $resyncAll.textContent = original;
-    }
-  });
-
-  $form.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const url = $url.value.trim();
-    if (!url) return;
-    add(url);
-  });
-
-  // ── YouTube connect/disconnect ──────────────────────────────────────────
-  const $yt = document.getElementById('yt');
-  const $ytTitle = document.getElementById('yt-title');
-  const $ytSub = document.getElementById('yt-sub');
-  const $ytAction = document.getElementById('yt-action');
-
-  async function loadYouTubeStatus() {
-    const r = await fetch('/ui/api/youtube/status', { credentials: 'same-origin' });
-    if (!r.ok) { $yt.hidden = true; return; }
-    const data = await r.json();
-    $yt.hidden = false;
-    if (data.connected) {
-      $ytTitle.textContent = 'YouTube · ' + (data.channelTitle || 'connected');
-      $ytSub.textContent = 'Granted: ' + (data.scope || '(unknown scope)');
-      $ytAction.textContent = 'Disconnect';
-      $ytAction.className = 'danger';
-      $ytAction.onclick = disconnectYouTube;
-    } else {
-      $ytTitle.textContent = 'YouTube';
-      $ytSub.textContent = 'Connect your account to let this app create and update playlists.';
-      $ytAction.textContent = 'Sign in with YouTube';
-      $ytAction.className = 'connect';
-      $ytAction.onclick = () => { window.location.href = '/ui/oauth/start'; };
-    }
-  }
-
-  async function disconnectYouTube() {
-    if (!confirm('Disconnect this app from your YouTube account?')) return;
-    $ytAction.disabled = true;
-    try {
-      const r = await fetch('/ui/oauth/disconnect', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
-      if (!r.ok) { showError('disconnect failed (' + r.status + ')'); return; }
-      await loadYouTubeStatus();
-    } finally {
-      $ytAction.disabled = false;
-    }
-  }
-
-  // Surface ?yt=connected / ?yt_error=... after the OAuth round-trip.
-  const params = new URLSearchParams(location.search);
-  if (params.get('yt_error')) showError('YouTube connect failed: ' + params.get('yt_error'));
-  if (params.get('yt') || params.get('yt_error')) {
-    history.replaceState({}, '', location.pathname);
-  }
-
   // ── YouTube video JSON inspector ───────────────────────────────────────
   // Paste any watch/youtu.be/shorts URL (or a bare id) and dump the raw
   // videos.list payload. Read-only: it touches nothing else in the app.
@@ -1870,90 +1478,9 @@ ${BAN_HISTORY_HTML}
   $plErrorsOnly.addEventListener('change', renderPlaylistAdds);
   $plMore.addEventListener('click', () => loadPlaylistAdds(false));
 
-  // ── Combined "all tracked artists" playlist ────────────────────────────
-  // One playlist holding every video from every tracked DJ. The sync mirrors
-  // new videos into it as it goes; anything older (sets processed before this
-  // existed, or a new DJ's back catalogue) arrives via the backfill, which the
-  // crons run automatically — the button here just skips the wait.
-  const $cmbBody = document.getElementById('cmb-body');
-  const $cmbRefresh = document.getElementById('cmb-refresh');
-  const $cmbBackfill = document.getElementById('cmb-backfill');
-
-  function renderCombined(d) {
-    if (!d || d.connected === false) {
-      $cmbBody.innerHTML = '<span class="counts">Connect a YouTube account to build the combined playlist.</span>';
-      $cmbBackfill.disabled = true;
-      return;
-    }
-    $cmbBackfill.disabled = false;
-    const missing = d.missingTotal || 0;
-    const sources = d.sources || [];
-    const cap = d.dailyInsertCap || 0;
-    const left = Math.max(0, cap - (d.dailyInsertsUsed || 0));
-    const head = d.playlistId
-      ? link(d.playlistUrl, d.title) + ' <span class="counts">· ' + (d.videoCount || 0) + ' videos</span>'
-      : esc(d.title) + ' <span class="counts">· not created yet</span>';
-    const bits = [
-      missing > 0
-        ? '<span class="warn">' + missing + ' still to add</span>'
-        : 'up to date with every artist playlist',
-      sources.length + ' artist playlist' + (sources.length === 1 ? '' : 's'),
-      left + '/' + cap + ' inserts left today',
-    ];
-    // Deleted/private videos that can never be inserted — skipped, not retried.
-    if (d.unavailableTotal) bits.push(d.unavailableTotal + ' unavailable skipped');
-    if (d.lastBackfillAt) bits.push('last backfill ' + relTime(new Date(d.lastBackfillAt * 1000).toISOString()));
-    let html = '<div class="headline">' + head + '</div><div class="counts">' + bits.join(' · ') + '</div>';
-    if (missing > 0) {
-      html += '<div class="counts">Backfilling automatically on every cron tick, up to ' + cap +
-        ' videos/day (YouTube quota).</div>';
-    }
-    $cmbBody.innerHTML = html;
-  }
-
-  async function loadCombined() {
-    try {
-      const r = await fetch('/ui/api/combined', { credentials: 'same-origin' });
-      if (!r.ok) { $cmbBody.innerHTML = '<span class="counts">status unavailable (' + r.status + ')</span>'; return; }
-      renderCombined(await r.json());
-    } catch { $cmbBody.innerHTML = '<span class="counts">status unavailable</span>'; }
-  }
-
-  $cmbRefresh.addEventListener('click', loadCombined);
-  $cmbBackfill.addEventListener('click', async () => {
-    showError('');
-    $cmbBackfill.disabled = true;
-    const original = $cmbBackfill.textContent;
-    $cmbBackfill.textContent = 'Backfilling…';
-    try {
-      const r = await fetch('/ui/api/combined/backfill', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        if (r.status === 412 && data.error === 'youtube_reauth_required') { showReauthError(); loadYouTubeStatus(); return; }
-        showError(data.errorMessage || data.message || data.error || ('backfill failed (' + r.status + ')'));
-        return;
-      }
-      if (data.ok === false) {
-        showError(data.reason === 'no_sources'
-          ? 'nothing to backfill yet — sync a DJ first'
-          : 'backfill skipped: ' + data.reason);
-      } else {
-        showError('combined playlist: added ' + (data.inserted || 0) + ' video' + (data.inserted === 1 ? '' : 's') +
-          (data.pending ? ' · ' + data.pending + ' still pending (' + (data.cappedBy || 'capped') + ')' : ''));
-      }
-      await loadCombined();
-    } finally {
-      $cmbBackfill.disabled = false;
-      $cmbBackfill.textContent = original;
-    }
-  });
-
   // Cf-Access-Authenticated-User-Email is forwarded by Access; surface it for confidence.
   document.getElementById('who').textContent = document.cookie.includes('CF_Authorization=') ? 'Cloudflare Access' : 'dev';
 
-  load();
-  loadYouTubeStatus();
-  loadCombined();
   loadAudit(true);
   loadPlaylistAdds(true);
 })();

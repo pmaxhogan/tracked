@@ -4,6 +4,7 @@
 import { shell } from '../shell'
 import type { UiPage } from './index'
 import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
+import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from './dj-actions'
 
 const BODY = /* html */ `
 <div class="dj-layout">
@@ -19,7 +20,6 @@ const BODY = /* html */ `
       <button id="resync" type="button" class="btn danger" hidden title="Forget the cached video for every set and re-check them all">Invalidate &amp; resync</button>
       <button id="refresh" type="button" class="btn">Refresh from 1001tracklists</button>
     </div>
-    <div id="dj-msg" class="error" role="alert"></div>
   </aside>
   <section class="dj-main">
     <div id="chips" class="chips" role="group" aria-label="Filter sets">
@@ -51,13 +51,11 @@ const CSS = /* css */ `
   .set-card > .body { padding-top: var(--sp-3); }
   .set-meta { color: var(--muted); font-size: var(--fs-sm); display: flex; flex-wrap: wrap; gap: 4px var(--sp-3); margin-bottom: var(--sp-3); }
   .set-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-3); }
-  .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
   .set-card.unloaded { opacity: .75; }
   .set-card .badge.neutral { text-transform: none; }
   .retry { margin-left: var(--sp-2); }
   .warn-text { color: var(--danger); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .loading-text { color: var(--muted); font-size: var(--fs-sm); }
-  #dj-msg a { color: inherit; font-weight: 600; }
   @media (min-width: 900px) {
     .dj-layout { grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr); }
     .dj-side { position: sticky; top: var(--sp-4); }
@@ -65,18 +63,20 @@ const CSS = /* css */ `
   @media (min-width: 1300px) {
     .dj-sets { grid-template-columns: 1fr 1fr; }
   }
-${TRACK_ROW_CSS}`
+${TRACK_ROW_CSS}
+${DJ_ACTIONS_CSS}`
 
 const JS = /* js */ `
 (() => {
 ${TRACK_ROW_JS}
+${DJ_ACTIONS_JS}
   const $ = TK.$;
   // The slug comes from the path (/ui/dj/<slug>).
   let slug = '', badSlug = false;
   try { slug = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || ''); } catch (e) { badSlug = true; }
 
   const $name = $('dj-name'), $sub = $('dj-sub'), $slug = $('dj-slug'), $link1001 = $('dj-1001'), $counts = $('counts');
-  const $refresh = $('refresh'), $sync = $('sync'), $resync = $('resync'), $msg = $('dj-msg');
+  const $refresh = $('refresh'), $sync = $('sync'), $resync = $('resync');
   const $playlist = $('dj-playlist'), $last = $('dj-last');
   const $error = $('error'), $sets = $('sets'), $empty = $('empty'), $chips = $('chips'), $note = $('filter-note');
   let filter = 'all';
@@ -320,45 +320,9 @@ ${TRACK_ROW_JS}
     if (refresh) await TK.busy($refresh, 'Refreshing…', run); else await run();
   }
 
-  // ── Sync / Invalidate & resync (same endpoints and wording as the DJs page) ──
-  function showReauth() {
-    $msg.textContent = '';
-    const t = document.createElement('span');
-    t.textContent = TK.errText({ data: { error: 'youtube_reauth_required' } }, '') + ' ';
-    const a = document.createElement('a'); a.href = '/ui/oauth/start'; a.textContent = 'Reconnect YouTube';
-    $msg.appendChild(t); $msg.appendChild(a);
-  }
-  async function syncOne(resync, btn) {
-    $msg.textContent = '';
-    await TK.busy(btn, resync ? 'Resyncing…' : 'Syncing…', async () => {
-      const res = await TK.api.post('/ui/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {});
-      const data = res.data && typeof res.data === 'object' ? res.data : {};
-      if (!res.ok) {
-        if (res.status === 412 && data.error === 'youtube_reauth_required') { showReauth(); TK.toast(TK.errText(res, ''), 'bad'); return; }
-        const msg = data.errorMessage || TK.errText(res, 'sync failed (' + res.status + ')');
-        const detail = data.errorStack
-          || (data.errorName && data.errorName !== 'Error' ? data.errorName : null)
-          || (res.raw && res.raw !== msg ? res.raw : null);
-        TK.toast('sync failed: ' + msg, 'bad', detail);
-        return;
-      }
-      const stats = data.stats || {};
-      const pending = stats.tracklistsPending || 0;
-      const rechecksPending = stats.rechecksPending || 0;
-      const continuing = [];
-      if (pending > 0) continuing.push(pending + ' new pending');
-      if (rechecksPending > 0) continuing.push(rechecksPending + ' recheck' + (rechecksPending === 1 ? '' : 's') + ' pending');
-      const more = continuing.length ? ' · ' + continuing.join(', ') + ' — auto-continuing every 5 min' : '';
-      const combined = stats.combinedVideoIdsAdded ? ' · ' + stats.combinedVideoIdsAdded + ' into the combined playlist' : '';
-      const rechecked = stats.tracklistsRechecked ? ' · rechecked ' + stats.tracklistsRechecked + ', replaced ' + (stats.videosReplaced || 0) : '';
-      const inv = data.invalidated ? ' (invalidated ' + (data.invalidated.tracklistsMarked || 0) + ' cached videos)' : '';
-      TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
-        (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
-        ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + rechecked + combined + more, 'ok');
-    });
-  }
-  $sync.addEventListener('click', () => syncOne(false, $sync));
-  $resync.addEventListener('click', () => syncOne(true, $resync));
+  // ── Sync / Invalidate & resync: the same calls and wording as the DJs page (dj-actions) ──
+  $sync.addEventListener('click', async () => { const out = await DJA.syncSlug(slug, $sync); if (out && out.ok) loadState(); });
+  $resync.addEventListener('click', async () => { const out = await DJA.syncSlug(slug, $resync, { resync: true }); if (out && out.ok) loadState(); });
   $refresh.addEventListener('click', () => load(true));
 
   if (badSlug) {

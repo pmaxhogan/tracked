@@ -74,7 +74,7 @@ describe('the guard on /ui/api/* (real app)', () => {
 })
 
 describe('the admin pages send what the guard wants', () => {
-  const pages = ['/ui', '/ui/set', '/ui/dj/some-dj', '/ui/removed', '/ui/mkvid', '/ui/pool', '/ui/pool/settings', '/ui/captcha', '/ui/captcha/ch-1']
+  const pages = ['/ui', '/ui/djs', '/ui/playlists', '/ui/set', '/ui/dj/some-dj', '/ui/removed', '/ui/mkvid', '/ui/pool', '/ui/pool/settings', '/ui/captcha', '/ui/captcha/ch-1']
   it.each(pages)('%s: every POST/PUT/DELETE fetch carries a JSON content type', async (path) => {
     const html = await (await call(path, {})).text()
     const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!).join('\n')
@@ -90,7 +90,7 @@ describe('the admin pages send what the guard wants', () => {
     }
     expect(bad).toEqual([])
     // The scan really sees the fetches (the pool pages build theirs with jsonInit, which sets the type).
-    if (path === '/ui') expect(seen).toBeGreaterThan(2)
+    if (path === '/ui/djs') expect(seen).toBeGreaterThan(2)
     if (path === '/ui/pool') expect(scripts).toContain("headers: { 'content-type': 'application/json' }")
   })
 })

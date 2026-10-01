@@ -108,8 +108,8 @@ describe('playlist title fix (seam 8)', () => {
     // Without Access (no dev bypass, no JWT) it is refused.
     const locked = { ...env, DEV_BYPASS_CF_ACCESS: undefined, CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'a@example.com' } as Env
     expect([401, 403]).toContain((await post(locked, {})).status)
-    // The main page has the button.
-    const page = await (await app.request('http://x/ui', {}, env)).text()
+    // The DJs page has the button.
+    const page = await (await app.request('http://x/ui/djs', {}, env)).text()
     expect(page).toContain('id="fix-titles"')
     expect(page).toContain('/ui/api/playlists/fix-titles')
   })
