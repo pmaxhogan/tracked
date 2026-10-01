@@ -766,6 +766,7 @@ describe('Access gate on every /ui route', () => {
     expect(paths).toContain('/ui')
     expect(paths).toContain('/ui/')
     expect(paths).toContain('/ui/api/mkvid/progress') // the render progress proxy (calls mkvid) sits behind Access too
+    expect(paths).toContain('/ui/api/search') // the search API (routes/search.ts) is mounted inside subscriptionsApp
     expect(paths.length).toBeGreaterThan(20)
   })
   it.each(paths)('GET %s answers 401 without Access and never fetches', async (path) => {

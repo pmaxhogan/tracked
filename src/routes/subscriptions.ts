@@ -74,6 +74,7 @@ import {
 import { SW_JS } from './ban-ui'
 import { hygieneApp } from './playlist-hygiene'
 import { activityApp } from './activity'
+import { searchApp } from './search'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -104,6 +105,9 @@ subscriptionsApp.route('/', hygieneApp)
 
 // Activity log + set diagnostics (routes/activity.ts). Behind cfAccess above.
 subscriptionsApp.route('/', activityApp)
+
+// Search over the SEARCH_DB index (routes/search.ts). Behind cfAccess above.
+subscriptionsApp.route('/', searchApp)
 
 // Home: status tiles, needs attention, recent activity (ui/pages/home.ts).
 subscriptionsApp.get('/', (c) => servePage(c, HOME_PAGE.html))
