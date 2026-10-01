@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { unpublishResponse } from './mkvid-ops'
 import type { Env } from '../types'
 import { cfAccess } from '../middleware/cf-access'
 import { servePage } from '../ui/pages'
@@ -56,7 +57,7 @@ import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audi
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
 import { readinessFor, setSkipIdWait } from '../lib/mkvid-readiness'
-import { countOldStyleVideos, deleteOldVideo, listUndeletedOldVideos, recreateMkvidRequest, recreateOldStyleVideos, resetOldVideoDelete } from '../lib/mkvid-recreate'
+import { countOldStyleVideos, deleteOldVideo, listUndeletedOldVideos, recreateMkvidRequest, recreateOldStyleVideos, resetOldVideoDelete, unpublishMkvidRequest } from '../lib/mkvid-recreate'
 import { banMkvidRequest, countMkvidRequests, getMkvidLastPoll, listMkvidDjs, listMkvidQueuePage, listMkvidSettledPage, MKVID_ACCOUNTS, MKVID_MOVES, MKVID_SOURCES, MKVID_STATUSES, mkvidAccountUsage, moveMkvidRequest, quotaDayEnd, requestSummary, retryMkvidRequest, type MkvidAccount, type MkvidFilter, type MkvidMove, type MkvidSourceKind, type MkvidStatus } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { getBanStatus, manualClear, simulateBan } from '../lib/ban-state'
@@ -826,6 +827,16 @@ subscriptionsApp.post('/api/mkvid/recreate/:id', async (c) => {
   log.info('subs.mkvid_recreate', { id, ...r })
   if (r.ok) return c.json(r)
   return c.json({ ...r, id }, r.error === 'not_found' ? 404 : 409)
+})
+
+/**
+ * "Delete video" (done requests only): out of the playlists and off YouTube
+ * now, the request back to pending; it renders again once the claim's gates
+ * pass (lib/mkvid-recreate.ts unpublishMkvidRequest).
+ */
+subscriptionsApp.post('/api/mkvid/unpublish/:id', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_unpublish', by: c.get('cfAccessEmail') })
+  return unpublishResponse(c, c.req.param('id'), log)
 })
 
 /** The render mkvid is working on now, as weighted stages (the page's progress bar); `running: null` when it is idle. */

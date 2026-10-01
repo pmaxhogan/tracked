@@ -23,6 +23,7 @@ import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
 import { drainPageCaptures } from './lib/page-store'
 import { poolPagesApp } from './routes/pool-pages'
+import { mkvidOpsApp } from './routes/mkvid-ops'
 import { prunePoolEvents, retryFailedPoolPushes } from './lib/pool-events'
 import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
 import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
@@ -93,6 +94,8 @@ app.route('/mkvid', mkvidApp)
 // sub-app — skipped by the API_TOKEN wildcard gate below, like /mkvid.
 app.route('/pool', poolPagesApp) // GET /pool/pages*, bearer API_TOKEN, gated per path; before poolEventsApp's '*' gate
 app.route('/pool', poolEventsApp)
+// Operator actions on mkvid requests, bearer API_TOKEN inside the sub-app (routes/mkvid-ops.ts).
+app.route('/ops', mkvidOpsApp)
 // Documented here only (the sub-app is plain Hono), so mkvid's side has a
 // published contract for the claim, track list included.
 app.openAPIRegistry.registerPath({
@@ -123,6 +126,7 @@ app.use('*', async (c, next) => {
   if (path === '/subscriptions' || path.startsWith('/subscriptions/')) return next()
   if (path === '/mkvid' || path.startsWith('/mkvid/')) return next()
   if (path === '/pool' || path.startsWith('/pool/')) return next()
+  if (path === '/ops' || path.startsWith('/ops/')) return next()
   return bearerAuth(c, next)
 })
 

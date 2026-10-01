@@ -29,6 +29,7 @@
 import { markOutOfPlaylist } from './playlist-blocklist'
 import type { Env } from '../types'
 import { dbOf } from './db'
+import { pullInHeldRecheck, TIMED_SQL } from './mkvid-readiness'
 import { errorFields, type Logger } from './log'
 import { openCombinedPlaylist, removeFromCombined, type CombinedHandle } from './combined-playlist'
 import { cachePlaylistVideoIds } from './playlist-cache'
@@ -76,6 +77,8 @@ export async function recreateMkvidRequest(env: Env, id: string, log: Logger): P
     .run()
   if ((r.meta.changes ?? 0) === 0) return { ok: false, error: 'not_done' }
   await recordAwaitingOldVideos(env, [id])
+  const setUrl = (await db.prepare('SELECT set_url FROM mkvid_requests WHERE id = ?').bind(id).first<{ set_url: string }>())?.set_url
+  if (setUrl) await pullInHeldRecheck(env, setUrl)
   log.info('mkvid.recreate_queued', { id, replacesVideoId: row.video_id })
   return { ok: true, id, replacesVideoId: row.video_id }
 }
@@ -123,6 +126,11 @@ export async function recreateOldStyleVideos(
     for (const x of res) queued += x.meta.changes ?? 0
   }
   await recordAwaitingOldVideos(env, rows.results.map((r) => r.id))
+  // A held (untimed) recreation keeps its set due within a week. Usually none: only sets queued under the new gate are held.
+  const held = await db
+    .prepare(`SELECT set_url FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id WHERE r.status = 'pending' AND r.replaces_video_id IS NOT NULL AND NOT COALESCE(${TIMED_SQL}, 0)`)
+    .all<{ set_url: string }>()
+  for (const h of held.results) await pullInHeldRecheck(env, h.set_url)
   log.info('mkvid.recreate_old_style_queued', { queued })
   return { ok: true, queued }
 }
@@ -188,6 +196,69 @@ export async function retireSupersededOldVideo(
   const style = (await db.prepare('SELECT style FROM mkvid_old_videos WHERE video_id = ?').bind(a.oldVideoId).first<{ style: string | null }>())?.style ?? null
   await markOldVideoForDelete(env, { requestId: a.requestId, slug: a.slug, setUrl: a.setUrl, oldVideoId: a.oldVideoId, oldStyle: style, replacedBy: a.replacedBy })
   a.log.info('mkvid.recreate_superseded_old_retired', { id: a.requestId, oldVideoId: a.oldVideoId, replacedBy: a.replacedBy })
+}
+
+export type UnpublishResult =
+  | { ok: true; id: string; videoId: string; removedFromArtist: boolean; removedFromCombined: number }
+  | { ok: false; error: 'not_found' | 'not_done' | 'no_video' | 'already_recreating' | 'not_connected' }
+
+/**
+ * Take a delivered mkvid video down without a replacement ready (a render
+ * that came out wrong, e.g. a list with too few cue times): out of the artist
+ * and combined playlists now, queued for deletion from YouTube
+ * (mkvid_old_videos, replaced_by 'unpublished'), the set's video cleared, and
+ * the request back to `pending` in its natural place with no attempts used.
+ * It renders again whenever the claim's gates (verified, timed, ID wait)
+ * pass. Needs the YouTube connection: an artist playlist failure throws
+ * before anything is written, so it leaves everything as it was.
+ */
+export async function unpublishMkvidRequest(env: Env, id: string, log: Logger, accessToken: string | null): Promise<UnpublishResult> {
+  const db = dbOf(env)
+  const row = await db
+    .prepare('SELECT slug, set_url, status, video_id, replaces_video_id, style FROM mkvid_requests WHERE id = ?')
+    .bind(id)
+    .first<{ slug: string; set_url: string; status: string; video_id: string | null; replaces_video_id: string | null; style: string | null }>()
+  if (!row) return { ok: false, error: 'not_found' }
+  if (row.status !== 'done') return { ok: false, error: 'not_done' }
+  if (!row.video_id) return { ok: false, error: 'no_video' }
+  if (row.replaces_video_id) return { ok: false, error: 'already_recreating' }
+  if (!accessToken) return { ok: false, error: 'not_connected' }
+  const videoId = row.video_id
+  let removedFromArtist = false
+  const pl = await db.prepare('SELECT playlist_id FROM sub_sync WHERE slug = ?').bind(row.slug).first<{ playlist_id: string | null }>()
+  if (pl?.playlist_id) {
+    const ids = await listPlaylistVideoIds(pl.playlist_id, accessToken)
+    if (ids.has(videoId)) {
+      removedFromArtist = (await removeVideoFromPlaylist(pl.playlist_id, videoId, accessToken)) > 0
+      ids.delete(videoId)
+    }
+    await markOutOfPlaylist(env, pl.playlist_id, videoId, 'recreate')
+    await cachePlaylistVideoIds(env, pl.playlist_id, ids)
+  }
+  let removedFromCombined = 0
+  try {
+    const combined = await openCombinedPlaylist(env, accessToken, log)
+    if (combined) removedFromCombined = await removeFromCombined(combined, videoId, accessToken, log)
+  } catch (e) {
+    log.warn('mkvid.unpublish_combined_remove_failed', { id, videoId, ...errorFields(e) })
+  }
+  // Recorded before the request lets go of the id, so no path can lose it.
+  await markOldVideoForDelete(env, { requestId: id, slug: row.slug, setUrl: row.set_url, oldVideoId: videoId, oldStyle: row.style, replacedBy: 'unpublished' })
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE mkvid_requests SET status = 'pending', video_id = NULL, video_url = NULL, attempts = 0, not_before = NULL,
+           claimed_at = NULL, job_id = NULL, error = NULL, unknown_failures = 0, updated_at = ?
+         WHERE id = ? AND status = 'done' AND video_id = ?`,
+      )
+      .bind(nowSeconds(), id, videoId),
+    db
+      .prepare("UPDATE tracklists SET video_id = NULL, video_source = NULL, video_known = 1, checked_at = 0 WHERE url = ? AND video_id = ? AND video_source = 'mkvid'")
+      .bind(row.set_url, videoId),
+  ])
+  await pullInHeldRecheck(env, row.set_url)
+  log.info('mkvid.unpublished', { id, videoId, removedFromArtist, removedFromCombined })
+  return { ok: true, id, videoId, removedFromArtist, removedFromCombined }
 }
 
 /**

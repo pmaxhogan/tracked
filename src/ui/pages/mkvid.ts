@@ -558,6 +558,7 @@ ${MKVID_STATE_JS}
     }
     if (r.status === 'done' && r.videoId && !r.replacesVideoId) {
       btns.push('<button type="button" class="btn danger" data-do="recreate" title="Render the set again (back of the queue, counts against the daily cap); the old video is deleted once the new one is in the playlists">Delete and recreate</button>');
+      btns.push('<button type="button" class="btn danger" data-do="unpublish" title="Take the video out of the playlists and delete it from YouTube now; the set goes back in the queue and renders again when it is ready">Delete video</button>');
     }
     btns.push('<a class="btn" href="/ui/set?url=' + encodeURIComponent(r.setUrl || '') + '">Open set page</a>');
     // A failed action's reason, shown here: a toast would sit under the modal drawer.
@@ -566,6 +567,7 @@ ${MKVID_STATE_JS}
     return out.join('');
   }
 
+  const UNPUBLISH_ASK = 'Delete this video now? It comes out of the playlists and is deleted from YouTube right away. The set goes back in the queue and renders again once it is ready.';
   const RECREATE_ASK = 'Delete and recreate this video? The set is rendered again at the back of the queue; the current video stays up until the new one is in the playlists, then it is deleted from YouTube.';
   // errMsg: the reason the last action on this request failed, shown in the drawer.
   let drawerFor = null;
@@ -581,14 +583,15 @@ ${MKVID_STATE_JS}
       const id = encodeURIComponent(r.id);
       const what = b.dataset.do;
       if (what === 'recreate' && !(await TK.ask(RECREATE_ASK, { yes: 'Delete and recreate', danger: true }))) return;
-      const url = what === 'retry' ? '/ui/api/mkvid/retry/' + id : what === 'render-now' ? '/ui/api/mkvid/render-now/' + id : '/ui/api/mkvid/recreate/' + id;
+      if (what === 'unpublish' && !(await TK.ask(UNPUBLISH_ASK, { yes: 'Delete video', danger: true }))) return;
+      const url = what === 'retry' ? '/ui/api/mkvid/retry/' + id : what === 'render-now' ? '/ui/api/mkvid/render-now/' + id : what === 'unpublish' ? '/ui/api/mkvid/unpublish/' + id : '/ui/api/mkvid/recreate/' + id;
       if (errLine) errLine.hidden = true;
       const res = await TK.busy(b, 'Working…', () => TK.api.post(url, {}));
       if (res && res.ok) { TK.drawer.close(); await load('all'); return; }
       // Failed: say why in the drawer, which stays open, and reload, as the old
       // panel did; the drawer then shows the request as it is now.
       const why = TK.errText(res, '');
-      const msg = (what === 'render-now' ? 'render now' : what) + ' failed (' + (res ? res.status : 0) + ')' + (why ? ': ' + why : '');
+      const msg = (what === 'render-now' ? 'render now' : what === 'unpublish' ? 'delete video' : what) + ' failed (' + (res ? res.status : 0) + ')' + (why ? ': ' + why : '');
       if (errLine) { errLine.textContent = msg; errLine.hidden = false; }
       await load('all');
       const dlg = $('tk-drawer');

@@ -12,3 +12,12 @@ UPDATE mkvid_request_tracks
        timed_rows = (SELECT COUNT(*) FROM json_each(mkvid_request_tracks.tracks)
                       WHERE COALESCE(json_extract(value, '$.layered'), 0) != 1
                         AND (CAST(key AS INTEGER) = 0 OR json_type(value, '$.cueSeconds') IN ('integer', 'real')));
+-- Sets held by this today keep their schedule due within a week, as
+-- pullInHeldRecheck does from now on (an old set may be due in 90 days, or never),
+-- spread at random over that week so they do not all come due at once.
+UPDATE set_schedule
+   SET next_due_at = CAST(strftime('%s', 'now') AS INTEGER) + ABS(RANDOM() % (7 * 86400)),
+       updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE url IN (SELECT r.set_url FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id
+                WHERE r.status = 'pending' AND NOT COALESCE(t.base_rows > 0 AND t.timed_rows * 10 >= t.base_rows * 9, 0))
+   AND (next_due_at IS NULL OR next_due_at > CAST(strftime('%s', 'now') AS INTEGER) + 7 * 86400);

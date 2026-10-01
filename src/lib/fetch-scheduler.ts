@@ -76,15 +76,6 @@ const INIT_BATCH = 500
 const MKVID_WAITING_SPREAD_SECONDS = 2 * 24 * HOUR
 /** A discovery / backfill step that did not complete is retried after about this long, not a whole interval later. */
 const DJ_RETRY_SECONDS = HOUR
-/**
- * A set mkvid is waiting on whose stored list is under 90 % timed
- * (lib/mkvid-readiness.ts) is rechecked at least this often, so its render
- * starts soon after 1001tracklists gets the times — not 30 or 90 days later.
- */
-export const HELD_UNTIMED_RECHECK_SECONDS = 7 * 24 * HOUR
-/** A pending mkvid request for the set whose stored list is too untimed to render (TIMED_SQL negated; NULL counts = untimed). */
-const HELD_UNTIMED_SQL = `SELECT 1 FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id
-  WHERE r.set_url = ? AND r.status = 'pending' AND NOT COALESCE(t.base_rows > 0 AND t.timed_rows * 10 >= t.base_rows * 9, 0) LIMIT 1`
 /** CACHE KV: when ensureSetSchedules last ran (unix seconds). */
 export const ENSURE_STAMP_KEY = 'scheduler:ensure_at'
 /** The render feeder submits at most this many first fetches per tick. */
@@ -146,7 +137,7 @@ export async function ensureSetSchedules(env: Env, settings: PoolSettings, nowSe
   return statements.length
 }
 
-/** After a successful fetch of a set page: its next due time by age (jittered), or never; at most a week for a set held as untimed. */
+/** After a successful fetch of a set page: its next due time by age (jittered), or never. */
 export async function scheduleAfterFetch(
   env: Env,
   settings: PoolSettings,
@@ -154,11 +145,7 @@ export async function scheduleAfterFetch(
 ): Promise<number | null> {
   const nowSec = f.nowSec ?? nowSeconds()
   const setDate = setDateFromUrl(f.url)
-  let interval = recheckIntervalSeconds(settings, setAgeDays(setDate, nowSec), { noGoodVideo: !f.videoId, hasIdRows: f.hasIdRows })
-  if (interval === null || interval > HELD_UNTIMED_RECHECK_SECONDS) {
-    const held = await dbOf(env).prepare(HELD_UNTIMED_SQL).bind(f.url).first()
-    if (held) interval = HELD_UNTIMED_RECHECK_SECONDS
-  }
+  const interval = recheckIntervalSeconds(settings, setAgeDays(setDate, nowSec), { noGoodVideo: !f.videoId, hasIdRows: f.hasIdRows })
   const next = interval === null ? null : nowSec + jitter(interval, settings.recheck.jitterFraction, f.random)
   await dbOf(env)
     .prepare(
@@ -385,7 +372,8 @@ function retryAfterOf(e: unknown): number | null {
  * ID wait whose last known list has ID rows (it is young, so its 12 h / 1 d
  * recheck fetches it anyway), one whose longest audio player is known to be
  * shorter than the last cue (mkvid would refuse it as incomplete), one whose
- * known list is under 90 % timed (held; its weekly recheck fetches it), one whose
+ * known list is under 90 % timed (held; lib/mkvid-readiness.ts
+ * pullInHeldRecheck keeps its set due within a week), one whose
  * set-page fetch is waiting out a failed attempt or is out of attempts today
  * (set_schedule.retry_at / attempts_today; a request's own mkvid retry
  * backoff does not matter here), one fetched by anything within

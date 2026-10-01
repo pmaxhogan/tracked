@@ -19,7 +19,7 @@ import {
   saveMkvidTracks,
   supersedeMkvidRequestForSet,
 } from '../src/lib/mkvid'
-import { ID_WAIT_SECONDS, isVerified, mkvidReadiness, readinessFor, setAgeReference, timedRowCounts } from '../src/lib/mkvid-readiness'
+import { ID_WAIT_SECONDS, isVerified, mkvidReadiness, readinessFor, pullInHeldRecheck, setAgeReference, timedRowCounts } from '../src/lib/mkvid-readiness'
 import {
   callMkvidDelete,
   countOldStyleVideos,
@@ -320,6 +320,89 @@ function stubMkvid(answer: (url: string, init: RequestInit) => Response) {
   return calls
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+
+describe('delete video (unpublish)', () => {
+  const postUi = (env: Env, path: string) => app.request(`http://x${path}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)
+  const due = async (env: Env, url: string) => (await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(url).first<{ next_due_at: number | null }>())?.next_due_at ?? null
+
+  it('takes the video out of both playlists, deletes it via mkvid, and puts the request back to pending with no video', async () => {
+    const env = makeEnv({ MKVID_URL: 'https://mkvid.example/' })
+    const a = await doneRequest(env, 'set', 'scene')
+    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set([OLD]))
+    const calls = stubMkvid(() => json({ ok: true, outcome: 'deleted' }))
+    const r = await postUi(env, `/ui/api/mkvid/unpublish/${a.id}`)
+    expect(r.status).toBe(200)
+    expect(await r.json()).toMatchObject({ ok: true, videoId: OLD, removedFromArtist: true, deleteState: 'deleted' })
+    expect(removeVideoFromPlaylist).toHaveBeenCalledWith('PLa', OLD, 'ya29')
+    expect(removeVideoFromPlaylist).toHaveBeenCalledWith('PLc', OLD, 'ya29')
+    expect(calls.map((c) => c.url)).toEqual([`https://mkvid.example/api/videos/${OLD}/delete`])
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', videoId: null, videoUrl: null, replacesVideoId: null, attempts: 0 })
+    expect(await env.DB.prepare('SELECT video_id, video_source FROM tracklists WHERE url = ?').bind(a.setUrl).first()).toEqual({ video_id: null, video_source: null })
+    expect(await env.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first()).toEqual({ state: 'deleted', replaced_by: 'unpublished' })
+    // Its (timed) list makes it claimable again; twice is refused.
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(a.id)
+    expect((await postUi(env, `/ui/api/mkvid/unpublish/${a.id}`)).status).toBe(409)
+    expect((await postUi(env, '/ui/api/mkvid/unpublish/nope')).status).toBe(404)
+  })
+
+  it('an untimed list stays held after unpublishing, its set due within a week; the operator route needs the API token', async () => {
+    const env = makeEnv({ MKVID_URL: 'https://mkvid.example/' })
+    const a = await doneRequest(env, 'set', 'scene')
+    await storeVerifiedList(env, a.setUrl, { rows: 33, untimedRows: 31 })
+    await env.DB.prepare('INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at) VALUES (?, NULL, NULL, 1, 0, 0, 1)').bind(a.setUrl).run()
+    stubMkvid(() => json({ ok: true, outcome: 'deleted' }))
+    expect((await app.request(`http://x/ops/mkvid/unpublish/${a.id}`, { method: 'POST' }, env)).status).toBe(401)
+    const before = Math.floor(Date.now() / 1000)
+    const r = await app.request(`http://x/ops/mkvid/unpublish/${a.id}`, { method: 'POST', headers: { Authorization: 'Bearer tasker' } }, env)
+    expect(r.status).toBe(200)
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
+    const at = (await due(env, a.setUrl))!
+    expect(at).toBeGreaterThanOrEqual(before + 7 * DAY)
+    expect(at).toBeLessThanOrEqual(before + 7 * DAY + 5)
+  })
+
+  it('without a YouTube connection nothing changes', async () => {
+    const env = makeEnv({ SUBS: fakeKV() })
+    const a = await doneRequest(env, 'set', 'scene')
+    expect((await postUi(env, `/ui/api/mkvid/unpublish/${a.id}`)).status).toBe(503)
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'done', videoId: OLD })
+  })
+})
+
+describe('a held (untimed) set is kept due within a week', () => {
+  const due = async (env: Env, url: string) => (await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(url).first<{ next_due_at: number | null }>())?.next_due_at ?? null
+
+  it('on Delete and recreate, and never pushed later or applied to a timed list', async () => {
+    const env = makeEnv()
+    const a = await doneRequest(env, 'held', 'scene')
+    const b = await doneRequest(env, 'timed', 'scene')
+    await env.DB.prepare("UPDATE mkvid_requests SET video_id = 'otherVid0001' WHERE id = ?").bind(b.id).run()
+    await storeVerifiedList(env, a.setUrl, { rows: 33, untimedRows: 31 })
+    const soon = NOW + 3600
+    await env.DB.prepare('INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at) VALUES (?, NULL, NULL, 1, 0, 0, 1), (?, NULL, NULL, 1, 0, 0, 1)').bind(a.setUrl, b.setUrl).run()
+    expect((await recreateMkvidRequest(env, a.id, log)).ok).toBe(true)
+    expect((await recreateMkvidRequest(env, b.id, log)).ok).toBe(true)
+    expect(await due(env, a.setUrl)).toBeGreaterThanOrEqual(NOW + 7 * DAY)
+    expect(await due(env, b.setUrl)).toBeNull()
+    await env.DB.prepare('UPDATE set_schedule SET next_due_at = ? WHERE url = ?').bind(soon, a.setUrl).run()
+    expect(await pullInHeldRecheck(env, a.setUrl)).toBe(true)
+    expect(await due(env, a.setUrl)).toBe(soon)
+    expect(await pullInHeldRecheck(env, b.setUrl)).toBe(false)
+  })
+
+  it('on every save of the list (the sync saves after its own scheduling)', async () => {
+    const env = makeEnv()
+    const a = await queue(env, 'x')
+    await env.DB.prepare('INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at) VALUES (?, NULL, ?, 1, 0, 0, 1)').bind(a.setUrl, NOW + 90 * DAY).run()
+    const rows = Array.from({ length: 10 }, (_, i) => ({ artist: `A${i}`, title: `T${i}`, startSeconds: i === 0 ? 0 : i === 9 ? 900 : null, ownStartSeconds: null, isMashupLinked: false, isUnidentified: false, anonymous: false, artworkUrl: null }))
+    expect(await saveMkvidTracks(env, a.setUrl, { rows: rows as any, decoy: { named: 10, mismatched: 0, suspected: false } })).toBe('kept')
+    expect(await due(env, a.setUrl)).toBe(NOW + 90 * DAY) // the stored (trusted, timed) list was kept: not held
+    await env.DB.prepare('UPDATE mkvid_request_tracks SET trusted = 0').run()
+    expect(await saveMkvidTracks(env, a.setUrl, { rows: rows as any, decoy: { named: 10, mismatched: 0, suspected: false } })).toBe('saved')
+    expect(await env.DB.prepare('SELECT base_rows, timed_rows FROM mkvid_request_tracks').first()).toEqual({ base_rows: 10, timed_rows: 2 })
+    expect(await due(env, a.setUrl)).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 7 * DAY + 5)
+  })
+})
 
 describe('delete and recreate', () => {
   it('end to end: queued at the back, the old video stays until the new one is in, then it leaves the playlists and is deleted', async () => {

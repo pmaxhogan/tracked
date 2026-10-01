@@ -12,8 +12,8 @@
  *   - A verified list whose base rows (every row but a "w/" one) are under
  *     90 % timed is held: mkvid spreads untimed rows evenly between timed
  *     neighbours, which is only a fair guess when they are few. The set is
- *     rechecked at least weekly (lib/fetch-scheduler.ts scheduleAfterFetch)
- *     and renders once 1001tracklists has the times. Render now does not
+ *     rechecked at least weekly (pullInHeldRecheck) and renders once
+ *     1001tracklists has the times. Render now does not
  *     skip this.
  *   - Anything else that is pending and past its retry backoff is ready; the
  *     daily cap then decides whether it goes today.
@@ -28,6 +28,7 @@
 import type { Env } from '../types'
 import { dbOf } from './db'
 import { isVerified } from './verification'
+import { setDateFromUrl } from './pool-settings'
 
 /** A verified list with ID rows is held until the set is this old. */
 export const ID_WAIT_SECONDS = 7 * 86400
@@ -54,6 +55,36 @@ export function isTimedEnough(baseRows: number, timedRows: number): boolean {
 
 /** isTimedEnough over `mkvid_request_tracks t` (a list stored before migration 0013 counts as untimed until saved again). */
 export const TIMED_SQL = 't.base_rows > 0 AND t.timed_rows * 10 >= t.base_rows * 9'
+
+/** A held set is due for a recheck at most this long from when its list was last saved or its request reopened. */
+export const HELD_UNTIMED_RECHECK_SECONDS = 7 * 86400
+
+/** A pending request for the set whose stored list is held as untimed (TIMED_SQL negated; NULL counts = untimed). */
+export const HELD_UNTIMED_SQL = `SELECT 1 FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id
+  WHERE r.set_url = ? AND r.status = 'pending' AND NOT COALESCE(${TIMED_SQL}, 0) LIMIT 1`
+
+/**
+ * Keep a held set due within HELD_UNTIMED_RECHECK_SECONDS: pulls its
+ * set_schedule due time in (never pushes it out), creating the row if needed.
+ * Called wherever a held state can begin or continue — every save of a
+ * request's list (the sync, after the fetch's own scheduling, which may have
+ * set 30 / 90 days or never) and every reopening of a done request — so it
+ * needs no knowledge of which fetch came first. Returns whether the set is held.
+ */
+export async function pullInHeldRecheck(env: Env, setUrl: string, now = Math.floor(Date.now() / 1000)): Promise<boolean> {
+  const db = dbOf(env)
+  if (!(await db.prepare(HELD_UNTIMED_SQL).bind(setUrl).first())) return false
+  await db
+    .prepare(
+      `INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at)
+       VALUES (?, ?, ?, NULL, 0, 0, ?)
+       ON CONFLICT(url) DO UPDATE SET next_due_at = excluded.next_due_at, updated_at = excluded.updated_at
+         WHERE set_schedule.next_due_at IS NULL OR set_schedule.next_due_at > excluded.next_due_at`,
+    )
+    .bind(setUrl, setDateFromUrl(setUrl), now + HELD_UNTIMED_RECHECK_SECONDS, now)
+    .run()
+  return true
+}
 
 /** The fetch layer's verdict (lib/verification.ts), re-exported for the panel and tests. */
 export { isVerified }

@@ -44,7 +44,7 @@ import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
 import { isVerified, tracklistFingerprint, verifiedFingerprint } from './verification'
 import { markInPlaylist } from './playlist-blocklist'
-import { CLAIM_READY_SQL, ID_WAIT_SECONDS, timedRowCounts } from './mkvid-readiness'
+import { CLAIM_READY_SQL, ID_WAIT_SECONDS, pullInHeldRecheck, timedRowCounts } from './mkvid-readiness'
 import { isOldStyle, queueBannedUploadForDelete, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
 import { decodeEntities } from './html-entities'
 
@@ -360,6 +360,8 @@ export async function saveMkvidTracks(
     )
     .bind(req.id, JSON.stringify(tracks), tracks.length, trusted ? 1 : 0, parsed.decoy.named, parsed.decoy.mismatched, nowSeconds(), idRows, baseRows, timedRows)
     .run()
+  // A held (under 90 % timed) list keeps its set due within a week, whichever list was kept.
+  await pullInHeldRecheck(env, setUrl)
   if ((r.meta.changes ?? 0) === 0) return 'kept'
   // The request's counts follow the stored list: every row, anonymous "ID - ID" ones included.
   await db.prepare('UPDATE mkvid_requests SET track_count = ?, ided_count = ? WHERE id = ?').bind(tracks.length, tracks.length - idRows, req.id).run()
