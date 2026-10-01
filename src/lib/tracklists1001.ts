@@ -786,7 +786,7 @@ export function extractSetAppleLink(html: string): string | null {
  */
 function parseRowLabel(row: HTMLElement): string | null {
   const clean = (xs: string[]): string | null => {
-    const labels = xs.map((x) => decodeEntities(x).replace(/s+/g, ' ').trim()).filter((x) => x && !/^not on label$/i.test(x))
+    const labels = xs.map((x) => decodeEntities(x).replace(/\s+/g, ' ').trim()).filter((x) => x && !/^not on label$/i.test(x))
     return labels.length ? labels.join(' / ') : null
   }
   const pub = row.querySelector('meta[itemprop="publisher"]')?.getAttribute('content')

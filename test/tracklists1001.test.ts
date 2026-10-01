@@ -776,7 +776,6 @@ describe("parseTracklist: 'w/' (layered) rows", () => {
     expect(t.map((r) => [r.isMashupLinked, r.startSeconds, r.ownStartSeconds])).toEqual([[false, 30, 30], [true, 30, null]])
   })
 
-
   it('rows carry their label (from the publisher meta); "Not On Label" and anonymous rows give null; tracks keep the ParsedTrack shape', () => {
     const m = parseTracklist('https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html', fx('tracklist-matroda.html'))
     expect(m.rows[0]!.label).toBeNull()
@@ -787,8 +786,20 @@ describe("parseTracklist: 'w/' (layered) rows", () => {
     expect(m.tracks.some((t) => 'label' in t)).toBe(false)
     const d = p('tracklist-decoy-dcr839.html')
     expect(d.rows.filter((r) => r.anonymous).every((r) => r.label === null)).toBe(true)
-    expect(d.rows.some((r) => r.label === 'Drumcode Records' || /drumcode/i.test(r.label ?? ''))).toBe(true)
+    expect(d.rows.some((r) => r.label === 'SENSO SOUNDS')).toBe(true)
+    expect(d.rows.some((r) => r.label === 'WE ARE THE BRAVE')).toBe(true)
     expect(d.tracks.some((t) => 'label' in t)).toBe(false)
+  })
+
+  it('label: visible span.trackLabel fallback, entity decoding, inner whitespace, several labels, Not On Label', () => {
+    const row = (n: number, inner: string) =>
+      `<div class="tlpTog bItm tlpItem trRow${n}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="A - T${n}">${inner}</div></div>`
+    const html =
+      row(1, '<span title="label" class="trackLabel noWrap blueTxt">Armada  Music<a href="/label/x/index.html"></a></span>') +
+      row(2, '<meta itemprop="publisher" content="&lt;span class=&quot;trackLabel&quot;&gt;Drums &amp;amp; Bass  Records&lt;/span&gt;&lt;span class=&quot;trackLabel&quot;&gt;Second Label&lt;/span&gt;">') +
+      row(3, '<span title="label" class="trackLabel noWrap">Not On Label</span>') +
+      row(4, '')
+    expect(parseTracklist(url, html).rows.map((r) => r.label)).toEqual(['Armada Music', 'Drums & Bass Records / Second Label', null, null])
   })
   it("rows: every page row in order, anonymous 'ID - ID' rows included and flagged; tracks: the same list without them", () => {
     const d = p('tracklist-decoy-dcr839.html')
