@@ -238,7 +238,7 @@ describe('queue lifecycle', () => {
     const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '10' })
     const q = async (n: string, setDate: string | null) => {
       await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate })
-      // sql.js has second resolution on created_at; force distinct queue times.
+      // created_at has second resolution; force distinct queue times.
       await env.DB.prepare('UPDATE mkvid_requests SET created_at = created_at + ? WHERE set_url = ?').bind(['old', 'mid', 'new', 'undated-old', 'undated-new'].indexOf(n), `https://x/tracklist/${n}`).run()
     }
     await q('old', '2014-03-06')

@@ -1,30 +1,62 @@
 /**
- * In-memory D1 for tests, backed by sql.js (SQLite compiled to WebAssembly —
- * pure JS, so it runs on whatever Node CI happens to have; a native
- * better-sqlite3 build crashed vitest's workers on the CI runner and
- * `node:sqlite` needs Node ≥ 22.13) with the real `migrations/*.sql` applied,
- * so a test exercises the same schema production runs on. Implements the
- * subset of the D1 API the code uses (`prepare().bind().first/all/run/raw`,
- * `batch`, `exec`).
+ * In-memory D1 for tests, backed by @sqlite.org/sqlite-wasm (the official
+ * SQLite WebAssembly build, used through its oo1 API) with the real
+ * `migrations/*.sql` applied, so a test exercises the same schema production
+ * runs on. It is WebAssembly, so it runs on whatever Node CI happens to have:
+ * a native better-sqlite3 build crashed vitest's workers on the CI runner, and
+ * `node:sqlite` needs Node >= 22.13. The engine is this build and not sql.js
+ * because the search index needs FTS5 with the trigram tokenizer. sql.js
+ * builds have no FTS5, and sql.js-fts5 is SQLite 3.33, which has no trigram.
+ * Implements the subset of the D1 API the code uses
+ * (`prepare().bind().first/all/run/raw`, `batch`, `exec`).
  *
  * Deliberately as strict as D1 where it matters: `undefined` and boolean bind
  * values throw (D1 raises `D1_TYPE_ERROR` for both), `first()` returns `null`
  * on a miss, `bind()` returns a fresh statement, and `batch()` is one
- * transaction.
+ * transaction. Integers come back as JS numbers, never bigint, as D1 returns
+ * them.
+ *
+ * `fakeD1()` applies `migrations/` (the main database). `fakeD1({ migrations:
+ * 'search' })` applies `migrations-search/` (the search database) and applies
+ * nothing while that directory does not exist.
  */
-import initSqlJs, { type Database, type SqlValue } from 'sql.js'
-import { readdirSync, readFileSync } from 'node:fs'
+import sqlite3InitModule, { type Database, type SqlValue } from '@sqlite.org/sqlite-wasm'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const MIGRATIONS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations')
-const SQL = await initSqlJs()
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const MIGRATIONS = { main: join(ROOT, 'migrations'), search: join(ROOT, 'migrations-search') } as const
 
-export function applyMigrations(db: Database): void {
-  const files = readdirSync(MIGRATIONS_DIR)
+// The library reads this documented config object once at init and deletes it
+// afterwards. Two things keep test output clean:
+// - Disabling kvvfs (the localStorage/sessionStorage VFS) stops init from
+//   probing `globalThis.localStorage`, which on Node >= 25 prints an
+//   ExperimentalWarning. Tests only use ':memory:'.
+// - oo1 warns "sqlite3_step() rc= ..." on every failing step and then throws
+//   the same error. The throw is what tests see; drop the duplicate warning and
+//   pass any other warning through.
+;(globalThis as { sqlite3ApiConfig?: unknown }).sqlite3ApiConfig = {
+  disable: { vfs: { kvvfs: true } },
+  warn: (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].startsWith('sqlite3_step() rc=')) return
+    console.warn(...args)
+  },
+}
+const sqlite3 = await sqlite3InitModule()
+
+/** A bare in-memory database with no migrations applied. */
+export function openRawDb(): Database {
+  return new sqlite3.oo1.DB(':memory:')
+}
+
+/** Apply every `*.sql` file in `dir` (default `migrations/`) in name order. A missing directory applies nothing. */
+export function applyMigrations(db: Database, dir: string = MIGRATIONS.main): void {
+  if (!existsSync(dir)) return
+  const files = readdirSync(dir)
     .filter((f) => f.endsWith('.sql'))
     .sort()
-  for (const f of files) db.exec(readFileSync(join(MIGRATIONS_DIR, f), 'utf8'))
+  for (const f of files) db.exec(readFileSync(join(dir, f), 'utf8'))
 }
 
 type Row = Record<string, unknown>
@@ -50,6 +82,13 @@ function checkBinds(values: unknown[]): void {
   }
 }
 
+/** A plain object (oo1 rows have a null prototype) with any bigint turned into a number. */
+function plainRow(row: Record<string, SqlValue>): Row {
+  const out: Row = {}
+  for (const [k, v] of Object.entries(row)) out[k] = typeof v === 'bigint' ? Number(v) : v
+  return out
+}
+
 /** Statements that return rows are stepped; everything else is run and reports changes. */
 const READS = /^\s*(?:SELECT|WITH|PRAGMA|EXPLAIN)\b/i
 
@@ -68,21 +107,22 @@ class FakeStatement {
   private rows(): Row[] {
     const stmt = this.db.prepare(this.sql)
     try {
+      // oo1 throws on bind() for a statement with no parameters, so only bind when there are values.
       if (this.values.length) stmt.bind(this.values)
       const out: Row[] = []
-      while (stmt.step()) out.push(stmt.getAsObject() as Row)
+      while (stmt.step()) out.push(plainRow(stmt.get({}) as Record<string, SqlValue>))
       return out
     } finally {
-      stmt.free()
+      stmt.finalize()
     }
   }
 
   /** Execute synchronously (also what `batch()` calls inside its transaction). */
   _execSync(): Result<Row> {
     if (READS.test(this.sql)) return { results: this.rows(), success: true, meta: meta() }
-    this.db.run(this.sql, this.values)
-    const changes = this.db.getRowsModified()
-    const lastRowId = Number(this.db.exec('SELECT last_insert_rowid() AS id')[0]?.values[0]?.[0] ?? 0)
+    this.rows()
+    const changes = this.db.changes()
+    const lastRowId = Number(sqlite3.capi.sqlite3_last_insert_rowid(this.db))
     return { results: [], success: true, meta: meta({ changes, last_row_id: lastRowId, changed_db: changes > 0 }) }
   }
 
@@ -111,9 +151,9 @@ class FakeStatement {
 
 export type FakeD1 = D1Database & { _db: Database }
 
-export function fakeD1(): FakeD1 {
-  const db = new SQL.Database()
-  applyMigrations(db)
+export function fakeD1(opts: { migrations?: 'main' | 'search' } = {}): FakeD1 {
+  const db = openRawDb()
+  applyMigrations(db, MIGRATIONS[opts.migrations ?? 'main'])
   const api = {
     _db: db,
     prepare(sql: string) {

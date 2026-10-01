@@ -24,10 +24,9 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.6.4",
     "@cloudflare/workers-types": "^4.20250109.0",
+    "@sqlite.org/sqlite-wasm": "3.53.4-build1",
     "@types/he": "^1.2.3",
     "@types/node": "^25.6.0",
-    "@types/sql.js": "^1.4.11",
-    "sql.js": "^1.14.2",
     "typescript": "^5.7.3",
     "undici": "^7.29.1",
     "vitest": "~2.1.9",

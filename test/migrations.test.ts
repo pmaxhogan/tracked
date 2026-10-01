@@ -4,21 +4,18 @@
  * deploy takes. (A fresh database is what every other test file uses.)
  */
 import { describe, it, expect } from 'vitest'
-import initSqlJs from 'sql.js'
+import { openRawDb } from './helpers/fake-d1'
 import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'migrations')
-const SQL = await initSqlJs()
 const files = readdirSync(DIR).filter((f) => f.endsWith('.sql')).sort()
 const upTo = (n: number) => files.filter((f) => Number(f.slice(0, 4)) <= n)
 const after = (n: number) => files.filter((f) => Number(f.slice(0, 4)) > n)
 
-function rows(db: InstanceType<typeof SQL.Database>, sql: string): Record<string, unknown>[] {
-  const r = db.exec(sql)[0]
-  if (!r) return []
-  return r.values.map((v) => Object.fromEntries(r.columns.map((c, i) => [c, v[i]])))
+function rows(db: ReturnType<typeof openRawDb>, sql: string): Record<string, unknown>[] {
+  return db.exec({ sql, rowMode: 'object', returnValue: 'resultRows' }).map((r) => ({ ...r }))
 }
 
 describe('migrations on a copy of the pre-pool schema with data', () => {
@@ -38,7 +35,7 @@ describe('migrations on a copy of the pre-pool schema with data', () => {
   })
 
   it('0007+ apply over 0001-0006 data: old trusted lists are reset (review W4 #1) and 0009 backfills the row counts', () => {
-    const db = new SQL.Database()
+    const db = openRawDb()
     for (const f of upTo(6)) db.exec(readFileSync(join(DIR, f), 'utf8'))
     // Production-shaped rows from before the pool: a queued request whose list was trusted on the in-page check alone.
     const tracks = JSON.stringify([
