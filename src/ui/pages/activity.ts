@@ -54,6 +54,44 @@ export const ACTIVITY_ROW_JS = /* js */ `
   }
 `
 
+/**
+ * The drawer for an activity row, shared by the Activity page and Home: audit
+ * and addition rows fetch their detail, every other row shows its own fields.
+ * Needs ACTIVITY_DETAIL_JS and ACTIVITY_ROW_JS in scope; call openActivityRow(row).
+ */
+export const ACTIVITY_DRAWER_JS = /* js */ `
+  let drawerSeq = 0;
+  async function openFetched(title, path, renderer) {
+    const my = ++drawerSeq;
+    const body = TK.drawer.open(title, '<span class="muted">loading…</span>');
+    const res = await TK.api.get(path);
+    if (my !== drawerSeq || !body) return;
+    if (!res.ok && res.status !== 404) { body.innerHTML = '<span class="warn">failed to load detail</span>'; return; }
+    const rec = res.data && res.data.record;
+    body.innerHTML = '<div class="h-detail">' + (rec ? renderer(rec) : '<span class="warn">detail not found</span>') + '</div>';
+  }
+  function ownDetailHtml(r) {
+    const iso = activityIso(r.ts);
+    return dl([
+      ['When', esc(iso) + (iso ? ' <span class="when">(' + esc(TK.fmt.rel(iso)) + ')</span>' : '')],
+      ['Kind', esc(r.kind)],
+      ['Status', '<span class="' + (r.problem ? 'warn' : '') + '">' + esc(r.status || '—') + '</span>'],
+      ['Title', esc(r.title || '—')],
+      r.detail ? ['Detail', esc(r.detail)] : null,
+      r.dj ? ['DJ', '<a href="/ui/dj/' + encodeURIComponent(r.dj) + '">' + esc(r.dj) + '</a>'] : null,
+      r.setUrl ? ['Set', '<a href="/ui/set?url=' + encodeURIComponent(r.setUrl) + '">' + esc(setLabel(r.setUrl)) + '</a> ' + link(r.setUrl, '1001tracklists')] : null,
+      r.videoId ? ['Video', '<span class="mono">' + esc(r.videoId) + '</span> ' + link('https://youtu.be/' + encodeURIComponent(r.videoId), 'open')] : null,
+    ]);
+  }
+  function openActivityRow(r) {
+    if (!r) return;
+    const ref = r.ref || {};
+    if (ref.kind === 'audit') openFetched(r.title || 'Request', '/ui/api/audit-detail?key=' + encodeURIComponent(ref.key), auditDetailHtml);
+    else if (ref.kind === 'addition') openFetched(r.title || 'Playlist addition', '/ui/api/playlist-addition-detail?key=' + encodeURIComponent(ref.key), plDetailHtml);
+    else { ++drawerSeq; TK.drawer.open(r.title || 'Activity', '<div class="h-detail">' + ownDetailHtml(r) + '</div>'); }
+  }
+`
+
 export const ACTIVITY_ROW_CSS = /* css */ `
   .a-item { display: flex; align-items: center; gap: var(--sp-2); border-bottom: 1px solid var(--line); min-width: 0; }
   .a-item:last-child { border-bottom: 0; }
@@ -120,6 +158,7 @@ const JS = /* js */ `
   const $ = TK.$, esc = TK.esc;
 ${ACTIVITY_DETAIL_JS}
 ${ACTIVITY_ROW_JS}
+${ACTIVITY_DRAWER_JS}
   const KINDS = ${JSON.stringify(KINDS)};
   const RANGE_MS = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000, '90d': 90 * 86400000 };
   const $filters = $('a-filters'), $kinds = $('a-kinds'), $toggle = $('a-toggle'), $ranges = $('a-ranges'), $dj = $('a-dj');
@@ -207,39 +246,11 @@ ${ACTIVITY_ROW_JS}
     if (b) TK.busy(b, 'Retrying…', () => load(lastMore && rows.length > 0 && !!cursor));
   });
 
-  // ── the drawer ──
-  let drawerSeq = 0;
-  async function openFetched(title, path, renderer) {
-    const my = ++drawerSeq;
-    const body = TK.drawer.open(title, '<span class="muted">loading…</span>');
-    const res = await TK.api.get(path);
-    if (my !== drawerSeq || !body) return;
-    if (!res.ok && res.status !== 404) { body.innerHTML = '<span class="warn">failed to load detail</span>'; return; }
-    const rec = res.data && res.data.record;
-    body.innerHTML = '<div class="h-detail">' + (rec ? renderer(rec) : '<span class="warn">detail not found</span>') + '</div>';
-  }
-  function ownDetailHtml(r) {
-    const iso = activityIso(r.ts);
-    return dl([
-      ['When', esc(iso) + (iso ? ' <span class="when">(' + esc(TK.fmt.rel(iso)) + ')</span>' : '')],
-      ['Kind', esc(r.kind)],
-      ['Status', '<span class="' + (r.problem ? 'warn' : '') + '">' + esc(r.status || '—') + '</span>'],
-      ['Title', esc(r.title || '—')],
-      r.detail ? ['Detail', esc(r.detail)] : null,
-      r.dj ? ['DJ', '<a href="/ui/dj/' + encodeURIComponent(r.dj) + '">' + esc(r.dj) + '</a>'] : null,
-      r.setUrl ? ['Set', '<a href="/ui/set?url=' + encodeURIComponent(r.setUrl) + '">' + esc(setLabel(r.setUrl)) + '</a> ' + link(r.setUrl, '1001tracklists')] : null,
-      r.videoId ? ['Video', '<span class="mono">' + esc(r.videoId) + '</span> ' + link('https://youtu.be/' + encodeURIComponent(r.videoId), 'open')] : null,
-    ]);
-  }
+  // ── the drawer (ACTIVITY_DRAWER_JS) ──
   $list.addEventListener('click', (ev) => {
     const b = ev.target && ev.target.closest ? ev.target.closest('[data-i]') : null;
     if (!b) return;
-    const r = rows[Number(b.dataset.i)];
-    if (!r) return;
-    const ref = r.ref || {};
-    if (ref.kind === 'audit') openFetched(r.title || 'Request', '/ui/api/audit-detail?key=' + encodeURIComponent(ref.key), auditDetailHtml);
-    else if (ref.kind === 'addition') openFetched(r.title || 'Playlist addition', '/ui/api/playlist-addition-detail?key=' + encodeURIComponent(ref.key), plDetailHtml);
-    else { ++drawerSeq; TK.drawer.open(r.title || 'Activity', '<div class="h-detail">' + ownDetailHtml(r) + '</div>'); }
+    openActivityRow(rows[Number(b.dataset.i)]);
   });
 
   // ── the DJ filter's options: after the first page; a failure leaves "All DJs" ──

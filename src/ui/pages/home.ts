@@ -1,13 +1,12 @@
 // Home: four status tiles (Fetching, YouTube, mkvid, Challenges), what needs
-// the owner's attention (each row links to its fix), the last six requests and
-// the last six playlist additions side by side, and the quick actions (Sync
-// all, Backfill combined, Run hygiene compare). Every source loads in parallel
-// and fails on its own. Data: GET /ui/api/ban/status, /ui/api/pool/status,
-// /ui/api/pool/challenges, /ui/api/youtube/status, /ui/api/combined,
-// /ui/api/mkvid?limit=1, /ui/api/removals?limit=1, /ui/api/list +
-// /ui/api/state/:slug (four at a time), /ui/api/audit?limit=6 and
-// /ui/api/playlist-additions?limit=6; the detail drawers use
-// /ui/api/audit-detail and /ui/api/playlist-addition-detail.
+// the owner's attention (each row links to its fix), the last twelve events of
+// the Activity log, and the quick actions (Sync all, Backfill combined, Run
+// hygiene compare). Every source loads in parallel and fails on its own.
+// Data: GET /ui/api/ban/status, /ui/api/pool/status, /ui/api/pool/challenges,
+// /ui/api/youtube/status, /ui/api/combined, /ui/api/mkvid?limit=1,
+// /ui/api/removals?limit=1, /ui/api/list + /ui/api/state/:slug (four at a
+// time) and /ui/api/activity?limit=12; the detail drawers (shared with the
+// Activity page) use /ui/api/audit-detail and /ui/api/playlist-addition-detail.
 //
 // Everything renders through innerHTML strings with delegated clicks (the
 // tests run this script in a stub DOM without appendChild), and every
@@ -17,6 +16,7 @@ import type { UiPage } from './index'
 import { MKVID_STATE_JS } from './mkvid-state'
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from './dj-actions'
 import { ACTIVITY_DETAIL_CSS, ACTIVITY_DETAIL_JS } from './activity-detail'
+import { ACTIVITY_DRAWER_JS, ACTIVITY_ROW_CSS, ACTIVITY_ROW_JS } from './activity'
 
 const ACTIONS = /* html */ `
 <button id="h-sync-all" type="button" class="btn">Sync all</button>
@@ -39,17 +39,13 @@ const BODY = /* html */ `
   <div id="attn-empty" class="muted">Checking…</div>
   <div id="attn-err" class="error" hidden></div>
 </div>
-<div class="tk-grid two h-recent">
-  <div class="tk-card">
-    <h2>Recent requests</h2>
-    <div id="req-list" class="h-list"></div>
-    <div id="req-empty" class="muted">Loading…</div>
+<div class="tk-card h-recent">
+  <div class="h-recent-head">
+    <h2>Recent activity</h2>
+    <span class="h-recent-links"><a href="/ui/activity">View all</a><a href="/ui/activity?problems=1">Problems</a></span>
   </div>
-  <div class="tk-card">
-    <h2>Recent playlist additions</h2>
-    <div id="pl-list" class="h-list"></div>
-    <div id="pl-empty" class="muted">Loading…</div>
-  </div>
+  <div id="act-list" class="a-list" role="list"></div>
+  <div id="act-empty" class="muted">Loading…</div>
 </div>
 `
 
@@ -70,20 +66,11 @@ const CSS = /* css */ `
   .h-attn .sub { color: var(--muted); font-size: var(--fs-sm); min-width: 0; overflow-wrap: anywhere; flex: 1 1 12rem; }
   .h-attn .go { margin-left: auto; color: var(--accent); font-size: var(--fs-sm); white-space: nowrap; }
   #attn-err { margin-top: var(--sp-2); }
-  .h-list { display: grid; }
-  .h-row { display: flex; align-items: center; gap: var(--sp-2); width: 100%; font: inherit; color: var(--fg); background: none; border: 0; border-bottom: 1px solid var(--line); padding: 8px 4px; text-align: left; cursor: pointer; min-width: 0; }
-  .h-row:last-child { border-bottom: 0; }
-  .h-row:hover { background: var(--elev); }
-  .h-row.err { box-shadow: inset 3px 0 0 var(--danger); }
-  .h-row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
-  .h-row .via, .h-row .when, .h-row .pos, .h-row .vid { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
-  .h-row .vid { font-family: var(--mono); }
-  .h-row .pos { font-variant-numeric: tabular-nums; }
-  .h-row .flag { color: var(--danger); font-weight: 700; }
-  @media (max-width: 599px) {
-    .h-row { flex-wrap: wrap; }
-    .h-row .title { flex-basis: 60%; }
-  }
+  .h-recent-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
+  .h-recent-links { display: flex; gap: var(--sp-3); font-size: var(--fs-sm); }
+  .h-recent-links a { color: var(--accent); }
+  #act-empty .error { color: var(--danger); }
+${ACTIVITY_ROW_CSS}
 ${ACTIVITY_DETAIL_CSS}
 ${DJ_ACTIONS_CSS}`
 
@@ -93,6 +80,8 @@ ${MKVID_STATE_JS}
 ${DJ_ACTIONS_JS}
   const $ = TK.$, esc = TK.esc;
 ${ACTIVITY_DETAIL_JS}
+${ACTIVITY_ROW_JS}
+${ACTIVITY_DRAWER_JS}
   const isoOf = (sec) => { try { return new Date(sec * 1000).toISOString(); } catch (e) { return ''; } };
   const meter = (used, cap) => cap > 0 ? '<div class="tk-meter"><i style="width:' + Math.min(100, Math.round((used / cap) * 100)) + '%"></i></div>' : '';
   const failText = (res) => TK.errText(res, 'unavailable (' + (res.status || 'offline') + ')');
@@ -267,72 +256,22 @@ ${ACTIVITY_DETAIL_JS}
     setAttn('djs', failedStates && !errs.length ? { error: failedStates + ' sync state' + (failedStates === 1 ? '' : 's') + ' unavailable' } : { items: errs });
   }
 
-  // ── recent activity ──
-  const PROBLEM = new Set(['no_video', 'no_tracklist', 'upstream_error']);
-  const PL_PROBLEM = new Set(['failed', 'abandoned']);
-  const BADGE = { ok: 'ok', unidentified: 'warn', no_video: 'bad', no_tracklist: 'bad', upstream_error: 'bad',
-    added: 'ok', duplicate: 'neutral', replaced: 'info', no_youtube: 'warn', failed: 'bad', abandoned: 'bad' };
-  const badge = (st) => '<span class="badge ' + (BADGE[st] || 'neutral') + '">' + esc(st || '?') + '</span>';
-  let reqRecords = [], plRecords = [];
-
-
-  function renderReq() {
-    $('req-list').innerHTML = reqRecords.map((r, i) => {
-      const skewBad = r.skew != null && Math.abs(r.skew) > BIG_SKEW;
-      return '<button type="button" class="h-row' + (PROBLEM.has(r.status) || r.impossible ? ' err' : '') + '" data-i="' + i + '">' + badge(r.status) +
-        '<span class="title">' + esc(r.title || '(no title)') + '</span>' +
-        (r.via ? '<span class="via">via ' + esc(r.via) + '</span>' : '') +
-        '<span class="pos">' + clock(r.cs) + (r.dur ? ' / ' + clock(r.dur) : '') +
-          (r.impossible ? ' <span class="flag" title="reported position is past the end of the video">!</span>' : '') +
-          (skewBad ? ' <span class="flag" title="large gap between reported position and selected track start">Δ' + clock(r.skew) + '</span>' : '') +
-        '</span>' +
-        '<span class="when" title="' + esc(r.t) + '">' + esc(TK.fmt.rel(r.t)) + '</span></button>';
-    }).join('');
+  // ── recent activity: the newest twelve rows of the Activity log ──
+  let actRows = [];
+  async function loadActivity() {
+    const $list = $('act-list'), $empty = $('act-empty');
+    const res = await TK.api.get('/ui/api/activity?limit=12');
+    const rows = res.ok && res.data && Array.isArray(res.data.rows) ? res.data.rows : null;
+    if (!rows) { $empty.hidden = false; $empty.innerHTML = '<span class="error">' + esc(failText(res)) + '</span>'; return; }
+    actRows = rows.slice(0, 12);
+    $list.innerHTML = actRows.map((r, i) => activityRowHtml(r, i)).join('');
+    $empty.hidden = actRows.length > 0;
+    $empty.textContent = 'No activity recorded yet.';
   }
-
-
-  function renderPl() {
-    $('pl-list').innerHTML = plRecords.map((r, i) =>
-      '<button type="button" class="h-row' + (PL_PROBLEM.has(r.status) ? ' err' : '') + '" data-i="' + i + '">' + badge(r.status) +
-      '<span class="title">' + esc(setLabel(r.set)) + '</span>' +
-      (r.artist || r.slug ? '<span class="via">' + esc(r.artist || r.slug) + '</span>' : '') +
-      (r.vid ? '<span class="vid">' + (r.prev ? esc(r.prev) + ' → ' : '') + esc(r.vid) + '</span>' : '') +
-      '<span class="when" title="' + esc(r.t) + '">' + esc(TK.fmt.rel(r.t)) + '</span></button>').join('');
-  }
-
-
-  async function loadRecent(path, emptyText, onRecords, $empty) {
-    const res = await TK.api.get(path);
-    const recs = res.ok && res.data && res.data.records;
-    if (!Array.isArray(recs)) { $empty.hidden = false; $empty.innerHTML = '<span class="error">' + esc(failText(res)) + '</span>'; return; }
-    onRecords(recs.slice(0, 6));
-    $empty.hidden = recs.length > 0;
-    $empty.textContent = emptyText;
-  }
-  const loadReq = () => loadRecent('/ui/api/audit?limit=6', 'No requests recorded yet.', (r) => { reqRecords = r; renderReq(); }, $('req-empty'));
-  const loadPl = () => loadRecent('/ui/api/playlist-additions?limit=6', 'No playlist additions recorded yet.', (r) => { plRecords = r; renderPl(); }, $('pl-empty'));
-
-  // A row opens the drawer; the detail is fetched on every open, so a failed load retries on reopen.
-  let drawerSeq = 0;
-  async function openDetail(title, path, render) {
-    const seq = ++drawerSeq;
-    const body = TK.drawer.open(title, '<span class="muted">loading…</span>');
-    const res = await TK.api.get(path);
-    if (seq !== drawerSeq || !body) return;
-    if (!res.ok && res.status !== 404) { body.innerHTML = '<span class="warn">failed to load detail</span>'; return; }
-    const rec = res.data && res.data.record;
-    body.innerHTML = '<div class="h-detail">' + (rec ? render(rec) : '<span class="warn">detail not found</span>') + '</div>';
-  }
-  function rowClicks(listId, records, pathOf, titleOf, render) {
-    $(listId).addEventListener('click', (ev) => {
-      const b = ev.target && ev.target.closest ? ev.target.closest('[data-i]') : null;
-      if (!b) return;
-      const r = records()[Number(b.dataset.i)];
-      if (r) openDetail(titleOf(r), pathOf(r), render);
-    });
-  }
-  rowClicks('req-list', () => reqRecords, (r) => '/ui/api/audit-detail?key=' + encodeURIComponent(r.key), (r) => r.title || 'Request', auditDetailHtml);
-  rowClicks('pl-list', () => plRecords, (r) => '/ui/api/playlist-addition-detail?key=' + encodeURIComponent(r.key), (r) => setLabel(r.set), plDetailHtml);
+  $('act-list').addEventListener('click', (ev) => {
+    const b = ev.target && ev.target.closest ? ev.target.closest('[data-i]') : null;
+    if (b) openActivityRow(actRows[Number(b.dataset.i)]);
+  });
 
   // ── quick actions ──
   const $syncAll = $('h-sync-all'), $backfill = $('h-backfill'), $compare = $('h-compare');
@@ -389,8 +328,7 @@ ${ACTIVITY_DETAIL_JS}
   loadMkvid();
   loadHolds();
   loadDjs();
-  loadReq();
-  loadPl();
+  loadActivity();
 })();
 `
 

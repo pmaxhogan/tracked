@@ -241,14 +241,15 @@ OpenAPI spec: `GET /openapi.json` (bearer-gated).
 
 `GET /ui` is a single-user admin web UI: the list of DJs to track, the pool, playlists, mkvid and the tools around them. Paste a 1001tracklists DJ URL like `https://www.1001tracklists.com/dj/lillypalmer/index.html` on the DJs page and only the slug (`lillypalmer`) is stored. Subscriptions live in the D1 `subscriptions` table (see **Storage**) so they're durable independent of the cache. `GET /` redirects to `/ui/`.
 
-### Pages (phase 1)
+### Pages
 
 | Path | Page |
 | --- | --- |
-| `/ui` | Home: status tiles, needs-attention list, the last 6 requests and playlist additions, quick actions |
+| `/ui` | Home: status tiles, needs-attention list, the last 12 events from the Activity log (links to the full log and to problems only), quick actions |
 | `/ui/djs` | DJs: the list (table on desktop, cards on a phone) with the add form in the header |
 | `/ui/dj/<slug>` | DJ profile: summary column and expandable set cards |
-| `/ui/set?url=` | Set: the tracklist viewer (`?url=` deep link kept) |
+| `/ui/activity` | Activity: one newest-first log of requests, playlist additions, hygiene, mkvid, pool, sync and IP blocks. Filters (kind, Problems only, DJ, range 24h/7d/30d/90d) live in the URL; Load older pages back through the log; a row opens a drawer (the full detail for requests and additions, the row's own fields for the rest) |
+| `/ui/set?url=` | Set: the tracklist viewer (`?url=` deep link kept) and a diagnostics column (discovery, recording, verification, full-recording rule, playlist, hygiene, mkvid). The diagnostics read only stored data: nothing is fetched from YouTube, tlpool or 1001tracklists |
 | `/ui/playlists` | Playlists: YouTube connection, combined playlist, per-DJ playlists, fix titles, hygiene strip |
 | `/ui/removed` | Removed videos (the push target for removals) |
 | `/ui/mkvid` | mkvid: status line, caps, Queue / Finished / Old videos tabs, detail drawer |
@@ -259,7 +260,7 @@ OpenAPI spec: `GET /openapi.json` (bearer-gated).
 | `/ui/settings` | Settings: YouTube account, notifications and devices, theme, integration status, IP-ban episodes |
 | `/ui/tools` | Tools: YouTube video JSON, purge a tracklist, simulate a ban, requeue victims, migration status |
 
-Not built yet: **Activity** (`/ui/activity`, a unified log with filters; phase 2, and the set diagnostics view) and **Search** (`/ui/search`, sets, tracks and DJs; phase 3). In phase 1 the search box at the top of the page, the Search tab and the `/` key all open the DJs filter.
+Not built yet: **Search** (`/ui/search`, sets, tracks and DJs; phase 3). In phase 1 the search box at the top of the page, the Search tab and the `/` key all open the DJs filter.
 
 ### The shell
 
@@ -273,7 +274,7 @@ Every page is one server-rendered HTML document with the shell, page CSS and JS 
 
 ### Where the old sections went
 
-The old single page had these sections: the YouTube strip is on Playlists and Settings; the add form and DJ list are on DJs; Combined playlist is on Playlists; mkvid uploads are on mkvid; YouTube video JSON, simulate ban and requeue victims are on Tools; IP-ban history and push devices are on Settings; Recent requests and Recent playlist additions are on Home (phase 2 moves them to Activity). The tracklist viewer is `/ui/set`, the pool pages keep their paths under `/ui`.
+The old single page had these sections: the YouTube strip is on Playlists and Settings; the add form and DJ list are on DJs; Combined playlist is on Playlists; mkvid uploads are on mkvid; YouTube video JSON, simulate ban and requeue victims are on Tools; IP-ban history and push devices are on Settings; Recent requests and Recent playlist additions are on Activity (Home shows the latest 12). The tracklist viewer is `/ui/set`, the pool pages keep their paths under `/ui`.
 
 The admin UI lived under `/subscriptions` until it moved to `/ui`. Until the owner retires the old prefix, `/subscriptions/...` pages answer a `301` to the same path under `/ui` (the old tracklist viewer to `/ui/set`), and the old API, OAuth and service worker paths answer `410 { error: "moved" }` (`src/routes/legacy.ts`). None of those answers carries content, so they need no Access.
 

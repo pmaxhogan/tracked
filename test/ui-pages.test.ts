@@ -301,7 +301,9 @@ describe('Home page', () => {
     expect(html).toContain('data-ban-page="home"')
     expect(html).toContain('<h1>Home</h1>')
     expect(html).not.toMatch(/quiet/i)
-    for (const id of ['h-sync-all', 'h-backfill', 'h-compare', 'attn', 'req-list', 'pl-list']) expect(html).toContain(`id="${id}"`)
+    expect(html).toContain('href="/ui/activity"')
+    expect(html).toContain('href="/ui/activity?problems=1"')
+    for (const id of ['h-sync-all', 'h-backfill', 'h-compare', 'attn', 'act-list', 'act-empty']) expect(html).toContain(`id="${id}"`)
   })
   it('loads every source in parallel and lists what needs attention, each row linking to its fix', async () => {
     const now = Math.floor(Date.now() / 1000)
@@ -316,22 +318,25 @@ describe('Home page', () => {
       if (u === '/ui/api/state/dj-1') return Response.json({ state: { lastRunAt: now - 60, lastError: 'boom <b>' } })
       if (u === '/ui/api/state/dj-2') return Response.json({ state: { lastRunAt: now - 60 } })
       if (u.startsWith('/ui/api/removals')) return Response.json({ holds: [{ kind: 'artist', slug: 'dj-1', playlistId: 'PL1', missing: 5, expected: 40, at: now - 3600 }] })
-      if (u.startsWith('/ui/api/audit?')) return Response.json({ records: [{ key: '1', status: 'ok', title: 'A <set>', via: 'yt', cs: 4000, dur: 3600, impossible: true, skew: 900, t: new Date().toISOString() }], cursor: null })
+      if (u.startsWith('/ui/api/activity?')) return Response.json({ rows: [
+        { ts: Date.now() - 1000, kind: 'request', status: 'no_video', problem: true, title: 'A <set>', detail: 'no match', dj: null, setUrl: null, videoId: null, ref: { kind: 'audit', key: '1' } },
+        { ts: Date.now() - 2000, kind: 'playlist', status: 'added', problem: false, title: 'some set', detail: 'added to PL1', dj: 'dj-1', setUrl: null, videoId: 'abcdefghijk', ref: { kind: 'addition', key: '2' } },
+        { ts: Date.now() - 3000, kind: 'pool', status: 'account.flagged', problem: true, title: 'acct-2 flagged <b>', detail: '', dj: null, setUrl: null, videoId: null, ref: { kind: 'pool', key: '7' } },
+      ], cursor: 'c' })
       if (u === '/ui/api/audit-detail?key=1') return Response.json({ record: { t: 'now', reqId: 'r1', status: 'ok', input: { videoTitle: 'A <set>' }, youtube: { videoId: 'abcdefghijk' }, search: { attempts: [] }, meta: {} } })
       if (u.startsWith('/ui/api/playlist-addition-detail')) return Response.json({ error: 'not_found' }, { status: 404 })
-      if (u.startsWith('/ui/api/playlist-additions?')) return Response.json({ records: [{ key: '2', status: 'failed', set: 'https://www.1001tracklists.com/tracklist/x/some-set.html', slug: 'dj-1', vid: 'abcdefghijk', t: new Date().toISOString() }], cursor: null })
       return new Response('{}', { status: 404 })
     }, '/ui')
     ;(ctx as any).URL = URL // TK.fmt.setLabel parses the set URL
     const clicks: Record<string, (ev: unknown) => void> = {}
-    for (const id of ['req-list', 'pl-list']) (ctx as any).document.getElementById(id).addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks[id] = fn }
+    for (const id of ['act-list']) (ctx as any).document.getElementById(id).addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks[id] = fn }
     const html = await (await app.request('https://tracked.example/ui', {}, env())).text()
     for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
     for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0))
     for (const u of ['/ui/api/ban/status', '/ui/api/pool/status', '/ui/api/pool/challenges', '/ui/api/youtube/status', '/ui/api/combined', '/ui/api/list', '/ui/api/state/dj-1']) expect(fetches).toContain(u)
     expect(fetches).toContain('/ui/api/mkvid?limit=1')
-    expect(fetches).toContain('/ui/api/audit?limit=6')
-    expect(fetches).toContain('/ui/api/playlist-additions?limit=6')
+    expect(fetches).toContain('/ui/api/activity?limit=12')
+    expect(fetches.some((u) => u.startsWith('/ui/api/audit?') || u.startsWith('/ui/api/playlist-additions?'))).toBe(false)
     const attn = els.get('attn').innerHTML as string
     expect(attn).toContain('href="/ui/captcha/ch-1"')
     expect(attn).toContain('href="/ui/removed"')
@@ -349,19 +354,23 @@ describe('Home page', () => {
     expect(els.get('t-chal').innerHTML).toContain('1')
     expect(els.get('t-yt').innerHTML).toContain('25 / 100')
     expect(els.get('t-mk').innerHTML).toContain('primary 3 / 24')
-    const req = els.get('req-list').innerHTML as string
-    expect(req).toContain('A &lt;set&gt;')
-    expect(req).toContain('title="reported position is past the end of the video"')
-    expect(req).toContain('Δ15:00')
-    expect(els.get('pl-list').innerHTML).toContain('some set')
-    const row = { target: { closest: () => ({ dataset: { i: '0' } }) } }
-    clicks['req-list']!(row)
-    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    const act = els.get('act-list').innerHTML as string
+    expect(act).toContain('A &lt;set&gt;')
+    expect(act).not.toContain('<set>')
+    expect(act).toMatch(/class="a-row err" data-i="0"/)
+    expect(act).not.toMatch(/class="a-row err" data-i="1"/)
+    expect(act).toContain('acct-2 flagged &lt;b&gt;')
+    const clickRow = async (i: string) => {
+      clicks['act-list']!({ target: { closest: () => ({ dataset: { i } }) } })
+      for (let n = 0; n < 10; n++) await new Promise((res) => setTimeout(res, 0))
+    }
+    await clickRow('0')
     expect(els.get('tk-drawer-body').innerHTML).toContain('YouTube match')
     expect(els.get('tk-drawer-body').innerHTML).toContain('A &lt;set&gt;')
-    clicks['pl-list']!(row)
-    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    await clickRow('1')
     expect(els.get('tk-drawer-body').innerHTML).toContain('detail not found')
+    await clickRow('2')
+    expect(fetches.filter((u) => u.includes('-detail')).length).toBe(2)
   })
 })
 
