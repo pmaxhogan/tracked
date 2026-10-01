@@ -58,6 +58,7 @@ import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { fetchOptsFromEnv, isStopTheBatchError } from './upstream1001'
 import { deferVerification, dueVerifications, noteSetFetch, type VerificationResult } from './verification'
 import { syncOne, type SyncOneResult } from './sync'
+import { queueSearchIndex } from './search/index'
 import { MKVID_MAX_ATTEMPTS } from './mkvid'
 import { DISCOVERED_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 
@@ -259,6 +260,8 @@ export async function recordSetFetch(
         pool: f.pool === undefined ? poolConfigFromEnv(env) : f.pool,
         log: f.log,
       })
+      // Search index (lib/search/index.ts): verified lists only, fire-and-forget, drained via waitUntil.
+      queueSearchIndex(env, { setUrl: f.setUrl, html: f.html, parsed, videoId: f.videoId, log: f.log }, out.verification.outcome)
     }
     const hasIdRows = parsed ? parsed.rows.some((r) => r.anonymous || r.isUnidentified) : false
     await scheduleAfterFetch(env, settings, { url: f.setUrl, videoId: f.videoId, hasIdRows })

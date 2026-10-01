@@ -57,6 +57,7 @@ import { recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
 import { isVerified } from './verification'
 import { artistPlaylistTitle } from './playlist-rename'
 import { dbOf } from './db'
+import { prettifySlug } from './prettify-slug'
 
 import { getAccessToken } from './google-oauth'
 import {
@@ -1408,17 +1409,5 @@ async function resolveArtistPlaylist(
   return r
 }
 
-/**
- * Best-effort prettification when the DJ page didn't yield a name. Underscore
- * / hyphen → space, then word-cap. "lillypalmer" stays "Lillypalmer" (we have
- * no way to split runs of letters), but "lilly_palmer" becomes "Lilly Palmer".
- * Always loses to the scraped H1 when one is present.
- */
-export function prettifySlug(slug: string): string {
-  return slug
-    .replace(/[._-]+/g, ' ')
-    .split(' ')
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ')
-}
+// Lives in prettify-slug.ts (lib/search uses it without an import cycle); re-exported for existing importers.
+export { prettifySlug }

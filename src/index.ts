@@ -22,6 +22,7 @@ import { pruneNowPlayingAudit } from './lib/now-playing-audit'
 import { prunePlaylistAdditions } from './lib/playlist-audit'
 import { makeLogger, errorFields } from './lib/log'
 import { drainPageCaptures } from './lib/page-store'
+import { drainSearchIndex } from './lib/search/index'
 import { poolPagesApp } from './routes/pool-pages'
 import { mkvidOpsApp } from './routes/mkvid-ops'
 import { prunePoolEvents, retryFailedPoolPushes } from './lib/pool-events'
@@ -39,11 +40,11 @@ const app = new OpenAPIHono<{ Bindings: Env }>({
   },
 })
 
-// Stored pages (lib/page-store.ts) are written in the background; hand them to waitUntil once the response is built.
+// Stored pages (lib/page-store.ts) and search index writes (lib/search/index.ts) run in the background; hand them to waitUntil once the response is built.
 app.use('*', async (c, next) => {
   await next()
   try {
-    c.executionCtx.waitUntil(drainPageCaptures())
+    c.executionCtx.waitUntil(Promise.all([drainPageCaptures(), drainSearchIndex()]))
   } catch {
     /* no executionCtx (tests): captures still run */
   }
@@ -201,6 +202,12 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       }
       // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
       await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) })
+      // Search index writes started by this tick's verified fetches (they swallow their own errors).
+      try {
+        await drainSearchIndex()
+      } catch (e) {
+        log.warn('cron.search_drain_threw', errorFields(e))
+      }
       } finally {
         // Stored pages finish even when the tick threw.
         await drainPageCaptures()
