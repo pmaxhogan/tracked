@@ -183,9 +183,8 @@ ${DJ_ACTIONS_JS}
     if (!st) { poolS = null; poolErr = failText(res); renderFetch(); setAttn('accounts', { error: poolErr }); return; }
     poolS = st;
     renderFetch();
-    const items = (st.accounts || []).filter((a) => a.flagged || a.state === 'retired').map((a) => a.flagged
-      ? item('/ui/pool', 'bad', String(a.id) + ' is flagged', a.flagReason ? String(a.flagReason).replace(/_/g, ' ') : '', 'Pool')
-      : item('/ui/pool', 'warn', String(a.id) + ' is retired', '', 'Pool'));
+    const items = (st.accounts || []).filter((a) => a.flagged && a.state !== 'retired').map((a) =>
+      item('/ui/pool', 'bad', String(a.id) + ' is flagged', a.flagReason ? String(a.flagReason).replace(/_/g, ' ') : '', 'Pool'));
     setAttn('accounts', { items });
   }
 

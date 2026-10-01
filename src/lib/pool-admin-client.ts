@@ -211,7 +211,7 @@ export function normalizeAccount(raw: unknown): PoolAccount | null {
   return {
     id,
     state,
-    passive: bool(raw.passive),
+    passive: bool(raw.passive) || state === 'passive',
     exitLabel: label(pick(raw, 'exitLabel', 'exit_label') ?? pick(exit, 'label', 'name')),
     exitKind: label(pick(raw, 'exitKind', 'exit_kind') ?? pick(exit, 'kind', 'type')),
     usedToday: num(pick(raw, 'usedToday', 'used_today', 'used')),

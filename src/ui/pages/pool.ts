@@ -37,7 +37,7 @@ ${CAPTCHA_JS}
   const stateBadge = (a) => {
     const s = String(a.state || 'unknown');
     // tlpool states: new (signing up), warming (ramp days 1-2), active, passive, resting, retired.
-    const cls = a.flagged || s === 'flagged' ? 'bad' : s === 'retired' ? '' : s === 'resting' || s === 'warming' || s === 'ramping' || s === 'new' || s === 'creating' ? 'warn' : s === 'active' || s === 'ok' || s === 'healthy' ? 'ok' : 'info';
+    const cls = a.flagged || s === 'flagged' ? 'bad' : s === 'retired' ? '' : s === 'resting' || s === 'new' || s === 'creating' ? 'warn' : s === 'warming' || s === 'ramping' ? 'info' : s === 'active' || s === 'ok' || s === 'healthy' ? 'ok' : 'info';
     return '<span class="badge ' + cls + '">' + esc(s) + '</span>';
   };
   const confirmWords = { rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };

@@ -298,7 +298,7 @@ describe('Home page', () => {
     const fetches: string[] = []
     const { ctx, els } = richStub(async (u: string) => {
       fetches.push(u)
-      if (u === '/ui/api/pool/status') return Response.json({ status: { accounts: [{ id: 'acct-1', state: 'active', budget: 40, usedToday: 15 }, { id: 'acct-2', state: 'active', flagged: true, flagReason: 'too_many' }] }, challenges: [], challengesError: null })
+      if (u === '/ui/api/pool/status') return Response.json({ status: { accounts: [{ id: 'acct-1', state: 'active', budget: 40, usedToday: 15 }, { id: 'acct-2', state: 'active', flagged: true, flagReason: 'too_many' }, { id: 'acct-3', state: 'retired' }, { id: 'acct-4', state: 'retired', flagged: true }] }, challenges: [], challengesError: null })
       if (u === '/ui/api/pool/challenges') return Response.json({ challenges: [{ id: 'ch-1', state: 'pending', ready: true, type: 'image', expiresAt: new Date(Date.now() + 20 * 60000).toISOString(), createdAt: new Date().toISOString() }, { id: 'ch-2', state: 'solved' }] })
       if (u === '/ui/api/combined') return Response.json({ connected: true, title: 'All DJs', playlistId: 'PLc', videoCount: 12, missingTotal: 0, sources: [], dailyInsertCap: 100, dailyInsertsUsed: 25 })
       if (u.startsWith('/ui/api/mkvid')) return Response.json({ enabled: true, dailyClaimCap: 30, dailyClaims: 3, now, quotaResetsAt: now + 3600, counts: { pending: 0, claimed: 0, done: 4, failed: 2 }, accounts: [{ account: 'primary', label: 'primary', cap: 24, used: 3 }, { account: 'shared', label: 'shared', cap: 6, used: 0 }], lastPoll: { at: now, outcome: 'ok', accounts: ['primary', 'shared'] }, oldVideos: [{ videoId: 'v1' }], queue: [], settled: [] })
@@ -328,6 +328,9 @@ describe('Home page', () => {
     expect(attn).toContain('href="/ui/dj/dj-1"')
     expect(attn).not.toContain('href="/ui/dj/dj-2"')
     expect(attn).toContain('href="/ui/pool"')
+    expect(attn).toContain('acct-2 is flagged')
+    expect(attn).not.toContain('acct-3')
+    expect(attn).not.toContain('acct-4')
     expect(attn).toContain('/ui/mkvid?status=failed')
     expect(attn).toContain('/ui/mkvid?tab=old')
     expect(attn).toContain('boom &lt;b&gt;')

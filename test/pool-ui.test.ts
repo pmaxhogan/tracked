@@ -146,6 +146,8 @@ describe('pool UI: Cloudflare Access gate', () => {
     const { r, text } = await req(mainApp, '/ui/pool')
     expect(r.status).toBe(200)
     expect(text).toContain('Pool accounts')
+    expect(text).toMatch(/s === 'resting' \|\| s === 'new' \|\| s === 'creating' \? 'warn'/)
+    expect(text).toMatch(/s === 'warming' \|\| s === 'ramping' \? 'info'/)
     const main = await req(mainApp, '/ui')
     expect(main.text).toContain('href="/ui/pool"')
   })
@@ -470,6 +472,11 @@ describe('normalisers', () => {
     expect(JSON.stringify(a)).not.toContain('wgPrivateKey')
     const c = normalizeChallenge(upstreamChallenge('ch-1'))!
     expect(Object.keys(c).sort()).toEqual(['accountId', 'createdAt', 'error', 'expiresAt', 'id', 'ready', 'reason', 'state', 'step', 'type'])
+  })
+  it('reads passive from state when tlpool sends no passive field', () => {
+    expect(normalizeAccount({ id: 'acct-1', state: 'passive' })!.passive).toBe(true)
+    expect(normalizeAccount({ id: 'acct-2', state: 'active' })!.passive).toBe(false)
+    expect(normalizeAccount({ id: 'acct-3', state: 'active', passive: true })!.passive).toBe(true)
   })
   it('refuse ids that are not opaque tokens', () => {
     expect(normalizeAccount({ id: '../x' })).toBeNull()
