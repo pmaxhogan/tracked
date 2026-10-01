@@ -30,7 +30,7 @@ export const POOL_CSS = /* css */ `
   @media (max-width: 700px) {
     .tk-table td.acts-cell { justify-content: flex-start; text-align: left; }
   }
-  dialog#add-dlg { width: min(34rem, calc(100% - 2rem)); }
+  @media (min-width: 800px) { dialog#add-dlg { width: min(34rem, calc(100% - 2rem)); } }
   .switch { display: flex; align-items: flex-start; gap: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--line-strong); border-radius: var(--r-tile); cursor: pointer; }
   .switch input { width: 1.5rem; height: 1.5rem; margin: 2px 0 0; flex-shrink: 0; }
   #add-form .field { margin: var(--sp-3) 0; }

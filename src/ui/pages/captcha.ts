@@ -8,7 +8,7 @@ export function captchaPageHtml(id: string): string {
 (() => {
 ${COMMON_JS}
 ${CAPTCHA_JS}
-  const ID = ${JSON.stringify(id)};
+  const ID = ${JSON.stringify(id).replace(/</g, '\\u003c')};
   let ch = null, widget = null, finished = false, timer = null, watch = null;
 
   function renderHead() {

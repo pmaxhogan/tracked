@@ -449,8 +449,8 @@ ${MKVID_STATE_JS}
       r.readiness ? ['waiting', mkWhy(r.readiness, false, capped)] : null,
       r.skipIdWait ? ['ID wait', 'skipped (Render now)'] : null,
       r.jobId ? ['mkvid job', '<span class="mono">' + esc(r.jobId) + '</span>'] : null,
-      ['queued', esc(isoOf(r.createdAt))],
-      ['updated', esc(isoOf(r.updatedAt))],
+      ['queued', esc(TK.fmt.time(isoOf(r.createdAt))) + ' <span class="when">(' + esc(rel(r.createdAt)) + ')</span>'],
+      ['updated', esc(TK.fmt.time(isoOf(r.updatedAt))) + ' <span class="when">(' + esc(rel(r.updatedAt)) + ')</span>'],
     ]));
     const btns = [];
     if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed' || r.status === 'banned') {

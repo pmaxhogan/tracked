@@ -29,6 +29,8 @@ const CSS = /* css */ `
   .rm-filters .chips { margin-bottom: 0; }
   .rm-dj { min-width: 12rem; margin-left: auto; }
   .rm-when { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .rm-stack { display: flex; flex-direction: column; min-width: 0; }
+  @media (max-width: 700px) { .rm-stack { align-items: flex-end; text-align: right; } }
   .rm-detail { display: block; color: var(--muted); font-size: var(--fs-xs); }
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
   #error:empty { display: none; }
@@ -97,14 +99,16 @@ const JS = /* js */ `
     st.appendChild(el('span', String(r.status).replace('_', ' '), 'badge ' + kind));
     tr.appendChild(st);
     const set = cell('DJ / set');
-    if (r.slug) { const a = el('a', r.slug); a.href = '/ui/dj/' + encodeURIComponent(r.slug); set.appendChild(a); }
-    if (r.slug && r.set_url) set.appendChild(document.createElement('br'));
-    if (r.set_url) set.appendChild(link(r.set_url, (String(r.set_url).split('/').pop() || r.set_url).replace(/\\.html$/, '')));
+    const setBox = el('div', null, 'rm-stack'); set.appendChild(setBox);
+    if (r.slug) { const a = el('a', r.slug); a.href = '/ui/dj/' + encodeURIComponent(r.slug); setBox.appendChild(a); }
+    if (r.set_url) setBox.appendChild(link(r.set_url, (String(r.set_url).split('/').pop() || r.set_url).replace(/\\.html$/, '')));
     tr.appendChild(set);
     const vid = cell('Video'); vid.appendChild(link('https://www.youtube.com/watch?v=' + encodeURIComponent(r.video_id), r.video_id)); tr.appendChild(vid);
     const pl = cell('Playlist'); pl.appendChild(link('https://www.youtube.com/playlist?list=' + encodeURIComponent(r.playlist_id), r.playlist_kind)); tr.appendChild(pl);
-    const why = cell('Why'); why.appendChild(document.createTextNode(labels[r.reason] || r.reason));
-    if (r.detail) why.appendChild(el('span', r.detail, 'rm-detail'));
+    const why = cell('Why');
+    const whyBox = el('div', null, 'rm-stack'); why.appendChild(whyBox);
+    whyBox.appendChild(el('span', labels[r.reason] || r.reason));
+    if (r.detail) whyBox.appendChild(el('span', r.detail, 'rm-detail'));
     tr.appendChild(why);
     const act = cell('');
     if (r.source !== 'dead' && (r.status === 'removed' || r.status === 'recorded' || r.status === 'would_remove')) {
