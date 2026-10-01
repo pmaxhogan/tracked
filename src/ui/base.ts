@@ -4,6 +4,7 @@
 export const BASE_CSS = /* css */ `
 /* ── reset ── */
 *, *::before, *::after { box-sizing: border-box; }
+input[type=checkbox], input[type=radio] { accent-color: var(--accent-fill); }
 body { margin: 0; background: var(--page); color: var(--fg); font: 15px/1.5 var(--sans); }
 [hidden] { display: none !important; }
 a { color: var(--accent); }

@@ -299,7 +299,7 @@ POST /ui/api/tracklist/purge { url | slug | videoId }      → same as POST /tra
 POST /ui/api/playlists/fix-titles { dryRun?: true }        → { dryRun, checked, fixes: [{ slug, playlistId, oldTitle, newTitle, status }] }
 ```
 
-**Fix playlist titles** (button on the main page; `lib/playlist-rename.ts`): since 1001tracklists' July 2026 redesign the DJ page H1 reads "Tracklists By X", and playlists created meanwhile are titled "Tracklists By X (1001tklists)". The DJ page parser strips the prefix now and the next DJ page fetch corrects the stored name, but YouTube titles are set only at creation. The route finds every managed DJ playlist whose title starts with "Tracklists By ", computes the title a fresh creation would get ("X (1001tklists)"), and, only with `dryRun: false`, renames it with `playlists.update`, keeping its description, privacy and language (50 quota units each); the stored artist name is corrected too. The button shows the list first and asks before renaming.
+**Fix playlist titles** (button on the Playlists page; `lib/playlist-rename.ts`): since 1001tracklists' July 2026 redesign the DJ page H1 reads "Tracklists By X", and playlists created meanwhile are titled "Tracklists By X (1001tklists)". The DJ page parser strips the prefix now and the next DJ page fetch corrects the stored name, but YouTube titles are set only at creation. The route finds every managed DJ playlist whose title starts with "Tracklists By ", computes the title a fresh creation would get ("X (1001tklists)"), and, only with `dryRun: false`, renames it with `playlists.update`, keeping its description, privacy and language (50 quota units each); the stored artist name is corrected too. The button shows the list first and asks before renaming.
 
 **Per-track links in the viewers are lazy**: loading a set costs one set page; each identified row has a **links** button, and **Load links** fetches them for the whole list (25 per request). Every lookup is a budgeted pool view at priority `recheck`, cached per track id for 30 days.
 
@@ -340,7 +340,7 @@ The `video` field is Google's `videos.list` item verbatim, asking for every part
 
 ### YouTube account connection
 
-The same page has a "Sign in with YouTube" button that runs an OAuth 2.0 authorization-code flow against Google so the worker can create and modify playlists on the connected channel. The flow is implemented in `src/lib/google-oauth.ts` and wired up in `src/routes/subscriptions.ts`:
+The Settings page (YouTube account) and the Playlists page have a "Sign in with YouTube" button that runs an OAuth 2.0 authorization-code flow against Google so the worker can create and modify playlists on the connected channel. The flow is implemented in `src/lib/google-oauth.ts` and wired up in `src/routes/subscriptions.ts`:
 
 ```
 GET  /ui/oauth/start                   → 302 to Google consent (state cookie set)
@@ -678,7 +678,7 @@ tlpool posts `challenge.created` / `.solved` / `.expired` and `account.flagged` 
 
 ### Admin banner and pause
 
-`src/lib/ban-state.ts` keeps `ban:pause` (the master switch) and the banner's episodes (`ban:home`, `ban:ep:*`) in KV. Every admin page shows the banner while paused, until *Dismiss* hides it for that pause (`ban:pause:dismissed`; the pause itself stays); the main page's history lists past episodes and whether tlpool is configured. Web Push needs `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (`node scripts/gen-vapid-keys.mjs mailto:you@example.com`); **Enable notifications** once per device, **Send test notification** proves delivery.
+`src/lib/ban-state.ts` keeps `ban:pause` (the master switch) and the banner's episodes (`ban:home`, `ban:ep:*`) in KV. Every admin page shows the banner while paused, until *Dismiss* hides it for that pause (`ban:pause:dismissed`; the pause itself stays); the Settings page's ban history lists past episodes and whether tlpool is configured. Web Push needs `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (`node scripts/gen-vapid-keys.mjs mailto:you@example.com`); **Enable notifications** once per device, **Send test notification** proves delivery.
 
 Admin endpoints (CF Access): `GET /ui/api/ban/status[?live=1]`, `POST /ui/api/ban/clear`, `POST /ui/api/ban/simulate`, `POST /ui/api/ban/requeue-victims[?days=14&dry=1]`, `GET/PUT /ui/api/pool/settings`, `GET /ui/api/push/config`, `POST /ui/api/push/{subscribe,unsubscribe,test}`, `GET /ui/sw.js`. Pool pages and their proxies to tlpool (accounts, add account, captchas, live view, tlpool settings) are listed in `src/routes/pool-ui.ts`.
 
@@ -697,7 +697,7 @@ Every cache key embeds the version of the logic that produced its value (`family
 
 Each `/now-playing` call also writes a durable audit row to D1 (`now_playing_audit`, `lib/now-playing-audit.ts`; 90-day retention, pruned by the daily cron). The write runs after the response inside `waitUntil` and swallows its own errors, so a D1 hiccup never fails a Tasker call. Each record captures the full request story: inputs (`currentSeconds`, `videoDurationSeconds`, title/url), the YouTube resolution (matched id/title or the error), the tracklist-search plan and which signal hit, and the selection it produced (`currentStartSeconds`, `currentSkewSeconds`, chosen tracks) — plus an `impossibleTimestamp` flag when `currentSeconds > videoDurationSeconds` (the fingerprint of a client-side position bug). A compact summary sits in its own column so the admin panel lists recent requests without parsing records. Workers Logs only retains ~3 days, but timestamp/selection bugs are often noticed much later (a wrong "now playing" spotted in an old screenshot).
 
-Browse this history on the **Home** page (`/ui`) under **Recent requests** (the last few; the full Activity log is phase 2) (newest-first, expandable per-request detail, a "problems only" filter, and anomaly highlighting for error statuses / impossible timestamps / large skews). Behind Cloudflare Access. Endpoints: `GET /ui/api/audit?limit&cursor` (summaries, keyset-paged newest-first; each record's `key` is its row id) and `GET /ui/api/audit-detail?key=` (full record). For raw CLI access: `npx wrangler d1 execute tracked --remote --command "SELECT t, status, summary FROM now_playing_audit ORDER BY ts DESC LIMIT 20"`.
+Browse this history on the **Home** page (`/ui`) under **Recent requests** (the last 6, newest first; the full Activity log with filters is phase 2). Each row opens its full record, and rows with an error status or an impossible timestamp are highlighted, with a flag on large position skews. Behind Cloudflare Access. Endpoints: `GET /ui/api/audit?limit&cursor` (summaries, keyset-paged newest-first; each record's `key` is its row id) and `GET /ui/api/audit-detail?key=` (full record). For raw CLI access: `npx wrangler d1 execute tracked --remote --command "SELECT t, status, summary FROM now_playing_audit ORDER BY ts DESC LIMIT 20"`.
 
 ### Playlist-addition audit trail
 
@@ -705,7 +705,7 @@ The sync writes the same kind of trail for its own work (`lib/playlist-audit.ts`
 
 Rows are buffered during a run and flushed in one batch at the end: awaiting up to 30 sequential writes inside the set loop would eat a large slice of the 25 s sync deadline. A run killed mid-loop therefore loses its rows — deliberate, since this is diagnostics only; idempotency and progress live in the per-sub state. A D1 failure here is logged and swallowed, never surfaced as a sync failure.
 
-Browse it on the **Home** page (`/ui`) under **Recent playlist additions**, which mirrors the requests view (newest-first, expandable per-row detail, a "problems only" filter — `failed` / `abandoned`, since `no_youtube` is a normal outcome). Endpoints: `GET /ui/api/playlist-additions?limit&cursor` (summaries) and `GET /ui/api/playlist-addition-detail?key=` (full record). Raw CLI access is the same as above against the `playlist_additions` table.
+Browse it on the **Home** page (`/ui`) under **Recent playlist additions**, which mirrors the requests view (the last 6, newest first; each row opens its full record, and `failed` / `abandoned` rows are highlighted since `no_youtube` is a normal outcome). Endpoints: `GET /ui/api/playlist-additions?limit&cursor` (summaries) and `GET /ui/api/playlist-addition-detail?key=` (full record). Raw CLI access is the same as above against the `playlist_additions` table.
 
 ## Files
 
