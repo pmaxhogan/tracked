@@ -210,16 +210,17 @@ ${MKVID_STATE_JS}
   async function loadRun() {
     const res = await TK.api.get('/ui/api/mkvid/progress');
     const p = res.ok && res.data && res.data.running;
-    if (!p || !Array.isArray(p.stages) || !p.stages.length) { $run.hidden = true; $run.innerHTML = ''; return; }
-    renderRun(p);
+    if (!p || !Array.isArray(p.stages) || !p.stages.length) { $run.hidden = true; $run.innerHTML = ''; }
+    else renderRun(p);
+    return res;
   }
-  let runTimer = null;
-  function scheduleRun() {
-    clearTimeout(runTimer);
-    if (document.hidden) return;
-    runTimer = setTimeout(() => { loadRun().finally(scheduleRun); }, 15000);
+  // TK.poll: pauses while hidden, backs off on errors, stops on 401/403 and after 15 min (Refresh restarts it).
+  let runPoll = null;
+  function startRun() {
+    if (runPoll) runPoll.stop();
+    loadRun();
+    runPoll = TK.poll(loadRun, 15000, { onAuth: () => { $run.hidden = true; } });
   }
-  document.addEventListener('visibilitychange', () => { if (document.hidden) clearTimeout(runTimer); else { loadRun(); scheduleRun(); } });
   // Overlapping loads (typing in the search box): only the newest renders.
   // A whole-view load supersedes everything before it; an append is dropped
   // while one is pending, or when one started after it (its cursor and filter
@@ -592,7 +593,7 @@ ${MKVID_STATE_JS}
   }
 
   // ── header actions ──
-  $refresh.addEventListener('click', () => TK.busy($refresh, 'Refreshing…', () => load('all')));
+  $refresh.addEventListener('click', () => { startRun(); TK.busy($refresh, 'Refreshing…', () => load('all')); });
   // Bulk recreate: confirm with the live count, and send it back so a count that changed meanwhile is refused.
   // The reload runs after busy has put its saved label back, so the button
   // ends up with the new count (or hidden at 0).
@@ -628,8 +629,7 @@ ${MKVID_STATE_JS}
 
   renderTabs(false);
   load('all');
-  loadRun(); scheduleRun();
-  if ($refresh) $refresh.addEventListener('click', () => { loadRun(); });
+  startRun();
 })();
 `
 
