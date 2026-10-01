@@ -237,11 +237,45 @@ Errors mirror `/likes`: `401` bad/missing `LIKED_SONGS_TOKEN`, `500` when that s
 
 OpenAPI spec: `GET /openapi.json` (bearer-gated).
 
-## Subscriptions mini-app
+## Admin UI (`/ui`)
 
-`GET /ui/` is a tiny single-user web UI for managing the list of DJs to track. Paste a 1001tracklists DJ URL like `https://www.1001tracklists.com/dj/lillypalmer/index.html` and only the slug (`lillypalmer`) is stored. Subscriptions live in the D1 `subscriptions` table (see **Storage**) so they're durable independent of the cache.
+`GET /ui` is a single-user admin web UI: the list of DJs to track, the pool, playlists, mkvid and the tools around them. Paste a 1001tracklists DJ URL like `https://www.1001tracklists.com/dj/lillypalmer/index.html` on the DJs page and only the slug (`lillypalmer`) is stored. Subscriptions live in the D1 `subscriptions` table (see **Storage**) so they're durable independent of the cache. `GET /` redirects to `/ui/`.
 
-The admin UI lived under `/subscriptions` until it moved to `/ui`. Until the owner retires the old prefix, `/subscriptions/...` pages answer a `301` to the same path under `/ui` (the old tracklist viewer to `/ui/set`), and the old API, OAuth and service worker paths answer `410 { error: "moved" }` (`src/routes/legacy.ts`). None of those answers carries content, so they need no Access. `GET /` redirects to `/ui/`.
+### Pages (phase 1)
+
+| Path | Page |
+| --- | --- |
+| `/ui` | Home: status tiles, needs-attention list, the last 6 requests and playlist additions, quick actions |
+| `/ui/djs` | DJs: the list (table on desktop, cards on a phone) with the add form in the header |
+| `/ui/dj/<slug>` | DJ profile: summary column and expandable set cards |
+| `/ui/set?url=` | Set: the tracklist viewer (`?url=` deep link kept) |
+| `/ui/playlists` | Playlists: YouTube connection, combined playlist, per-DJ playlists, fix titles, hygiene strip |
+| `/ui/removed` | Removed videos (the push target for removals) |
+| `/ui/mkvid` | mkvid: status line, caps, Queue / Finished / Old videos tabs, detail drawer |
+| `/ui/pool` | Pool accounts: stats, challenges, accounts table, add-account dialog |
+| `/ui/pool/settings` | Pool settings |
+| `/ui/captcha` | Challenges |
+| `/ui/captcha/<id>` | One challenge (the push target; phone-first) |
+| `/ui/settings` | Settings: YouTube account, notifications and devices, theme, integration status, IP-ban episodes |
+| `/ui/tools` | Tools: YouTube video JSON, purge a tracklist, simulate a ban, requeue victims, migration status |
+
+Not built yet: **Activity** (`/ui/activity`, a unified log with filters; phase 2, and the set diagnostics view) and **Search** (`/ui/search`, sets, tracks and DJs; phase 3). In phase 1 the search box in the shell links to the DJs filter.
+
+### The shell
+
+Every page is one server-rendered HTML document with the shell, page CSS and JS inline; the theme script runs before first paint.
+
+- 1100px and wider: a sidebar with grouped navigation (Home; Library: DJs, Search, Playlists, Removed videos; Pipeline: mkvid; Pool: Accounts, Challenges with a live count, Pool settings; Settings; Tools) and a footer with the status pill, the theme toggle and "Signed in via Access". `/` focuses the search box.
+- 800px to 1100px: the sidebar collapses to an icon rail with tooltips.
+- Under 800px: a top bar (page title, menu) and a bottom tab bar (Home, DJs, Search, mkvid, Pool).
+- The shell owns the ban/pause banner on every page.
+- The theme control (sidebar footer, and the Settings page on any width) picks System, Light or Dark, and the choice is remembered in the browser.
+
+### Where the old sections went
+
+The old single page had these sections: the YouTube strip is on Playlists and Settings; the add form and DJ list are on DJs; Combined playlist is on Playlists; mkvid uploads are on mkvid; YouTube video JSON, simulate ban and requeue victims are on Tools; IP-ban history and push devices are on Settings; Recent requests and Recent playlist additions are on Home (phase 2 moves them to Activity). The tracklist viewer is `/ui/set`, the pool pages keep their paths under `/ui`.
+
+The admin UI lived under `/subscriptions` until it moved to `/ui`. Until the owner retires the old prefix, `/subscriptions/...` pages answer a `301` to the same path under `/ui` (the old tracklist viewer to `/ui/set`), and the old API, OAuth and service worker paths answer `410 { error: "moved" }` (`src/routes/legacy.ts`). None of those answers carries content, so they need no Access.
 
 The UI is gated by **Cloudflare Access**, not the bearer token used for `/now-playing`. The worker doesn't trust the `Cf-Access-Authenticated-User-Email` header on its own — every `/ui/*` request goes through `cfAccess` middleware that:
 
@@ -271,7 +305,7 @@ POST /ui/api/playlists/fix-titles { dryRun?: true }        → { dryRun, checked
 
 ### Tracklist viewer
 
-`GET /ui/set` is a standalone page (linked from the top of the subscriptions page) where you paste a 1001tracklists **tracklist** URL and get a clean per-song list: each row shows the artist – title, cue time, a **YouTube** icon that links straight to the track's video, and an **Apple Music** button, whenever 1001tracklists has those links. It's the browser-facing companion to the bearer-gated `POST /tracklist` API; because the browser only carries the Cloudflare Access cookie (not the bearer token), the page calls its own Access-gated endpoint:
+`GET /ui/set` is a standalone page (open it from the DJs page or paste a `?url=` link) where you paste a 1001tracklists **tracklist** URL and get a clean per-song list: each row shows the artist – title, cue time, a **YouTube** icon that links straight to the track's video, and an **Apple Music** button, whenever 1001tracklists has those links. It's the browser-facing companion to the bearer-gated `POST /tracklist` API; because the browser only carries the Cloudflare Access cookie (not the bearer token), the page calls its own Access-gated endpoint:
 
 ```
 GET  /ui/set                     → the viewer page (HTML)
@@ -296,7 +330,7 @@ The set list comes from `GET /ui/api/dj/<slug>` (`?refresh=1` to force), which w
 
 ### YouTube video JSON
 
-`/ui` also has a **YouTube video JSON** section: paste any video URL (`watch?v=`, `youtu.be/`, `/shorts/`, `/embed/`, `/live/`, a bare 11-character id — anything `extractVideoId` accepts) and it pretty-prints the raw YouTube Data API payload for that video. Purely a lookup — it doesn't scrape a tracklist, touch a playlist, or write anything.
+`/ui/tools` has a **YouTube video JSON** section: paste any video URL (`watch?v=`, `youtu.be/`, `/shorts/`, `/embed/`, `/live/`, a bare 11-character id — anything `extractVideoId` accepts) and it pretty-prints the raw YouTube Data API payload for that video. Purely a lookup — it doesn't scrape a tracklist, touch a playlist, or write anything.
 
 ```
 GET /ui/api/youtube/video?url=...   → { videoId, watchUrl, video: { ...videos.list item } }
@@ -353,7 +387,7 @@ Both playlists are created on demand (looked up by exact title first, so an exis
 
 The scheduler hands rechecks to the sync one set at a time, after new sets and verification fetches (decision 12); a manual run still does its new-set window first, then at most 20 due rechecks per DJ. A recheck that keeps failing (3×) is deferred to the next interval rather than abandoned — the video it already has stays put. `playlistItems.delete` costs the same 50 units as an insert; a swap is rare enough that this isn't budgeted, but every removal shows up in the audit row's message.
 
-**Invalidate video cache & resync.** Each DJ row in the panel has an **Invalidate & resync** button, and the list header has one for every DJ. It marks every processed set due *now* (keeping its recorded video, so swaps are detected and old videos removed), gives abandoned sets another chance, drops the cached membership of both the artist playlist and the combined playlist (`yt:plvids:<id>`) so they're re-read from YouTube, and runs one sync. One run rechecks at most 20 sets and stops when the manual fetch budget (`manualMaxFetches`, default 10) is spent; the scheduler works through the rest by age and priority — the panel message says how many are still pending. The list-header button is `POST /ui/api/resync` — one server-side pass over every DJ on a single shared budget. Until 2026-09-14 it looped the per-DJ endpoint from the browser, and neither the loop nor the per-DJ endpoints carried a budget, so a "resync all" fetched every set of every DJ flat out; that is what tripped the 1001tracklists rate limit on both ban days.
+**Invalidate video cache & resync.** Each DJ row on the DJs page has an **Invalidate & resync** button, and the list header has one for every DJ. It marks every processed set due *now* (keeping its recorded video, so swaps are detected and old videos removed), gives abandoned sets another chance, drops the cached membership of both the artist playlist and the combined playlist (`yt:plvids:<id>`) so they're re-read from YouTube, and runs one sync. One run rechecks at most 20 sets and stops when the manual fetch budget (`manualMaxFetches`, default 10) is spent; the scheduler works through the rest by age and priority — the panel message says how many are still pending. The list-header button is `POST /ui/api/resync` — one server-side pass over every DJ on a single shared budget. Until 2026-09-14 it looped the per-DJ endpoint from the browser, and neither the loop nor the per-DJ endpoints carried a budget, so a "resync all" fetched every set of every DJ flat out; that is what tripped the 1001tracklists rate limit on both ban days.
 
 ```
 POST /ui/api/resync/<slug>   → same body as /api/sync/<slug>, plus
@@ -369,7 +403,7 @@ POST /ui/api/resync/<slug>   → same body as /api/sync/<slug>, plus
 - A **quota** error (`quotaExceeded` etc.) stops the run immediately (`cappedBy: "quota"`) — nothing else will succeed today, and each further attempt would be noise.
 - A **transient** error (5xx, network) stays pending and is retried next tick, but the attempt still counted against the daily budget, so even an unclassified repeat-failure can't loop unmetered.
 
-The admin panel's **Combined playlist** section shows the link, video count, how many are still to add, today's remaining insert budget, how many unavailable videos are being skipped, and a **Backfill now** button that runs one bounded pass immediately (same caps — clicking it repeatedly can't blow the quota). Per-set rows in **Recent playlist additions** carry a `combined` field: `added` / `duplicate` / `failed` / `unavailable`.
+The **Combined playlist** card on the Playlists page shows the link, video count, how many are still to add, today's remaining insert budget, how many unavailable videos are being skipped, and a **Backfill now** button that runs one bounded pass immediately (same caps — clicking it repeatedly can't blow the quota). Per-set rows in **Recent playlist additions** carry a `combined` field: `added` / `duplicate` / `failed` / `unavailable`.
 
 ```
 GET  /ui/api/combined            → { connected, title, playlistId, playlistUrl, videoCount,
@@ -405,7 +439,7 @@ The Worker can't reach the NAS (mkvid sits behind Cloudflare Access on a cloudfl
 5. **Rechecks keep working.** An mkvid video is kept while the page still has no recording (never removed on absence) and is swapped out — removed from both playlists, replaced — the day 1001tracklists attaches a real YouTube video, like any phone recording replaced by an official upload. The recheck also refreshes the stored track list of a set whose video is an mkvid upload, so a recreation renders from the newest list.
 6. **Delete and recreate** (`lib/mkvid-recreate.ts`). **Delete and recreate** in a done request's details (`POST /ui/api/mkvid/recreate/<id>`) puts the set back in the queue **behind everything waiting**, remembering the video it replaces (`replaces_video_id`); it is an ordinary request from there — it needs a verified list, waits for IDs, and its claim counts against the daily cap. The old video stays on YouTube and in both playlists until the new one is delivered; then `/mkvid/complete` adds the new video to both playlists first, removes the old one from both, writes a `replaced` audit row (`trigger: mkvid.recreate`, `previousVideoId`), and asks mkvid to delete the old video from YouTube (`POST <MKVID_URL>/api/videos/<id>/delete { requestId }`, bearer `MKVID_TOKEN`; mkvid only deletes a video its own database recorded as uploaded for that request, through the account that uploaded it). The old video id is written to `mkvid_old_videos` the moment Recreate is pressed (state `awaiting_replacement`, not on the panel's to-delete list), so no path can lose it: it becomes due for deletion when the new video is delivered, or when the set is superseded by an official recording meanwhile (at the claim, at completion, or by the sync), in which case it is also taken out of both playlists; the new upload of a superseded recreation stays on record in `video_id`. When the new video did not make it into the combined playlist, the delete waits 6 h (the combined backfill adds it first), and an old video missing from the cached artist listing is looked for in a fresh listing before it is recorded. A delete that fails is kept in `mkvid_old_videos`, retried by the cron (10 min doubling to 6 h, never given up) and listed on the panel with its error and a **Retry now**; mkvid refusing one (not its upload) is final and shown. **Recreate all old-style videos** in the panel header queues every done request whose video was not made with `scene` (unknown counts as old), after a confirm that shows the count (`GET`/`POST /ui/api/mkvid/recreate-old-style { expect: <count> }`; a count that changed meanwhile is refused with the fresh one). `MKVID_URL` is mkvid's base URL; mkvid sits behind Cloudflare Access, so either set `MKVID_ACCESS_CLIENT_ID` / `MKVID_ACCESS_CLIENT_SECRET` (an Access service token the Worker sends) or give `/api/videos/*` a bypass policy — the route checks the bearer itself.
 
-The admin panel's **mkvid uploads** section opens with one status line that answers "why is nothing uploading?" — paused (cap 0), mkvid not polling (the Worker records each `/mkvid/claim` poll's outcome in KV, rewritten at most every 10 min), today's cap used (with the time until the midnight-Pacific reset), rendering, or ready — then the backlog estimate, what is rendering, the waiting line in claim order, and what finished. It lists every request (status, source, video, attempts, error, the privacy YouTube actually applied — an unverified OAuth app forces `private` even when `unlisted` was requested) with a **Retry** for failed ones.
+The mkvid page opens with one status line that answers "why is nothing uploading?" — paused (cap 0), mkvid not polling (the Worker records each `/mkvid/claim` poll's outcome in KV, rewritten at most every 10 min), today's cap used (with the time until the midnight-Pacific reset), rendering, or ready — then the backlog estimate, what is rendering, the waiting line in claim order, and what finished. It lists every request (status, source, video, attempts, error, the privacy YouTube actually applied — an unverified OAuth app forces `private` even when `unlisted` was requested) with a **Retry** for failed ones.
 
 Both lists are **filterable and paged**. The filter bar narrows them by free text (a substring of the set title, the DJ or the set URL), status, source and DJ; the summary line then says how many requests match, and **Clear** drops the filter. Each list loads 25 rows at a time with a **Load more** under it, and a waiting-line row keeps the number of its place in the *whole* queue — neither a filter nor a page boundary renumbers it, so ⤒ ↑ ↓ ⤓ still move it where the badge says. Paging is by keyset cursor rather than an offset, so a claim, a retry or a reorder between two pages can never make a row skip a page or turn up on both.
 
@@ -663,7 +697,7 @@ Every cache key embeds the version of the logic that produced its value (`family
 
 Each `/now-playing` call also writes a durable audit row to D1 (`now_playing_audit`, `lib/now-playing-audit.ts`; 90-day retention, pruned by the daily cron). The write runs after the response inside `waitUntil` and swallows its own errors, so a D1 hiccup never fails a Tasker call. Each record captures the full request story: inputs (`currentSeconds`, `videoDurationSeconds`, title/url), the YouTube resolution (matched id/title or the error), the tracklist-search plan and which signal hit, and the selection it produced (`currentStartSeconds`, `currentSkewSeconds`, chosen tracks) — plus an `impossibleTimestamp` flag when `currentSeconds > videoDurationSeconds` (the fingerprint of a client-side position bug). A compact summary sits in its own column so the admin panel lists recent requests without parsing records. Workers Logs only retains ~3 days, but timestamp/selection bugs are often noticed much later (a wrong "now playing" spotted in an old screenshot).
 
-Browse this history in the **admin panel** at `/ui` → **Recent requests** (newest-first, expandable per-request detail, a "problems only" filter, and anomaly highlighting for error statuses / impossible timestamps / large skews). Behind Cloudflare Access. Endpoints: `GET /ui/api/audit?limit&cursor` (summaries, keyset-paged newest-first; each record's `key` is its row id) and `GET /ui/api/audit-detail?key=` (full record). For raw CLI access: `npx wrangler d1 execute tracked --remote --command "SELECT t, status, summary FROM now_playing_audit ORDER BY ts DESC LIMIT 20"`.
+Browse this history on the **Home** page (`/ui`) under **Recent requests** (the last few; the full Activity log is phase 2) (newest-first, expandable per-request detail, a "problems only" filter, and anomaly highlighting for error statuses / impossible timestamps / large skews). Behind Cloudflare Access. Endpoints: `GET /ui/api/audit?limit&cursor` (summaries, keyset-paged newest-first; each record's `key` is its row id) and `GET /ui/api/audit-detail?key=` (full record). For raw CLI access: `npx wrangler d1 execute tracked --remote --command "SELECT t, status, summary FROM now_playing_audit ORDER BY ts DESC LIMIT 20"`.
 
 ### Playlist-addition audit trail
 
@@ -671,7 +705,7 @@ The sync writes the same kind of trail for its own work (`lib/playlist-audit.ts`
 
 Rows are buffered during a run and flushed in one batch at the end: awaiting up to 30 sequential writes inside the set loop would eat a large slice of the 25 s sync deadline. A run killed mid-loop therefore loses its rows — deliberate, since this is diagnostics only; idempotency and progress live in the per-sub state. A D1 failure here is logged and swallowed, never surfaced as a sync failure.
 
-Browse it in the **admin panel** at `/ui` → **Recent playlist additions**, which mirrors the requests view (newest-first, expandable per-row detail, a "problems only" filter — `failed` / `abandoned`, since `no_youtube` is a normal outcome). Endpoints: `GET /ui/api/playlist-additions?limit&cursor` (summaries) and `GET /ui/api/playlist-addition-detail?key=` (full record). Raw CLI access is the same as above against the `playlist_additions` table.
+Browse it on the **Home** page (`/ui`) under **Recent playlist additions**, which mirrors the requests view (newest-first, expandable per-row detail, a "problems only" filter — `failed` / `abandoned`, since `no_youtube` is a normal outcome). Endpoints: `GET /ui/api/playlist-additions?limit&cursor` (summaries) and `GET /ui/api/playlist-addition-detail?key=` (full record). Raw CLI access is the same as above against the `playlist_additions` table.
 
 ## Files
 
@@ -680,7 +714,14 @@ src/
   index.ts                  OpenAPIHono app + /openapi.json
   routes/now-playing.ts     pipeline orchestrator (track playing at an offset)
   routes/tracklist.ts       whole-tracklist → JSON dump
-  routes/subscriptions.ts   DJ subscriptions mini-app (HTML + JSON API)
+  routes/subscriptions.ts   admin JSON API (DJs, playlists, tracklists, YouTube) mounted under /ui
+  routes/legacy.ts          the old /subscriptions prefix: 301 for pages, 410 for API / OAuth / sw.js
+  ui/tokens.ts              design tokens (colors, type scale, spacing, radii), light and dark
+  ui/base.ts                shared CSS (buttons, tables, dialogs, chips, toasts)
+  ui/icons.ts               the inline SVG icon set
+  ui/runtime.ts             shared page runtime (the one global, TK: api helpers, formatting, toasts)
+  ui/shell.ts               sidebar, rail, top bar, bottom tabs, banner slot, theme control
+  ui/pages/                 one module per page (home, djs, dj, set, playlists, removed, mkvid, pool, captcha, settings, tools)
   routes/mkvid.ts           the work queue mkvid polls (bearer MKVID_TOKEN)
   routes/pool-api.ts        POST /pool/events (tlpool webhook) + GET/PUT /ui/api/pool/settings
   middleware/auth.ts        bearer token (timing-safe)
