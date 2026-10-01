@@ -118,6 +118,7 @@ ${DJ_ACTIONS_JS}
     // One bulk action at a time: the other bulk button waits (the pressed one is TK.busy's).
     if (bulk !== 'sync') $syncAll.disabled = !!bulk;
     if (bulk !== 'resync') $resyncAll.disabled = !!bulk;
+    $fix.disabled = !!bulk;
     $wrap.hidden = !list.length;
     $rows.innerHTML = list.map(rowHtml).join('');
     if (!rows.length) { $empty.textContent = 'No subscriptions yet.'; $empty.hidden = false; }

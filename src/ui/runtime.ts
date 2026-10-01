@@ -115,7 +115,7 @@ var TK = (() => {
       pre.textContent = String(detail);
       t.appendChild(pre);
     }
-    const href = link ? safeHref(link.href) || (typeof link.href === 'string' && link.href.charAt(0) === '/' && link.href.charAt(1) !== '/' ? link.href : null) : null;
+    const href = link ? safeHref(link.href) || (typeof link.href === 'string' && /^\\/(?![\\/\\\\])[^\\\\\\x00-\\x1f\\x7f]*$/.test(link.href) ? link.href : null) : null;
     if (href) {
       const a = document.createElement('a');
       a.href = href;

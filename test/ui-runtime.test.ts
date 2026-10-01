@@ -129,6 +129,12 @@ describe('TK basics', () => {
     expect(a).toMatchObject({ href: '/ui/oauth/start', textContent: 'Reconnect YouTube' })
     vm.runInContext("TK.toast('x', 'bad', null, { href: 'javascript:alert(1)', text: 'no' })", c)
     expect(box.children[1].children.some((x: any) => x.tag === 'a')).toBe(false)
+    for (const bad of ['/\\evil.example', '/\\\\evil', '//evil', 'javascript:alert(1)', '', ' /ui/x', '/ui/\nx']) {
+      const before = box.children.length
+      ;(c as any).__href = bad
+      vm.runInContext("TK.toast('x', 'bad', null, { href: __href, text: 'no' })", c)
+      expect(box.children[before].children.some((x: any) => x.tag === 'a'), JSON.stringify(bad)).toBe(false)
+    }
     const plain = ctx({})
     vm.runInContext(RUNTIME_JS, plain.c)
     expect(() => vm.runInContext("TK.toast('x', 'bad', null, { href: '/a', text: 'b' })", plain.c)).not.toThrow()
