@@ -71,6 +71,7 @@ import {
 } from '../lib/web-push'
 import { SW_JS } from './ban-ui'
 import { hygieneApp } from './playlist-hygiene'
+import { activityApp } from './activity'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -98,6 +99,9 @@ subscriptionsApp.onError((e, c) => {
 
 // /removed page, removal log + undo, remove-and-replace (routes/playlist-hygiene.ts). Behind cfAccess above.
 subscriptionsApp.route('/', hygieneApp)
+
+// Activity log + set diagnostics (routes/activity.ts). Behind cfAccess above.
+subscriptionsApp.route('/', activityApp)
 
 // Home: status tiles, needs attention, recent activity (ui/pages/home.ts).
 subscriptionsApp.get('/', (c) => servePage(c, HOME_PAGE.html))
