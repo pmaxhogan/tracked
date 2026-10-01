@@ -192,6 +192,44 @@ describe('activity feed', () => {
     expect(p2.cursor).toBeNull()
   })
 
+  it('filters ban problems before the limit + 1 cut', async () => {
+    const env = makeEnv()
+    await banEpisode(env, 1_000) // the only real block, oldest
+    await banEpisode(env, 2_000, true)
+    await banEpisode(env, 3_000, true)
+    await banEpisode(env, 4_000, true)
+    const p = await page(env, '?kind=ban&problems=1&limit=2')
+    expect(p.rows.map((r) => [r.ts, r.title])).toEqual([[1_000, 'IP block']])
+    expect(p.cursor).toBeNull()
+    // A key whose body is gone does not take a slot either.
+    await banEpisode(env, 500)
+    await banEpisode(env, 400)
+    await env.CACHE.delete('ban:ep:' + String(10_000_000_000_000 - 4_000).padStart(14, '0'))
+    const q = await page(env, '?kind=ban&limit=2')
+    expect(q.rows.map((r) => r.ts)).toEqual([3_000, 2_000])
+    expect(q.cursor).not.toBeNull()
+  })
+
+  it('treats an empty sync error as ok', async () => {
+    const env = makeEnv()
+    await env.DB.prepare("INSERT INTO sub_sync (slug, artist_name, last_run_at, last_error) VALUES ('dj-one', 'DJ One', 7000, '')").run()
+    const p = await page(env, '?kind=sync')
+    expect(p.rows.map((r) => [r.status, r.problem])).toEqual([['ok', false]])
+    expect((await page(env, '?kind=sync&problems=1')).rows).toEqual([])
+  })
+
+  it('drops pool reasons that could carry an address or are long', async () => {
+    const env = makeEnv()
+    await poolEvent(env, 1, 10, 'account.flagged', 'acct-1', { reason: 'mail bounced for someone@example.com' })
+    await poolEvent(env, 2, 20, 'account.flagged', 'acct-2', { reason: 'x'.repeat(121) })
+    await poolEvent(env, 3, 30, 'account.flagged', 'acct-3', { reason: 'y'.repeat(120) })
+    const p = await page(env, '?kind=pool')
+    const detail = (key: string) => p.rows.find((r) => r.ref.key === key)!.detail
+    expect(detail('1')).toBe('acct-1')
+    expect(detail('2')).toBe('acct-2')
+    expect(detail('3')).toBe(`acct-3 · ${'y'.repeat(120)}`)
+  })
+
   it('since cuts every source', async () => {
     const env = makeEnv()
     await audit(env, 1, 1_000)

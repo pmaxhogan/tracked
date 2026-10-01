@@ -269,6 +269,10 @@ const POOL_TITLES: Record<string, string> = {
   'account.retired': 'Account retired',
   'account.rested': 'Account rested',
 }
+/** A pool event's free-text reason, only when it cannot carry an address and is short. */
+const POOL_REASON_MAX = 120
+const poolReason = (v: unknown): string | null =>
+  typeof v === 'string' && v !== '' && !v.includes('@') && v.length <= POOL_REASON_MAX ? v : null
 const POOL_PROBLEM_TYPES = ['account.flagged', 'account.retired', 'challenge.expired']
 
 async function poolSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
@@ -291,7 +295,7 @@ async function poolSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
       detail: joinParts([
         account,
         r.challenge_id && `challenge ${r.challenge_id}`,
-        str(payload.reason),
+        poolReason(payload.reason),
         (r.push_status === 'failed' || r.push_status === 'not_configured') && `push ${r.push_status}`,
       ]),
       dj: null, setUrl: null, videoId: null,
@@ -302,20 +306,23 @@ async function poolSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
 
 async function syncSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
   const T = 'last_run_at * 1000'
-  const w = where(q, 'sync', T, 'slug', 'last_error IS NOT NULL', 'slug')
+  const w = where(q, 'sync', T, 'slug', "last_error IS NOT NULL AND last_error != ''", 'slug')
   w.parts.push('last_run_at IS NOT NULL')
   const res = await dbOf(env)
     .prepare(`SELECT slug, ${T} AS ms, artist_name, last_error FROM sub_sync WHERE ${w.parts.join(' AND ')} ORDER BY ${T} DESC, slug DESC LIMIT ?`)
     .bind(...w.binds, q.limit + 1)
     .all<{ slug: string; ms: number; artist_name: string | null; last_error: string | null }>()
-  return res.results.map((r) => ({
-    ts: Number(r.ms), kind: 'sync', status: r.last_error ? 'error' : 'ok',
-    problem: r.last_error != null,
-    title: `Sync: ${r.artist_name || r.slug}`,
-    detail: clip(r.last_error),
-    dj: r.slug, setUrl: null, videoId: null,
-    ref: { kind: 'sync', key: r.slug },
-  }))
+  return res.results.map((r) => {
+    const failed = typeof r.last_error === 'string' && r.last_error !== ''
+    return {
+      ts: Number(r.ms), kind: 'sync', status: failed ? 'error' : 'ok',
+      problem: failed,
+      title: `Sync: ${r.artist_name || r.slug}`,
+      detail: clip(r.last_error),
+      dj: r.slug, setUrl: null, videoId: null,
+      ref: { kind: 'sync', key: r.slug },
+    }
+  })
 }
 
 type BanEpisodeView = { endedAt?: string | null; blockedForMs?: number | null; simulated?: boolean; clearedBy?: string | null }
@@ -338,26 +345,39 @@ async function banSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
     survivors.push({ key: k.name, ts })
   }
   survivors.sort((a, b) => b.ts - a.ts || (a.key < b.key ? 1 : a.key > b.key ? -1 : 0))
+  // Fetch bodies in parallel chunks, in key order, until limit + 1 rows qualify
+  // (missing bodies and, under `problems`, simulated episodes do not count).
+  const want = q.limit + 1
   const rows: ActivityRow[] = []
-  for (const s of survivors.slice(0, q.limit + 1)) {
-    const ep = await env.CACHE.get<BanEpisodeView>(s.key, 'json')
-    if (!ep) continue
-    const simulated = ep.simulated === true
-    const open = ep.endedAt == null
-    rows.push({
-      ts: s.ts, kind: 'ban', status: open ? 'open' : 'ended',
-      problem: !simulated,
-      title: simulated ? 'Simulated IP block' : 'IP block',
-      detail: joinParts([
-        typeof ep.blockedForMs === 'number' && ep.blockedForMs > 0 && `blocked ${duration(ep.blockedForMs)}`,
-        str(ep.clearedBy) && `cleared by ${ep.clearedBy}`,
-        open && 'ongoing',
-      ]),
-      dj: null, setUrl: null, videoId: null,
-      ref: { kind: 'ban', key: s.key },
+  for (let i = 0; i < survivors.length && rows.length < want; ) {
+    const chunk = survivors.slice(i, i + (want - rows.length))
+    i += chunk.length
+    const eps = await Promise.all(chunk.map((s) => env.CACHE.get<BanEpisodeView>(s.key, 'json')))
+    chunk.forEach((s, j) => {
+      const ep = eps[j]
+      if (!ep || rows.length >= want) return
+      const row = banRow(s.key, s.ts, ep)
+      if (!q.problems || row.problem) rows.push(row)
     })
   }
-  return q.problems ? rows.filter((r) => r.problem) : rows
+  return rows
+}
+
+function banRow(key: string, ts: number, ep: BanEpisodeView): ActivityRow {
+  const simulated = ep.simulated === true
+  const open = ep.endedAt == null
+  return {
+    ts, kind: 'ban', status: open ? 'open' : 'ended',
+    problem: !simulated,
+    title: simulated ? 'Simulated IP block' : 'IP block',
+    detail: joinParts([
+      typeof ep.blockedForMs === 'number' && ep.blockedForMs > 0 && `blocked ${duration(ep.blockedForMs)}`,
+      str(ep.clearedBy) && `cleared by ${ep.clearedBy}`,
+      open && 'ongoing',
+    ]),
+    dj: null, setUrl: null, videoId: null,
+    ref: { kind: 'ban', key },
+  }
 }
 
 const SOURCES: Array<{ src: ActivitySource; kind: ActivityKind; run: (env: Env, q: ActivityQuery) => Promise<ActivityRow[]> }> = [
