@@ -23,6 +23,7 @@ const BODY = /* html */ `
 
 export const SEARCH_CSS = /* css */ `
   mark { background: var(--accent-soft); color: inherit; border-radius: 2px; }
+  .tk-search { display: none; }
   .sq-bar { margin-bottom: var(--sp-3); }
   .sq-bar input { appearance: none; font: inherit; font-size: var(--fs-md, 1rem); color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); padding: 10px 12px; width: 100%; min-width: 0; }
   .sq-bar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -87,6 +88,8 @@ ${TRACK_ROW_JS}
         at = folded.indexOf(t, at + 1);
       }
     }
+    // A dropped character (an apostrophe) between two hits belongs to the hit: don't for dont.
+    for (let i = 1; i + 1 < chars.length; i++) if (!hit[i] && hit[i - 1] && hit[i + 1] && !fold(chars[i])) hit[i] = true;
     let out = '', run = '', on = false;
     chars.forEach((c, i) => {
       if (hit[i] !== on) { out += on ? '<mark>' + esc(run) + '</mark>' : esc(run); run = ''; on = hit[i]; }
@@ -194,7 +197,7 @@ ${TRACK_ROW_JS}
     const to = {};
     for (const x of c) to[x.from] = x.to;
     const shown = wordsOf(q).map((w) => (Object.prototype.hasOwnProperty.call(to, w) ? to[w] : w)).join(' ');
-    $note.innerHTML = 'Showing results for <strong>' + esc(shown) + '</strong>. <button type="button" id="sq-exact" class="btn small">Search exactly for ' + esc(q) + '</button>';
+    $note.innerHTML = '<span>Showing results for <strong>' + esc(shown) + '</strong>.</span> <button type="button" id="sq-exact" class="btn small">Search exactly for ' + esc(q) + '</button>';
     $note.hidden = false;
   }
 

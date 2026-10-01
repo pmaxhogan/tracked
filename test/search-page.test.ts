@@ -75,6 +75,8 @@ describe('Search page script', () => {
     expect(out).toContain('<mark>Café</mark>')
     expect(out).toContain('&lt;img src=x onerror=1&gt;')
     expect(out).not.toContain('<img')
+    const apos = await open('?q=dont%20stop', () => Response.json(response({ tracks: [track({ title: "Don't Stop" })], sets: [], djs: [] })))
+    expect(apos.els.get('sq-results').innerHTML).toContain('<mark>Don&#39;t</mark> <mark>Stop</mark>')
   })
 
   it('shows the corrected notice with a search-exactly button that requests exact=1', async () => {
@@ -82,7 +84,7 @@ describe('Search page script', () => {
     const p = await open('?q=lily%20plamer%20dont', answer)
     const note = p.els.get('sq-corrected')
     expect(note.hidden).toBe(false)
-    expect(note.innerHTML).toContain('Showing results for <strong>lilly palmer dont</strong>')
+    expect(note.innerHTML).toContain('Showing results for <strong>lilly palmer dont</strong>.</span>')
     expect(note.innerHTML).toContain('Search exactly for lily plamer dont')
     expect(p.searchFetches()[0]).not.toContain('exact=1')
     p.fire('sq-corrected', 'click', { target: { closest: () => ({ id: 'sq-exact' }) } })
