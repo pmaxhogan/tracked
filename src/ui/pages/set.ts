@@ -103,12 +103,17 @@ ${SET_DIAG_JS}
     $error.textContent = '';
     $empty.hidden = true;
     // Never leave another set's diagnostics on screen while this one loads.
-    if (!$diag.hidden) $diag.innerHTML = '<p class="muted">Loading diagnostics…</p>';
+    $diag.innerHTML = TK.skel(7, 'row');
+    $diag.hidden = false;
     loadDiag(url, my).catch((e) => {
       if (my !== seq) return;
       $diag.innerHTML = '<p class="diag-err">Diagnostics unavailable: ' + TK.esc(e && e.message ? e.message : e) + '</p>';
       $diag.hidden = false;
     });
+    // Skeleton rows until the list arrives (an uncached set is a live 1001tracklists fetch).
+    $tracks.innerHTML = TK.skel(8, 'row');
+    $tracks.hidden = false;
+    $setmeta.hidden = true;
     await TK.busy($btn, 'Loading…', async () => {
       const res = await TK.api.post('/ui/api/tracklist', { url });
       if (my !== seq) return;

@@ -11,7 +11,7 @@ const BODY = /* html */ `
   <aside class="tk-card dj-side">
     <div class="tk-row"><span id="dj-sub" class="badge ok" hidden>subscribed</span></div>
     <p class="mono dj-slug"><span id="dj-slug"></span></p>
-    <p id="counts" class="muted sub">Loading sets…</p>
+    <p id="counts" class="muted sub"><span class="skel" style="width:70%"></span></p>
     <p id="dj-playlist" class="sub" hidden></p>
     <p id="dj-last" class="sub" hidden></p>
     <p class="sub"><a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> · <a href="/ui/djs">All DJs</a></p>
@@ -31,7 +31,8 @@ const BODY = /* html */ `
     <p id="filter-note" class="muted sub" hidden></p>
     <div id="error" class="err-state" role="alert" hidden></div>
     <div id="sets" class="dj-sets"></div>
-    <div id="empty" class="empty" hidden>Loading sets…</div>
+    <div id="sets-skel" hidden></div>
+    <div id="empty" class="empty" hidden></div>
   </section>
 </div>
 `
@@ -55,7 +56,6 @@ const CSS = /* css */ `
   .set-card .badge.neutral { text-transform: none; }
   .retry { margin-left: var(--sp-2); }
   .warn-text { color: var(--danger); font-size: var(--fs-sm); overflow-wrap: anywhere; }
-  .loading-text { color: var(--muted); font-size: var(--fs-sm); }
   @media (min-width: 900px) {
     .dj-layout { grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr); }
     .dj-side { position: sticky; top: var(--sp-4); }
@@ -78,7 +78,7 @@ ${DJ_ACTIONS_JS}
   const $name = $('dj-name'), $sub = $('dj-sub'), $slug = $('dj-slug'), $link1001 = $('dj-1001'), $counts = $('counts');
   const $refresh = $('refresh'), $sync = $('sync'), $resync = $('resync');
   const $playlist = $('dj-playlist'), $last = $('dj-last');
-  const $error = $('error'), $sets = $('sets'), $empty = $('empty'), $chips = $('chips'), $note = $('filter-note');
+  const $error = $('error'), $sets = $('sets'), $empty = $('empty'), $skel = $('sets-skel'), $chips = $('chips'), $note = $('filter-note');
   let filter = 'all';
   let subscribed = false;
 
@@ -200,7 +200,7 @@ ${DJ_ACTIONS_JS}
 
   async function loadSetInto(card, body, head, set) {
     body.textContent = '';
-    const l = document.createElement('span'); l.className = 'loading-text'; l.textContent = 'loading tracklist…'; body.appendChild(l);
+    body.innerHTML = TK.skel(5, 'row');
     const res = await TK.api.post('/ui/api/tracklist', { url: set.url });
     if (res.ok) { renderSetBody(card, body, head, set, res.data || {}); return true; }
     body.textContent = '';
@@ -295,8 +295,10 @@ ${DJ_ACTIONS_JS}
   async function load(refresh) {
     showError('');
     const run = async () => {
-      if (!$sets.children.length) { $empty.textContent = refresh ? 'Crawling 1001tracklists…' : 'Loading sets…'; $empty.hidden = false; }
+      // Skeleton cards until the first list arrives (a refresh with sets on screen keeps them).
+      if (!$sets.children.length) { $empty.hidden = true; $skel.innerHTML = TK.skel(6, 'card'); $skel.hidden = false; }
       const res = await TK.api.get('/ui/api/dj/' + encodeURIComponent(slug) + (refresh ? '?refresh=1' : ''));
+      $skel.hidden = true; $skel.textContent = '';
       const data = res.data || {};
       if (!res.ok) {
         showError(TK.errText(res, 'failed (' + res.status + ')'));
@@ -309,7 +311,10 @@ ${DJ_ACTIONS_JS}
       $sub.hidden = !subscribed;
       $sync.hidden = !subscribed;
       $resync.hidden = !subscribed;
-      const src = data.source === 'state' ? 'from sync state (crawl unavailable)' : 'crawled ' + fmtWhen(data.crawledAt);
+      // 'refreshing': the server answered from the sync state and is crawling in the background (next view has it).
+      const src = data.source === 'state'
+        ? (data.stopReason === 'refreshing' ? 'from sync state · refreshing from 1001tracklists' : 'from sync state (crawl unavailable)')
+        : 'crawled ' + fmtWhen(data.crawledAt);
       // Until the daily backfill reaches the end of the DJ's list, the count is
       // "sets found so far", not the DJ's total on 1001tracklists.
       const partial = data.listingComplete === false ? ' found so far — listing may be incomplete (older sets are backfilled 10 a day)' : '';

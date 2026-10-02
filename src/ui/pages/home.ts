@@ -11,6 +11,7 @@
 // Everything renders through innerHTML strings with delegated clicks (the
 // tests run this script in a stub DOM without appendChild), and every
 // upstream value goes through TK.esc.
+import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
 import type { UiPage } from './index'
 import { MKVID_STATE_JS } from './mkvid-state'
@@ -45,7 +46,8 @@ const BODY = /* html */ `
     <span class="h-recent-links"><a href="/ui/activity">View all</a><a href="/ui/activity?problems=1">Problems</a></span>
   </div>
   <div id="act-list" class="a-list" role="list"></div>
-  <div id="act-empty" class="muted">Loading…</div>
+  <div id="act-skel">${skelHtml(6, 'row')}</div>
+  <div id="act-empty" class="muted" hidden></div>
 </div>
 `
 
@@ -261,6 +263,7 @@ ${ACTIVITY_DRAWER_JS}
   async function loadActivity() {
     const $list = $('act-list'), $empty = $('act-empty');
     const res = await TK.api.get('/ui/api/activity?limit=12');
+    $('act-skel').hidden = true;
     const rows = res.ok && res.data && Array.isArray(res.data.rows) ? res.data.rows : null;
     if (!rows) { $empty.hidden = false; $empty.innerHTML = '<span class="error">' + esc(failText(res)) + '</span>'; return; }
     actRows = rows.slice(0, 12);

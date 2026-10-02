@@ -157,3 +157,84 @@ describe('getDjSets', () => {
     expect(r2.sets.map((s) => s.url)).toEqual([u1])
   })
 })
+
+describe('getDjSets stale-while-revalidate (defer)', () => {
+  const u1 = `${ORIGIN}/tracklist/a1/lilly-palmer-set-one-2025-01-01.html`
+  const u2 = `${ORIGIN}/tracklist/b2/lilly-palmer-set-two-2024-12-25.html`
+  const SEVEN_HOURS = 7 * 3600
+  const deferred = () => {
+    const ps: Promise<unknown>[] = []
+    return { defer: (p: Promise<unknown>) => void ps.push(p), settle: () => Promise.all(ps), count: () => ps.length }
+  }
+
+  it('serves a stale cached list at once and refreshes it in the background', async () => {
+    const env = makeEnv()
+    mockCrawl([u1])
+    const first = await getDjSets(env, 'lillypalmer', { log })
+    mockCrawl([u2, u1])
+    const d = deferred()
+    const r = await getDjSets(env, 'lillypalmer', { log, defer: d.defer, nowSec: first.crawledAt + SEVEN_HOURS })
+    expect(r.sets.map((s) => s.url)).toEqual([u1])
+    expect(d.count()).toBe(1)
+    await d.settle()
+    const fresh = await getDjSets(env, 'lillypalmer', { log })
+    expect(fresh.sets.map((s) => s.url)).toEqual([u2, u1])
+  })
+
+  it('serves a fresh cached list without a background crawl', async () => {
+    const env = makeEnv()
+    mockCrawl([u1])
+    await getDjSets(env, 'lillypalmer', { log })
+    ;(crawlDjIndex as unknown as ReturnType<typeof vi.fn>).mockClear()
+    const d = deferred()
+    await getDjSets(env, 'lillypalmer', { log, defer: d.defer })
+    expect(d.count()).toBe(0)
+    expect(crawlDjIndex).not.toHaveBeenCalled()
+  })
+
+  it('with no cache, serves the sync state list (stopReason refreshing) and crawls in the background', async () => {
+    const env = makeEnv()
+    await env.SUBS.put('subs:state:lillypalmer', JSON.stringify({ processedTracklistUrls: [], discoveredTracklistUrls: [u1], artistName: 'Lilly Palmer' }))
+    mockCrawl([u2, u1])
+    const d = deferred()
+    const r = await getDjSets(env, 'lillypalmer', { log, defer: d.defer })
+    expect(r).toMatchObject({ source: 'state', stopReason: 'refreshing', artistName: 'Lilly Palmer' })
+    expect(r.sets.map((s) => s.url)).toEqual([u1])
+    await d.settle()
+    expect((await getDjSets(env, 'lillypalmer', { log })).sets.map((s) => s.url)).toEqual([u2, u1])
+  })
+
+  it('starts one background crawl per DJ while the refresh lock is held', async () => {
+    const env = makeEnv()
+    await env.SUBS.put('subs:state:lillypalmer', JSON.stringify({ processedTracklistUrls: [], discoveredTracklistUrls: [u1] }))
+    ;(crawlDjIndex as unknown as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}))
+    const d = deferred()
+    await getDjSets(env, 'lillypalmer', { log, defer: d.defer })
+    await getDjSets(env, 'lillypalmer', { log, defer: d.defer })
+    expect(d.count()).toBe(1)
+  })
+
+  it('crawls inline for a DJ with neither a cache nor a sync state, and for refresh', async () => {
+    const env = makeEnv()
+    mockCrawl([u1])
+    const d = deferred()
+    const r = await getDjSets(env, 'unknown', { log, defer: d.defer })
+    expect(r.source).toBe('crawl')
+    expect(d.count()).toBe(0)
+    mockCrawl([u2, u1])
+    const r2 = await getDjSets(env, 'unknown', { log, defer: d.defer, refresh: true })
+    expect(r2.sets.map((s) => s.url)).toEqual([u2, u1])
+    expect(d.count()).toBe(0)
+  })
+
+  it('a failing background crawl is swallowed and the stale list stays served', async () => {
+    const env = makeEnv()
+    mockCrawl([u1])
+    const first = await getDjSets(env, 'lillypalmer', { log })
+    ;(crawlDjIndex as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('blocked'))
+    const d = deferred()
+    const r = await getDjSets(env, 'lillypalmer', { log, defer: d.defer, nowSec: first.crawledAt + SEVEN_HOURS })
+    expect(r.sets.map((s) => s.url)).toEqual([u1])
+    await expect(d.settle()).resolves.toBeDefined()
+  })
+})

@@ -9,6 +9,7 @@
 // re-rendered through innerHTML and clicks are delegated (the tests run this
 // script in a stub DOM without setAttribute or appendChild). Every upstream
 // value goes through esc.
+import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
 import { icon } from '../icons'
 import type { UiPage } from './index'
@@ -132,7 +133,8 @@ const BODY = /* html */ `
   </div>
 </div>
 <div id="a-list" class="tk-card a-list" role="list" hidden></div>
-<div id="a-empty" class="empty">Loading…</div>
+<div id="a-skel">${skelHtml(8, 'card')}</div>
+<div id="a-empty" class="empty" hidden></div>
 <p class="a-foot"><button id="a-more" type="button" class="btn" hidden>Load older</button></p>
 `
 
@@ -166,7 +168,7 @@ ${ACTIVITY_DRAWER_JS}
   const KINDS = ${JSON.stringify(KINDS)};
   const RANGE_MS = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000, '90d': 90 * 86400000 };
   const $filters = $('a-filters'), $kinds = $('a-kinds'), $toggle = $('a-toggle'), $ranges = $('a-ranges'), $dj = $('a-dj');
-  const $list = $('a-list'), $empty = $('a-empty'), $more = $('a-more'), $refresh = $('a-refresh');
+  const $list = $('a-list'), $empty = $('a-empty'), $skel = $('a-skel'), $more = $('a-more'), $refresh = $('a-refresh');
 
   // ── filter state: the query string is the source, unknown kinds and ranges are dropped ──
   const known = new Set(KINDS.map((k) => k[0]));
@@ -218,6 +220,7 @@ ${ACTIVITY_DRAWER_JS}
     if (!more) { cursor = null; $more.hidden = true; setBusy(true); }
     const res = await TK.api.get(apiUrl(from));
     if (my !== seq) return;
+    $skel.hidden = true;
     setBusy(false);
     const d = res.ok && res.data && Array.isArray(res.data.rows) ? res.data : null;
     if (!d) {

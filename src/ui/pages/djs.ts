@@ -2,6 +2,7 @@
 // one or all (serially), Invalidate & resync one or all (all is ONE request),
 // and the "fix titles" dialog. Data: GET /ui/api/list, then one
 // GET /ui/api/state/:slug per row, four at a time.
+import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
 import type { UiPage } from './index'
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from './dj-actions'
@@ -28,7 +29,8 @@ const BODY = /* html */ `
     <tbody id="rows"></tbody>
   </table>
 </div>
-<div id="empty" class="empty">Loading DJs…</div>
+<div id="djs-skel">${skelHtml(8, 'row')}</div>
+<div id="empty" class="empty" hidden></div>
 ${FIX_DIALOG_HTML}
 `
 
@@ -145,6 +147,7 @@ ${DJ_ACTIONS_JS}
   async function load() {
     showError('');
     const res = await TK.api.get('/ui/api/list');
+    $('djs-skel').hidden = true;
     if (!res.ok) {
       if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
       showError(TK.errText(res, 'failed to load (' + res.status + ')'));

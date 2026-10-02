@@ -2,6 +2,7 @@
 // (with Backfill now), one playlist row per DJ, and the hygiene strip. Data:
 // GET /ui/api/youtube/status, /ui/api/combined, /ui/api/list + /ui/api/state/:slug
 // per row (four at a time) and one GET /ui/api/removals.
+import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
 import type { UiPage } from './index'
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from './dj-actions'
@@ -32,7 +33,8 @@ ${YOUTUBE_CARD_HTML}
       <tbody id="rows"></tbody>
     </table>
   </div>
-  <div id="empty" class="empty">Loading playlists…</div>
+  <div id="pl-skel">${skelHtml(6, 'row')}</div>
+  <div id="empty" class="empty" hidden></div>
 </div>
 ${FIX_DIALOG_HTML}
 `
@@ -164,6 +166,7 @@ ${YOUTUBE_CARD_JS}
   async function loadRows() {
     showError('');
     const res = await TK.api.get('/ui/api/list');
+    $('pl-skel').hidden = true;
     if (!res.ok) {
       showError(TK.errText(res, 'failed to load (' + res.status + ')'));
       if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }

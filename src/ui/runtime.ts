@@ -12,6 +12,8 @@
 // This is a template literal: any backslash that must reach the browser
 // (regexes) is doubled here.
 
+import { SKEL_ITEMS } from './skeleton'
+
 /** Applies a stored manual theme ('dark' | 'light'); 'system' is left to the media query. */
 export const THEME_BOOT_JS = `(function(){try{var t=localStorage.getItem('tk-theme');if(t==='dark'||t==='light')document.documentElement.dataset.theme=t}catch(e){}})();`
 
@@ -303,6 +305,15 @@ var TK = (() => {
     }
   }
 
+  // ── skeletons ── (markup from src/ui/skeleton.ts)
+  const SKEL_ITEMS = ${JSON.stringify(SKEL_ITEMS)};
+  function skel(n, kind) {
+    const items = SKEL_ITEMS[kind === 'card' ? 'card' : 'row'];
+    let h = '<div class="skel-list" role="status" aria-label="Loading">';
+    for (let i = 0; i < n; i++) h += items[i % items.length];
+    return h + '</div>';
+  }
+
   // ── theme ──
   const THEME_KEY = 'tk-theme';
   const theme = {
@@ -320,7 +331,7 @@ var TK = (() => {
   };
 
   return {
-    $, esc, safeHref, api, errText, toast, ask, drawer, busy, poll, qs, navCount, theme,
+    $, esc, safeHref, api, errText, toast, ask, drawer, busy, poll, qs, navCount, theme, skel,
     fmt: { time: fmtTime, dur: fmtDur, ago, rel: relTime, clock, until: untilTime, date: fmtDate, setLabel },
   };
 })();

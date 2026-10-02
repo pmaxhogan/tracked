@@ -4,7 +4,7 @@ import { fetchOptsFromEnv } from './upstream1001'
 import { loadSubState } from './sync'
 import { loadDjBackfill } from './sync-store'
 import { TTL, getJson, putJson } from './cache'
-import type { Logger } from './log'
+import { errorFields, type Logger } from './log'
 
 /**
  * The set list behind the DJ profile page (`/ui/dj/<slug>`): every
@@ -77,6 +77,14 @@ export function setMetaFromUrl(url: string): DjSetSummary {
   return { url, tlSlug, title: title || url, date }
 }
 
+/** A cached list younger than this is served as is. */
+const FRESH_SECONDS = TTL.DJ_SETS
+/** How long KV keeps a list at all: past FRESH_SECONDS it is served stale while a background crawl replaces it. */
+const KEEP_SECONDS = 30 * 24 * 3600
+/** One background refresh per DJ at a time (KV's minimum TTL). */
+const REFRESH_LOCK_SECONDS = 60
+const lockKey = (slug: string) => `djsets:refreshing:${slug}`
+
 /**
  * Full set list for one DJ, served from KV when fresh. On miss (or
  * `refresh: true`) we walk the DJ's 1001tracklists index — same crawl the
@@ -85,6 +93,12 @@ export function setMetaFromUrl(url: string): DjSetSummary {
  * past crawl found). If the crawl comes back empty (IP block, CF shell),
  * the sync state alone still renders a useful page.
  *
+ * Stale-while-revalidate when the caller passes `defer` (the profile route
+ * hands in `waitUntil`): a stale cached list, or failing that the sync
+ * state's list, is returned at once and the crawl (up to 20 s of pool page
+ * views) runs in the background to refresh the cache. Only a DJ with neither
+ * crawls inline. `refresh: true` always crawls inline: the owner asked.
+ *
  * Crawl order is newest-first (that's how 1001tl lists them); state-only
  * URLs are appended after, so recency ordering is preserved for everything
  * the crawl saw.
@@ -92,25 +106,69 @@ export function setMetaFromUrl(url: string): DjSetSummary {
 export async function getDjSets(
   env: Env,
   slug: string,
-  opts: { refresh?: boolean; log: Logger },
+  opts: { refresh?: boolean; log: Logger; defer?: (p: Promise<unknown>) => void; nowSec?: number },
 ): Promise<DjSets> {
   const { log } = opts
   const key = cacheKey(slug)
+  const nowSec = opts.nowSec ?? Math.floor(Date.now() / 1000)
+  let stale: DjSets | undefined
   if (!opts.refresh) {
     const cached = await getJson<DjSets>(env.CACHE, key)
-    if (cached) {
+    if (cached && nowSec - cached.crawledAt < FRESH_SECONDS) {
       log.counters.cacheHits++
       log.info('cache.hit', { key, setCount: cached.sets.length })
       return cached
     }
     log.counters.cacheMisses++
-    log.info('cache.miss', { key })
+    log.info('cache.miss', { key, stale: !!cached })
+    stale = cached
   }
 
   // Known sets first, so the crawl only walks down to them: a profile view
   // for a DJ already in the database costs page 1 and no scroll request.
   // Deeper history is the scheduler's paced backfill, never a page view's.
   const [state, backfill] = await Promise.all([loadSubState(env, slug), loadDjBackfill(env, slug)])
+
+  if (!opts.refresh && opts.defer) {
+    const known = state?.discoveredTracklistUrls ?? []
+    const now: DjSets | null = stale
+      ? stale
+      : known.length > 0
+        ? {
+            slug,
+            artistName: state?.artistName ?? null,
+            sets: known.map(setMetaFromUrl),
+            source: 'state',
+            crawledAt: nowSec,
+            pagesWalked: 0,
+            stopReason: 'refreshing',
+            listingComplete: backfill?.done === true,
+          }
+        : null
+    if (now) {
+      if (!(await env.CACHE.get(lockKey(slug)))) {
+        await env.CACHE.put(lockKey(slug), '1', { expirationTtl: REFRESH_LOCK_SECONDS })
+        opts.defer(
+          crawlAndStore(env, slug, log, state, backfill).catch((e) =>
+            log.warn('djsets.background_refresh_failed', { slug, ...errorFields(e) }),
+          ),
+        )
+        log.info('djsets.served_stale', { slug, from: stale ? 'cache' : 'state', setCount: now.sets.length })
+      }
+      return now
+    }
+  }
+  return crawlAndStore(env, slug, log, state, backfill)
+}
+
+async function crawlAndStore(
+  env: Env,
+  slug: string,
+  log: Logger,
+  state: Awaited<ReturnType<typeof loadSubState>>,
+  backfill: Awaited<ReturnType<typeof loadDjBackfill>>,
+): Promise<DjSets> {
+  const key = cacheKey(slug)
   const crawl = await crawlDjIndex(slug, {
     // The owner is waiting on the page, but it is not the phone button: `new`,
     // so it never eats the phone's reserved share in tlpool.
@@ -143,8 +201,8 @@ export async function getDjSets(
   // Don't cache a failed crawl that the sync state couldn't cover either —
   // the next view should retry instead of pinning an empty page for the TTL.
   if (result.sets.length > 0) {
-    await putJson(env.CACHE, key, result, TTL.DJ_SETS)
-    log.info('cache.put', { key, setCount: result.sets.length, ttlSeconds: TTL.DJ_SETS })
+    await putJson(env.CACHE, key, result, KEEP_SECONDS)
+    log.info('cache.put', { key, setCount: result.sets.length, ttlSeconds: KEEP_SECONDS, freshSeconds: FRESH_SECONDS })
   } else {
     log.warn('djsets.empty_not_cached', { slug, stopReason: crawl.stopReason })
   }

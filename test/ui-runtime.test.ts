@@ -340,3 +340,17 @@ describe('TK.fmt', () => {
     expect(vm.runInContext('TK.fmt.until(Date.now() / 1000 + 90 * 60)', c)).toBe('in 1h 30m')
   })
 })
+
+describe('TK.skel', () => {
+  it('builds the same placeholder markup as the server-side skelHtml, n items, named for screen readers', async () => {
+    const { skelHtml } = await import('../src/ui/skeleton')
+    const { c } = ctx()
+    vm.runInContext(RUNTIME_JS, c)
+    for (const [n, kind] of [[3, 'card'], [10, 'row']] as const) {
+      const h = vm.runInContext(`TK.skel(${n}, '${kind}')`, c) as string
+      expect(h).toBe(skelHtml(n, kind))
+      expect(h.match(new RegExp(`class="skel-${kind}"`, 'g'))?.length).toBe(n)
+      expect(h).toContain('role="status" aria-label="Loading"')
+    }
+  })
+})

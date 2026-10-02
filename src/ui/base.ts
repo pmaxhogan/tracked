@@ -127,6 +127,10 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
 .skel { display: block; height: 1em; border-radius: 4px; background: var(--line); animation: tk-pulse 1.4s ease-in-out infinite; }
 @keyframes tk-pulse { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+.skel.sm { height: .75em; }
+.skel-list { display: grid; gap: var(--sp-2); }
+.skel-card { display: grid; gap: var(--sp-2); padding: var(--sp-3) var(--sp-4); border: 1px solid var(--line); border-radius: var(--r-card); background: var(--card); }
+.skel-row { display: grid; gap: 6px; padding: 6px 0; }
 
 /* ── track row and set card ── */
 .trk { display: grid; grid-template-columns: 52px 36px 1fr auto; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: .86rem; }

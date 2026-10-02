@@ -134,9 +134,11 @@ subscriptionsApp.get('/tracklist', (c) => c.redirect('/ui/set' + new URL(c.req.u
 subscriptionsApp.get('/dj/:slug', (c) => servePage(c, DJ_PAGE.html))
 
 /**
- * Set list for one DJ (backs the profile page). Served from a 6 h KV cache of
- * the DJ-index crawl merged with the sync state's discovered URLs; pass
- * `?refresh=1` to force a fresh crawl (the page's Refresh button does).
+ * Set list for one DJ (backs the profile page). Served from a KV cache of the
+ * DJ-index crawl merged with the sync state's discovered URLs, fresh for 6 h
+ * and served stale (or from the sync state) while a background crawl
+ * refreshes it; pass `?refresh=1` to force a crawl now (the page's Refresh
+ * button does).
  */
 subscriptionsApp.get('/api/dj/:slug', async (c) => {
   const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.dj_sets', by: c.get('cfAccessEmail') })
@@ -145,7 +147,15 @@ subscriptionsApp.get('/api/dj/:slug', async (c) => {
   const refresh = c.req.query('refresh') === '1'
   log.info('subs.dj_sets.start', { slug, refresh })
   try {
-    const [sets, subs] = await Promise.all([getDjSets(c.env, slug, { refresh, log }), listSubscriptions(c.env)])
+    // A stale or state-only list comes back at once; the crawl refreshes the cache in the background.
+    const defer = (p: Promise<unknown>) => {
+      try {
+        c.executionCtx.waitUntil(p)
+      } catch {
+        /* no executionCtx (tests): the promise still runs */
+      }
+    }
+    const [sets, subs] = await Promise.all([getDjSets(c.env, slug, { refresh, log, defer }), listSubscriptions(c.env)])
     if (sets.sets.length === 0) {
       // Nothing from the crawl OR the sync state — either a bad slug or an
       // upstream block. 502 (not 404) so the UI says "retry", since we can't
