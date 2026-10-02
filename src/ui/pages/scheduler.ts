@@ -82,7 +82,7 @@ const JS = /* js */ `
   const $ = TK.$, esc = TK.esc;
   const CLASSES = ['new', 'verify', 'recheck', 'backfill'];
   const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'dj_backfill'];
-  const KIND_WORDS = { discovery: 'DJ discovery', set: 'New set', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', dj_backfill: 'DJ backfill' };
+  const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', dj_backfill: 'DJ backfill' };
   const SKIP_WORDS = { paused: 'Paused (IP block)', backoff: 'Pool backoff', pool_not_configured: 'Pool not configured', youtube_not_connected: 'YouTube not connected', nothing_due: 'Nothing due', zero_draw: 'Drew zero' };
   const GOOD = new Set(['ok', 'stepped', 'done', 'no_cursor']);
   const OVERDUE_BAD = 6 * 3600;
