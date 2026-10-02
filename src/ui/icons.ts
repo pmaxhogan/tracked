@@ -5,7 +5,7 @@ export const ICON_NAMES = [
   'home', 'djs', 'search', 'playlist', 'removed', 'mkvid', 'activity', 'pool',
   'captcha', 'settings', 'tools', 'sliders', 'menu', 'close', 'sun', 'moon',
   'monitor', 'external', 'refresh', 'play', 'bell', 'shield', 'up', 'down',
-  'top', 'bottom', 'ban', 'check', 'warn', 'copy', 'link',
+  'top', 'bottom', 'ban', 'check', 'warn', 'copy', 'link', 'clock',
 ] as const
 
 export type IconName = (typeof ICON_NAMES)[number]
@@ -23,6 +23,7 @@ const BODY: Record<IconName, string> = {
   settings: '<path d="M9.8 4.7 L10.3 2.1 L13.7 2.1 L14.2 4.7 L15.5 5.3 L17.8 3.8 L20.2 6.2 L18.7 8.5 L19.3 9.8 L21.9 10.3 L21.9 13.7 L19.3 14.2 L18.7 15.5 L20.2 17.8 L17.8 20.2 L15.5 18.7 L14.2 19.3 L13.7 21.9 L10.3 21.9 L9.8 19.3 L8.5 18.7 L6.2 20.2 L3.8 17.8 L5.3 15.5 L4.7 14.2 L2.1 13.7 L2.1 10.3 L4.7 9.8 L5.3 8.5 L3.8 6.2 L6.2 3.8 L8.5 5.3 Z"/><circle cx="12" cy="12" r="3"/>',
   tools: '<path d="M14.7 6.3a4 4 0 0 0 5 5L21 12.6a1 1 0 0 1 0 1.4l-1 1-6-6 1-1a1 1 0 0 1 .7-.3z"/><path d="m14 9-10.5 10.5a1.8 1.8 0 0 0 2.5 2.5L16.5 11.5"/>',
   sliders: '<path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/><path d="M4 12h2"/><path d="M10 12h10"/><circle cx="8" cy="12" r="2"/><path d="M4 18h10"/><path d="M18 18h2"/><circle cx="16" cy="18" r="2"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   menu: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2"/><path d="M12 19.5v2"/><path d="m4.9 4.9 1.4 1.4"/><path d="m17.7 17.7 1.4 1.4"/><path d="M2.5 12h2"/><path d="M19.5 12h2"/><path d="m4.9 19.1 1.4-1.4"/><path d="m17.7 6.3 1.4-1.4"/>',

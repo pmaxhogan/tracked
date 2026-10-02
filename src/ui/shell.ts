@@ -14,7 +14,7 @@ import { THEME_BOOT_JS, RUNTIME_JS } from './runtime'
 import { BAN_BANNER_HTML, BAN_JS } from '../routes/ban-ui'
 
 export type NavKey = 'home' | 'djs' | 'search' | 'playlists' | 'removed' | 'mkvid' | 'activity'
-  | 'pool' | 'captcha' | 'pool-settings' | 'settings' | 'tools'
+  | 'pool' | 'captcha' | 'pool-settings' | 'scheduler' | 'settings' | 'tools'
 
 export interface NavItem {
   key: NavKey
@@ -43,6 +43,7 @@ export const NAV: NavItem[] = [
   { key: 'pool', label: 'Accounts', href: '/ui/pool', icon: 'pool', group: 'Pool', tab: 'Pool' },
   { key: 'captcha', label: 'Challenges', href: '/ui/captcha', icon: 'captcha', group: 'Pool', extra: '<span class="count" id="nav-count-captcha" hidden></span>' },
   { key: 'pool-settings', label: 'Pool settings', href: '/ui/pool/settings', icon: 'sliders', group: 'Pool' },
+  { key: 'scheduler', label: 'Scheduler', href: '/ui/scheduler', icon: 'clock', group: 'Pool' },
   { key: 'settings', label: 'Settings', href: '/ui/settings', icon: 'settings', group: null },
   { key: 'tools', label: 'Tools', href: '/ui/tools', icon: 'tools', group: null },
 ]
@@ -69,7 +70,7 @@ const current = (on: boolean) => (on ? ' class="on" aria-current="page"' : '')
 
 /** The Pool tab stands for every Pool page. */
 function tabIsOn(item: NavItem, nav: NavKey | null): boolean {
-  if (item.key === 'pool') return nav === 'pool' || nav === 'captcha' || nav === 'pool-settings'
+  if (item.key === 'pool') return nav === 'pool' || nav === 'captcha' || nav === 'pool-settings' || nav === 'scheduler'
   return item.key === nav
 }
 
