@@ -267,6 +267,10 @@ Search lives at `/ui/search` (see [Search](#search)); the search box at the top 
 
 `/ui/search` searches every verified track list: tracks (artist, title, label, with the sets they were played in), sets and DJs. It reads `GET /ui/api/search?q=&kind=all|sets|tracks|djs&limit=1..20&exact=1`, which normalizes the query (case, diacritics, apostrophes, `ft`/`feat`), corrects likely typos against the index's own vocabulary (the page says "Showing results for ..." and offers "Search exactly for ..." with `exact=1`) and re-ranks in the Worker.
 
+**Results.** "All" is one list: matching DJs first, then tracks and sets interleaved by relevance (each result carries a `score`, its match quality relative to an exact match on every word, so tracks and sets compare). The Tracks, Sets and DJs tabs show one kind. A track appears once: rows with the same 1001tracklists track link are merged, and a row without a link (a backfilled mkvid list carries no track ids) joins the linked row with the same artist and title, pooling their sets.
+
+**Thumbnails.** Every result has a square picture: a track's artwork, a set's page image (`og:image`), a DJ's newest set image (also used for a set whose page had none), else a lettered placeholder. The index keeps the source URL; `GET /ui/img/<key>` (behind Access) serves a copy from R2 (`IMAGES`, bucket `tracked-images`), fetching it from its source CDN (https only, `image/*` but not SVG, at most 2 MB) the first time it is asked for. Nothing is hotlinked from the page, and no image fetch is a 1001tracklists page view. Sets indexed before thumbnails existed pick them up the next time they are indexed (`INDEX_FORMAT_SINCE`; Rebuild redoes the mkvid lists).
+
 **What is indexed, and when.** Only trusted lists: a set is indexed after a fetch that verified against its recording, in the background (`waitUntil`, one batch per set, skipped when it was already indexed since that verification), and lists that mkvid uploaded from a trusted track list are added by the rebuild below. Sets with more than 500 tracks keep their first 500. In results, each track lists its 50 newest sets. Unverified lists are never indexed, so a wrong guess cannot surface in search.
 
 **Rebuild.** The Tools page has a Search index card with the counts (sets, tracks, last indexed) and a "Rebuild 500 more" button: each press works through up to 500 trusted mkvid lists (indexed or skipped as already current), in requests of about 60 sets each (one Worker invocation's D1 query budget), showing the running totals, and remembers where it stopped, so press it until it says done. It is safe to repeat.
@@ -276,6 +280,8 @@ Search lives at `/ui/search` (see [Search](#search)); the search box at the top 
 ```
 npx wrangler d1 migrations apply tracked-search --remote
 ```
+
+The thumbnails bucket is created once with `npx wrangler r2 bucket create tracked-images`.
 
 Locally, `npx wrangler d1 migrations apply tracked-search --local` does the same for `wrangler dev`.
 

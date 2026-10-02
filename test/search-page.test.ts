@@ -60,7 +60,7 @@ describe('Search page script', () => {
     expect(out).toContain('<mark>Mau</mark>')
     expect(out).toContain('&lt;b&gt;x&lt;/b&gt;')
     expect(out).not.toContain('<b>x')
-    for (const h of ['Tracks', 'Sets', 'DJs']) expect(out).toContain(h)
+    for (const h of ['>Track<', '>Set<', '>DJ<']) expect(out).toContain(h)
     expect(out).toContain('/ui/set?url=' + encodeURIComponent(SET_URL))
     expect(out).toContain('/ui/dj/maup')
     expect(out).toContain('18/20 IDs')
@@ -175,20 +175,46 @@ describe('Search page script', () => {
     expect(out).not.toContain('data-links="a"')
   })
 
-  it('tabs request kind= and All shows Show all links', async () => {
-    const many = response({ sets: Array.from({ length: 7 }, (_, i) => ({ url: SET_URL + i, title: 'Set ' + i, djSlug: 'maup', djName: 'Mau P', date: null, videoId: null, trackCount: 0, idedCount: 0 })) })
-    const p = await open('?q=mau', () => Response.json(many))
+  it('All is one list: DJs first, then tracks and sets by score (a set first on a tie); a tab shows one kind', async () => {
+    const sets = [
+      { url: SET_URL + 'a', title: 'Set A', djSlug: 'maup', djName: 'Mau P', date: null, videoId: null, trackCount: 0, idedCount: 0, image: null, score: 0.95 },
+      { url: SET_URL + 'b', title: 'Set B', djSlug: 'maup', djName: 'Mau P', date: null, videoId: null, trackCount: 0, idedCount: 0, image: null, score: 0.5 },
+    ]
+    const tracks = [track({ trackKey: 'ta', title: 'Track A', score: 0.9 }), track({ trackKey: 'tb', title: 'Track B', score: 0.5 })]
+    const p = await open('?q=mau', (u) => Response.json(u.includes('kind=sets') ? response({ tracks: [], djs: [], sets }) : response({ tracks, sets, djs: [{ slug: 'maup', name: 'Mau P', subscribed: true, sets: 4, image: null, score: 0.4 }] })))
     expect(p.searchFetches()[0]).toContain('kind=all')
     const out = p.els.get('sq-results').innerHTML as string
-    expect(out).toContain('Show all 7')
-    expect(out).toContain('data-kind="sets"')
-    expect((out.match(/data-set-row/g) ?? []).length).toBe(5)
+    const at = (s: string) => out.indexOf(s)
+    expect(at('/ui/dj/maup"')).toBeGreaterThan(-1)
+    const order = ['Profile</a>', 'Set A', 'Track A', 'Set B', 'Track B'].map(at)
+    expect(order.every((x) => x > -1)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    expect(out).not.toContain('Show all')
+    expect(out).not.toContain('<h2')
     expect(p.els.get('sq-tabs').innerHTML).toContain('aria-pressed="true"')
-    p.fire('sq-results', 'click', { target: { closest: (s: string) => (s === '[data-kind]' ? { dataset: { kind: 'sets' } } : null) } })
+    p.fire('sq-tabs', 'click', { target: { closest: (s: string) => (s === '[data-kind]' ? { dataset: { kind: 'sets' } } : null) } })
     await tick()
     expect(p.searchFetches()[1]).toContain('kind=sets')
     expect(p.history.urls.at(-1)).toContain('kind=sets')
-    expect((p.els.get('sq-results').innerHTML as string).match(/data-set-row/g)!.length).toBe(7)
+    const one = p.els.get('sq-results').innerHTML as string
+    expect(one).toContain('Sets <span class="n">2</span>')
+    expect(one.match(/data-set-row/g)!.length).toBe(2)
+    expect(one).not.toContain('sq-kind')
+  })
+
+  it('every row has a square thumbnail: an R2 image path over a lettered placeholder; anything else is just the placeholder', async () => {
+    const img = '/ui/img/' + 'a'.repeat(32)
+    const p = await open('?q=mau', () => Response.json(response({
+      tracks: [track({ image: img }), track({ trackKey: 'k2', artist: 'Zed', image: 'https://evil.example/x.png' })],
+      sets: [],
+      djs: [{ slug: 'maup', name: 'Mau P', subscribed: true, sets: 4, image: img }],
+    })))
+    const out = p.els.get('sq-results').innerHTML as string
+    expect(out.match(/class="sq-thumb/g)!.length).toBe(3)
+    expect(out.match(new RegExp('<img src="' + img + '"', 'g'))!.length).toBe(2)
+    expect(out).not.toContain('evil.example')
+    expect(out).toContain('<span class="sq-ph">Z</span>')
+    expect(out).toContain('class="sq-thumb dj"')
   })
 
   it('keyboard: arrows move the active result, Enter opens it, Escape clears', async () => {
@@ -202,7 +228,7 @@ describe('Search page script', () => {
     p.fire('sq', 'keydown', { key: 'ArrowUp' })
     expect(input['@aria-activedescendant']).toBe('sq-r0')
     p.fire('sq', 'keydown', { key: 'Enter' })
-    expect(p.location.href).toBe('/ui/set?url=' + encodeURIComponent(SET_URL))
+    expect(p.location.href).toBe('/ui/dj/maup') // All lists DJs first
     p.fire('sq', 'keydown', { key: 'Escape' })
     expect(input.value).toBe('')
     expect(p.els.get('sq-results').innerHTML).toBe('')

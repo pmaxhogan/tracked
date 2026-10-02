@@ -1,7 +1,9 @@
 // Search (phase 3): one box over every verified track list. Data: GET
-// /ui/api/search (src/routes/search.ts) as you type, grouped into tracks, sets
-// and DJs. q and kind live in the query string; the shell's top box submits
-// here with ?q=.
+// /ui/api/search (src/routes/search.ts) as you type. "All" is one list: DJs
+// first, then tracks and sets interleaved by relevance (`score`); the other
+// tabs show one kind. Every row has a square thumbnail (/ui/img/<key>, an R2
+// copy) over a lettered placeholder. q and kind live in the query string; the
+// shell's top box submits here with ?q=.
 //
 // Results are rendered through innerHTML and clicks are delegated (the tests
 // run this script in a stub DOM). Every upstream string goes through esc, every
@@ -32,7 +34,14 @@ export const SEARCH_CSS = /* css */ `
   .sq-sec { margin-bottom: var(--sp-4); min-width: 0; }
   .sq-sec h2 { font-size: var(--fs-sm); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 var(--sp-2); }
   .sq-sec h2 .n { font-weight: 400; }
-  .sq-row { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-2); min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .sq-row { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-2); min-width: 0; display: flex; align-items: flex-start; gap: var(--sp-3); }
+  .sq-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .sq-thumb { position: relative; flex: 0 0 56px; width: 56px; height: 56px; border-radius: 6px; overflow: hidden; background: var(--elev); }
+  .sq-thumb.dj { border-radius: 50%; }
+  .sq-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  .sq-ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 1.15rem; color: var(--muted); text-transform: uppercase; }
+  .sq-kind { font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--subtle); }
+  @media (max-width: 800px) { .sq-thumb { flex-basis: 44px; width: 44px; height: 44px; } .sq-row { padding: var(--sp-3); } }
   .sq-row.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
   .sq-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--sp-2); min-width: 0; }
   .sq-ttl { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
@@ -54,7 +63,6 @@ const JS = /* js */ `
   const $ = TK.$, esc = TK.esc;
 ${TRACK_ROW_JS}
   const TABS = ${JSON.stringify(TABS)};
-  const PEEK = 5;
   const $sq = $('sq'), $tabs = $('sq-tabs'), $note = $('sq-corrected'), $res = $('sq-results'), $empty = $('sq-empty');
   const EMPTY_HINT = 'Search every verified track list: tracks, sets and DJs.';
 
@@ -105,7 +113,21 @@ ${TRACK_ROW_JS}
   const setHref = (url) => '/ui/set?url=' + encodeURIComponent(url);
   const ext = (url, label, cls) => { const h = TK.safeHref(url); return h ? '<a class="' + (cls || 'pill') + '" href="' + esc(h) + '" target="_blank" rel="noreferrer noopener">' + esc(label) + '</a>' : ''; };
   const hl = (s) => highlight(s, tokens);
-  function rowOpen(n, extra) { return '<div class="sq-row" id="sq-r' + n + '" role="option" aria-selected="false" data-n="' + n + '"' + (extra ? ' ' + extra : '') + '>'; }
+  const IMG_RE = /^\\/ui\\/img\\/[0-9a-f]{32}$/;
+  // The thumbnail: the image over a lettered placeholder (a failed image is removed, see the error listener).
+  function thumb(src, label, k) {
+    const ch = [...String(label || '').trim()][0] || '?';
+    return '<div class="sq-thumb' + (k === 'djs' ? ' dj' : '') + '" aria-hidden="true"><span class="sq-ph">' + esc(ch) + '</span>' +
+      (typeof src === 'string' && IMG_RE.test(src) ? '<img src="' + esc(src) + '" alt="" loading="lazy" width="56" height="56">' : '') + '</div>';
+  }
+  const KIND_TAG = { tracks: 'Track', sets: 'Set', djs: 'DJ' };
+  let tagKinds = false;
+  const tag = (k) => (tagKinds ? '<span class="sq-kind">' + KIND_TAG[k] + '</span>' : '');
+  // A result row: thumbnail, then the body (closed by rowClose).
+  function rowOpen(n, extra, img, label, k) {
+    return '<div class="sq-row" id="sq-r' + n + '" role="option" aria-selected="false" data-n="' + n + '"' + (extra ? ' ' + extra : '') + '>' + thumb(img, label, k) + '<div class="sq-body">';
+  }
+  const rowClose = '</div></div>';
 
   function trackLinks(t) {
     let h = ext(t.trackUrl, '1001tl') + ext(t.youtubeLink, 'YouTube') + ext(t.soundcloudLink, 'SoundCloud') + ext(t.appleLink, 'Apple Music');
@@ -132,47 +154,56 @@ ${TRACK_ROW_JS}
       (s.date ? '<span class="muted">' + esc(s.date) + '</span>' : '') +
       (s.cueSeconds != null ? '<span class="sq-cue">' + esc(TK.fmt.clock(s.cueSeconds)) + '</span>' : '') +
       '<a href="' + esc(setHref(s.url)) + '">Set page</a>' + ext(s.url, '1001tl', 'sq-ext') + '</li>').join('') + '</ul>' : '';
-    return rowOpen(n) +
-      '<div class="sq-main"><span class="sq-ttl">' + hl(t.artist) + ' – ' + hl(t.title) + '</span>' +
+    return rowOpen(n, '', t.image, t.artist, 'tracks') +
+      '<div class="sq-main">' + tag('tracks') + '<span class="sq-ttl">' + hl(t.artist) + ' – ' + hl(t.title) + '</span>' +
         (t.label ? '<span class="badge neutral">' + hl(t.label) + '</span>' : '') + '</div>' +
       '<div class="sq-acts">' + trackLinks(t) +
         (sets.length ? '<button type="button" class="btn small" data-exp="' + esc(t.trackKey) + '" aria-expanded="' + open + '">' + sets.length + (sets.length === 1 ? ' set' : ' sets') + '</button>' : '') +
-      '</div>' + lines + '</div>';
+      '</div>' + lines + rowClose;
   }
   function setRowHtml(s, n) {
     primaries[n] = setHref(s.url);
-    return rowOpen(n, 'data-set-row') +
-      '<div class="sq-main"><span class="sq-ttl"><a href="' + esc(setHref(s.url)) + '">' + hl(s.title) + '</a></span></div>' +
+    return rowOpen(n, 'data-set-row', s.image, s.djName || s.title, 'sets') +
+      '<div class="sq-main">' + tag('sets') + '<span class="sq-ttl"><a href="' + esc(setHref(s.url)) + '">' + hl(s.title) + '</a></span></div>' +
       '<div class="sq-meta"><a href="/ui/dj/' + encodeURIComponent(s.djSlug) + '">' + hl(s.djName) + '</a>' +
         (s.date ? '<span>' + esc(s.date) + '</span>' : '') +
         '<span>' + esc(s.idedCount) + '/' + esc(s.trackCount) + ' IDs</span>' +
         (s.videoId ? '<span class="badge ok">video</span>' : '<span class="badge warn">no video</span>') + '</div>' +
-      '<div class="sq-acts"><a class="pill" href="' + esc(setHref(s.url)) + '">Set page</a>' + ext(s.url, '1001tl') + '</div></div>';
+      '<div class="sq-acts"><a class="pill" href="' + esc(setHref(s.url)) + '">Set page</a>' + ext(s.url, '1001tl') + '</div>' + rowClose;
   }
   function djRowHtml(d, n) {
     primaries[n] = '/ui/dj/' + encodeURIComponent(d.slug);
-    return rowOpen(n) +
-      '<div class="sq-main"><span class="sq-ttl"><a href="' + esc(primaries[n]) + '">' + hl(d.name) + '</a></span>' +
+    return rowOpen(n, '', d.image, d.name, 'djs') +
+      '<div class="sq-main">' + tag('djs') + '<span class="sq-ttl"><a href="' + esc(primaries[n]) + '">' + hl(d.name) + '</a></span>' +
         (d.subscribed ? '<span class="badge ok">subscribed</span>' : '') + '</div>' +
       '<div class="sq-meta"><span>' + esc(d.sets) + (d.sets === 1 ? ' set' : ' sets') + '</span></div>' +
-      '<div class="sq-acts"><a class="pill" href="' + esc(primaries[n]) + '">Profile</a></div></div>';
+      '<div class="sq-acts"><a class="pill" href="' + esc(primaries[n]) + '">Profile</a></div>' + rowClose;
   }
-  // The groups of one response. In All each shows PEEK rows and a "Show all N"
-  // button that switches the tab; a single tab shows everything it got.
+  const RENDER = { tracks: trackRowHtml, sets: setRowHtml, djs: djRowHtml };
+  const score = (x) => (x && typeof x.score === 'number' ? x.score : 0);
+  // All: DJs first (best first), then tracks and sets merged by score; on a
+  // tie the one ranked higher in its own list goes first, a set before a track.
+  function allOrder(d) {
+    const list = (k) => (d && Array.isArray(d[k]) ? d[k] : []).map((x, i) => ({ k, x, i }));
+    const rest = list('tracks').concat(list('sets'));
+    rest.sort((a, b) => score(b.x) - score(a.x) || a.i - b.i || (a.k === b.k ? 0 : a.k === 'sets' ? -1 : 1));
+    return list('djs').concat(rest);
+  }
+  // One response: All as one interleaved list with a kind tag on each row; a
+  // single tab as its own list under a heading.
   function renderResults(d, groupKind) {
     primaries = [];
-    let n = 0, html = '';
-    const groups = [['tracks', 'Tracks', trackRowHtml], ['sets', 'Sets', setRowHtml], ['djs', 'DJs', djRowHtml]];
-    for (const g of groups) {
-      if (groupKind !== 'all' && groupKind !== g[0]) continue;
-      const list = d && Array.isArray(d[g[0]]) ? d[g[0]] : [];
-      if (!list.length) continue;
-      const shown = groupKind === 'all' ? list.slice(0, PEEK) : list;
-      html += '<section class="sq-sec" role="presentation"><h2 role="presentation">' + g[1] + ' <span class="n">' + list.length + '</span></h2>' +
-        shown.map((x) => g[2](x, n++)).join('') +
-        (shown.length < list.length ? '<p class="sq-more"><button type="button" class="btn small" data-kind="' + g[0] + '">Show all ' + list.length + '</button></p>' : '') + '</section>';
+    let n = 0;
+    if (groupKind === 'all') {
+      tagKinds = true;
+      return allOrder(d).map((it) => RENDER[it.k](it.x, n++)).join('');
     }
-    return html;
+    tagKinds = false;
+    const label = { tracks: 'Tracks', sets: 'Sets', djs: 'DJs' }[groupKind];
+    const list = d && Array.isArray(d[groupKind]) ? d[groupKind] : [];
+    if (!list.length || !label) return '';
+    return '<section class="sq-sec" role="presentation"><h2 role="presentation">' + label + ' <span class="n">' + list.length + '</span></h2>' +
+      list.map((x) => RENDER[groupKind](x, n++)).join('') + '</section>';
   }
 
   function renderTabs() {
@@ -278,6 +309,9 @@ ${TRACK_ROW_JS}
     const row = t.closest('[data-n]');
     if (row && row.dataset) setActive(Number(row.dataset.n));
   });
+
+  // A thumbnail that fails to load is removed, leaving its placeholder (error events do not bubble: capture).
+  $res.addEventListener('error', (ev) => { const t = ev && ev.target; if (t && t.tagName === 'IMG' && typeof t.remove === 'function') t.remove(); }, true);
 
   // ── start ──
   renderTabs();

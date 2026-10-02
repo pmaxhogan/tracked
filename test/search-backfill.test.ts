@@ -70,7 +70,7 @@ describe('search backfill', () => {
   it('skips sets already indexed from a page, with no writes', async () => {
     const env = makeEnv()
     const a = await seedMkvid(env, 'a1')
-    await indexSet(env, { setUrl: a, djSlug: 'dj-one', djName: 'DJ One', title: 't', setDate: null, videoId: null, videoSource: null, trackCount: 1, idedCount: 1, source: 'page', tracks: [{ trackId: '1', trackUrl: null, artist: 'X', title: 'Y', label: null, cueSeconds: 0, layered: false }] }, NOW - 100)
+    await indexSet(env, { setUrl: a, djSlug: 'dj-one', djName: 'DJ One', title: 't', setDate: null, videoId: null, videoSource: null, trackCount: 1, idedCount: 1, source: 'page', imageUrl: null, tracks: [{ trackId: '1', trackUrl: null, artist: 'X', title: 'Y', label: null, artworkUrl: null, cueSeconds: 0, layered: false }] }, NOW - 100)
     const before = await all(env, 'SELECT * FROM search_sets')
     expect(await run(env)).toMatchObject({ indexed: 0, skipped: 1, done: true })
     expect(await all(env, 'SELECT * FROM search_sets')).toEqual(before)
@@ -178,13 +178,13 @@ describe('search backfill', () => {
 
   it('lazy links write found YouTube links back to the index', async () => {
     const env = makeEnv()
-    await indexSet(env, { setUrl: U('a1'), djSlug: 'dj-one', djName: 'DJ One', title: 't', setDate: null, videoId: null, videoSource: null, trackCount: 1, idedCount: 1, source: 'page', tracks: [{ trackId: '909720', trackUrl: null, artist: 'Mau P', title: 'Neck', label: null, cueSeconds: 0, layered: false }] }, NOW)
+    await indexSet(env, { setUrl: U('a1'), djSlug: 'dj-one', djName: 'DJ One', title: 't', setDate: null, videoId: null, videoSource: null, trackCount: 1, idedCount: 1, source: 'page', imageUrl: null, tracks: [{ trackId: '909720', trackUrl: null, artist: 'Mau P', title: 'Neck', label: null, artworkUrl: null, cueSeconds: 0, layered: false }] }, NOW)
     const res = await post(env, '/ui/api/tracklist/links', { trackIds: ['909720', '123456'] })
     expect(res.status).toBe(200)
     expect((await all<{ youtube_link: string | null }>(env, "SELECT youtube_link FROM search_tracks WHERE track_key = 't:909720'"))[0]!.youtube_link).toBe('https://www.youtube.com/watch?v=abc')
     // A pool refusal mid-list answers 502 with the links found so far, and writes those back too.
     const partial = makeEnv()
-    await indexSet(partial, { setUrl: U('a1'), djSlug: 'dj-one', djName: 'DJ One', title: 't', setDate: null, videoId: null, videoSource: null, trackCount: 1, idedCount: 1, source: 'page', tracks: [{ trackId: '909720', trackUrl: null, artist: 'Mau P', title: 'Neck', label: null, cueSeconds: 0, layered: false }] }, NOW)
+    await indexSet(partial, { setUrl: U('a1'), djSlug: 'dj-one', djName: 'DJ One', title: 't', setDate: null, videoId: null, videoSource: null, trackCount: 1, idedCount: 1, source: 'page', imageUrl: null, tracks: [{ trackId: '909720', trackUrl: null, artist: 'Mau P', title: 'Neck', label: null, artworkUrl: null, cueSeconds: 0, layered: false }] }, NOW)
     const stopped = await post(partial, '/ui/api/tracklist/links', { trackIds: ['909720', '666', '123456'] })
     expect(stopped.status).toBe(502)
     const body = (await stopped.json()) as { links: Record<string, unknown>; error: string }

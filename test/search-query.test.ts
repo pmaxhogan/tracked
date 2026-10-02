@@ -27,6 +27,7 @@ const t = (trackId: string, artist: string, title: string, label: string, cueSec
   artist,
   title,
   label,
+  artworkUrl: null,
   cueSeconds,
   layered: false,
 })
@@ -65,7 +66,7 @@ async function seed(env: Env): Promise<void> {
     await env.DB.prepare('INSERT INTO tracklists (slug, url, position, discovered_at, processed) VALUES (?, ?, ?, 0, 1)').bind(s.djSlug, s.url, i).run()
     await indexSet(
       env,
-      { setUrl: s.url, djSlug: s.djSlug, djName: s.djName, title: s.title, setDate: s.date, videoId: null, videoSource: null, trackCount: s.tracks.length, idedCount: s.tracks.length, source: 'page', tracks: s.tracks },
+      { setUrl: s.url, djSlug: s.djSlug, djName: s.djName, title: s.title, setDate: s.date, videoId: null, videoSource: null, trackCount: s.tracks.length, idedCount: s.tracks.length, source: 'page', imageUrl: null, tracks: s.tracks },
       NOW_SEC,
     )
   }
@@ -126,7 +127,7 @@ describe('GET /ui/api/search', () => {
     const at = (u: string) => (urls.includes(u) ? urls.indexOf(u) : Infinity)
     expect(at(URLS.ebUltra25)).toBeLessThan(at(URLS.ebIbiza))
     expect(at(URLS.ebUltra25)).toBeLessThan(at(URLS.jsUltra))
-    expect(r.sets[0]).toEqual({ url: URLS.ebUltra26, title: SETS[2]!.title, djSlug: 'elibrown', djName: 'Eli Brown', date: '2026-03-28', videoId: null, trackCount: 2, idedCount: 2 })
+    expect(r.sets[0]).toEqual({ url: URLS.ebUltra26, title: SETS[2]!.title, djSlug: 'elibrown', djName: 'Eli Brown', date: '2026-03-28', videoId: null, trackCount: 2, idedCount: 2, image: null, score: expect.any(Number) })
   })
 
   it('mau p neck returns Mau P - Neck with every set it appears on', async () => {
@@ -143,7 +144,7 @@ describe('GET /ui/api/search', () => {
   it('djs match subscription names with corrections: eli brwn corrects to brown', async () => {
     const r = await search(env, 'q=' + encodeURIComponent('eli brwn'))
     expect(r.corrected).toEqual([{ from: 'brwn', to: 'brown' }])
-    expect(r.djs[0]).toEqual({ slug: 'elibrown', name: 'Eli Brown', subscribed: true, sets: 3 })
+    expect(r.djs[0]).toEqual({ slug: 'elibrown', name: 'Eli Brown', subscribed: true, sets: 3, image: null, score: expect.any(Number) })
     expect(r.djs.map((d) => d.slug)).not.toContain('johnsummit')
     // A corrected token matches a DJ name: "summt" -> "summit" (in the vocabulary from the set title).
     const s = await search(env, 'q=' + encodeURIComponent('john summt') + '&kind=djs')

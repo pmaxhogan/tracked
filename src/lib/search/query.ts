@@ -6,11 +6,15 @@
  * rows. 4. Re-rank with `rankScore`; recency/subscribed (≤ MAX_LATE_BOOST) need
  * a track's sets, so sets are read only for candidates that can still make the
  * cut. 5. Every set of each returned track; DJs from the subscription list.
+ * Rows of one track are merged (same 1001tracklists link, or a linkless row with
+ * a linked row's artist + title). Every item carries `score` (relevance over
+ * the best possible, ~0-1, comparable across kinds) and `image` (/ui/img/<key>).
  */
 import type { Env } from '../../types'
 import { dbOf } from '../db'
 import { prettifySlug } from '../prettify-slug'
 import { searchDbOf } from './db'
+import { imageKey, imagePath } from './images'
 import { normalizeText } from './normalize'
 import { damerauLevenshtein, MAX_LATE_BOOST, rankScore, tokenFieldScore, type QueryToken } from './score'
 
@@ -27,9 +31,11 @@ export type SearchTrack = {
   youtubeLink: string | null
   trackUrl: string | null
   sets: SearchTrackSet[]
+  image: string | null
+  score: number
 }
-export type SearchSet = { url: string; title: string; djSlug: string; djName: string; date: string | null; videoId: string | null; trackCount: number; idedCount: number }
-export type SearchDj = { slug: string; name: string; subscribed: boolean; sets: number }
+export type SearchSet = { url: string; title: string; djSlug: string; djName: string; date: string | null; videoId: string | null; trackCount: number; idedCount: number; image: string | null; score: number }
+export type SearchDj = { slug: string; name: string; subscribed: boolean; sets: number; image: string | null; score: number }
 export type SearchResponse = { q: string; corrected: Array<{ from: string; to: string }>; tracks: SearchTrack[]; sets: SearchSet[]; djs: SearchDj[] }
 
 const KINDS: readonly SearchKind[] = ['all', 'sets', 'tracks', 'djs']
@@ -181,6 +187,7 @@ type TrackRow = {
   title: string
   label: string | null
   youtube_link: string | null
+  artwork_url: string | null
   n_artist: string | null
   n_title: string | null
   n_label: string | null
@@ -198,6 +205,7 @@ type SetRow = {
   video_id: string | null
   track_count: number
   ided_count: number
+  image_url: string | null
   n_title: string | null
   n_dj: string | null
   n_slug_words: string | null
@@ -248,6 +256,50 @@ function recencyDays(date: string | null, nowMs: number): number | null {
 /** Score desc, then bm25 asc (better first), then id. */
 const byRank = <T extends { score: number; bm: number; id: number }>(a: T, b: T) => b.score - a.score || a.bm - b.bm || a.id - b.id
 
+type Field = { tokens: string[]; weight: number }
+type TrackCand = { r: TrackRow; fields: Field[]; partial: number; score: number; bm: number; id: number; keys: string[] }
+
+/**
+ * One candidate per track. Rows with the same 1001tracklists link merge, and
+ * a row without a link (a backfilled mkvid list keys its tracks by name) joins
+ * the best linked row with the same normalized artist + title. The lead row is
+ * the linked one; its gaps (label, YouTube link, artwork) are filled from the
+ * others, field words are pooled, and the best partial score is kept.
+ */
+function mergeTracks(cands: TrackCand[]): TrackCand[] {
+  const sorted = [...cands].sort((a, b) => Number(!!b.r.track_url) - Number(!!a.r.track_url) || b.partial - a.partial || a.id - b.id)
+  const byUrl = new Map<string, TrackCand>()
+  const byName = new Map<string, TrackCand>()
+  const out: TrackCand[] = []
+  for (const c of sorted) {
+    const name = `${c.r.n_artist ?? ''}\u0000${c.r.n_title ?? ''}`
+    const g = c.r.track_url ? byUrl.get(c.r.track_url) : byName.get(name)
+    if (!g) {
+      const lead = { ...c, r: { ...c.r }, fields: c.fields.map((f) => ({ ...f, tokens: [...f.tokens] })), keys: [c.r.track_key] }
+      out.push(lead)
+      if (c.r.track_url) byUrl.set(c.r.track_url, lead)
+      if (!byName.has(name)) byName.set(name, lead)
+      continue
+    }
+    g.keys.push(c.r.track_key)
+    g.partial = Math.max(g.partial, c.partial)
+    g.bm = Math.min(g.bm, c.bm)
+    g.r.label ??= c.r.label
+    g.r.youtube_link ??= c.r.youtube_link
+    g.r.artwork_url ??= c.r.artwork_url
+    c.fields.forEach((f, i) => {
+      const into = g.fields[i]!
+      for (const w of f.tokens) if (!into.tokens.includes(w)) into.tokens.push(w)
+    })
+  }
+  return out
+}
+
+/** /ui/img/<key> for a source URL (null stays null). */
+async function imageOf(src: string | null | undefined): Promise<string | null> {
+  return src ? imagePath(await imageKey(src)) : null
+}
+
 type Subs = { slug: string; artist_name: string | null }
 
 const emptyResponse = (q: string, corrected: SearchResponse['corrected'] = []): SearchResponse => ({ q, corrected, tracks: [], sets: [], djs: [] })
@@ -275,9 +327,11 @@ export async function search(env: Env, q: SearchQuery, nowMs: number = Date.now(
   const subs = (main[0]?.results ?? []) as Subs[]
   const subscribed = new Set(subs.map((s) => s.slug))
   const res = emptyResponse(q.q, corrected)
+  /** Relevance over the best possible (every word an exact match in a weight-3 field): ~0-1, comparable across kinds. */
+  const norm = (score: number) => Math.round((score / (3 * tokens.length)) * 1000) / 1000
 
   if (wantTracks && recalled.tracks.length > 0) {
-    const scored = recalled.tracks.map((r) => {
+    const scored: TrackCand[] = recalled.tracks.map((r) => {
       const fields = [
         { tokens: fieldWords(r.n_artist), weight: 3 },
         { tokens: fieldWords(r.n_title), weight: 3 },
@@ -285,11 +339,12 @@ export async function search(env: Env, q: SearchQuery, nowMs: number = Date.now(
         { tokens: fieldWords(r.n_djs), weight: 2 },
         { tokens: fieldWords(r.n_set_titles), weight: 1 },
       ]
-      return { r, fields, partial: rankScore(tokens, fields, { youtube: r.youtube_link != null }), score: 0, bm: r.bm, id: r.id }
+      return { r, fields, partial: rankScore(tokens, fields, { youtube: r.youtube_link != null }), score: 0, bm: r.bm, id: r.id, keys: [r.track_key] }
     })
-    const ordered = [...scored].sort((a, b) => b.partial - a.partial || a.bm - b.bm || a.id - b.id)
+    const merged = mergeTracks(scored)
+    const ordered = [...merged].sort((a, b) => b.partial - a.partial || a.bm - b.bm || a.id - b.id)
     const floor = ordered.length >= q.limit ? ordered[q.limit - 1]!.partial : 0
-    const shortlist = scored.filter((c) => c.partial > 0 && c.partial * MAX_LATE_BOOST >= floor * (1 - 1e-9))
+    const shortlist = merged.filter((c) => c.partial > 0 && c.partial * MAX_LATE_BOOST >= floor * (1 - 1e-9))
     const setsByKey = new Map<string, TrackSetRow[]>()
     if (shortlist.length > 0) {
       const rows = (
@@ -304,7 +359,7 @@ export async function search(env: Env, q: SearchQuery, nowMs: number = Date.now(
              ) WHERE rn <= ${MAX_SETS_PER_TRACK}
              ORDER BY set_date DESC, set_url`,
           )
-          .bind(JSON.stringify(shortlist.map((c) => c.r.track_key)))
+          .bind(JSON.stringify(shortlist.flatMap((c) => c.keys)))
           .all<TrackSetRow>()
       ).results
       for (const row of rows) {
@@ -313,60 +368,111 @@ export async function search(env: Env, q: SearchQuery, nowMs: number = Date.now(
         setsByKey.set(row.track_key, list)
       }
     }
-    for (const c of shortlist) {
-      const sets = setsByKey.get(c.r.track_key) ?? []
+    /** A merged track's sets: each set once (a cue wins over none), newest first, capped. */
+    const setsOf = (c: TrackCand): TrackSetRow[] => {
+      const byUrl = new Map<string, TrackSetRow>()
+      for (const k of c.keys) for (const row of setsByKey.get(k) ?? []) {
+        const had = byUrl.get(row.set_url)
+        if (!had || (had.cue_seconds == null && row.cue_seconds != null)) byUrl.set(row.set_url, row)
+      }
+      return [...byUrl.values()]
+        .sort((a, b) => (b.set_date ?? '').localeCompare(a.set_date ?? '') || (a.set_url < b.set_url ? -1 : a.set_url > b.set_url ? 1 : 0))
+        .slice(0, MAX_SETS_PER_TRACK)
+    }
+    const withSets = shortlist.map((c) => ({ c, sets: setsOf(c) }))
+    for (const { c, sets } of withSets) {
       const newest = sets.find((s) => s.set_date)?.set_date ?? null
       c.score = rankScore(tokens, c.fields, { youtube: c.r.youtube_link != null, recencyDays: recencyDays(newest, nowMs), subscribed: sets.some((s) => subscribed.has(s.dj_slug)) })
     }
-    res.tracks = shortlist
-      .filter((c) => c.score > 0)
-      .sort(byRank)
-      .slice(0, q.limit)
-      .map(({ r }) => ({
-        trackKey: r.track_key,
-        trackId: r.track_id,
-        artist: r.artist,
-        title: r.title,
-        label: r.label,
-        youtubeLink: r.youtube_link,
-        trackUrl: r.track_url,
-        sets: (setsByKey.get(r.track_key) ?? []).map((s) => ({ url: s.set_url, title: s.title, djSlug: s.dj_slug, djName: s.dj_name, date: s.set_date, cueSeconds: s.cue_seconds })),
-      }))
+    res.tracks = await Promise.all(
+      withSets
+        .filter(({ c }) => c.score > 0)
+        .sort((a, b) => byRank(a.c, b.c))
+        .slice(0, q.limit)
+        .map(async ({ c, sets }) => ({
+          trackKey: c.r.track_key,
+          trackId: c.r.track_id,
+          artist: c.r.artist,
+          title: c.r.title,
+          label: c.r.label,
+          youtubeLink: c.r.youtube_link,
+          trackUrl: c.r.track_url,
+          sets: sets.map((s) => ({ url: s.set_url, title: s.title, djSlug: s.dj_slug, djName: s.dj_name, date: s.set_date, cueSeconds: s.cue_seconds })),
+          image: await imageOf(c.r.artwork_url),
+          score: norm(c.score),
+        })),
+    )
   }
 
-  if (wantSets) {
-    res.sets = recalled.sets
-      .map((r) => {
-        const fields = [
-          { tokens: fieldWords(r.n_title), weight: 3 },
-          { tokens: fieldWords(r.n_dj), weight: 2 },
-          { tokens: fieldWords(r.n_slug_words), weight: 1 },
-        ]
-        const score = rankScore(tokens, fields, { youtube: r.video_id != null, recencyDays: recencyDays(r.set_date, nowMs), subscribed: subscribed.has(r.dj_slug) })
-        return { r, score, bm: r.bm, id: r.id }
-      })
-      .filter((c) => c.score > 0)
-      .sort(byRank)
-      .slice(0, q.limit)
-      .map(({ r }) => ({ url: r.set_url, title: r.title, djSlug: r.dj_slug, djName: r.dj_name, date: r.set_date, videoId: r.video_id, trackCount: r.track_count, idedCount: r.ided_count }))
+  const setPicks = wantSets
+    ? recalled.sets
+        .map((r) => {
+          const fields = [
+            { tokens: fieldWords(r.n_title), weight: 3 },
+            { tokens: fieldWords(r.n_dj), weight: 2 },
+            { tokens: fieldWords(r.n_slug_words), weight: 1 },
+          ]
+          const score = rankScore(tokens, fields, { youtube: r.video_id != null, recencyDays: recencyDays(r.set_date, nowMs), subscribed: subscribed.has(r.dj_slug) })
+          return { r, score, bm: r.bm, id: r.id }
+        })
+        .filter((c) => c.score > 0)
+        .sort(byRank)
+        .slice(0, q.limit)
+    : []
+
+  const djPicks = wantDjs
+    ? subs
+        .map((s) => {
+          const name = s.artist_name ?? prettifySlug(s.slug)
+          const fields = [
+            { tokens: normalizeText(name), weight: 3 },
+            { tokens: normalizeText(s.slug.replace(/[._-]+/g, ' ')), weight: 1 },
+          ]
+          const matched = tokens.filter((t) => fields.some((f) => tokenFieldScore(t, f.tokens) > 0)).length
+          return { s, name, score: rankScore(tokens, fields, {}), matched }
+        })
+        .filter((c) => c.score > 0 && c.matched / tokens.length >= 0.5)
+        .sort((a, b) => b.score - a.score || (a.s.slug < b.s.slug ? -1 : 1))
+        .slice(0, q.limit)
+    : []
+
+  // A DJ's picture, and a set's when its page gave none: the newest indexed set of that DJ with an image.
+  const needDjImage = [...new Set([...djPicks.map((c) => c.s.slug), ...setPicks.filter((c) => !c.r.image_url).map((c) => c.r.dj_slug)])]
+  const djImage = new Map<string, string>()
+  if (needDjImage.length > 0) {
+    const rows = (
+      await sdb
+        .prepare(
+          `SELECT dj_slug, image_url FROM search_sets
+            WHERE image_url IS NOT NULL AND dj_slug IN (SELECT value FROM json_each(?))
+            ORDER BY set_date DESC, set_url`,
+        )
+        .bind(JSON.stringify(needDjImage))
+        .all<{ dj_slug: string; image_url: string }>()
+    ).results
+    for (const r of rows) if (!djImage.has(r.dj_slug)) djImage.set(r.dj_slug, r.image_url)
   }
+
+  res.sets = await Promise.all(
+    setPicks.map(async ({ r, score }) => ({
+      url: r.set_url,
+      title: r.title,
+      djSlug: r.dj_slug,
+      djName: r.dj_name,
+      date: r.set_date,
+      videoId: r.video_id,
+      trackCount: r.track_count,
+      idedCount: r.ided_count,
+      image: await imageOf(r.image_url ?? djImage.get(r.dj_slug)),
+      score: norm(score),
+    })),
+  )
 
   if (wantDjs) {
     const counts = new Map(((main[1]?.results ?? []) as Array<{ slug: string; n: number }>).map((r) => [r.slug, r.n]))
-    res.djs = subs
-      .map((s) => {
-        const name = s.artist_name ?? prettifySlug(s.slug)
-        const fields = [
-          { tokens: normalizeText(name), weight: 3 },
-          { tokens: normalizeText(s.slug.replace(/[._-]+/g, ' ')), weight: 1 },
-        ]
-        const matched = tokens.filter((t) => fields.some((f) => tokenFieldScore(t, f.tokens) > 0)).length
-        return { s, name, score: rankScore(tokens, fields, {}), matched }
-      })
-      .filter((c) => c.score > 0 && c.matched / tokens.length >= 0.5)
-      .sort((a, b) => b.score - a.score || (a.s.slug < b.s.slug ? -1 : 1))
-      .slice(0, q.limit)
-      .map((c) => ({ slug: c.s.slug, name: c.name, subscribed: true, sets: counts.get(c.s.slug) ?? 0 }))
+    res.djs = await Promise.all(
+      djPicks.map(async (c) => ({ slug: c.s.slug, name: c.name, subscribed: true, sets: counts.get(c.s.slug) ?? 0, image: await imageOf(djImage.get(c.s.slug)), score: norm(c.score) })),
+    )
   }
   return res
 }

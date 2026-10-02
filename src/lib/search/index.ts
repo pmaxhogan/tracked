@@ -18,13 +18,20 @@
  *     indexed from a page (`source = 'page'`), at or after its verification
  *     (`indexed_at >= verified_at`), with the same video. A backfilled set
  *     ('mkvid') is always replaced by a live verified fetch.
- *   - A fixed number of statements per set (11), whatever its length: every
+ *   - A fixed number of statements per set (12), whatever its length: every
  *     per-track and per-term write is one set-based statement over
  *     `json_each(?)` with one JSON array bind, so indexing never spends the
  *     invocation's D1 query budget per track. At most MAX_TRACKS_PER_SET (500)
  *     distinct tracks are indexed per set. D1's 100 KB limit applies to the
  *     SQL text, and bound values are counted separately; the 500-track cap
  *     keeps the largest JSON bind near 84 KB.
+ *   - Thumbnails: a track's artwork URL and the set page's og:image are kept
+ *     as source URLs (never overwritten with null) and registered in
+ *     search_images under their key (src/lib/search/images.ts); the images
+ *     are copied into R2 when first shown.
+ *   - INDEX_FORMAT_SINCE: a set indexed before the index format last changed
+ *     is re-indexed by its next verified fetch or Rebuild even when the skip
+ *     rule would hold, so older rows pick up new columns.
  *   - Fire-and-forget from the sync path (`queueSearchIndex`), drained via
  *     ctx.waitUntil (`drainSearchIndex`). Errors never reach the caller: they
  *     are logged at warn as `search.index_failed`.
@@ -41,9 +48,10 @@ import { prettifySlug } from '../prettify-slug'
 import type { PageRow, ScrapedTracklist } from '../tracklists1001'
 import { tracklistFingerprint, verifiedFingerprint, type VerificationOutcome } from '../verification'
 import { searchDbOf } from './db'
+import { extractPageImage, imageKey, usableImageUrl } from './images'
 import { normalizedJoin, normalizeText, slugWords, trackKey } from './normalize'
 
-export type IndexTrack = { trackId: string | null; trackUrl: string | null; artist: string; title: string; label: string | null; cueSeconds: number | null; layered: boolean }
+export type IndexTrack = { trackId: string | null; trackUrl: string | null; artist: string; title: string; label: string | null; artworkUrl: string | null; cueSeconds: number | null; layered: boolean }
 
 export type IndexSetInput = {
   setUrl: string
@@ -56,6 +64,8 @@ export type IndexSetInput = {
   trackCount: number
   idedCount: number
   source: 'page' | 'mkvid'
+  /** The set page's image (og:image) source URL; null keeps the stored one. */
+  imageUrl: string | null
   tracks: IndexTrack[]
 }
 
@@ -68,6 +78,12 @@ const MIN_TERM = 3
 
 /** Distinct tracks indexed per set; the rest of a longer list is dropped (see the header). */
 export const MAX_TRACKS_PER_SET = 500
+
+/**
+ * Unix seconds of the last index format change (2026-10-02: thumbnails). A
+ * set indexed before it is not skipped by the recheck/backfill skip rules.
+ */
+export const INDEX_FORMAT_SINCE = 1790954400
 
 /**
  * The indexable tracks of a page, in page order: anonymous and unidentified
@@ -87,6 +103,7 @@ export function tracksFromRows(rows: readonly PageRow[]): IndexTrack[] {
       artist,
       title,
       label: r.label,
+      artworkUrl: usableImageUrl(r.artworkUrl),
       cueSeconds: r.isMashupLinked ? r.ownStartSeconds : r.startSeconds,
       layered: r.isMashupLinked,
     })
@@ -100,7 +117,7 @@ function addTerms(into: Set<string>, ...texts: Array<string | null | undefined>)
 }
 
 /**
- * Write one set and its tracks: one SEARCH_DB batch (a transaction) of 11
+ * Write one set and its tracks: one SEARCH_DB batch (a transaction) of 12
  * statements, plus at most two reads before it. Throws on DB errors; callers
  * swallow them.
  */
@@ -148,30 +165,35 @@ export async function indexSet(env: Env, input: IndexSetInput, nowSec: number): 
   for (const t of tracks) touched.set(t.key, [normalizedJoin(t.artist), normalizedJoin(t.title), normalizedJoin(t.label ?? storedLabel.get(t.key))])
 
   // JSON array binds, rows as positional arrays to keep them small:
-  //   trackRows  [key, track_url, artist, title, label]
+  //   trackRows  [key, track_url, artist, title, label, artwork_url]
   //   linkRows   [key, pos, cue_seconds, layered]
   //   ftsRows    [key, artist, title, label] (normalized), one per touched key
   //   terms      [term, ...]
-  const trackRows = JSON.stringify(tracks.map((t) => [t.key, t.trackUrl, t.artist, t.title, t.label]))
+  //   images     [key, src] for the set image and each track's artwork
+  const trackRows = JSON.stringify(tracks.map((t) => [t.key, t.trackUrl, t.artist, t.title, t.label, t.artworkUrl]))
   const linkRows = JSON.stringify(tracks.map((t) => [t.key, t.pos, t.cueSeconds, t.layered ? 1 : 0]))
   const ftsRows = JSON.stringify([...touched].map(([k, v]) => [k, ...v]))
   const termSet = new Set<string>()
   addTerms(termSet, input.title, input.djName)
   for (const t of tracks) addTerms(termSet, t.artist, t.title, t.label)
   const terms = JSON.stringify([...termSet])
+  const imageUrl = usableImageUrl(input.imageUrl)
+  const srcs = [...new Set([imageUrl, ...tracks.map((t) => t.artworkUrl)].filter((u): u is string => !!u))]
+  const images = JSON.stringify(await Promise.all(srcs.map(async (u) => [await imageKey(u), u])))
 
   await sdb.batch([
     // 1-3. Set row and its FTS row.
     sdb
       .prepare(
-        `INSERT INTO search_sets (set_url, dj_slug, dj_name, title, set_date, video_id, video_source, track_count, ided_count, source, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO search_sets (set_url, dj_slug, dj_name, title, set_date, video_id, video_source, track_count, ided_count, source, indexed_at, image_url)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(set_url) DO UPDATE SET
            dj_slug = excluded.dj_slug, dj_name = excluded.dj_name, title = excluded.title, set_date = excluded.set_date,
            video_id = excluded.video_id, video_source = excluded.video_source, track_count = excluded.track_count,
-           ided_count = excluded.ided_count, source = excluded.source, indexed_at = excluded.indexed_at`,
+           ided_count = excluded.ided_count, source = excluded.source, indexed_at = excluded.indexed_at,
+           image_url = COALESCE(excluded.image_url, image_url)`,
       )
-      .bind(setUrl, input.djSlug, input.djName, input.title, input.setDate, input.videoId, input.videoSource, input.trackCount, input.idedCount, input.source, nowSec),
+      .bind(setUrl, input.djSlug, input.djName, input.title, input.setDate, input.videoId, input.videoSource, input.trackCount, input.idedCount, input.source, nowSec, imageUrl),
     sdb.prepare('DELETE FROM sets_fts WHERE rowid = (SELECT id FROM search_sets WHERE set_url = ?)').bind(setUrl),
     sdb
       .prepare('INSERT INTO sets_fts (rowid, title, dj, slug_words) SELECT id, ?, ?, ? FROM search_sets WHERE set_url = ?')
@@ -182,16 +204,16 @@ export async function indexSet(env: Env, input: IndexSetInput, nowSec: number): 
     //    written here. `WHERE true` keeps ON CONFLICT from parsing as a join constraint.
     sdb
       .prepare(
-        `INSERT INTO search_tracks (track_key, track_id, track_url, artist, title, label, sets_count, updated_at)
+        `INSERT INTO search_tracks (track_key, track_id, track_url, artist, title, label, artwork_url, sets_count, updated_at)
          SELECT json_extract(j.value, '$[0]'),
                 CASE WHEN json_extract(j.value, '$[0]') LIKE 't:%' THEN substr(json_extract(j.value, '$[0]'), 3) END,
                 json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]'), json_extract(j.value, '$[3]'), json_extract(j.value, '$[4]'),
-                0, ?1
+                json_extract(j.value, '$[5]'), 0, ?1
            FROM json_each(?2) j WHERE true
          ON CONFLICT(track_key) DO UPDATE SET
            artist = excluded.artist, title = excluded.title,
            track_url = COALESCE(excluded.track_url, track_url), label = COALESCE(excluded.label, label),
-           updated_at = excluded.updated_at`,
+           artwork_url = COALESCE(excluded.artwork_url, artwork_url), updated_at = excluded.updated_at`,
       )
       .bind(nowSec, trackRows),
     // 6. New links in.
@@ -234,6 +256,10 @@ export async function indexSet(env: Env, input: IndexSetInput, nowSec: number): 
           WHERE v.term IN (SELECT value FROM json_each(?)) AND NOT EXISTS (SELECT 1 FROM vocab_fts f WHERE f.rowid = v.id)`,
       )
       .bind(terms),
+    // 12. Thumbnail sources, by key (served from R2 by /ui/img/<key>).
+    sdb
+      .prepare(`INSERT OR IGNORE INTO search_images (key, src) SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?)`)
+      .bind(images),
   ])
   return { tracks: tracks.length }
 }
@@ -270,7 +296,7 @@ export async function indexVerifiedFetch(env: Env, f: VerifiedFetch): Promise<'i
     .prepare('SELECT source, indexed_at, video_id FROM search_sets WHERE set_url = ?')
     .bind(setUrl)
     .first<{ source: string; indexed_at: number; video_id: string | null }>()
-  if (cur && cur.source === 'page' && set.verified_at != null && cur.indexed_at >= set.verified_at && (cur.video_id ?? null) === videoId) return 'skipped'
+  if (cur && cur.source === 'page' && set.verified_at != null && cur.indexed_at >= Math.max(set.verified_at, INDEX_FORMAT_SINCE) && (cur.video_id ?? null) === videoId) return 'skipped'
 
   await indexSet(
     env,
@@ -285,6 +311,7 @@ export async function indexVerifiedFetch(env: Env, f: VerifiedFetch): Promise<'i
       trackCount: parsed.rows.length,
       idedCount: parsed.rows.filter((r) => !r.anonymous && !r.isUnidentified).length,
       source: 'page',
+      imageUrl: extractPageImage(html),
       tracks: tracksFromRows(parsed.rows),
     },
     nowSec,

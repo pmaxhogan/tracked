@@ -14,7 +14,8 @@
  *   - Never reads KV and never runs from the cron: it is an admin press only.
  *     The main DB is only read; every write goes to SEARCH_DB (via indexSet).
  *   - Skip (counted as `skipped`, no writes): a search_sets row exists with
- *     source 'page', or with source 'mkvid' and indexed_at >= verified_at.
+ *     source 'page', or with source 'mkvid' and indexed_at at or after both
+ *     verified_at and INDEX_FORMAT_SINCE.
  *     Existing rows for the page are read in chunks of 50 binds.
  *   - Tracks: the list's JSON is parsed defensively; rows that are `isId` or
  *     lack an artist or title are dropped. No track ids or urls (the mkvid
@@ -34,13 +35,14 @@ import { dbOf, parseJson } from '../db'
 import { errorFields, makeLogger } from '../log'
 import { prettifySlug } from '../prettify-slug'
 import { searchDbOf } from './db'
-import { indexSet, type IndexTrack } from './index'
+import { INDEX_FORMAT_SINCE, indexSet, type IndexTrack } from './index'
+import { usableImageUrl } from './images'
 import { slugWords } from './normalize'
 
 /** D1 queries one invocation may spend on the backfill (the platform allows 1000). */
 export const BACKFILL_QUERY_BUDGET = 800
-/** Statements indexSet issues per set: 2 reads plus one batch of 11. */
-const QUERIES_PER_SET = 13
+/** Statements indexSet issues per set: 2 reads plus one batch of 12. */
+const QUERIES_PER_SET = 14
 const IN_CHUNK = 50
 
 type SourceRow = {
@@ -55,7 +57,7 @@ type SourceRow = {
   verified_at: number | null
 }
 
-type MkvidListTrack = { cueSeconds?: unknown; artist?: unknown; title?: unknown; isId?: unknown; layered?: unknown }
+type MkvidListTrack = { cueSeconds?: unknown; artist?: unknown; title?: unknown; artworkUrl?: unknown; isId?: unknown; layered?: unknown }
 
 const str = (x: unknown) => (typeof x === 'string' ? x.trim() : '')
 
@@ -103,7 +105,7 @@ export async function backfillSearch(
   let skipped = 0
   for (const r of page) {
     const have = existing.get(r.set_url)
-    if (have && (have.source === 'page' || (have.source === 'mkvid' && have.indexed_at >= (r.verified_at ?? 0)))) {
+    if (have && (have.source === 'page' || (have.source === 'mkvid' && have.indexed_at >= Math.max(r.verified_at ?? 0, INDEX_FORMAT_SINCE)))) {
       skipped++
       cursor = r.set_url
       continue
@@ -120,7 +122,7 @@ export async function backfillSearch(
       const artist = str(t.artist)
       const title = str(t.title)
       if (!artist || !title) continue
-      tracks.push({ trackId: null, trackUrl: null, artist, title, label: null, cueSeconds: typeof t.cueSeconds === 'number' ? t.cueSeconds : null, layered: t.layered === true })
+      tracks.push({ trackId: null, trackUrl: null, artist, title, label: null, artworkUrl: usableImageUrl(typeof t.artworkUrl === 'string' ? t.artworkUrl : null), cueSeconds: typeof t.cueSeconds === 'number' ? t.cueSeconds : null, layered: t.layered === true })
     }
     used += QUERIES_PER_SET
     try {
@@ -137,6 +139,7 @@ export async function backfillSearch(
           trackCount: r.track_count,
           idedCount,
           source: 'mkvid',
+          imageUrl: null,
           tracks,
         },
         nowSec,

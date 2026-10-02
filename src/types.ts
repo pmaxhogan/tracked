@@ -2,6 +2,8 @@ export type Env = {
   CACHE: KVNamespace
   /** R2 bucket tracked-pages: every page tlpool returned (lib/page-store.ts). Optional: unset = nothing is kept. */
   PAGES?: R2Bucket
+  /** R2 bucket tracked-images: search-result thumbnails copied from their source CDN (src/lib/search/images.ts). Optional: unset = no thumbnails. */
+  IMAGES?: R2Bucket
   /** Durable list of DJ subscriptions for the /ui admin app. */
   SUBS: KVNamespace
   /**

@@ -12,7 +12,7 @@ import { fakeKV } from './helpers/fake-kv'
 import { tracklistFingerprint } from '../src/lib/verification'
 import { DEFAULT_POOL_SETTINGS } from '../src/lib/pool-settings'
 import { recordSetFetch } from '../src/lib/fetch-scheduler'
-import { drainSearchIndex, indexSet, indexVerifiedFetch, MAX_TRACKS_PER_SET, queueSearchIndex, tracksFromRows, type IndexSetInput, type IndexTrack } from '../src/lib/search/index'
+import { drainSearchIndex, INDEX_FORMAT_SINCE, indexSet, indexVerifiedFetch, MAX_TRACKS_PER_SET, queueSearchIndex, tracksFromRows, type IndexSetInput, type IndexTrack } from '../src/lib/search/index'
 
 const NOW = Math.floor(Date.now() / 1000)
 const VERIFIED_AT = NOW - 3600
@@ -166,6 +166,17 @@ describe('search indexer', () => {
     expect(await one(env, 'SELECT indexed_at, video_id FROM search_sets WHERE set_url = ?', SET_LP)).toEqual({ indexed_at: NOW + 600, video_id: 'vid2' })
   })
 
+  it('re-indexes a set indexed before INDEX_FORMAT_SINCE once (new columns), then skips it again; the page image is kept', async () => {
+    const { env, parsed } = await lpEnv()
+    await env.DB.prepare('UPDATE set_verification SET verified_at = ? WHERE url = ?').bind(INDEX_FORMAT_SINCE - 100, SET_LP).run()
+    const html = HTML_LP + '<meta property="og:image" content="https://i1.sndcdn.com/avatars-lp-t500x500.jpg">'
+    const f = { setUrl: SET_LP, html, parsed, videoId: 'vid1' }
+    expect(await indexVerifiedFetch(env, { ...f, nowSec: INDEX_FORMAT_SINCE - 50 })).toBe('indexed')
+    expect(await indexVerifiedFetch(env, { ...f, nowSec: INDEX_FORMAT_SINCE + 10 })).toBe('indexed')
+    expect(await indexVerifiedFetch(env, { ...f, nowSec: INDEX_FORMAT_SINCE + 20 })).toBe('skipped')
+    expect(await one(env, 'SELECT image_url FROM search_sets WHERE set_url = ?', SET_LP)).toEqual({ image_url: 'https://i1.sndcdn.com/avatars-lp-t500x500.jpg' })
+  })
+
   it('does not index a list whose fingerprint is not the verified one', async () => {
     const { env } = await lpEnv()
     const changed = tracklist([...LP_ROWS.slice(0, 2), row({ ...LP_ROWS[2]!, title: 'Venus (Edit)' })])
@@ -206,6 +217,7 @@ describe('search indexer', () => {
         trackCount: 3,
         idedCount: 3,
         source: 'mkvid',
+        imageUrl: null,
         tracks: tracksFromRows(LP_ROWS.map((r) => ({ ...r, trackId: null, label: null }))),
       },
       NOW,
@@ -384,12 +396,13 @@ describe('search indexer', () => {
         artist: `Artist ${i} & Friend ${i}`,
         title: `Track Number ${i} (Extended Mix)`,
         label: i % 2 ? `Label ${i} Records` : null,
+        artworkUrl: null,
         cueSeconds: i * 60,
         layered: false,
       }))
     const input = (setUrl: string, tracks: IndexTrack[]): IndexSetInput => ({
       setUrl, djSlug: 'somedj', djName: 'Some DJ', title: 'Some DJ @ Big Festival 2026-05-16', setDate: '2026-05-16',
-      videoId: null, videoSource: null, trackCount: tracks.length, idedCount: tracks.length, source: 'page', tracks,
+      videoId: null, videoSource: null, trackCount: tracks.length, idedCount: tracks.length, source: 'page', imageUrl: null, tracks,
     })
     async function batchSizes(env: Env, ...inputs: IndexSetInput[]): Promise<number[]> {
       const sizes: number[] = []
@@ -407,7 +420,7 @@ describe('search indexer', () => {
     it('the batch for a 30-track set and for a 200-track set have the same statement count', async () => {
       const env = makeEnv()
       const sizes = await batchSizes(env, input(SET_LP, synth(30)), input(SET_EB, synth(200)), input(SET_LP, synth(200).slice(100)))
-      expect(sizes).toEqual([11, 11, 11])
+      expect(sizes).toEqual([12, 12, 12])
       // The re-index of SET_LP dropped tracks 0-29 (orphaned) and links 100-199.
       expect(await one(env, 'SELECT COUNT(*) AS n FROM search_track_sets WHERE set_url = ?', SET_LP)).toEqual({ n: 100 })
       expect(await one(env, `SELECT sets_count FROM search_tracks WHERE track_key = 't:100000'`)).toEqual({ sets_count: 1 })
