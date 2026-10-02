@@ -26,6 +26,7 @@ import { drainSearchIndex } from './lib/search/index'
 import { poolPagesApp } from './routes/pool-pages'
 import { mkvidOpsApp } from './routes/mkvid-ops'
 import { prunePoolEvents, retryFailedPoolPushes } from './lib/pool-events'
+import { pruneSchedulerTicks, recordSchedulerTick } from './lib/tick-history'
 import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
 import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
 
@@ -174,16 +175,24 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         if (d.tried) log.info('cron.mkvid_old_video_deletes', d)
       }
       if (isDaily) {
-        // D1 has no TTLs: keep both audit trails at the 90-day horizon.
+        // D1 has no TTLs: keep the audit trails at the 90-day horizon (scheduler tick history: 14 days).
         try {
-          log.info('cron.audit_pruned', { nowPlaying: await pruneNowPlayingAudit(env), playlistAdditions: await prunePlaylistAdditions(env), poolEvents: await prunePoolEvents(env) })
+          log.info('cron.audit_pruned', { nowPlaying: await pruneNowPlayingAudit(env), playlistAdditions: await prunePlaylistAdditions(env), poolEvents: await prunePoolEvents(env), schedulerTicks: await pruneSchedulerTicks(env) })
         } catch (e) {
           log.warn('cron.audit_prune_threw', errorFields(e))
         }
       } else {
         try {
-          const r = await runSchedulerTick(env, { log })
-          log.info('cron.done', { skipped: r.skipped ?? null, drawn: r.drawn, ran: r.items.length, stoppedBy: r.stoppedBy ?? null })
+          const at = Math.floor(Date.now() / 1000)
+          const t0 = Date.now()
+          try {
+            const r = await runSchedulerTick(env, { log })
+            log.info('cron.done', { skipped: r.skipped ?? null, drawn: r.drawn, ran: r.items.length, stoppedBy: r.stoppedBy ?? null })
+            await recordSchedulerTick(env, at, Date.now() - t0, r)
+          } catch (e) {
+            await recordSchedulerTick(env, at, Date.now() - t0, null, e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+            throw e
+          }
         } catch (e) {
           log.error('cron.threw', errorFields(e))
         }

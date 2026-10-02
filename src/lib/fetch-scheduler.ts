@@ -551,6 +551,8 @@ export async function pickTickItems(
   slugs: ReadonlySet<string>,
   nowSec = nowSeconds(),
   feedAllowance?: number,
+  /** Filled with how many items were due per class (before `n` cut them): tick history. */
+  dueOut?: Record<ScheduledClass, number>,
 ): Promise<TickItem[]> {
   if (n <= 0) return []
   const db = dbOf(env)
@@ -635,6 +637,7 @@ export async function pickTickItems(
 
   for (const r of dueBackfill) buckets.backfill.push({ cls: 'backfill', kind: 'dj_backfill', slug: r.slug })
 
+  if (dueOut) for (const cls of Object.keys(buckets) as ScheduledClass[]) dueOut[cls] = buckets[cls].length
   const out: TickItem[] = []
   for (const cls of settings.priorities.order) {
     for (const item of buckets[cls]) {
@@ -655,6 +658,8 @@ export type TickResult = {
   items: TickItemResult[]
   /** Set when a pool refusal (budget, challenge, outage) ended the tick early. */
   stoppedBy?: string
+  /** Items due per class when the tick picked (lib/tick-history.ts). */
+  due?: Record<ScheduledClass, number>
 }
 
 const PRIORITY_OF: Record<ScheduledClass, PoolPriority> = { new: 'new', verify: 'verify', recheck: 'recheck', backfill: 'backfill' }
@@ -702,15 +707,16 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     log.info('scheduler.zero_draw')
     return { skipped: 'zero_draw', drawn: 0, items: [] }
   }
-  const items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec)
+  const due = { new: 0, verify: 0, recheck: 0, backfill: 0 } as Record<ScheduledClass, number>
+  const items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec, undefined, due)
   if (items.length === 0) {
     log.info('scheduler.nothing_due', { drawn })
-    return { skipped: 'nothing_due', drawn, items: [] }
+    return { skipped: 'nothing_due', drawn, items: [], due }
   }
   const tokenInfo = await getAccessToken(env)
   if (!tokenInfo) {
     log.warn('scheduler.youtube_not_connected', { due: items.length })
-    return { skipped: 'youtube_not_connected', drawn, items: [] }
+    return { skipped: 'youtube_not_connected', drawn, items: [], due }
   }
 
   log.info('scheduler.tick_start', { drawn, picked: items.map((i) => `${i.kind}:${i.cls}`) })
@@ -820,5 +826,5 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     }
   }
   log.info('scheduler.tick_done', { drawn, ran: results.length, outcomes: results.map((x) => `${x.item.kind}:${x.outcome}`), stoppedBy: stoppedBy ?? null })
-  return { drawn, items: results, ...(stoppedBy ? { stoppedBy } : {}) }
+  return { drawn, items: results, due, ...(stoppedBy ? { stoppedBy } : {}) }
 }

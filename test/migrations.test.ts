@@ -41,6 +41,13 @@ describe('migrations on a copy of the pre-pool schema with data', () => {
     ])
   })
 
+  it('0015 creates the scheduler tick history table', () => {
+    const db = openRawDb()
+    for (const f of files) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    db.exec("INSERT INTO scheduler_ticks (at, drawn) VALUES (1, 2)")
+    expect(rows(db, 'SELECT at, drawn, ran, items FROM scheduler_ticks')).toEqual([{ at: 1, drawn: 2, ran: 0, items: null }])
+  })
+
   it('are numbered without gaps or duplicates', () => {
     const nums = files.map((f) => Number(f.slice(0, 4)))
     expect(nums).toEqual(nums.map((_, i) => i + 1))

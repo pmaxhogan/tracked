@@ -2,6 +2,7 @@
  * Operator routes for mkvid requests, bearer API_TOKEN (the panel's own
  * buttons go through /ui/api/*, behind Access, and share the handlers):
  *   POST /ops/mkvid/unpublish/<request id>   take a delivered video down and requeue the set
+ *   GET  /ops/scheduler/ticks?limit=&before=  scheduler tick history, newest first (lib/tick-history.ts)
  */
 
 import { Hono, type Context } from 'hono'
@@ -10,6 +11,7 @@ import { bearerAuthFor } from '../middleware/auth'
 import { getAccessToken } from '../lib/google-oauth'
 import { makeLogger, type Logger } from '../lib/log'
 import { deleteOldVideo, unpublishMkvidRequest } from '../lib/mkvid-recreate'
+import { listSchedulerTicks } from '../lib/tick-history'
 
 export const mkvidOpsApp = new Hono<{ Bindings: Env }>()
 mkvidOpsApp.use('*', bearerAuthFor('API_TOKEN'))
@@ -27,4 +29,12 @@ export async function unpublishResponse(c: Context<any>, id: string, log: Logger
 mkvidOpsApp.post('/mkvid/unpublish/:id', async (c) => {
   const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'ops.mkvid_unpublish' })
   return unpublishResponse(c, c.req.param('id'), log)
+})
+
+mkvidOpsApp.get('/scheduler/ticks', async (c) => {
+  const num = (k: string) => {
+    const v = Number(c.req.query(k))
+    return Number.isFinite(v) && v > 0 ? v : undefined
+  }
+  return c.json({ ticks: await listSchedulerTicks(c.env, { limit: num('limit'), before: num('before') ?? null }) })
 })

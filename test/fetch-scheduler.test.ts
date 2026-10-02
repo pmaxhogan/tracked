@@ -152,6 +152,11 @@ describe('pickTickItems (decision 12 priorities)', () => {
     ])
     expect(items[2]).toMatchObject({ excludeAccounts: ['acct-1'] })
     expect((await pickTickItems(env, DEFAULT_POOL_SETTINGS, 2, new Set(['a']), NOW)).map((i) => i.kind)).toEqual(['discovery', 'set'])
+    // Tick history: what was due per class, before the draw of 2 cut it.
+    const due = { new: 0, verify: 0, recheck: 0, backfill: 0 }
+    await pickTickItems(env, DEFAULT_POOL_SETTINGS, 2, new Set(['a']), NOW, undefined, due)
+    expect(due).toMatchObject({ new: 2, recheck: 1, backfill: 2 })
+    expect(due.verify).toBeGreaterThanOrEqual(1)
   })
 
   it('follows a custom order from the settings, and ignores unsubscribed DJs', async () => {
