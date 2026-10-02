@@ -13,6 +13,7 @@
  *   GET  /api/pool/accounts             tlpool GET /accounts
  *   POST /api/pool/accounts             tlpool POST /accounts {passive, exitKind?}
  *   POST /api/pool/accounts/:id/:action tlpool POST /accounts/:id/{rest,retire,retest}
+ *   GET  /api/pool/accounts/:id/events  that account's newest pool events (D1 pool_events, lib/pool-events.ts)
  *   GET  /api/pool/challenges           tlpool GET /challenges
  *   GET  /api/pool/challenges/:id       tlpool GET /challenges/:id
  *   GET  /api/pool/challenges/:id/image tlpool GET /challenges/:id/image (PNG)
@@ -44,6 +45,7 @@ import {
   type Fetcher,
   type PoolEnv,
 } from '../lib/pool-admin-client'
+import { isPoolAccountId, listPoolEventsForAccount } from '../lib/pool-events'
 import { servePage } from '../ui/pages'
 import { POOL_PAGE_HTML } from '../ui/pages/pool'
 import { CAPTCHA_LIST_HTML } from '../ui/pages/captcha-list'
@@ -124,6 +126,14 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
     const account = await client(c.env).accountAction(id, action as AccountAction)
     log.info('pool_ui.account_action', { accountId: id, action })
     return c.json({ ok: true, account })
+  })
+
+  // The state details drawer: what the pool told the Worker about one account
+  // (stored events, never tlpool itself). acct-N ids only.
+  app.get('/api/pool/accounts/:id/events', async (c) => {
+    const id = c.req.param('id')
+    if (!isPoolAccountId(id)) return c.json({ error: 'invalid', detail: 'bad_id' }, 400)
+    return c.json({ events: await listPoolEventsForAccount(c.env, id, 20) })
   })
 
   app.get('/api/pool/challenges', async (c) => c.json({ challenges: await client(c.env).listChallenges() }))

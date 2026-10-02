@@ -91,6 +91,29 @@ export type PoolAccount = {
   xhrBudget: number | null
   /** The challenge that tracks this account's signup (tlpool `signupChallengeId`); the pool page reopens its progress from it. */
   signupChallengeId: string | null
+  /** When the account entered its current state. tlpool keeps it (state_changed_at) but its /status does not send it yet: null today. */
+  stateChangedAt: string | null
+  /** Why it rests, as tlpool words it (`retest:requested`, `challenge_expired`…); plain text, never one holding '@' or a URL. */
+  restReason: string | null
+  /** One retest with a known set is due once the rest ends. */
+  retestPending: boolean
+  createdAt: string | null
+  /** When signup finished and the ramp started (ramp day 0). */
+  activatedAt: string | null
+  /** When it was retired; the exit's 30-day quarantine runs from here. */
+  retiredAt: string | null
+  /** When it submitted the register form (null: never submitted, so its exit was never burned). */
+  submittedAt: string | null
+  /** tlpool's last error in plain words (same text rules as restReason). */
+  lastError: string | null
+  /** Why it may not open a browser now (exit missing, unverified, IP changed, marked bad); same text rules. */
+  exitProblem: string | null
+  /** A captcha waiting for this account (opaque challenge id). */
+  pendingChallengeId: string | null
+  /** tlpool would accept a signup retry (signup_failed, or a new account whose signup ended). */
+  canRetrySignup: boolean
+  /** What the pool is doing with it right now: `signup`, `retest`, `fetch:<priority>`. */
+  busy: string | null
 }
 
 export type PoolStatus = {
@@ -170,6 +193,15 @@ function plain(v: unknown, max = 200): string | null {
   if (!s || /[\u0000-\u001f<>]/.test(s)) return null
   return s.length > max ? s.slice(0, max - 1) + '…' : s
 }
+/**
+ * Free text about an account (rest reason, last error, exit problem): plain()
+ * rules, and dropped whole when it holds an '@' (an address or a login), a
+ * URL or a backslash. tracked is a public repo and these reach a page.
+ */
+function accountText(v: unknown, max = 200): string | null {
+  const s = plain(v, max)
+  return s && !/@|:\/\/|\\/.test(s) ? s : null
+}
 function code(v: unknown): string | null {
   return typeof v === 'string' && /^[a-z][a-z0-9_]{0,47}$/.test(v) ? v : null
 }
@@ -227,6 +259,18 @@ export function normalizeAccount(raw: unknown): PoolAccount | null {
     xhrUsedToday: num(pick(raw, 'usedXhrToday', 'used_xhr_today', 'xhrUsedToday')),
     xhrBudget: num(pick(raw, 'xhrBudget', 'xhr_budget')),
     signupChallengeId: opaqueId(pick(raw, 'signupChallengeId', 'signup_challenge_id', 'signup_cid')),
+    stateChangedAt: iso(pick(raw, 'stateChangedAt', 'state_changed_at')),
+    restReason: accountText(pick(raw, 'restReason', 'rest_reason'), 120),
+    retestPending: bool(pick(raw, 'retestPending', 'retest_pending')),
+    createdAt: iso(pick(raw, 'createdAt', 'created_at')),
+    activatedAt: iso(pick(raw, 'activatedAt', 'activated_at')),
+    retiredAt: iso(pick(raw, 'retiredAt', 'retired_at')),
+    submittedAt: iso(pick(raw, 'submittedAt', 'submitted_at')),
+    lastError: accountText(pick(raw, 'lastError', 'last_error')),
+    exitProblem: accountText(pick(raw, 'exitProblem', 'exit_problem')),
+    pendingChallengeId: opaqueId(pick(raw, 'pendingChallenge', 'pendingChallengeId', 'pending_challenge')),
+    canRetrySignup: bool(pick(raw, 'canRetrySignup', 'can_retry_signup')),
+    busy: typeof raw.busy === 'string' && /^[a-z][a-z0-9_]{0,23}(?::[a-z0-9_]{1,24})?$/.test(raw.busy) ? raw.busy : null,
   }
 }
 

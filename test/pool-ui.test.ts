@@ -7,6 +7,7 @@ import { app as mainApp } from '../src/index'
 import { createPoolUiApp, POOL_PAGES } from '../src/routes/pool-ui'
 import { normalizeAccount, normalizeChallenge, type Fetcher } from '../src/lib/pool-admin-client'
 import type { Env } from '../src/types'
+import { receivePoolEvent, sanitizePoolEvent } from '../src/lib/pool-events'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 
@@ -118,6 +119,7 @@ describe('pool UI: Cloudflare Access gate', () => {
     ['GET', '/ui/api/pool/accounts'],
     ['POST', '/ui/api/pool/accounts'],
     ['POST', '/ui/api/pool/accounts/acct-1/retire'],
+    ['GET', '/ui/api/pool/accounts/acct-1/events'],
     ['GET', '/ui/api/pool/challenges'],
     ['GET', '/ui/api/pool/challenges/ch-1'],
     ['GET', '/ui/api/pool/challenges/ch-1/image'],
@@ -224,6 +226,8 @@ describe('pool UI: accounts and status', () => {
     expect(data.status.accounts[0]).toEqual({
       id: 'acct-1', state: 'active', passive: false, exitLabel: 'own-2', exitKind: 'own', usedToday: 12, budget: 30, rampDay: 3,
       lastOkAt: '2026-09-29T10:00:00.000Z', lastChallengeAt: null, flagged: false, flagReason: null, restUntil: null, xhrUsedToday: null, xhrBudget: null, signupChallengeId: null,
+      stateChangedAt: null, restReason: null, retestPending: false, createdAt: null, activatedAt: null, retiredAt: null, submittedAt: null,
+      lastError: null, exitProblem: null, pendingChallengeId: null, canRetrySignup: false, busy: null,
     })
     expect(data.status.accounts[1]).toMatchObject({ id: 'acct-2', flagged: true, passive: true, flagReason: 'decoy_names' })
     expect(data.status.queueDepth).toBe(12)
@@ -468,7 +472,10 @@ describe('pool UI: tlpool settings (/api/pool/limits)', () => {
 describe('normalisers', () => {
   it('drop every field outside the whitelist', () => {
     const a = normalizeAccount(upstreamAccount('acct-1', { exit: { label: 'x', wgPrivateKey: 'k' } }))!
-    expect(Object.keys(a).sort()).toEqual(['budget', 'exitKind', 'exitLabel', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastOkAt', 'passive', 'rampDay', 'restUntil', 'signupChallengeId', 'state', 'usedToday', 'xhrBudget', 'xhrUsedToday'])
+    expect(Object.keys(a).sort()).toEqual([
+      'activatedAt', 'budget', 'busy', 'canRetrySignup', 'createdAt', 'exitKind', 'exitLabel', 'exitProblem', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastError', 'lastOkAt',
+      'passive', 'pendingChallengeId', 'rampDay', 'restReason', 'restUntil', 'retestPending', 'retiredAt', 'signupChallengeId', 'state', 'stateChangedAt', 'submittedAt', 'usedToday', 'xhrBudget', 'xhrUsedToday',
+    ])
     expect(JSON.stringify(a)).not.toContain('wgPrivateKey')
     const c = normalizeChallenge(upstreamChallenge('ch-1'))!
     expect(Object.keys(c).sort()).toEqual(['accountId', 'createdAt', 'error', 'expiresAt', 'id', 'ready', 'reason', 'state', 'step', 'type'])
@@ -1010,9 +1017,10 @@ describe('pool page: reopening the signup progress of an account still being cre
     const accts = els.get('accts')!.innerHTML
     expect(badgeButtons(accts)).toEqual([{ cid: 'ch_n1', acct: 'acct-1', text: 'new' }])
     expect(accts).toMatch(/<button type="button" class="badge badge-btn warn" data-signup="ch_n1"[^>]*aria-label="acct-1 is new: show its signup progress"/)
-    expect(accts).toContain('<span class="badge ok">active</span>')
-    expect(accts).toContain('<span class="badge warn">new</span>') // acct-3: no challenge to follow
-    expect(accts).toContain('<span class="badge info">warming</span>')
+    // Every other badge opens the state details instead (never the signup dialog).
+    expect(accts).toMatch(/<button type="button" class="badge badge-btn ok" data-state-acct="acct-2"[^>]*>active<\/button>/)
+    expect(accts).toMatch(/<button type="button" class="badge badge-btn warn" data-state-acct="acct-3"[^>]*>new<\/button>/) // acct-3: no challenge to follow
+    expect(accts).toMatch(/<button type="button" class="badge badge-btn info" data-state-acct="acct-4"[^>]*>warming<\/button>/)
     expectNoCredentials([...els.values()].map((e) => e.innerHTML + e.textContent).join('\n'))
   })
 
@@ -1062,5 +1070,244 @@ describe('pool page: reopening the signup progress of an account still being cre
     await (pg.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!(clickOn({ signup: 'ch_gone', acct: 'acct-1' }))
     await settle()
     expect(pg.els.get('add-msg')!.innerHTML).toContain('lost track of this signup')
+  })
+})
+
+describe('pool page: state details for every other account state', () => {
+  const H = 3600_000
+  const D = 24 * H
+  const isoIn = (ms: number) => new Date(Date.now() + ms).toISOString()
+  const statusWith = (accounts: unknown[]) => () => json({ accounts, queueDepth: 0 })
+  /** A click on the #accts table that lands on a button carrying these data attributes. */
+  const clickOn = (dataset: Record<string, string>) => ({ target: { closest: (sel: string) => (sel === 'button' ? { dataset, closest: () => null } : null) } })
+  const stateButtons = (html: string) => [...html.matchAll(/<button type="button" class="badge badge-btn ([a-z]*)" data-state-acct="([^"]*)" aria-haspopup="dialog" aria-label="([^"]*)"[^>]*>([^<]*)<\/button>/g)]
+    .map((m) => ({ cls: m[1], acct: m[2], label: m[3], text: m[4] }))
+  async function seed(env: Env, body: Record<string, unknown>) {
+    const s = sanitizePoolEvent(body)
+    if (!s.ok) throw new Error(s.error)
+    await receivePoolEvent(env, s.event)
+  }
+  async function openOn(pg: { els: Map<string, StubEl> }, acct: string) {
+    await (pg.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!(clickOn({ stateAcct: acct }))
+    await settle()
+    return { title: pg.els.get('tk-drawer-title')!.textContent, body: pg.els.get('tk-drawer-body')!.innerHTML }
+  }
+
+  const ALL = [
+    upstreamAccount('acct-1', { state: 'new', created_at: isoIn(-1 * H) }),
+    upstreamAccount('acct-2', { state: 'warming', activated_at: isoIn(-1.5 * D), used_today: 4, budget: 20 }),
+    upstreamAccount('acct-3', { state: 'active', activated_at: isoIn(-9 * D), used_today: 30, budget: 30 }),
+    upstreamAccount('acct-4', { state: 'passive', passive: true, activated_at: isoIn(-4 * D) }),
+    upstreamAccount('acct-5', { state: 'resting', restUntil: isoIn(5 * H), restReason: 'retest:requested', retestPending: true, flagged: true }),
+    upstreamAccount('acct-6', { state: 'retired', retiredAt: isoIn(-2 * D), submittedAt: isoIn(-20 * D) }),
+    upstreamAccount('acct-7', { state: 'signup_failed', submittedAt: isoIn(-3 * D), canRetrySignup: true, lastError: 'signup not confirmed: the email never came' }),
+    upstreamAccount('acct-8', { state: 'flagged', flag_reason: 'decoy_names' }),
+    upstreamAccount('acct-9', { state: 'quarantined_v2' }),
+    upstreamAccount('acct-10', { state: 'new', signupChallengeId: 'ch_n10' }),
+  ]
+
+  it('the normaliser keeps tlpool\'s lifecycle fields and drops free text holding an address or a URL', () => {
+    const a = normalizeAccount({
+      id: 'acct-1', state: 'resting', restReason: 'retest_inconclusive:rate_block', retestPending: true, createdAt: '2026-09-01T00:00:00Z',
+      activatedAt: '2026-09-02T00:00:00Z', retiredAt: null, submittedAt: '2026-09-01T01:00:00Z', lastError: 'retest postponed: NoBrowserSlot',
+      exitProblem: 'its exit is not in the registry', pendingChallenge: 'ch_p1', canRetrySignup: false, busy: 'fetch:phone', state_changed_at: 1790000000,
+    })!
+    expect(a).toMatchObject({
+      restReason: 'retest_inconclusive:rate_block', retestPending: true, createdAt: '2026-09-01T00:00:00.000Z', activatedAt: '2026-09-02T00:00:00.000Z',
+      submittedAt: '2026-09-01T01:00:00.000Z', lastError: 'retest postponed: NoBrowserSlot', exitProblem: 'its exit is not in the registry',
+      pendingChallengeId: 'ch_p1', busy: 'fetch:phone', stateChangedAt: new Date(1790000000 * 1000).toISOString(),
+    })
+    const b = normalizeAccount({
+      id: 'acct-2', state: 'resting', restReason: `login failed for ${SECRET_EMAIL}`, lastError: 'see https://x.example/y',
+      exitProblem: 'C:\\exits\\x.json', busy: 'fetch:<b>', pendingChallenge: '<img>',
+    })!
+    expect(b).toMatchObject({ restReason: null, lastError: null, exitProblem: null, busy: null, pendingChallengeId: null })
+  })
+
+  it('every state badge is a real button: "new" with a signup challenge keeps the signup dialog, every other one opens the details', async () => {
+    const { fetcher } = fakePool({ 'GET /status': statusWith(ALL), 'GET /challenges': () => json({ challenges: [] }) })
+    const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const accts = els.get('accts')!.innerHTML
+    const btns = stateButtons(accts)
+    expect(btns.map((b) => [b.acct, b.text])).toEqual([
+      ['acct-1', 'new'], ['acct-2', 'warming'], ['acct-3', 'active'], ['acct-4', 'passive'], ['acct-5', 'resting'],
+      ['acct-6', 'retired'], ['acct-7', 'signup_failed'], ['acct-8', 'flagged'], ['acct-9', 'quarantined_v2'],
+    ])
+    for (const b of btns) expect(b.label).toBe(`${b.acct} is ${b.text}: show what that means and what happens next`)
+    expect(btns.find((b) => b.acct === 'acct-8')!.cls).toBe('bad')
+    expect(btns.find((b) => b.acct === 'acct-6')!.cls).toBe('')
+    // The signup badge is untouched.
+    expect(accts).toContain('data-signup="ch_n10" data-acct="acct-10" aria-haspopup="dialog" aria-label="acct-10 is new: show its signup progress"')
+    expect(accts).not.toContain('data-state-acct="acct-10"')
+    // Real buttons get the shared focus-visible ring.
+    expect(POOL_PAGES.POOL_PAGE_HTML).toContain('button.badge-btn:focus-visible')
+  })
+
+  it('the details say what each state means, how it got there and what happens next', async () => {
+    const env = makeEnv()
+    const { fetcher } = fakePool({
+      'GET /status': statusWith(ALL), 'GET /challenges': () => json({ challenges: [] }),
+      'GET /settings': () => json({ budgetPerDay: 30, ramp: [10, 20, 25] }),
+    })
+    await seed(env, { type: 'account.retired', accountId: 'acct-6', reason: 'retest_failed:decoy', createdAt: isoIn(-2 * D), exitQuarantinedUntil: isoIn(28 * D) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), env)
+    const showModal = vi.fn(); pg.els.get('tk-drawer')!.showModal = showModal
+
+    const n = await openOn(pg, 'acct-1')
+    expect(showModal).toHaveBeenCalled()
+    expect(n.title).toBe('acct-1 · new')
+    expect(n.body).toContain('Being created')
+    expect(n.body).toContain('Created <b>')
+    expect(n.body).toContain('the pool gives up')
+
+    const w = await openOn(pg, 'acct-2')
+    expect(w.body).toContain('on the ramp')
+    expect(w.body).toContain('Ramp day <b>2 of 3</b>')
+    expect(w.body).toContain('4 / 20')
+    expect(w.body).toContain('Becomes active with the full budget around')
+
+    const a = await openOn(pg, 'acct-3')
+    expect(a.body).toContain('full daily page budget')
+    expect(a.body).toContain('budget is spent')
+    expect(a.body).toContain('does not report the exact next time')
+
+    expect((await openOn(pg, 'acct-4')).body).toContain('never fetches')
+
+    const r = await openOn(pg, 'acct-5')
+    expect(r.body).toContain('Out of rotation')
+    expect(r.body).toContain('Why: a retest was asked for (by hand).')
+    expect(r.body).toContain('Rests until <b>')
+    expect(r.body).toContain('Then one retest with a known set')
+
+    const t = await openOn(pg, 'acct-6')
+    expect(t.body).toContain('Out for good')
+    expect(t.body).toContain('Retired <b>')
+    expect(t.body).toContain('The pool said: it failed its retest (the site served it decoy track names).')
+    expect(t.body).toContain('Its exit is kept from new accounts until <b>')
+
+    const f = await openOn(pg, 'acct-7')
+    expect(f.body).toContain('never confirmed')
+    expect(f.body).toContain('Last error: signup not confirmed: the email never came')
+    expect(f.body).toContain('Retired on its own <b>')
+    expect(f.body).toContain('accepts a signup retry')
+
+    const g = await openOn(pg, 'acct-8')
+    expect(g.body).toContain('flagged it')
+    expect(g.body).toContain('the site served it decoy track names')
+
+    expect((await openOn(pg, 'acct-9')).body).toContain('A state this page does not know yet')
+    expectNoCredentials([...pg.els.values()].map((e) => e.innerHTML + e.textContent).join('\n'))
+  })
+
+  it('a retired account without a stored event falls back to retiredAt + 30 days for the exit', async () => {
+    const { fetcher } = fakePool({ 'GET /status': statusWith([ALL[5]]), 'GET /challenges': () => json({ challenges: [] }) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const t = await openOn(pg, 'acct-6')
+    expect(t.body).toContain('Its exit is kept from new accounts until <b>')
+    expect(t.body).toContain('No pool events stored for acct-6')
+  })
+
+  it('the events route lists only that account\'s events, newest first, acct-N ids only', async () => {
+    const env = makeEnv()
+    await seed(env, { id: 'e1', type: 'account.created', accountId: 'acct-1', createdAt: '2026-09-20T10:00:00Z' })
+    await seed(env, { id: 'e2', type: 'challenge.created', challengeId: 'ch-9', accountId: 'acct-2', challengeType: 'image', createdAt: '2026-09-21T10:00:00Z' })
+    await seed(env, { id: 'e3', type: 'account.flagged', accountId: 'acct-1', reason: 'decoy', createdAt: '2026-09-22T10:00:00Z' })
+    await seed(env, { id: 'e4', type: 'account.rested', accountId: 'acct-12', createdAt: '2026-09-23T10:00:00Z' })
+    const { fetcher, calls } = fakePool({})
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/accounts/acct-1/events', {}, env)
+    expect(r.status).toBe(200)
+    expect(data.events.map((e: { type: string }) => e.type)).toEqual(['account.flagged', 'account.created'])
+    expect(data.events[0]).toEqual({ type: 'account.flagged', at: '2026-09-22T10:00:00.000Z', reason: 'decoy', challengeId: null, challengeType: null, phoneInitiated: false, exitQuarantinedUntil: null })
+    expect(calls).toHaveLength(0) // D1 only, never tlpool
+    expect((await req(mount(fetcher), '/ui/api/pool/accounts/dj_fan_marta88/events', {}, env)).r.status).toBe(400)
+    // The POST action route still knows only rest, retire and retest.
+    const post = await req(mount(fetcher), '/ui/api/pool/accounts/acct-1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, env)
+    expect(post.r.status).toBe(404)
+    expect(post.data).toEqual({ error: 'not_found', detail: 'unknown_action' })
+
+    // The drawer shows them.
+    const page = fakePool({ 'GET /status': statusWith([upstreamAccount('acct-1', { state: 'active' })]), 'GET /challenges': () => json({ challenges: [] }) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(page.fetcher), env)
+    const d = await openOn(pg, 'acct-1')
+    expect(d.body).toContain('<b>Flagged</b>')
+    expect(d.body).toContain('<b>Account created</b>')
+    expect(d.body).not.toContain('Captcha raised')
+    expect(d.body).not.toContain('Rested')
+  })
+
+  it('a reason that held an address never reaches the route or the drawer', async () => {
+    const env = makeEnv()
+    await seed(env, { id: 'e5', type: 'account.retired', accountId: 'acct-3', reason: `login failed for ${SECRET_EMAIL}`, createdAt: '2026-09-22T10:00:00Z' })
+    const { fetcher } = fakePool({
+      'GET /status': statusWith([upstreamAccount('acct-3', { state: 'resting', restReason: `rest for ${SECRET_EMAIL}`, lastError: `mail to ${SECRET_EMAIL} bounced` })]),
+      'GET /challenges': () => json({ challenges: [] }),
+    })
+    const { data, text } = await req(mount(fetcher), '/ui/api/pool/accounts/acct-3/events', {}, env)
+    expect(data.events[0].reason).toBeNull()
+    expect(text).not.toContain('owner-domain')
+    expect(text).not.toContain('[redacted]')
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), env)
+    const d = await openOn(pg, 'acct-3')
+    expect(d.body).toContain('<b>Retired</b>')
+    expect(d.body).not.toContain('@')
+    expect(d.body).not.toContain('redacted')
+    expect(d.body).not.toContain('Last error')
+    expectNoCredentials([...pg.els.values()].map((e) => e.innerHTML + e.textContent).join('\n'))
+  })
+
+  it('escapes what it shows', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': statusWith([upstreamAccount('acct-1', { state: 'resting', restReason: 'x"><img src=y onerror=z>' , lastError: 'a & b' })]),
+      'GET /challenges': () => json({ challenges: [] }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const d = await openOn(pg, 'acct-1')
+    expect(d.body).not.toContain('<img')
+    expect(d.body).toContain('Last error: a &amp; b')
+  })
+
+  it('drops an events reply that lands after the drawer moved to another account or closed', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const { fetcher } = fakePool({
+      'GET /status': statusWith([upstreamAccount('acct-1', { state: 'active' }), upstreamAccount('acct-2', { state: 'passive', passive: true })]),
+      'GET /challenges': () => json({ challenges: [] }),
+    })
+    const appl = new Hono<{ Bindings: Env }>()
+    appl.get('/ui/api/pool/accounts/:id/events', async (c) => {
+      if (c.req.param('id') === 'acct-1') { await gate; return c.json({ events: [{ type: 'account.flagged', at: '2026-09-22T10:00:00Z', reason: 'stale_reply_marker' }] }) }
+      return c.json({ events: [] })
+    })
+    appl.route('/ui', createPoolUiApp({ fetcher }))
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, appl, makeEnv())
+    const click = (pg.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!
+    const first = click(clickOn({ stateAcct: 'acct-1' }))
+    await settle()
+    expect(pg.els.get('tk-drawer-body')!.innerHTML).toContain('data-sd-acct="acct-1"')
+    await openOn(pg, 'acct-2')
+    expect(pg.els.get('tk-drawer-body')!.innerHTML).toContain('data-sd-acct="acct-2"')
+    release()
+    await first
+    await settle()
+    const body = pg.els.get('tk-drawer-body')!.innerHTML
+    expect(body).toContain('data-sd-acct="acct-2"')
+    expect(body).not.toContain('stale reply marker')
+    expect(pg.els.get('tk-drawer-title')!.textContent).toBe('acct-2 · passive')
+
+    // Closed while the reply is on its way: the closed drawer is left alone.
+    let release2!: () => void
+    const gate2 = new Promise<void>((r) => { release2 = r })
+    const appl2 = new Hono<{ Bindings: Env }>()
+    appl2.get('/ui/api/pool/accounts/:id/events', async (c) => { await gate2; return c.json({ events: [{ type: 'account.flagged', at: '2026-09-22T10:00:00Z', reason: 'stale_reply_marker' }] }) })
+    appl2.route('/ui', createPoolUiApp({ fetcher }))
+    const pg2 = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, appl2, makeEnv())
+    const p2 = (pg2.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!(clickOn({ stateAcct: 'acct-1' }))
+    await settle()
+    ;(pg2.els.get('tk-drawer')!.handlers as Record<string, () => void>).close!()
+    release2()
+    await p2
+    await settle()
+    expect(pg2.els.get('tk-drawer-body')!.innerHTML).not.toContain('stale reply marker')
+    expect(pg2.els.get('tk-drawer-body')!.innerHTML).toContain('Loading…')
   })
 })

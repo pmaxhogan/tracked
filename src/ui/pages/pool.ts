@@ -45,8 +45,176 @@ ${CAPTCHA_JS}
     if (IN_CREATION.test(s) && a.signupChallengeId) {
       return '<button type="button" class="badge badge-btn ' + cls + '" data-signup="' + esc(a.signupChallengeId) + '" data-acct="' + esc(a.id) + '" aria-haspopup="dialog" aria-label="' + esc(a.id + ' is ' + s + ': show its signup progress') + '" title="Show signup progress">' + esc(s) + '</button>';
     }
-    return '<span class="badge ' + cls + '">' + esc(s) + '</span>';
+    // Every other state: the badge opens the state details drawer for that account.
+    return '<button type="button" class="badge badge-btn ' + cls + '" data-state-acct="' + esc(a.id) + '" aria-haspopup="dialog" aria-label="' + esc(a.id + ' is ' + s + ': show what that means and what happens next') + '" title="What this state means">' + esc(s) + '</button>';
   };
+  const badgeClass = (a) => { const m = /class="badge (?:badge-btn )?([a-z]*)"/.exec(stateBadge(a)); return m ? m[1] : ''; };
+
+  // ── state details (drawer) ─────────────────────────────────────────────
+  // What a state means, why the account is in it and what happens next, from
+  // tlpool's /status fields, plus that account's stored pool events. Account
+  // ids only; free text holding an '@' is never shown.
+  const tkEsc = (s) => (typeof TK !== 'undefined' && TK.esc ? TK.esc : esc)(s);
+  const STATE_ALIASES = { creating: 'new', signup: 'new', pending: 'new', ramping: 'warming', ok: 'active', healthy: 'active' };
+  const STATE_MEANS = {
+    new: 'Being created. The pool is signing it up on its own exit: the register form, the confirmation email, the first login. It fetches nothing yet.',
+    warming: 'Signed up and on the ramp. It fetches, but its daily page budget is cut down for its first days so a new account does not look busy.',
+    active: 'Ramped up. It fetches with the full daily page budget whenever the pool picks it.',
+    passive: 'Control group. It is logged in on its own exit but never fetches, which shows whether flags come from use or from simply existing.',
+    resting: 'Out of rotation for a while: after an unanswered captcha, a flag, a failed login or a requested retest. It fetches nothing until the rest ends.',
+    retired: 'Out for good. It is never used again, and its exit is kept from new accounts for 30 days so a fresh account does not inherit its record.',
+    signup_failed: 'Its signup submitted the register form but was never confirmed. It fetches nothing; its exit counts as burned for 30 days from the submit.',
+    flagged: '1001tracklists flagged it (decoy track names, a block). It rests 72 hours, then gets one retest with a known set.',
+  };
+  const REASON_WORDS = {
+    challenge_expired: 'nobody answered its captcha in time', challenge_lost_on_restart: 'a captcha was open when the pool restarted',
+    walls_in_a_row: 'it hit captcha walls several times in a row', login_failed: 'it could not log in', decoy: 'the site served it decoy track names',
+    decoy_names: 'the site served it decoy track names', rate_block: 'the site rate-blocked it', consent: 'the site showed a consent wall',
+    retest: 'a retest was asked for', retest_inconclusive: 'its retest was inconclusive', retest_failed: 'it failed its retest',
+    signup_failed: 'its signup failed', signup_stalled: 'its signup stalled before the register form was sent',
+    signup_failed_expired: 'its failed signup reached the end of its 30-day exit burn', requested: 'by hand', manual: 'by hand',
+  };
+  const safeText = (t) => (typeof t === 'string' && t && t.indexOf('@') < 0 && t.indexOf('[redacted]') < 0 ? t : null);
+  function reasonWords(r) {
+    r = safeText(r);
+    if (!r) return null;
+    const i = r.indexOf(':');
+    const head = (i < 0 ? r : r.slice(0, i)).trim(), tail = i < 0 ? '' : r.slice(i + 1).trim();
+    const word = (w) => REASON_WORDS[w] || w.replace(/_/g, ' ');
+    return word(head) + (tail ? ' (' + word(tail) + ')' : '');
+  }
+  const EVENT_WORDS = {
+    'challenge.created': 'Captcha raised', 'challenge.solved': 'Captcha solved', 'challenge.expired': 'Captcha expired',
+    'account.created': 'Account created', 'account.flagged': 'Flagged', 'account.rested': 'Rested', 'account.retired': 'Retired',
+  };
+  const DAY_MS = 86400000;
+  const plusMs = (iso, ms) => (iso && Number.isFinite(Date.parse(iso)) ? new Date(Date.parse(iso) + ms).toISOString() : null);
+  function when(iso) {
+    if (!iso || !Number.isFinite(Date.parse(iso))) return '—';
+    const d = Date.parse(iso) - Date.now();
+    return fmtTime(iso) + ' (' + (d >= 0 ? 'in ' + fmtDur(d) : fmtDur(-d) + ' ago') + ')';
+  }
+  // The newest event of one of these types, or null.
+  const lastEvent = (events, types) => (events || []).find((e) => types.indexOf(e.type) >= 0) || null;
+
+  let details = { seq: 0, id: null, events: null, eventsErr: null, rampLen: null };
+
+  function detailsHtml(a, d) {
+    const raw = String(a.state || 'unknown');
+    const s = STATE_ALIASES[raw] || raw;
+    const li = (t) => '<li>' + t + '</li>';
+    const evs = d.events;
+    const why = [], next = [];
+    const flagged = a.flagged || s === 'flagged';
+
+    // How it got here.
+    if (a.stateChangedAt) why.push(li('In this state since <b>' + tkEsc(when(a.stateChangedAt)) + '</b>.'));
+    else if (s === 'new' && a.createdAt) why.push(li('Created <b>' + tkEsc(when(a.createdAt)) + '</b>.'));
+    else if ((s === 'warming' || s === 'active' || s === 'passive') && a.activatedAt) why.push(li('Finished signing up <b>' + tkEsc(when(a.activatedAt)) + '</b>.'));
+    else if (s === 'retired' && a.retiredAt) why.push(li('Retired <b>' + tkEsc(when(a.retiredAt)) + '</b>.'));
+    else if (s === 'signup_failed' && a.submittedAt) why.push(li('Sent the register form <b>' + tkEsc(when(a.submittedAt)) + '</b>; no confirmation followed.'));
+    const entry = s === 'resting' || s === 'flagged' ? lastEvent(evs, ['account.rested', 'account.flagged']) : s === 'retired' ? lastEvent(evs, ['account.retired']) : s === 'new' ? lastEvent(evs, ['account.created']) : null;
+    if (entry && !a.stateChangedAt) why.push(li('The pool reported it ' + tkEsc((EVENT_WORDS[entry.type] || entry.type).toLowerCase()) + ' <b>' + tkEsc(when(entry.at)) + '</b>.'));
+    const restWhy = reasonWords(a.restReason) || (a.flagReason ? reasonWords(a.flagReason) : null);
+    if ((s === 'resting' || flagged) && restWhy) why.push(li('Why: ' + tkEsc(restWhy) + '.'));
+    const evWhy = entry ? reasonWords(entry.reason) : null;
+    if (evWhy && evWhy !== restWhy) why.push(li('The pool said: ' + tkEsc(evWhy) + '.'));
+    if (flagged && s !== 'flagged') why.push(li('Flagged by the site' + (a.flagReason ? ' (' + tkEsc(reasonWords(a.flagReason)) + ')' : '') + '.'));
+    if (a.retestPending) why.push(li('A retest is pending.'));
+    const lastErr = safeText(a.lastError);
+    if (lastErr) why.push(li('Last error: ' + tkEsc(lastErr)));
+    if (a.exitKind || a.exitLabel) why.push(li('Exit: <span class="mono">' + tkEsc(a.exitLabel || '—') + '</span>' + (a.exitKind ? ' (' + tkEsc(a.exitKind) + ')' : '') + '.'));
+    if (!why.length) why.push(li('<span class="muted">The pool does not say when or why it entered this state.</span>'));
+
+    // What happens next.
+    if (s === 'new') {
+      if (a.busy === 'signup') next.push(li('Signing up right now.'));
+      const stale = plusMs(a.createdAt, 6 * 3600000);
+      if (stale) next.push(li('If the signup has not finished by <b>' + tkEsc(when(stale)) + '</b>, the pool gives up: signup failed when the form was sent, retired when it never was.'));
+      if (a.canRetrySignup) next.push(li('Its signup ended without finishing; the pool accepts a retry (from the NAS, this page has no retry button).'));
+    } else if (s === 'warming') {
+      const day = a.activatedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(a.activatedAt)) / DAY_MS)) : (a.rampDay ?? null);
+      const len = d.rampLen;
+      if (day !== null) next.push(li('Ramp day <b>' + tkEsc(day + 1) + (len ? ' of ' + len : '') + '</b>' + (len ? '' : ' (the ramp length comes from the pool settings, which did not load)') + '.'));
+      if (a.budget !== null && a.budget !== undefined) next.push(li('Today: <b>' + tkEsc((a.usedToday ?? 0) + ' / ' + a.budget) + '</b> pages in the last 24 h.'));
+      const done = len && a.activatedAt ? plusMs(a.activatedAt, len * DAY_MS) : null;
+      if (done) next.push(li('Becomes active with the full budget around <b>' + tkEsc(when(done)) + '</b>.'));
+    } else if (s === 'active') {
+      if (a.budget !== null && a.budget !== undefined) next.push(li('Today: <b>' + tkEsc((a.usedToday ?? 0) + ' / ' + a.budget) + '</b> pages' + (a.xhrBudget ? ', ' + tkEsc((a.xhrUsedToday ?? 0) + ' / ' + a.xhrBudget) + ' in-page lookups' : '') + ' in the last 24 h.'));
+      if (a.budget && (a.usedToday ?? 0) >= a.budget) next.push(li('Its budget is spent: it is picked again as page views from the last 24 h age out.'));
+      next.push(li('After each page view it waits a random gap (tens of seconds or more) before the next. The pool does not report the exact next time.'));
+    } else if (s === 'passive') {
+      next.push(li('Nothing: it stays logged in and never fetches, until it is retired.'));
+    } else if (s === 'resting' || s === 'flagged') {
+      if (a.restUntil) next.push(li('Rests until <b>' + tkEsc(when(a.restUntil)) + '</b>.'));
+      if (a.retestPending) next.push(li('Then one retest with a known set: a pass puts it back to warming or active, a fail retires it, an inconclusive one rests it again.'));
+      else next.push(li('Then it goes back to warming or active on its own (the pool checks every 15 to 40 seconds).'));
+    } else if (s === 'retired') {
+      next.push(li('It is never used again.'));
+      const ev = lastEvent(evs, ['account.retired']);
+      const q = ev && ev.exitQuarantinedUntil ? ev.exitQuarantinedUntil : a.submittedAt ? plusMs(a.retiredAt, 30 * DAY_MS) : null;
+      if (q) next.push(li((Date.parse(q) > Date.now() ? 'Its exit is kept from new accounts until <b>' : 'Its exit quarantine ended <b>') + tkEsc(when(q)) + '</b>.'));
+      else if (a.retiredAt && !a.submittedAt) next.push(li('The pool has no record of it sending the register form, so its exit is likely free already; otherwise it is kept from new accounts until <b>' + tkEsc(when(plusMs(a.retiredAt, 30 * DAY_MS))) + '</b>.'));
+    } else if (s === 'signup_failed') {
+      const end = plusMs(a.submittedAt, 30 * DAY_MS);
+      if (end) next.push(li('Retired on its own <b>' + tkEsc(when(end)) + '</b>, when its exit\\'s 30-day burn ends.'));
+      if (a.canRetrySignup) next.push(li('The pool accepts a signup retry (from the NAS; this page has no retry button).'));
+    }
+    if (a.busy && a.busy !== 'signup') next.push(li('Busy now: ' + tkEsc(a.busy.replace(':', ', ').replace(/_/g, ' ')) + '.'));
+    const exitProblem = safeText(a.exitProblem);
+    if (exitProblem) next.push(li('It cannot open a browser now: ' + tkEsc(exitProblem) + '.'));
+    if (a.pendingChallengeId) next.push(li('A captcha is waiting for it: <a href="/ui/captcha/' + tkEsc(encodeURIComponent(a.pendingChallengeId)) + '">solve it</a>.'));
+    if (!next.length) next.push(li('<span class="muted">Nothing is scheduled for this state.</span>'));
+
+    // Recent pool events.
+    let evHtml;
+    if (d.eventsErr) evHtml = '<div class="empty error">' + tkEsc(d.eventsErr) + '</div>';
+    else if (!evs) evHtml = '<div class="empty">Loading…</div>';
+    else if (!evs.length) evHtml = '<div class="empty">No pool events stored for ' + tkEsc(a.id) + ' (the Worker keeps 90 days).</div>';
+    else evHtml = '<ul class="sd-events">' + evs.map((e) => {
+      const r = reasonWords(e.reason);
+      const bits = [];
+      if (e.challengeType) bits.push(e.challengeType === 'checkbox' ? 'checkbox wall' : 'image captcha');
+      if (e.phoneInitiated) bits.push('phone lookup');
+      if (r) bits.push(r);
+      if (e.type === 'account.retired' && e.exitQuarantinedUntil) bits.push('exit kept until ' + fmtTime(e.exitQuarantinedUntil));
+      return '<li><b>' + tkEsc(EVENT_WORDS[e.type] || e.type) + '</b> <span class="muted">' + tkEsc(when(e.at)) + '</span>' + (bits.length ? '<div class="muted sub">' + tkEsc(bits.join(' · ')) + '</div>' : '') + '</li>';
+    }).join('') + '</ul>';
+
+    return '<div class="sd" data-sd-acct="' + tkEsc(a.id) + '">' +
+      '<p><span class="badge ' + tkEsc(badgeClass(a)) + '">' + tkEsc(raw) + '</span>' + (a.passive && s !== 'passive' ? ' <span class="badge info">passive</span>' : '') + '</p>' +
+      '<h3>What it means</h3><p>' + tkEsc(STATE_MEANS[s] || 'A state this page does not know yet (the pool may be newer than this page).') + '</p>' +
+      '<h3>How it got here</h3><ul class="sd-list">' + why.join('') + '</ul>' +
+      '<h3>What happens next</h3><ul class="sd-list">' + next.join('') + '</ul>' +
+      '<h3>Recent pool events</h3>' + evHtml +
+      '</div>';
+  }
+
+  // Opens the drawer on one account, then fills in its events (and the ramp
+  // length for a warming account). A reply that lands after the drawer moved
+  // to another account, or was closed, is dropped.
+  async function openDetails(id) {
+    if (typeof TK === 'undefined' || !TK.drawer) return;
+    const find = () => ((lastStatus && lastStatus.accounts) || []).find((x) => x.id === id) || null;
+    const a = find();
+    const seq = ++details.seq;
+    details = { seq, id, events: null, eventsErr: null, rampLen: details.rampLen };
+    if (!a) { TK.drawer.open(id, '<div class="empty">' + tkEsc(id) + ' is no longer in the pool\\'s list.</div>'); return; }
+    TK.drawer.open(id + ' · ' + String(a.state || 'unknown'), detailsHtml(a, details));
+    const st = STATE_ALIASES[a.state] || a.state;
+    const [ev, lim] = await Promise.all([
+      api('/accounts/' + encodeURIComponent(id) + '/events'),
+      st === 'warming' && details.rampLen === null ? api('/limits') : Promise.resolve(null),
+    ]);
+    if (details.seq !== seq) return;
+    if (ev.ok) details.events = Array.isArray(ev.data.events) ? ev.data.events : [];
+    else details.eventsErr = ev.status === 401 || ev.status === 403 ? SIGN_IN_AGAIN : errText(ev.data, ev.status);
+    if (lim && lim.ok && lim.data.settings && Array.isArray(lim.data.settings.ramp)) details.rampLen = lim.data.settings.ramp.length;
+    const body = $('tk-drawer-body');
+    if (body) body.innerHTML = detailsHtml(find() || a, details);
+  }
+  // Closing the drawer drops whatever reply is still on its way.
+  if ($('tk-drawer')) $('tk-drawer').addEventListener('close', () => { details.seq++; });
   const confirmWords = { rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };
   let lastStatus = null;
 
@@ -109,6 +277,7 @@ ${CAPTCHA_JS}
     const b = ev.target.closest('button');
     if (!b) return;
     if (b.dataset.signup) { openFlow(b.dataset.signup, b.dataset.acct || null); return; }
+    if (b.dataset.stateAcct) { openDetails(b.dataset.stateAcct); return; }
     const box = b.closest('[data-acts]');
     const id = box && box.dataset.acts;
     if (b.dataset.act) {
@@ -303,12 +472,21 @@ ${CAPTCHA_JS}
 })();
 `
 
+/** The state details drawer (TK.drawer). */
+const DETAILS_CSS = /* css */ `
+  .sd h3 { font-size: var(--fs-sm); margin: var(--sp-4) 0 var(--sp-2); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .sd p { margin: 0 0 var(--sp-2); }
+  .sd ul.sd-list { margin: 0; padding-left: 1.2rem; display: grid; gap: var(--sp-1); }
+  .sd ul.sd-events { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
+  .sd ul.sd-events li { border-left: 2px solid var(--line-strong); padding-left: var(--sp-3); }
+`
+
 export const POOL_PAGE_HTML = shell({
   nav: 'pool',
   title: 'Pool accounts',
   actions: '<button id="add-btn" type="button" class="btn primary">+ Add account</button>',
   body: BODY,
-  css: POOL_CSS,
+  css: POOL_CSS + DETAILS_CSS,
   js: JS,
   ownNavCount: true,
 })

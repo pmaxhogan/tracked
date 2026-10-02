@@ -235,6 +235,52 @@ export async function prunePoolEvents(env: Env, nowSec = Math.floor(Date.now() /
   return r.meta.changes ?? 0
 }
 
+/** An `acct-N` id as the events keep it (the same rule as on the way in). */
+export function isPoolAccountId(x: unknown): x is string {
+  return typeof x === 'string' && ACCOUNT_RE.test(x)
+}
+
+/** One event of one account, as the pool page's state details show it. */
+export type AccountPoolEvent = {
+  type: PoolEventType
+  /** tlpool's time for the event, else when the Worker received it (ISO). */
+  at: string
+  /** Free text from tlpool; null when it held an address (an '@', redacted on the way in) or none was sent. */
+  reason: string | null
+  challengeId: string | null
+  challengeType: 'image' | 'checkbox' | null
+  phoneInitiated: boolean
+  /** account.retired: until when the exit is kept from new accounts (null: free at once, or not said). */
+  exitQuarantinedUntil: string | null
+}
+
+/**
+ * The newest events of one account (`acct-N`), newest first, for the pool
+ * page's state details. A reason that held an address is dropped whole: the
+ * sanitizer already rewrote any '@' to `[redacted]`, so both are checked.
+ */
+export async function listPoolEventsForAccount(env: Env, accountId: string, limit = 20): Promise<AccountPoolEvent[]> {
+  if (!isPoolAccountId(accountId)) return []
+  const res = await dbOf(env)
+    .prepare('SELECT payload, received_at FROM pool_events WHERE account_id = ? ORDER BY received_at DESC, id DESC LIMIT ?')
+    .bind(accountId, Math.max(1, Math.min(50, Math.floor(limit))))
+    .all<{ payload: string; received_at: number }>()
+  return res.results.flatMap((r) => {
+    const ev = parseJson<PoolEvent | null>(r.payload, null)
+    if (!ev || ev.accountId !== accountId || !(POOL_EVENT_TYPES as readonly string[]).includes(ev.type)) return []
+    const reason = typeof ev.reason === 'string' && ev.reason && !ev.reason.includes('@') && !ev.reason.includes('[redacted]') ? ev.reason : null
+    return [{
+      type: ev.type,
+      at: ev.createdAt ?? new Date(Number(r.received_at) * 1000).toISOString(),
+      reason,
+      challengeId: ev.challengeId ?? null,
+      challengeType: ev.challengeType ?? null,
+      phoneInitiated: ev.phoneInitiated === true,
+      exitQuarantinedUntil: ev.exitQuarantinedUntil ?? null,
+    }]
+  })
+}
+
 /** Newest events first, for the admin pages. */
 export async function listPoolEvents(env: Env, limit = 50): Promise<Array<PoolEvent & { rowId: number; receivedAt: number; pushStatus: PushStatus }>> {
   const res = await dbOf(env)
