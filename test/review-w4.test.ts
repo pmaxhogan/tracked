@@ -138,6 +138,14 @@ describe('tlpool contract as built', () => {
     expect(poolEventPushPayload(ev({ type: 'account.retired', accountId: 'acct-2' }))).toMatchObject({ kind: 'pool_account', url: '/ui/pool' })
   })
 
+  it('the retired push says whether the exit is quarantined (tlpool omits the date when the form was never submitted)', () => {
+    const free = poolEventPushPayload(ev({ type: 'account.retired', accountId: 'acct-32', reason: 'signup_failed: could not set the country on the registration form' }))!
+    expect(free.body).toBe('acct-32 was retired (signup_failed: could not set the country on the registration form). It never submitted the register form, so its exit is free for a new account.')
+    const held = poolEventPushPayload(ev({ type: 'account.retired', accountId: 'acct-7', reason: 'decoy', exitQuarantinedUntil: '2026-11-01T17:00:00Z' }))!
+    expect(held.body).toBe('acct-7 was retired (decoy). Its exit is not reused until Nov 1.')
+    expect(ev({ type: 'account.retired', exitQuarantinedUntil: 'soon' }).exitQuarantinedUntil).toBeNull()
+  })
+
   it('reads contract errors from the body of an HTTP 200 answer (tlpool never answers 502/504)', async () => {
     const answer = (body: unknown, status = 200) => ({ url: 'https://tlpool.example', token: 't', fetchImpl: (async () => Response.json(body, { status })) as unknown as typeof fetch })
     const req = { url: 'https://www.1001tracklists.com/tracklist/x/y.html', kind: 'set' as const, priority: 'new' as const }

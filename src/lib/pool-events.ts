@@ -15,7 +15,8 @@
  *
  * Accepted body (liberal; unknown fields are ignored and never stored):
  *   { id?, type, challengeId? | challenge: { id, type, account, createdAt, expiresAt },
- *     accountId?, challengeType?, createdAt?, expiresAt?, priority?, phoneInitiated?, reason? }
+ *     accountId?, challengeType?, createdAt?, expiresAt?, priority?, phoneInitiated?, reason?,
+ *     exitQuarantinedUntil? }
  * Only ids matching tight patterns are kept (account ids must look like
  * `acct-N`), so a username can never end up in D1 or a push.
  */
@@ -40,6 +41,12 @@ export type PoolEvent = {
   /** The fetch that hit the challenge was the phone button's (said in the push text). */
   phoneInitiated: boolean
   reason: string | null
+  /**
+   * account.retired: until when tlpool keeps the account's exit from new
+   * accounts. Absent (null) when the account never submitted the register
+   * form, so the exit is free at once.
+   */
+  exitQuarantinedUntil: string | null
 }
 
 export type PushStatus = 'none' | 'sent' | 'failed' | 'not_configured'
@@ -85,9 +92,17 @@ export function sanitizePoolEvent(body: unknown): { ok: true; event: PoolEvent }
     expiresAt: iso(b.expiresAt ?? ch.expiresAt),
     phoneInitiated: b.phoneInitiated === true || b.priority === 'phone' || ch.priority === 'phone',
     reason: safeReason(b.reason),
+    exitQuarantinedUntil: iso(b.exitQuarantinedUntil),
   }
   if (event.type.startsWith('challenge.') && !event.challengeId) return { ok: false, error: 'challenge event without a valid challenge id' }
   return { ok: true, event }
+}
+
+/** What happens to a retired account's exit (tlpool's exitQuarantinedUntil). */
+function retiredExitText(until: string | null | undefined): string {
+  if (!until) return 'It never submitted the register form, so its exit is free for a new account.'
+  const day = new Date(until).toLocaleDateString('en-US', { timeZone: 'America/Chicago', month: 'short', day: 'numeric' })
+  return `Its exit is not reused until ${day}.`
 }
 
 /** The push for an event, or null when this event type does not page the owner. */
@@ -119,7 +134,7 @@ export function poolEventPushPayload(ev: PoolEvent, now: Date = new Date()): Pus
     return {
       kind: 'pool_account',
       title: 'Pool account retired',
-      body: `${who} was retired${ev.reason ? ` (${ev.reason})` : ''}. Its exit is not reused for 30 days.`,
+      body: `${who} was retired${ev.reason ? ` (${ev.reason})` : ''}. ${retiredExitText(ev.exitQuarantinedUntil)}`,
       url: '/ui/pool',
       tag: `tlpool-account-${ev.accountId ?? 'unknown'}`.slice(0, 64),
       ts: now.toISOString(),

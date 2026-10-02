@@ -61,6 +61,7 @@ describe('pool events: sanitising', () => {
       expiresAt: '2026-09-29T17:00:00.000Z',
       phoneInitiated: false,
       reason: 'login as [redacted] failed',
+      exitQuarantinedUntil: null,
     })
     expect(JSON.stringify(e)).not.toMatch(/secret-user|someone@/)
     expect(ev({ type: 'account.flagged', accountId: 'real.person.name' }).accountId).toBeNull()
