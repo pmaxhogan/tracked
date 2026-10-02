@@ -509,21 +509,23 @@ export type EnqueueInput = {
 }
 
 /**
- * LIKE pattern matching every URL of the set's 1001tracklists id
- * (`/tracklist/<id>/<name>.html`). 1001tl renames a set's <name> part, and a
- * DJ page can list the old and the new URL side by side; both are one set.
- * Null when the URL has no id.
+ * The set's 1001tracklists id (`/tracklist/<id>/<name>.html`), stored as
+ * mkvid_requests.tl_id (migration 0014 backfills it the same way). 1001tl
+ * renames a set's <name> part, and a DJ page can list the old and the new URL
+ * side by side; both are one set. Null when the URL has no id.
  */
-export function sameTracklistLike(setUrl: string): string | null {
-  const id = setUrl.match(/\/tracklist\/([A-Za-z0-9]+)\//)?.[1]
-  return id ? `%/tracklist/${id}/%` : null
+export function tracklistIdOf(setUrl: string): string | null {
+  return setUrl.match(/\/tracklist\/([^/?#]+)\//)?.[1] ?? null
 }
+
+/** Twin statuses that stand for the set: queued, rendering, has its video, or banned (a ban is for the set, not its URL name). A failed or superseded twin does not block the other URL. */
+const LIVE_TWIN_STATUSES = "('pending', 'claimed', 'done', 'banned')"
 
 /**
  * Queue a set, unless it already has a request (any status — a `done` or
  * `failed` request is final for that set until someone retries it from the
- * panel), also under another URL of the same tracklist id. Returns whether a
- * row was created.
+ * panel), or a live one (LIVE_TWIN_STATUSES) under another URL of the same
+ * tracklist id. Returns whether a row was created.
  */
 export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promise<'queued' | 'exists'> {
   const now = nowSeconds()
@@ -531,9 +533,9 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
     .prepare(
       `INSERT OR IGNORE INTO mkvid_requests
          (id, slug, set_url, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count,
-          status, attempts, created_at, updated_at)
-       SELECT ?, ?, ?, ?, ?, ?, COALESCE(julianday(?), 0), ?, ?, ?, ?, ?, 'pending', 0, ?, ?
-       WHERE NOT EXISTS (SELECT 1 FROM mkvid_requests WHERE set_url LIKE ?)`,
+          status, attempts, created_at, updated_at, tl_id)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, COALESCE(julianday(?7), 0), ?8, ?9, ?10, ?11, ?12, 'pending', 0, ?13, ?14, ?15
+       WHERE ?15 IS NULL OR NOT EXISTS (SELECT 1 FROM mkvid_requests WHERE tl_id = ?15 AND status IN ${LIVE_TWIN_STATUSES})`,
     )
     .bind(
       crypto.randomUUID(),
@@ -550,8 +552,7 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
       v(input.idedCount),
       now,
       now,
-      // No id in the URL: the pattern can match nothing (unique set_url still dedupes).
-      sameTracklistLike(input.setUrl) ?? '',
+      tracklistIdOf(input.setUrl),
     )
     .run()
   return (r.meta.changes ?? 0) > 0 ? 'queued' : 'exists'
@@ -987,20 +988,31 @@ async function tryClaimRow(
       return null
     }
     // The same tracklist under an older/newer URL (1001tl renamed the set)
-    // already has its mkvid video: rendering again would upload a duplicate.
-    const like = sameTracklistLike(row.set_url)
-    const twin = like
+    // has its mkvid video, or is rendering it: rendering this one too would
+    // upload a duplicate. A recreation is left alone — it replaces its own
+    // video (playlists, tracklists row) through the normal completion, which
+    // superseding here would skip.
+    const tlId = row.replaces_video_id ? null : tracklistIdOf(row.set_url)
+    const twin = tlId
       ? await db
-          .prepare("SELECT set_url, video_id FROM mkvid_requests WHERE set_url LIKE ? AND id != ? AND status = 'done' AND video_id IS NOT NULL LIMIT 1")
-          .bind(like, row.id)
-          .first<{ set_url: string; video_id: string }>()
+          .prepare(
+            `SELECT set_url, status, video_id FROM mkvid_requests
+              WHERE tl_id = ? AND id != ? AND ((status = 'done' AND video_id IS NOT NULL) OR status = 'claimed')
+              ORDER BY status = 'done' DESC LIMIT 1`,
+          )
+          .bind(tlId, row.id)
+          .first<{ set_url: string; status: 'done' | 'claimed'; video_id: string | null }>()
       : null
-    if (twin) {
+    if (twin?.status === 'claimed') {
+      // Not settled yet: if it fails, this one may still be needed.
+      log.info('mkvid.claim_skip_twin_rendering', { id: row.id, setUrl: row.set_url, twinSetUrl: twin.set_url })
+      return null
+    }
+    if (twin?.video_id) {
       await db
         .prepare("UPDATE mkvid_requests SET status = 'superseded', error = ?, updated_at = ? WHERE id = ?")
         .bind(`same tracklist as ${twin.set_url}, already rendered as ${twin.video_id}`, now, row.id)
         .run()
-      if (row.replaces_video_id) await queueSupersededOldVideo(env, row.id, twin.video_id)
       log.info('mkvid.claim_superseded_twin', { id: row.id, setUrl: row.set_url, twinSetUrl: twin.set_url, videoId: twin.video_id })
       return null
     }

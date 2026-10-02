@@ -18,6 +18,7 @@ import {
   nextMkvidRequests,
   saveMkvidTracks,
   supersedeMkvidRequestForSet,
+  tracklistIdOf,
 } from '../src/lib/mkvid'
 import { ID_WAIT_SECONDS, isVerified, mkvidReadiness, readinessFor, pullInHeldRecheck, setAgeReference, timedRowCounts } from '../src/lib/mkvid-readiness'
 import {
@@ -423,32 +424,75 @@ describe('a held (untimed) set is kept due within a week', () => {
 
 describe('one 1001tracklists id is one set, whatever its URL name', () => {
   const renamed = (from: string, name: string) => ({ ...input(from), setUrl: `https://www.1001tracklists.com/tracklist/t${from}/${name}.html` })
+  // A twin queued before this guard existed (prod has these): same row, the other URL.
+  const insertTwin = async (env: Env, of: string, url: string, status = 'pending', extra = '') => {
+    await env.DB.prepare(
+      `INSERT INTO mkvid_requests (id, slug, set_url, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count, status, attempts, created_at, updated_at, tl_id)
+       SELECT 'twin', slug, ?, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count, ?, 0, created_at, updated_at, tl_id FROM mkvid_requests WHERE id = ?`,
+    ).bind(url, status, of).run()
+    if (extra) await env.DB.prepare(`UPDATE mkvid_requests SET ${extra} WHERE id = 'twin'`).run()
+    await storeVerifiedList(env, url)
+  }
 
-  it('enqueue: a renamed URL of a queued set is not queued again', async () => {
-    const env = makeEnv()
-    await queue(env, 'bk')
-    expect(await enqueueMkvidRequest(env, renamed('bk', 'bk-under-the-k-bridge'))).toBe('exists')
-    expect(await getMkvidRequestForSet(env, renamed('bk', 'bk-under-the-k-bridge').setUrl)).toBeNull()
-    // another id is another set
-    expect(await enqueueMkvidRequest(env, input('other'))).toBe('queued')
+  it('tracklistIdOf: the path segment after /tracklist/, or null', () => {
+    expect(tracklistIdOf('https://www.1001tracklists.com/tracklist/298bkl4k/lilly-palmer-x.html')).toBe('298bkl4k')
+    expect(tracklistIdOf('https://www.1001tracklists.com/dj/lillypalmer/index.html')).toBeNull()
+    expect(tracklistIdOf('https://www.1001tracklists.com/tracklist/298bkl4k')).toBeNull()
   })
 
-  it('claim: a twin already rendered under the other URL supersedes this one instead of a second upload', async () => {
+  it('enqueue: a renamed URL of a live or banned set is not queued again; a failed or superseded twin does not block', async () => {
+    const env = makeEnv()
+    const first = await queue(env, 'bk')
+    expect(await enqueueMkvidRequest(env, renamed('bk', 'bk-under-the-k-bridge'))).toBe('exists')
+    expect(await getMkvidRequestForSet(env, renamed('bk', 'bk-under-the-k-bridge').setUrl)).toBeNull()
+    await env.DB.prepare("UPDATE mkvid_requests SET status = 'banned' WHERE id = ?").bind(first.id).run()
+    expect(await enqueueMkvidRequest(env, renamed('bk', 'bk-banned'))).toBe('exists')
+    for (const [i, status] of ['failed', 'superseded'].entries()) {
+      await env.DB.prepare('UPDATE mkvid_requests SET status = ? WHERE id = ?').bind(status, first.id).run()
+      expect(await enqueueMkvidRequest(env, renamed('bk', `bk-renamed-${i}`)), status).toBe('queued')
+      await env.DB.prepare('DELETE FROM mkvid_requests WHERE set_url = ?').bind(renamed('bk', `bk-renamed-${i}`).setUrl).run()
+    }
+    // another id is another set; a URL without an id queues as before
+    expect(await enqueueMkvidRequest(env, input('other'))).toBe('queued')
+    expect(await enqueueMkvidRequest(env, { ...input('noid'), setUrl: 'https://www.1001tracklists.com/tracklist/noid' })).toBe('queued')
+    expect(await enqueueMkvidRequest(env, { ...input('noid'), setUrl: 'https://www.1001tracklists.com/tracklist/noid' })).toBe('exists')
+  })
+
+  it('claim: a twin already rendered under the other URL is superseded, and the claim moves on to the next set', async () => {
     const env = makeEnv()
     const done = await queue(env, 'tw')
     await env.DB.prepare("UPDATE mkvid_requests SET status = 'done', video_id = 'vid00000001' WHERE id = ?").bind(done.id).run()
-    // a twin queued before this guard existed (prod has these)
-    const twinUrl = renamed('tw', 'tw-renamed').setUrl
-    await env.DB.prepare(
-      `INSERT INTO mkvid_requests (id, slug, set_url, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count, status, attempts, created_at, updated_at)
-       SELECT 'twin', slug, ?, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count, 'pending', 0, created_at, updated_at FROM mkvid_requests WHERE id = ?`,
-    ).bind(twinUrl, done.id).run()
-    await storeVerifiedList(env, twinUrl)
-    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
+    await insertTwin(env, done.id, renamed('tw', 'tw-renamed').setUrl, 'pending', 'sort_key = 99999999')
+    const other = await queue(env, 'later', { setDate: '2026-02-01' })
+    const claimed = await claimMkvidRequest(env, log, ['primary'], 'scene')
+    expect(claimed?.id).toBe(other.id)
     const twin = (await getMkvidRequest(env, 'twin'))!
     expect(twin.status).toBe('superseded')
     expect(twin.error).toContain('vid00000001')
     expect(twin.attempts).toBe(0)
+  })
+
+  it('claim: a twin still rendering holds this one back (not superseded); failed, banned or superseded twins do not', async () => {
+    const env = makeEnv()
+    const first = await queue(env, 'cl')
+    await env.DB.prepare("UPDATE mkvid_requests SET status = 'claimed', claimed_at = ? WHERE id = ?").bind(Math.floor(Date.now() / 1000), first.id).run()
+    await insertTwin(env, first.id, renamed('cl', 'cl-renamed').setUrl)
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
+    expect((await getMkvidRequest(env, 'twin'))!.status).toBe('pending')
+    for (const status of ['failed', 'banned', 'superseded']) {
+      await env.DB.prepare('UPDATE mkvid_requests SET status = ? WHERE id = ?').bind(status, first.id).run()
+      await env.DB.prepare("UPDATE mkvid_requests SET status = 'pending', attempts = 0, claimed_at = NULL WHERE id = 'twin'").run()
+      expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))?.id, status).toBe('twin')
+    }
+  })
+
+  it('claim: a recreation renders even when its twin has a video (it replaces its own video on completion)', async () => {
+    const env = makeEnv()
+    const done = await queue(env, 'rc')
+    await env.DB.prepare("UPDATE mkvid_requests SET status = 'done', video_id = 'vid00000002' WHERE id = ?").bind(done.id).run()
+    await insertTwin(env, done.id, renamed('rc', 'rc-renamed').setUrl, 'pending', "replaces_video_id = 'oldvid00003'")
+    const claimed = await claimMkvidRequest(env, log, ['primary'], 'scene')
+    expect(claimed?.id).toBe('twin')
   })
 })
 

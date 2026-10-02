@@ -29,6 +29,18 @@ describe('migrations on a copy of the pre-pool schema with data', () => {
     expect(rows(db, 'SELECT base_rows, timed_rows FROM mkvid_request_tracks')).toEqual([{ base_rows: 4, timed_rows: 3 }])
   })
 
+  it('0014 backfills the 1001tracklists id of each request (NULL when the URL has none)', () => {
+    const db = openRawDb()
+    for (const f of upTo(13)) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    for (const [id, url] of [['r1', 'https://www.1001tracklists.com/tracklist/298bkl4k/a-2026.html'], ['r2', 'https://www.1001tracklists.com/tracklist/298bkl4k/a-renamed-2026.html'], ['r3', 'https://www.1001tracklists.com/tracklist/noid'], ['r4', 'https://example.com/x']]) {
+      db.exec(`INSERT INTO mkvid_requests (id, slug, set_url, source, source_url, status, created_at, updated_at) VALUES ('${id}', 'dj', '${url}', 'soundcloud', 's', 'pending', 1, 1)`)
+    }
+    for (const f of after(13)) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    expect(rows(db, 'SELECT id, tl_id FROM mkvid_requests ORDER BY id')).toEqual([
+      { id: 'r1', tl_id: '298bkl4k' }, { id: 'r2', tl_id: '298bkl4k' }, { id: 'r3', tl_id: null }, { id: 'r4', tl_id: null },
+    ])
+  })
+
   it('are numbered without gaps or duplicates', () => {
     const nums = files.map((f) => Number(f.slice(0, 4)))
     expect(nums).toEqual(nums.map((_, i) => i + 1))
