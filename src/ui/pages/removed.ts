@@ -163,15 +163,21 @@ const JS = /* js */ `
 
   async function load(more) {
     $err.textContent = '';
-    const res = await TK.api.get('/ui/api/removals' + (more && next ? '?before=' + next : ''));
-    if (!res.ok) { $err.textContent = 'failed to load: ' + TK.errText(res, 'failed (' + res.status + ')'); return; }
-    const d = res.data || {};
-    labels = d.reasonLabels || {};
-    if (!more) { all = []; renderBar(d); renderHolds(d.holds); }
-    all = all.concat(d.rows || []);
-    next = d.next || null; $more.hidden = !next;
-    renderDjs();
-    render();
+    const apply = (res) => {
+      if (!res.ok) { $err.textContent = 'failed to load: ' + TK.errText(res, 'failed (' + res.status + ')'); return; }
+      $err.textContent = '';
+      const d = res.data || {};
+      labels = d.reasonLabels || {};
+      if (!more) { all = []; renderBar(d); renderHolds(d.holds); }
+      all = all.concat(d.rows || []);
+      // A stored first page has no cursor: Load more waits for the live one.
+      next = res.stale ? null : d.next || null; $more.hidden = !next;
+      renderDjs();
+      render();
+    };
+    // The first page paints from this browser's last view, then the live one; later pages are always live.
+    if (more) apply(await TK.api.get('/ui/api/removals' + (next ? '?before=' + next : '')));
+    else await TK.api.swr('/ui/api/removals', apply);
   }
 
   $dj.addEventListener('change', () => { djSlug = $dj.value; sync(); render(); });

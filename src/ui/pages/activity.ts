@@ -218,20 +218,25 @@ ${ACTIVITY_DRAWER_JS}
     lastMore = !!more;
     const from = more ? cursor : null;
     if (!more) { cursor = null; $more.hidden = true; setBusy(true); }
-    const res = await TK.api.get(apiUrl(from));
-    if (my !== seq) return;
-    $skel.hidden = true;
-    setBusy(false);
-    const d = res.ok && res.data && Array.isArray(res.data.rows) ? res.data : null;
-    if (!d) {
-      if (!more) { rows = []; $list.innerHTML = ''; $list.hidden = true; }
-      $empty.hidden = false;
-      $empty.innerHTML = '<span class="error">' + esc(TK.errText(res, 'Could not load activity (' + (res.status || 'offline') + ')')) + '</span><button type="button" id="a-retry" class="btn">Retry</button>';
-      return;
-    }
-    rows = more ? rows.concat(d.rows) : d.rows.slice();
-    cursor = d.cursor || null;
-    render();
+    const apply = (res) => {
+      if (my !== seq) return;
+      $skel.hidden = true;
+      setBusy(false);
+      const d = res.ok && res.data && Array.isArray(res.data.rows) ? res.data : null;
+      if (!d) {
+        if (!more) { rows = []; $list.innerHTML = ''; $list.hidden = true; }
+        $empty.hidden = false;
+        $empty.innerHTML = '<span class="error">' + esc(TK.errText(res, 'Could not load activity (' + (res.status || 'offline') + ')')) + '</span><button type="button" id="a-retry" class="btn">Retry</button>';
+        return;
+      }
+      rows = more ? rows.concat(d.rows) : d.rows.slice();
+      // A stored first page has no cursor: Load older waits for the live one.
+      cursor = res.stale ? null : d.cursor || null;
+      render();
+    };
+    // The first page for these filters paints from this browser's last view, then the live one; older pages are always live.
+    if (more) apply(await TK.api.get(apiUrl(from)));
+    else await TK.api.swr(apiUrl(null), apply, { key: '/ui/api/activity#' + kindList().join(',') + '|' + (problems ? 1 : 0) + '|' + (dj || '') + '|' + range });
   }
   function changed() { renderFilters(); sync(); load(false); }
 

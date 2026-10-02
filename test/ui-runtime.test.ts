@@ -354,3 +354,92 @@ describe('TK.skel', () => {
     }
   })
 })
+
+describe('TK.api.swr', () => {
+  function memStorage() {
+    const m = new Map<string, string>()
+    return {
+      m,
+      getItem: (k: string) => (m.has(k) ? m.get(k)! : null),
+      setItem: (k: string, v: string) => void m.set(k, String(v)),
+      removeItem: (k: string) => void m.delete(k),
+      key: (i: number) => [...m.keys()][i] ?? null,
+      get length() { return m.size },
+    }
+  }
+  function setup(fetchImpl: (path: string) => Response | Promise<Response>, storage: unknown = memStorage()) {
+    const calls: string[] = []
+    const { c } = ctx({ localStorage: storage, fetch: async (p: string) => { calls.push(p); return fetchImpl(p) } })
+    vm.runInContext(RUNTIME_JS, c)
+    const seen: Array<{ stale: boolean; ok: boolean; data: unknown }> = []
+    ;(c as any).__seen = seen
+    const run = (path: string, opts = '{}') =>
+      vm.runInContext(`TK.api.swr(${JSON.stringify(path)}, (r) => { __seen.push({ stale: !!r.stale, ok: r.ok, data: r.data }) }, ${opts})`, c) as Promise<any>
+    return { c, calls, seen, run, storage }
+  }
+  const json = (d: unknown, status = 200) => new Response(JSON.stringify(d), { status })
+
+  it('without a stored copy hands over the live response once and stores it', async () => {
+    const t = setup(() => json({ n: 1 }))
+    const res = await t.run('/ui/api/list')
+    expect(res.ok).toBe(true)
+    expect(t.seen).toEqual([{ stale: false, ok: true, data: { n: 1 } }])
+    expect(vm.runInContext(`TK.api.stored('/ui/api/list')`, t.c)).toEqual({ n: 1 })
+  })
+
+  it('paints the stored copy first, then the live one', async () => {
+    const t = setup(() => json({ n: 1 }))
+    await t.run('/ui/api/list')
+    t.seen.length = 0
+    let n = 1
+    const t2 = setup(() => json({ n: ++n }), t.storage)
+    await t2.run('/ui/api/list')
+    expect(t2.seen).toEqual([{ stale: true, ok: true, data: { n: 1 } }, { stale: false, ok: true, data: { n: 2 } }])
+  })
+
+  it('skips a stored copy older than maxAgeMs', async () => {
+    const st = memStorage()
+    st.setItem('tk-swr:1:/ui/api/list', JSON.stringify({ at: Date.now() - 2 * 86400000, data: { old: true } }))
+    const t = setup(() => json({ n: 1 }), st)
+    await t.run('/ui/api/list')
+    expect(t.seen.map((s) => s.stale)).toEqual([false])
+  })
+
+  it('a failed live call is handed over and keeps the stored copy', async () => {
+    const st = memStorage()
+    st.setItem('tk-swr:1:/ui/api/list', JSON.stringify({ at: Date.now(), data: { n: 1 } }))
+    const t = setup(() => json({ error: 'internal' }, 500), st)
+    const res = await t.run('/ui/api/list')
+    expect(res.ok).toBe(false)
+    expect(t.seen).toEqual([{ stale: true, ok: true, data: { n: 1 } }, { stale: false, ok: false, data: { error: 'internal' } }])
+    expect(JSON.parse(st.getItem('tk-swr:1:/ui/api/list')!).data).toEqual({ n: 1 })
+  })
+
+  it('drops a stored copy whose handler throws, and still delivers the live one', async () => {
+    const st = memStorage()
+    st.setItem('tk-swr:1:/x', JSON.stringify({ at: Date.now(), data: { bad: true } }))
+    const { c } = ctx({ localStorage: st, fetch: async () => json({ good: true }) })
+    vm.runInContext(RUNTIME_JS, c)
+    const got = await vm.runInContext(`(async () => { const seen = []; await TK.api.swr('/x', (r) => { if (r.stale) throw new Error('old shape'); seen.push(r.data) }); return seen })()`, c)
+    expect(got).toEqual([{ good: true }])
+    expect(JSON.parse(st.getItem('tk-swr:1:/x')!).data).toEqual({ good: true })
+  })
+
+  it('works without storage (missing or throwing localStorage)', async () => {
+    const throwing = { getItem() { throw new Error('blocked') }, setItem() { throw new Error('blocked') }, removeItem() { throw new Error('blocked') }, key: () => null, length: 0 }
+    for (const storage of [undefined, throwing]) {
+      const t = setup(() => json({ n: 1 }), storage)
+      await t.run('/ui/api/list')
+      expect(t.seen).toEqual([{ stale: false, ok: true, data: { n: 1 } }])
+    }
+  })
+
+  it('opts.key names the stored copy for a path with a moving part', async () => {
+    const t = setup(() => json({ rows: [] }))
+    await t.run('/ui/api/activity?since=1', `{ key: 'act' }`)
+    const t2 = setup(() => json({ rows: [1] }), t.storage)
+    await t2.run('/ui/api/activity?since=2', `{ key: 'act' }`)
+    expect(t2.seen.map((s) => s.stale)).toEqual([true, false])
+    expect(t2.calls).toEqual(['/ui/api/activity?since=2'])
+  })
+})

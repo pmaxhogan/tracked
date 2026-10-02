@@ -141,28 +141,34 @@ ${DJ_ACTIONS_JS}
     const s = await DJA.loadState(r.slug);
     if (s.failed) { r.state = null; r.failed = true; }
     else { r.state = s.state; r.failed = false; }
+    r.live = true;
     render();
   }
 
   async function load() {
     showError('');
-    const res = await TK.api.get('/ui/api/list');
-    $('djs-skel').hidden = true;
-    if (!res.ok) {
-      if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
-      showError(TK.errText(res, 'failed to load (' + res.status + ')'));
-      return;
-    }
-    const prev = new Map(rows.map((r) => [r.slug, r]));
-    rows = ((res.data && res.data.subscriptions) || []).map((s) => {
-      const old = prev.get(s.slug);
-      return { slug: s.slug, sourceUrl: s.sourceUrl, addedAt: s.addedAt, state: old ? old.state : undefined, failed: old ? old.failed : false, busy: old ? old.busy : null, confirming: false };
+    // The list (and each row's state) this browser stored at the last view paints at once; the live list replaces it.
+    await TK.api.swr('/ui/api/list', async (res) => {
+      $('djs-skel').hidden = true;
+      if (!res.ok) {
+        if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
+        showError(TK.errText(res, 'failed to load (' + res.status + ')'));
+        return;
+      }
+      showError('');
+      const prev = new Map(rows.map((r) => [r.slug, r]));
+      rows = ((res.data && res.data.subscriptions) || []).map((s) => {
+        const old = prev.get(s.slug);
+        const state = old ? old.state : res.stale ? DJA.storedState(s.slug) : undefined;
+        return { slug: s.slug, sourceUrl: s.sourceUrl, addedAt: s.addedAt, state, failed: old ? old.failed : false, busy: old ? old.busy : null, confirming: false, live: old ? old.live : false };
+      });
+      render();
+      // ?focus=filter: the filter row is only shown once there are rows to filter.
+      if (!focused && rows.length && TK.qs.get('focus') === 'filter') { focused = true; $text.focus(); }
+      if (res.stale) return;
+      // At most four state calls at a time; rows painted from a stored state are refreshed too.
+      await DJA.pool(rows.filter((r) => !r.live), 4, loadRowState);
     });
-    render();
-    // ?focus=filter: the filter row is only shown once there are rows to filter.
-    if (!focused && rows.length && TK.qs.get('focus') === 'filter') { focused = true; $text.focus(); }
-    // At most four state calls at a time; each row shows a skeleton until its own arrives.
-    await DJA.pool(rows.filter((r) => r.state === undefined), 4, loadRowState);
   }
 
   const find = (slug) => rows.find((r) => r.slug === slug);

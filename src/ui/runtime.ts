@@ -53,7 +53,57 @@ var TK = (() => {
     post: (path, b) => send(path, { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: body(b) }),
     put: (path, b) => send(path, { method: 'PUT', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: body(b) }),
     del: (path, b) => send(path, { method: 'DELETE', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: body(b) }),
+    swr,
+    // The stored copy swr would paint first, or null: for rendering many rows from memory at once.
+    stored: (path, maxAgeMs) => { const hit = swrRead(path, maxAgeMs || 86400000); return hit ? hit.data : null; },
   };
+
+  // ── stale-while-revalidate GETs ──
+  // TK.api.swr(path, handle, opts): the last good response this browser saw
+  // for path (at most opts.maxAgeMs old, default a day) goes to
+  // handle({ ok: true, status: 200, data, stale: true, storedAt }) at once,
+  // then the live response goes to handle(res) as TK.api.get returns it, so
+  // a page paints from memory and corrects itself a moment later. Returns the
+  // live response. Per-browser only: localStorage, every access guarded (it
+  // can be missing or throw), never shared; a stored copy whose handler
+  // throws is dropped.
+  const SWR_PREFIX = 'tk-swr:1:';
+  const SWR_MAX_CHARS = 200000;
+  function swrRead(path, maxAgeMs) {
+    try {
+      const v = JSON.parse(localStorage.getItem(SWR_PREFIX + path) || 'null');
+      return v && typeof v.at === 'number' && Date.now() - v.at <= maxAgeMs ? v : null;
+    } catch (e) { return null; }
+  }
+  function swrDrop(path) { try { localStorage.removeItem(SWR_PREFIX + path); } catch (e) {} }
+  function swrWrite(path, data) {
+    let s;
+    try { s = JSON.stringify({ at: Date.now(), data }); } catch (e) { return; }
+    if (s.length > SWR_MAX_CHARS) { swrDrop(path); return; }
+    try { localStorage.setItem(SWR_PREFIX + path, s); }
+    catch (e) {
+      // Full: forget every stored response (they are only a head start), then try once more.
+      try {
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.indexOf(SWR_PREFIX) === 0) keys.push(k); }
+        for (const k of keys) localStorage.removeItem(k);
+        localStorage.setItem(SWR_PREFIX + path, s);
+      } catch (e2) {}
+    }
+  }
+  // opts.key stores under another name than the path, for a path that carries a moving value (a since= time).
+  async function swr(path, handle, opts) {
+    const key = (opts && opts.key) || path;
+    const hit = swrRead(key, (opts && opts.maxAgeMs) || 86400000);
+    if (hit) {
+      try { await handle({ ok: true, status: 200, data: hit.data, raw: '', stale: true, storedAt: hit.at }); }
+      catch (e) { swrDrop(key); }
+    }
+    const res = await api.get(path, opts && opts.signal ? { signal: opts.signal } : undefined);
+    if (res.ok && res.data !== null && res.data !== undefined) swrWrite(key, res.data);
+    if (!res.aborted) await handle(res);
+    return res;
+  }
 
   const KNOWN_CODES = {
     youtube_not_connected: 'YouTube is not connected. Connect it on the Playlists page.',

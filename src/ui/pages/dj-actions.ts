@@ -151,10 +151,19 @@ export const DJ_ACTIONS_JS = /* js */ `
       try { return TK.fmt.rel(new Date(st.lastRunAt * 1000).toISOString()); } catch (e) { return ''; }
     }
     // Resolves { state } (null when the DJ has none yet) or { failed: true }.
+    // Live state for one DJ. Goes through TK.api.swr so the answer is also
+    // stored for the next page view (storedState reads it back); the stored
+    // copy itself is not delivered here.
     async function loadState(slug) {
-      const res = await TK.api.get('/ui/api/state/' + encodeURIComponent(slug));
-      if (!res.ok || !res.data) return { failed: true };
-      return { state: res.data.state || null };
+      let out = { failed: true };
+      await TK.api.swr(statePath(slug), (res) => { if (res.stale) return; out = !res.ok || !res.data ? { failed: true } : { state: res.data.state || null }; });
+      return out;
+    }
+    const statePath = (slug) => '/ui/api/state/' + encodeURIComponent(slug);
+    // The state this browser stored at the last view, or undefined: a row can paint from it before its live load.
+    function storedState(slug) {
+      const d = TK.api.stored(statePath(slug));
+      return d && d.state !== undefined ? d.state : undefined;
     }
     // Runs fn over items, at most limit at a time. fn failures never stop the rest.
     async function pool(items, limit, fn) {
@@ -168,6 +177,6 @@ export const DJ_ACTIONS_JS = /* js */ `
       await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
     }
 
-    return { syncSlug, resyncAll, fixTitles, reauthToast, summarize, playlistHref, lastRun, loadState, pool };
+    return { syncSlug, resyncAll, fixTitles, reauthToast, summarize, playlistHref, lastRun, loadState, storedState, pool };
   })();
 `

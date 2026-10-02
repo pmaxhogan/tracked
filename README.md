@@ -294,6 +294,7 @@ Every page is one server-rendered HTML document with the shell, page CSS and JS 
 - Under 800px: a top bar (page title, menu) and a bottom tab bar (Home, DJs, Search, mkvid, Pool).
 - The shell owns the ban/pause banner on every page.
 - The theme control (sidebar footer, and the Settings page on any width) picks System, Light or Dark, and the choice is remembered in the browser.
+- Pages paint from memory, then correct themselves (stale-while-revalidate, `TK.api.swr`): Home's tiles, attention items and recent activity, the DJs, Playlists and Removed videos lists, the first Activity page and the DJ profile's set list show the response this browser stored at its last view (at most a day old, kept in `localStorage`) at once, then replace it with the live one. Pool, challenge and ban data is always live. Loading lists show skeleton placeholders until the first answer.
 
 ### Where the old sections went
 
@@ -350,7 +351,7 @@ Every DJ in the subscriptions list links to `GET /ui/dj/<slug>` — a profile pa
 
 Once loaded, the badge stays on the card head, so collapsed cards keep showing which sets are fully IDed. Per-set detail is fetched only on expand — never in bulk — so viewing a profile costs at most one index crawl, and re-expanding a set another page already resolved is a warm cache hit.
 
-The set list comes from `GET /ui/api/dj/<slug>` (`?refresh=1` to force), which walks the DJ's 1001tracklists index with the same infinite-scroll crawl the sync uses (`lib/dj-sets.ts` → `crawlDjIndex`), merges in any URLs the sync state discovered that the index no longer surfaces, and caches the result in KV for 6 h (`djsets:v1:<slug>`). If the crawl is blocked upstream, the page degrades to the sync state's URL list rather than erroring; an empty result is never cached, so the next view retries.
+The set list comes from `GET /ui/api/dj/<slug>` (`?refresh=1` to force), which walks the DJ's 1001tracklists index with the same infinite-scroll crawl the sync uses (`lib/dj-sets.ts` → `crawlDjIndex`), merges in any URLs the sync state discovered that the index no longer surfaces, and caches the result in KV (`djsets:v2:<slug>`): fresh for 6 h, then served stale for up to 30 days while a background crawl (`waitUntil`, one per DJ a minute) replaces it. A DJ with no cached list but a sync state gets that state's URL list at once ("from sync state · refreshing from 1001tracklists") and the crawl runs in the background; only a DJ with neither waits for the crawl. If the crawl is blocked upstream, the page degrades to the sync state's URL list rather than erroring; an empty result is never cached, so the next view retries.
 
 ### YouTube video JSON
 

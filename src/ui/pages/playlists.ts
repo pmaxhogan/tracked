@@ -98,8 +98,13 @@ ${YOUTUBE_CARD_JS}
     $cmbFill.style.width = cap ? Math.min(100, Math.round(used / cap * 100)) + '%' : '0%';
   }
 
-  async function loadCombined() {
-    const res = await TK.api.get('/ui/api/combined');
+  // A page view paints the status this browser stored last, then the live one
+  // (one YouTube read); Refresh and Backfill ask for the live one only.
+  async function loadCombined(fromMemory) {
+    if (fromMemory === true) { await TK.api.swr('/ui/api/combined', applyCombined); return; }
+    applyCombined(await TK.api.get('/ui/api/combined'));
+  }
+  function applyCombined(res) {
     if (!res.ok) {
       $cmbBody.textContent = res.status === 412 ? TK.errText(res, 'status unavailable') : 'status unavailable (' + (res.status || 'offline') + ')';
       $cmbBackfill.disabled = true;
@@ -109,7 +114,7 @@ ${YOUTUBE_CARD_JS}
     renderCombined(res.data);
   }
 
-  $cmbRefresh.addEventListener('click', loadCombined);
+  $cmbRefresh.addEventListener('click', () => loadCombined());
   $cmbBackfill.addEventListener('click', () => TK.busy($cmbBackfill, 'Backfilling…', async () => {
     const res = await TK.api.post('/ui/api/combined/backfill', {});
     const data = res.data && typeof res.data === 'object' ? res.data : {};
@@ -165,25 +170,35 @@ ${YOUTUBE_CARD_JS}
   }
   async function loadRows() {
     showError('');
-    const res = await TK.api.get('/ui/api/list');
-    $('pl-skel').hidden = true;
-    if (!res.ok) {
-      showError(TK.errText(res, 'failed to load (' + res.status + ')'));
-      if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
-      return;
-    }
-    rows = ((res.data && res.data.subscriptions) || []).map((s) => ({ slug: s.slug, state: undefined, failed: false }));
-    render();
-    await DJA.pool(rows, 4, async (r) => {
-      const s = await DJA.loadState(r.slug);
-      if (s.failed) { r.state = null; r.failed = true; } else { r.state = s.state; }
+    // The list and each row's state stored at the last view paint at once; the live ones replace them.
+    await TK.api.swr('/ui/api/list', async (res) => {
+      $('pl-skel').hidden = true;
+      if (!res.ok) {
+        showError(TK.errText(res, 'failed to load (' + res.status + ')'));
+        if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
+        return;
+      }
+      showError('');
+      const prev = new Map(rows.map((r) => [r.slug, r]));
+      rows = ((res.data && res.data.subscriptions) || []).map((s) => {
+        const old = prev.get(s.slug);
+        return old || { slug: s.slug, state: res.stale ? DJA.storedState(s.slug) : undefined, failed: false };
+      });
       render();
+      if (res.stale) return;
+      await DJA.pool(rows, 4, async (r) => {
+        const s = await DJA.loadState(r.slug);
+        if (s.failed) { r.state = null; r.failed = true; } else { r.state = s.state; r.failed = false; }
+        render();
+      });
     });
   }
 
   // ── hygiene strip ──
   async function loadHygiene() {
-    const res = await TK.api.get('/ui/api/removals?limit=1');
+    await TK.api.swr('/ui/api/removals?limit=1', applyHygiene);
+  }
+  function applyHygiene(res) {
     const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
     $hygiene.hidden = false;
     if (!d) { $hygiene.innerHTML = '<span class="muted">Hygiene status unavailable.</span> <a href="/ui/removed">Removed videos →</a>'; return; }
@@ -199,7 +214,7 @@ ${YOUTUBE_CARD_JS}
 
   YT.handleReturn();
   YT.load();
-  loadCombined();
+  loadCombined(true);
   loadHygiene();
   loadRows();
 })();

@@ -203,41 +203,45 @@ ${ACTIVITY_DRAWER_JS}
     tileHtml('t-yt', v, s.join(' · '), { vcls: vcls + (ytS && ytS.connected ? ' small' : ''), meter: m });
   }
   async function loadYt() {
-    const res = await TK.api.get('/ui/api/youtube/status');
-    if (!res.ok || !res.data || typeof res.data !== 'object') { ytS = null; ytErr = failText(res); } else ytS = res.data;
-    renderYt();
+    await TK.api.swr('/ui/api/youtube/status', (res) => {
+      if (!res.ok || !res.data || typeof res.data !== 'object') { ytS = null; ytErr = failText(res); } else ytS = res.data;
+      renderYt();
+    });
   }
   async function loadCombined() {
-    const res = await TK.api.get('/ui/api/combined');
-    if (!res.ok || !res.data || typeof res.data !== 'object') { cmbS = null; cmbErr = failText(res); } else cmbS = res.data;
-    renderYt();
+    await TK.api.swr('/ui/api/combined', (res) => {
+      if (!res.ok || !res.data || typeof res.data !== 'object') { cmbS = null; cmbErr = failText(res); } else cmbS = res.data;
+      renderYt();
+    });
   }
 
   // ── mkvid tile ──
   async function loadMkvid() {
-    const res = await TK.api.get('/ui/api/mkvid?limit=1');
-    const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
-    if (!d) { const e = failText(res); tileHtml('t-mk', '—', esc(e), { scls: 'bad' }); setAttn('mkvid', { error: e }); return; }
-    const st = mkState(d), eff = mkEffective(d);
-    const caps = (d.accounts || []).map((a) => esc(a.label || a.account) + ' ' + esc(a.used) + ' / ' + esc(a.cap)).join(' · ');
-    tileHtml('t-mk', esc(st[1]), caps || esc(st[2]), { vcls: 'small ' + st[0], meter: meter(eff.used, eff.cap) });
-    const items = [];
-    const c = d.counts || {};
-    if (c.failed) items.push(item('/ui/mkvid?status=failed&tab=settled', 'bad', c.failed + ' mkvid request' + (c.failed === 1 ? '' : 's') + ' failed', 'Retry or ban them on the mkvid page', 'mkvid'));
-    const olds = d.oldVideos || [];
-    if (olds.length) items.push(item('/ui/mkvid?tab=old', 'warn', olds.length + ' old video' + (olds.length === 1 ? ' is' : 's are') + ' not deleted from YouTube yet', 'A recreation replaced ' + (olds.length === 1 ? 'it' : 'them'), 'Old videos'));
-    if (st[0] === 'bad') items.push(item('/ui/mkvid', 'bad', 'mkvid: ' + st[1], st[2], 'mkvid'));
-    setAttn('mkvid', { items });
+    await TK.api.swr('/ui/api/mkvid?limit=1', (res) => {
+      const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
+      if (!d) { const e = failText(res); tileHtml('t-mk', '—', esc(e), { scls: 'bad' }); setAttn('mkvid', { error: e }); return; }
+      const st = mkState(d), eff = mkEffective(d);
+      const caps = (d.accounts || []).map((a) => esc(a.label || a.account) + ' ' + esc(a.used) + ' / ' + esc(a.cap)).join(' · ');
+      tileHtml('t-mk', esc(st[1]), caps || esc(st[2]), { vcls: 'small ' + st[0], meter: meter(eff.used, eff.cap) });
+      const items = [];
+      const c = d.counts || {};
+      if (c.failed) items.push(item('/ui/mkvid?status=failed&tab=settled', 'bad', c.failed + ' mkvid request' + (c.failed === 1 ? '' : 's') + ' failed', 'Retry or ban them on the mkvid page', 'mkvid'));
+      const olds = d.oldVideos || [];
+      if (olds.length) items.push(item('/ui/mkvid?tab=old', 'warn', olds.length + ' old video' + (olds.length === 1 ? ' is' : 's are') + ' not deleted from YouTube yet', 'A recreation replaced ' + (olds.length === 1 ? 'it' : 'them'), 'Old videos'));
+      if (st[0] === 'bad') items.push(item('/ui/mkvid', 'bad', 'mkvid: ' + st[1], st[2], 'mkvid'));
+      setAttn('mkvid', { items });
+    });
   }
 
   // ── held playlists ──
   async function loadHolds() {
-    const res = await TK.api.get('/ui/api/removals?limit=1');
-    const holds = res.ok && res.data && res.data.holds;
-    if (!Array.isArray(holds)) { setAttn('holds', { error: failText(res) }); return; }
-    setAttn('holds', { items: holds.map((h) => item('/ui/removed', 'bad',
-      (h.kind === 'combined' ? 'Combined playlist' : (h.slug || h.playlistId || 'A playlist')) + ' is held',
-      (h.missing || 0) + ' of ' + (h.expected || 0) + ' missing' + (h.at ? ' since ' + TK.fmt.time(isoOf(h.at)) : ''), 'Removed videos')) });
+    await TK.api.swr('/ui/api/removals?limit=1', (res) => {
+      const holds = res.ok && res.data && res.data.holds;
+      if (!Array.isArray(holds)) { setAttn('holds', { error: failText(res) }); return; }
+      setAttn('holds', { items: holds.map((h) => item('/ui/removed', 'bad',
+        (h.kind === 'combined' ? 'Combined playlist' : (h.slug || h.playlistId || 'A playlist')) + ' is held',
+        (h.missing || 0) + ' of ' + (h.expected || 0) + ' missing' + (h.at ? ' since ' + TK.fmt.time(isoOf(h.at)) : ''), 'Removed videos')) });
+    });
   }
 
   // ── DJs whose last sync errored ──
@@ -259,17 +263,20 @@ ${ACTIVITY_DRAWER_JS}
   }
 
   // ── recent activity: the newest twelve rows of the Activity log ──
+  // Tiles, attention items and activity paint from the responses this browser
+  // stored at the last view (TK.api.swr), then correct themselves from the live ones.
   let actRows = [];
   async function loadActivity() {
     const $list = $('act-list'), $empty = $('act-empty');
-    const res = await TK.api.get('/ui/api/activity?limit=12');
-    $('act-skel').hidden = true;
-    const rows = res.ok && res.data && Array.isArray(res.data.rows) ? res.data.rows : null;
-    if (!rows) { $empty.hidden = false; $empty.innerHTML = '<span class="error">' + esc(failText(res)) + '</span>'; return; }
-    actRows = rows.slice(0, 12);
-    $list.innerHTML = actRows.map((r, i) => activityRowHtml(r, i)).join('');
-    $empty.hidden = actRows.length > 0;
-    $empty.textContent = 'No activity recorded yet.';
+    await TK.api.swr('/ui/api/activity?limit=12', (res) => {
+      $('act-skel').hidden = true;
+      const rows = res.ok && res.data && Array.isArray(res.data.rows) ? res.data.rows : null;
+      if (!rows) { $empty.hidden = false; $empty.innerHTML = '<span class="error">' + esc(failText(res)) + '</span>'; return; }
+      actRows = rows.slice(0, 12);
+      $list.innerHTML = actRows.map((r, i) => activityRowHtml(r, i)).join('');
+      $empty.hidden = actRows.length > 0;
+      $empty.textContent = 'No activity recorded yet.';
+    });
   }
   $('act-list').addEventListener('click', (ev) => {
     const b = ev.target && ev.target.closest ? ev.target.closest('[data-i]') : null;

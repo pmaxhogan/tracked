@@ -292,37 +292,50 @@ ${DJ_ACTIONS_JS}
     } catch (e) { /* the page works without it */ }
   }
 
+  // The set list as last rendered: a revalidated response with the same sets
+  // only updates the summary, so cards opened meanwhile stay open.
+  let renderedKey = null;
+  function applySets(res) {
+    $skel.hidden = true; $skel.textContent = '';
+    const data = res.data || {};
+    if (!res.ok) {
+      showError(TK.errText(res, 'failed (' + res.status + ')'));
+      $counts.textContent = $sets.children.length ? $counts.textContent : 'Could not load the sets.';
+      if (!$sets.children.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
+      return;
+    }
+    showError('');
+    setTitle(data.artistName || slug);
+    subscribed = !!data.subscribed;
+    $sub.hidden = !subscribed;
+    $sync.hidden = !subscribed;
+    $resync.hidden = !subscribed;
+    // 'refreshing': the server answered from the sync state and is crawling in the background (next view has it).
+    const src = data.source === 'state'
+      ? (data.stopReason === 'refreshing' ? 'from sync state · refreshing from 1001tracklists' : 'from sync state (crawl unavailable)')
+      : 'crawled ' + fmtWhen(data.crawledAt);
+    // Until the daily backfill reaches the end of the DJ's list, the count is
+    // "sets found so far", not the DJ's total on 1001tracklists.
+    const partial = data.listingComplete === false ? ' found so far — listing may be incomplete (older sets are backfilled 10 a day)' : '';
+    const sets = data.sets || [];
+    const n = sets.length;
+    $counts.textContent = n + ' set' + (n === 1 ? '' : 's') + partial + ' · ' + src;
+    const key = sets.map((x) => x.url).join(' ');
+    if (key !== renderedKey || !$sets.children.length) { renderedKey = key; renderSets(sets); }
+  }
+
   async function load(refresh) {
     showError('');
-    const run = async () => {
-      // Skeleton cards until the first list arrives (a refresh with sets on screen keeps them).
-      if (!$sets.children.length) { $empty.hidden = true; $skel.innerHTML = TK.skel(6, 'card'); $skel.hidden = false; }
-      const res = await TK.api.get('/ui/api/dj/' + encodeURIComponent(slug) + (refresh ? '?refresh=1' : ''));
-      $skel.hidden = true; $skel.textContent = '';
-      const data = res.data || {};
-      if (!res.ok) {
-        showError(TK.errText(res, 'failed (' + res.status + ')'));
-        $counts.textContent = $sets.children.length ? $counts.textContent : 'Could not load the sets.';
-        if (!$sets.children.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
-        return;
-      }
-      setTitle(data.artistName || slug);
-      subscribed = !!data.subscribed;
-      $sub.hidden = !subscribed;
-      $sync.hidden = !subscribed;
-      $resync.hidden = !subscribed;
-      // 'refreshing': the server answered from the sync state and is crawling in the background (next view has it).
-      const src = data.source === 'state'
-        ? (data.stopReason === 'refreshing' ? 'from sync state · refreshing from 1001tracklists' : 'from sync state (crawl unavailable)')
-        : 'crawled ' + fmtWhen(data.crawledAt);
-      // Until the daily backfill reaches the end of the DJ's list, the count is
-      // "sets found so far", not the DJ's total on 1001tracklists.
-      const partial = data.listingComplete === false ? ' found so far — listing may be incomplete (older sets are backfilled 10 a day)' : '';
-      const n = (data.sets || []).length;
-      $counts.textContent = n + ' set' + (n === 1 ? '' : 's') + partial + ' · ' + src;
-      renderSets(data.sets || []);
-    };
-    if (refresh) await TK.busy($refresh, 'Refreshing…', run); else await run();
+    const path = '/ui/api/dj/' + encodeURIComponent(slug);
+    // Skeleton cards until the first list arrives (a refresh with sets on screen keeps them).
+    const skel = () => { if (!$sets.children.length) { $empty.hidden = true; $skel.innerHTML = TK.skel(6, 'card'); $skel.hidden = false; } };
+    if (refresh) {
+      await TK.busy($refresh, 'Refreshing…', async () => { skel(); applySets(await TK.api.get(path + '?refresh=1')); });
+      return;
+    }
+    skel();
+    // The list this browser saw last paints at once; the live one replaces it.
+    await TK.api.swr(path, applySets);
   }
 
   // ── Sync / Invalidate & resync: the same calls and wording as the DJs page (dj-actions) ──
