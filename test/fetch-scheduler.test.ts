@@ -159,6 +159,28 @@ describe('pickTickItems (decision 12 priorities)', () => {
     expect(due.verify).toBeGreaterThanOrEqual(1)
   })
 
+  it('a DJ step overdue past overdueSlotHours takes the first slot (one per tick); a fresher one waits its turn; 0 turns it off', async () => {
+    const env = makeEnv()
+    const u = await everythingDue(env)
+    // Due 1 s ago: not overdue enough, backfill stays last.
+    expect((await pickTickItems(env, DEFAULT_POOL_SETTINGS, 2, new Set(['a']), NOW)).map((i) => i.kind)).toEqual(['discovery', 'set'])
+    // 13 h overdue: first slot, even in a tick of one.
+    await env.DB.prepare('UPDATE dj_schedule SET next_backfill_at = ? WHERE slug = ?').bind(NOW - 13 * H, 'a').run()
+    expect((await pickTickItems(env, DEFAULT_POOL_SETTINGS, 1, new Set(['a']), NOW)).map((i) => i.kind)).toEqual(['dj_backfill'])
+    const items = await pickTickItems(env, DEFAULT_POOL_SETTINGS, 10, new Set(['a']), NOW)
+    expect(items.map((i) => i.kind)).toEqual(['dj_backfill', 'discovery', 'set', 'verify', 'recheck', 'set'])
+    expect(items.filter((i) => i.kind === 'dj_backfill')).toHaveLength(1)
+    expect(items[5]).toMatchObject({ cls: 'backfill', url: u.old })
+    // Two overdue DJs: only the most overdue one jumps the queue.
+    await subscribe(env, 'b')
+    await env.DB.prepare('INSERT OR REPLACE INTO dj_schedule (slug, next_discovery_at, next_backfill_at, updated_at) VALUES (?, ?, ?, ?)').bind('b', NOW + D, NOW - 40 * H, NOW).run()
+    const two = await pickTickItems(env, DEFAULT_POOL_SETTINGS, 10, new Set(['a', 'b']), NOW)
+    expect(two[0]).toMatchObject({ kind: 'dj_backfill', slug: 'b' })
+    expect(two[two.length - 1]).toMatchObject({ kind: 'dj_backfill', slug: 'a' })
+    const off: PoolSettings = { ...DEFAULT_POOL_SETTINGS, backfill: { ...DEFAULT_POOL_SETTINGS.backfill, overdueSlotHours: 0 } }
+    expect((await pickTickItems(env, off, 1, new Set(['a', 'b']), NOW)).map((i) => i.kind)).toEqual(['discovery'])
+  })
+
   it('follows a custom order from the settings, and ignores unsubscribed DJs', async () => {
     const env = makeEnv()
     const u = await everythingDue(env)

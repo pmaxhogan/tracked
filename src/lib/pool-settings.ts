@@ -71,6 +71,12 @@ export const PoolSettingsSchema = z.object({
     /** One "older sets" step (10 sets) per DJ about this often while its history is incomplete (default 24 h). */
     stepIntervalHours: z.number().positive().max(24 * 30),
     jitterHours: z.number().min(0).max(24 * 7),
+    /**
+     * A DJ whose step is this many hours overdue gets the first slot of a tick
+     * (one per tick), ahead of the priority order: backfill is last in it and
+     * the classes above it can fill every slot for days (default 12 h, 0 = off).
+     */
+    overdueSlotHours: z.number().min(0).max(24 * 30),
   }),
   /** 1001tracklists fetches one manual button press (sync / resync) may spend (default 10). */
   manualMaxFetches: z.number().int().min(0).max(200),
@@ -111,7 +117,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   tick: { minItems: 0, maxItems: 3 },
   verify: { minGapHours: 2, jitterHours: 2 },
   discovery: { intervalHours: 24, jitterHours: 4 },
-  backfill: { stepIntervalHours: 24, jitterHours: 6 },
+  backfill: { stepIntervalHours: 24, jitterHours: 6, overdueSlotHours: 12 },
   manualMaxFetches: 10,
   forcedRefetch: { cooldownSeconds: 120, dailyCap: 40 },
   renderFeedPerDay: 40,

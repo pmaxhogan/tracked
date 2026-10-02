@@ -639,6 +639,17 @@ export async function pickTickItems(
 
   if (dueOut) for (const cls of Object.keys(buckets) as ScheduledClass[]) dueOut[cls] = buckets[cls].length
   const out: TickItem[] = []
+  // Starvation guard: the most overdue DJ step (past overdueSlotHours) takes the
+  // first slot, one per tick. Backfill is last in the order, and the classes
+  // above it (verify + the render feeder, rechecks) can fill every slot for days.
+  const overdueSlot = settings.backfill.overdueSlotHours
+  if (overdueSlot > 0) {
+    const late = dueBackfill.find((r) => r.next_backfill_at! <= nowSec - overdueSlot * HOUR)
+    if (late) {
+      const i = buckets.backfill.findIndex((b) => b.kind === 'dj_backfill' && b.slug === late.slug)
+      if (i >= 0) out.push(...buckets.backfill.splice(i, 1))
+    }
+  }
   for (const cls of settings.priorities.order) {
     for (const item of buckets[cls]) {
       if (out.length >= n) return out
