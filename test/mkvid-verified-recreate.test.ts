@@ -82,7 +82,8 @@ const fixture = (name: string) => readFileSync(resolve(dirname(fileURLToPath(imp
 
 const input = (name: string, setDate: string | null = '2026-01-01') => ({
   slug: 'lillypalmer',
-  setUrl: `https://www.1001tracklists.com/tracklist/abc/${name}.html`,
+  // One 1001tl id per set: two URLs with one id are the same set (sameTracklistLike).
+  setUrl: `https://www.1001tracklists.com/tracklist/t${name}/${name}.html`,
   artistName: 'Lilly Palmer',
   setTitle: `Lilly Palmer @ ${name}`,
   setDate,
@@ -417,6 +418,37 @@ describe('a held (untimed) set is kept due within a week', () => {
     expect(await saveMkvidTracks(env, a.setUrl, { rows: rows as any, decoy: { named: 10, mismatched: 0, suspected: false } })).toBe('saved')
     expect(await env.DB.prepare('SELECT base_rows, timed_rows FROM mkvid_request_tracks').first()).toEqual({ base_rows: 10, timed_rows: 2 })
     expect(await due(env, a.setUrl)).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 7 * DAY + 5)
+  })
+})
+
+describe('one 1001tracklists id is one set, whatever its URL name', () => {
+  const renamed = (from: string, name: string) => ({ ...input(from), setUrl: `https://www.1001tracklists.com/tracklist/t${from}/${name}.html` })
+
+  it('enqueue: a renamed URL of a queued set is not queued again', async () => {
+    const env = makeEnv()
+    await queue(env, 'bk')
+    expect(await enqueueMkvidRequest(env, renamed('bk', 'bk-under-the-k-bridge'))).toBe('exists')
+    expect(await getMkvidRequestForSet(env, renamed('bk', 'bk-under-the-k-bridge').setUrl)).toBeNull()
+    // another id is another set
+    expect(await enqueueMkvidRequest(env, input('other'))).toBe('queued')
+  })
+
+  it('claim: a twin already rendered under the other URL supersedes this one instead of a second upload', async () => {
+    const env = makeEnv()
+    const done = await queue(env, 'tw')
+    await env.DB.prepare("UPDATE mkvid_requests SET status = 'done', video_id = 'vid00000001' WHERE id = ?").bind(done.id).run()
+    // a twin queued before this guard existed (prod has these)
+    const twinUrl = renamed('tw', 'tw-renamed').setUrl
+    await env.DB.prepare(
+      `INSERT INTO mkvid_requests (id, slug, set_url, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count, status, attempts, created_at, updated_at)
+       SELECT 'twin', slug, ?, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count, 'pending', 0, created_at, updated_at FROM mkvid_requests WHERE id = ?`,
+    ).bind(twinUrl, done.id).run()
+    await storeVerifiedList(env, twinUrl)
+    expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
+    const twin = (await getMkvidRequest(env, 'twin'))!
+    expect(twin.status).toBe('superseded')
+    expect(twin.error).toContain('vid00000001')
+    expect(twin.attempts).toBe(0)
   })
 })
 

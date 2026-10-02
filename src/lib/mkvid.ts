@@ -509,9 +509,21 @@ export type EnqueueInput = {
 }
 
 /**
+ * LIKE pattern matching every URL of the set's 1001tracklists id
+ * (`/tracklist/<id>/<name>.html`). 1001tl renames a set's <name> part, and a
+ * DJ page can list the old and the new URL side by side; both are one set.
+ * Null when the URL has no id.
+ */
+export function sameTracklistLike(setUrl: string): string | null {
+  const id = setUrl.match(/\/tracklist\/([A-Za-z0-9]+)\//)?.[1]
+  return id ? `%/tracklist/${id}/%` : null
+}
+
+/**
  * Queue a set, unless it already has a request (any status — a `done` or
  * `failed` request is final for that set until someone retries it from the
- * panel). Returns whether a row was created.
+ * panel), also under another URL of the same tracklist id. Returns whether a
+ * row was created.
  */
 export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promise<'queued' | 'exists'> {
   const now = nowSeconds()
@@ -520,7 +532,8 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
       `INSERT OR IGNORE INTO mkvid_requests
          (id, slug, set_url, artist_name, set_title, set_date, sort_key, source, source_url, last_cue_seconds, track_count, ided_count,
           status, attempts, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, COALESCE(julianday(?), 0), ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, COALESCE(julianday(?), 0), ?, ?, ?, ?, ?, 'pending', 0, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM mkvid_requests WHERE set_url LIKE ?)`,
     )
     .bind(
       crypto.randomUUID(),
@@ -537,6 +550,8 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
       v(input.idedCount),
       now,
       now,
+      // No id in the URL: the pattern can match nothing (unique set_url still dedupes).
+      sameTracklistLike(input.setUrl) ?? '',
     )
     .run()
   return (r.meta.changes ?? 0) > 0 ? 'queued' : 'exists'
@@ -969,6 +984,24 @@ async function tryClaimRow(
         .run()
       if (row.replaces_video_id) await queueSupersededOldVideo(env, row.id, tl.video_id)
       log.info('mkvid.claim_superseded', { id: row.id, setUrl: row.set_url, videoId: tl.video_id })
+      return null
+    }
+    // The same tracklist under an older/newer URL (1001tl renamed the set)
+    // already has its mkvid video: rendering again would upload a duplicate.
+    const like = sameTracklistLike(row.set_url)
+    const twin = like
+      ? await db
+          .prepare("SELECT set_url, video_id FROM mkvid_requests WHERE set_url LIKE ? AND id != ? AND status = 'done' AND video_id IS NOT NULL LIMIT 1")
+          .bind(like, row.id)
+          .first<{ set_url: string; video_id: string }>()
+      : null
+    if (twin) {
+      await db
+        .prepare("UPDATE mkvid_requests SET status = 'superseded', error = ?, updated_at = ? WHERE id = ?")
+        .bind(`same tracklist as ${twin.set_url}, already rendered as ${twin.video_id}`, now, row.id)
+        .run()
+      if (row.replaces_video_id) await queueSupersededOldVideo(env, row.id, twin.video_id)
+      log.info('mkvid.claim_superseded_twin', { id: row.id, setUrl: row.set_url, twinSetUrl: twin.set_url, videoId: twin.video_id })
       return null
     }
   }
