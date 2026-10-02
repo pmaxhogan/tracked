@@ -223,7 +223,7 @@ describe('pool UI: accounts and status', () => {
     calls.forEach(expectAuthed)
     expect(data.status.accounts[0]).toEqual({
       id: 'acct-1', state: 'active', passive: false, exitLabel: 'own-2', exitKind: 'own', usedToday: 12, budget: 30, rampDay: 3,
-      lastOkAt: '2026-09-29T10:00:00.000Z', lastChallengeAt: null, flagged: false, flagReason: null, restUntil: null, xhrUsedToday: null, xhrBudget: null,
+      lastOkAt: '2026-09-29T10:00:00.000Z', lastChallengeAt: null, flagged: false, flagReason: null, restUntil: null, xhrUsedToday: null, xhrBudget: null, signupChallengeId: null,
     })
     expect(data.status.accounts[1]).toMatchObject({ id: 'acct-2', flagged: true, passive: true, flagReason: 'decoy_names' })
     expect(data.status.queueDepth).toBe(12)
@@ -468,7 +468,7 @@ describe('pool UI: tlpool settings (/api/pool/limits)', () => {
 describe('normalisers', () => {
   it('drop every field outside the whitelist', () => {
     const a = normalizeAccount(upstreamAccount('acct-1', { exit: { label: 'x', wgPrivateKey: 'k' } }))!
-    expect(Object.keys(a).sort()).toEqual(['budget', 'exitKind', 'exitLabel', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastOkAt', 'passive', 'rampDay', 'restUntil', 'state', 'usedToday', 'xhrBudget', 'xhrUsedToday'])
+    expect(Object.keys(a).sort()).toEqual(['budget', 'exitKind', 'exitLabel', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastOkAt', 'passive', 'rampDay', 'restUntil', 'signupChallengeId', 'state', 'usedToday', 'xhrBudget', 'xhrUsedToday'])
     expect(JSON.stringify(a)).not.toContain('wgPrivateKey')
     const c = normalizeChallenge(upstreamChallenge('ch-1'))!
     expect(Object.keys(c).sort()).toEqual(['accountId', 'createdAt', 'error', 'expiresAt', 'id', 'ready', 'reason', 'state', 'step', 'type'])
@@ -980,5 +980,87 @@ describe('tlpool as shipped', () => {
     await (pg.els.get('lim')!.handlers as Record<string, (e: unknown) => Promise<void>>).submit!({ preventDefault() {} })
     await settle()
     expect(puts[0]).toMatchObject({ xhrBudgetPerDay: 80, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.5 } })
+  })
+})
+
+describe('pool page: reopening the signup progress of an account still being created', () => {
+  const statusWith = (accounts: unknown[]) => () => json({ accounts, queueDepth: 0 })
+  const badgeButtons = (html: string) => [...html.matchAll(/<button [^>]*data-signup="([^"]*)"[^>]*data-acct="([^"]*)"[^>]*>([^<]*)<\/button>/g)].map((m) => ({ cid: m[1], acct: m[2], text: m[3] }))
+  /** A click on the #accts table that lands on a button carrying these data attributes. */
+  const clickOn = (dataset: Record<string, string>) => ({ target: { closest: (sel: string) => (sel === 'button' ? { dataset, closest: () => null } : null) } })
+
+  it('the normaliser keeps tlpool\'s signupChallengeId (opaque ids only)', () => {
+    expect(normalizeAccount({ id: 'acct-5', state: 'new', signupChallengeId: 'ch_s5' })!.signupChallengeId).toBe('ch_s5')
+    expect(normalizeAccount({ id: 'acct-5', state: 'new', signup_challenge_id: 'ch_s5' })!.signupChallengeId).toBe('ch_s5')
+    expect(normalizeAccount({ id: 'acct-5', state: 'active' })!.signupChallengeId).toBeNull()
+    expect(normalizeAccount({ id: 'acct-5', state: 'new', signupChallengeId: '<img src=x>' })!.signupChallengeId).toBeNull()
+  })
+
+  it('the state badge is a button only for an account still being created that names its signup challenge', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': statusWith([
+        upstreamAccount('acct-1', { state: 'new', signupChallengeId: 'ch_n1' }),
+        upstreamAccount('acct-2', { state: 'active', signupChallengeId: 'ch_old' }),
+        upstreamAccount('acct-3', { state: 'new' }),
+        upstreamAccount('acct-4', { state: 'warming', signupChallengeId: 'ch_w4' }),
+      ]),
+      'GET /challenges': () => json({ challenges: [] }),
+    })
+    const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const accts = els.get('accts')!.innerHTML
+    expect(badgeButtons(accts)).toEqual([{ cid: 'ch_n1', acct: 'acct-1', text: 'new' }])
+    expect(accts).toMatch(/<button type="button" class="badge badge-btn warn" data-signup="ch_n1"[^>]*aria-label="acct-1 is new: show its signup progress"/)
+    expect(accts).toContain('<span class="badge ok">active</span>')
+    expect(accts).toContain('<span class="badge warn">new</span>') // acct-3: no challenge to follow
+    expect(accts).toContain('<span class="badge info">warming</span>')
+    expectNoCredentials([...els.values()].map((e) => e.innerHTML + e.textContent).join('\n'))
+  })
+
+  it('clicking the badge opens the progress dialog on that account\'s signup challenge', async () => {
+    const { fetcher, calls } = fakePool({
+      'GET /status': statusWith([
+        upstreamAccount('acct-1', { state: 'new', signupChallengeId: 'ch_n1' }),
+        upstreamAccount('acct-2', { state: 'new', signupChallengeId: 'ch_n2' }),
+      ]),
+      'GET /challenges': () => json({ challenges: [] }),
+      'GET /challenges/ch_n1': () => json({ id: 'ch_n1', type: 'image', account: 'acct-1', purpose: 'signup', status: 'pending', step: 'form_opened', ready: false }),
+      'GET /challenges/ch_n2': () => json({ id: 'ch_n2', type: 'image', account: 'acct-2', purpose: 'signup', status: 'solved', step: 'awaiting_email', ready: false }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const dlg = pg.els.get('add-dlg')!
+    const showModal = vi.fn(); dlg.showModal = showModal
+    const n = calls.length
+    await (pg.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!(clickOn({ signup: 'ch_n2', acct: 'acct-2' }))
+    await settle()
+    const fetched = calls.slice(n).map((c) => c.url.slice(POOL.length))
+    expect(fetched).toContain('/challenges/ch_n2')
+    expect(fetched).not.toContain('/challenges/ch_n1')
+    expect(showModal).toHaveBeenCalledTimes(1)
+    expect(pg.els.get('add-form')!.hidden).toBe(true)
+    expect(pg.els.get('add-progress')!.hidden).toBe(false)
+    const steps = pg.els.get('add-steps')!.innerHTML
+    expect(steps).toMatch(/<li class="cur">.*Waiting for the confirmation email/)
+    expect(steps).toMatch(/<li class="done">.*Exit assigned/)
+    // It keeps watching that same challenge.
+    await pg.fire(2500)
+    expect(calls.slice(n).filter((c) => c.url.endsWith('/challenges/ch_n2')).length).toBeGreaterThan(1)
+    // "+ Add account" afterwards offers a new account, not the reopened signup.
+    ;(pg.els.get('add-btn')!.handlers as Record<string, () => void>).click!()
+    expect(pg.els.get('add-form')!.hidden).toBe(false)
+    expect(pg.els.get('add-progress')!.hidden).toBe(true)
+    const m = calls.length
+    await pg.fire(2500)
+    expect(calls.slice(m).filter((c) => c.url.includes('/challenges/ch_n2'))).toHaveLength(0)
+  })
+
+  it('a reopened signup whose challenge is gone says so at once (no "Starting…" grace)', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': statusWith([upstreamAccount('acct-1', { state: 'new', signupChallengeId: 'ch_gone' })]),
+      'GET /challenges': () => json({ challenges: [] }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await (pg.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!(clickOn({ signup: 'ch_gone', acct: 'acct-1' }))
+    await settle()
+    expect(pg.els.get('add-msg')!.innerHTML).toContain('lost track of this signup')
   })
 })

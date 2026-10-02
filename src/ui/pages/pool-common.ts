@@ -17,6 +17,9 @@ export const POOL_CSS = /* css */ `
   #prio .chip { cursor: default; }
   #prio .chip b { color: var(--fg); }
   .badge { text-transform: none; }
+  button.badge-btn { appearance: none; border: 0; font: inherit; font-size: .74rem; font-weight: 600; cursor: pointer; }
+  button.badge-btn:hover { text-decoration: underline; }
+  button.badge-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
   ul.plain li { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--card); padding: var(--sp-3) var(--sp-4); }
   ul.plain li a.open { display: block; text-decoration: none; color: inherit; }

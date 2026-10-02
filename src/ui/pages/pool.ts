@@ -34,10 +34,17 @@ const JS = /* js */ `
 ${COMMON_JS}
 ${CAPTCHA_JS}
   // ── overview ───────────────────────────────────────────────────────────
+  // Account states that mean "still being created" (tlpool: new; older shapes: the rest).
+  const IN_CREATION = /^(creating|signup|pending|new)$/;
   const stateBadge = (a) => {
     const s = String(a.state || 'unknown');
     // tlpool states: new (signing up), warming (ramp days 1-2), active, passive, resting, retired.
     const cls = a.flagged || s === 'flagged' ? 'bad' : s === 'retired' ? '' : s === 'resting' || s === 'new' || s === 'creating' ? 'warn' : s === 'warming' || s === 'ramping' ? 'info' : s === 'active' || s === 'ok' || s === 'healthy' ? 'ok' : 'info';
+    // An account still signing up whose signup challenge tlpool names: the badge
+    // is a button that reopens the Add account progress view for that signup.
+    if (IN_CREATION.test(s) && a.signupChallengeId) {
+      return '<button type="button" class="badge badge-btn ' + cls + '" data-signup="' + esc(a.signupChallengeId) + '" data-acct="' + esc(a.id) + '" aria-haspopup="dialog" aria-label="' + esc(a.id + ' is ' + s + ': show its signup progress') + '" title="Show signup progress">' + esc(s) + '</button>';
+    }
     return '<span class="badge ' + cls + '">' + esc(s) + '</span>';
   };
   const confirmWords = { rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };
@@ -101,6 +108,7 @@ ${CAPTCHA_JS}
   $('accts').addEventListener('click', async (ev) => {
     const b = ev.target.closest('button');
     if (!b) return;
+    if (b.dataset.signup) { openFlow(b.dataset.signup, b.dataset.acct || null); return; }
     const box = b.closest('[data-acts]');
     const id = box && box.dataset.acts;
     if (b.dataset.act) {
@@ -198,7 +206,7 @@ ${CAPTCHA_JS}
       // The solved challenge may be gone already; follow the account instead.
       const a = await api('/accounts');
       const acct = a.ok ? (a.data.accounts || []).find((x) => x.id === flow.accountId) : null;
-      if (acct && !/^(creating|signup|pending|new)$/.test(acct.state)) { ch = { state: 'solved', step: 'done' }; }
+      if (acct && !IN_CREATION.test(acct.state)) { ch = { state: 'solved', step: 'done' }; }
       else return a.ok ? r : a;
     } else if (!r.ok) {
       if (r.status === 401 || r.status === 403) return r; // the poller stops and says sign in again
@@ -257,10 +265,30 @@ ${CAPTCHA_JS}
     watchFlow();
   }
 
+  // Reopen the progress view for an account that is still being created (its
+  // "new" badge): follow its signup challenge exactly as create() does.
+  function openFlow(challengeId, accountId) {
+    if (flow && flow.active && flow.challengeId === challengeId) {
+      if (flow.poller && flow.poller.isStopped()) { flow.lastChange = Date.now(); poll(); watchFlow(); }
+      dlg.showModal();
+      return;
+    }
+    resetDialog();
+    $('add-form').hidden = true; $('add-progress').hidden = false;
+    $('add-msg').innerHTML = '<div class="muted">Loading…</div>';
+    renderSteps(-1, false);
+    // startedAt 0: the challenge already exists in tlpool, so a 404 is not "still starting".
+    flow = { challengeId, accountId, stepIdx: -1, lastChange: Date.now(), startedAt: 0, poller: null, captchaShown: false, captchaSeen: false, active: true, reopened: true };
+    poll();
+    watchFlow();
+    dlg.showModal();
+  }
+
   // Closing the dialog stops watching (the signup itself carries on in the
-  // pool); reopening resumes watching it.
+  // pool); reopening resumes watching it. A flow opened from a badge is not
+  // the one "+ Add account" resumes: that button always offers a new account then.
   $('add-btn').addEventListener('click', () => {
-    if (!flow || !flow.active) resetDialog();
+    if (!flow || !flow.active || flow.reopened) resetDialog();
     else if (flow.poller && flow.poller.isStopped()) { flow.lastChange = Date.now(); poll(); watchFlow(); }
     dlg.showModal();
   });

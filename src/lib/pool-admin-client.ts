@@ -89,6 +89,8 @@ export type PoolAccount = {
   /** In-page XHR lookups (media links, ajax) today, on their own budget. */
   xhrUsedToday: number | null
   xhrBudget: number | null
+  /** The challenge that tracks this account's signup (tlpool `signupChallengeId`); the pool page reopens its progress from it. */
+  signupChallengeId: string | null
 }
 
 export type PoolStatus = {
@@ -224,6 +226,7 @@ export function normalizeAccount(raw: unknown): PoolAccount | null {
     restUntil: iso(pick(raw, 'restUntil', 'rest_until', 'restingUntil', 'resting_until')),
     xhrUsedToday: num(pick(raw, 'usedXhrToday', 'used_xhr_today', 'xhrUsedToday')),
     xhrBudget: num(pick(raw, 'xhrBudget', 'xhr_budget')),
+    signupChallengeId: opaqueId(pick(raw, 'signupChallengeId', 'signup_challenge_id', 'signup_cid')),
   }
 }
 
