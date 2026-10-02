@@ -200,11 +200,15 @@ ${CAPTCHA_JS}
     if (!flow) return;
     // The stall guard runs before any early return, errors included.
     if (stalled()) { failFlow('No progress for 10 minutes. The flow may be stuck on the NAS.'); return; }
+    // A reply that lands after the dialog moved to another signup (closed, reopened elsewhere, + Add account) is dropped.
+    const f = flow;
     const r = await api('/challenges/' + encodeURIComponent(flow.challengeId));
+    if (flow !== f) return r;
     let ch = r.ok ? r.data.challenge : null;
     if (!r.ok && r.status === 404 && flow.stepIdx >= stepIndex('submitted') && flow.accountId) {
       // The solved challenge may be gone already; follow the account instead.
       const a = await api('/accounts');
+      if (flow !== f) return a;
       const acct = a.ok ? (a.data.accounts || []).find((x) => x.id === flow.accountId) : null;
       if (acct && !IN_CREATION.test(acct.state)) { ch = { state: 'solved', step: 'done' }; }
       else return a.ok ? r : a;
