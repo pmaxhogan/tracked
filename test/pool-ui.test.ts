@@ -1264,6 +1264,14 @@ describe('pool page: state details for every other account state', () => {
     const d = await openOn(pg, 'acct-1')
     expect(d.body).not.toContain('<img')
     expect(d.body).toContain('Last error: a &amp; b')
+    // A stored event reason keeps < and > (pool-events sanitising): the drawer escapes it.
+    const appl = new Hono<{ Bindings: Env }>()
+    appl.get('/ui/api/pool/accounts/:id/events', (c) => c.json({ events: [{ type: 'account.flagged', at: '2026-09-22T10:00:00Z', reason: '<img src=x onerror=y>' }] }))
+    appl.route('/ui', createPoolUiApp({ fetcher }))
+    const pg2 = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, appl, makeEnv())
+    const d2 = await openOn(pg2, 'acct-1')
+    expect(d2.body).not.toContain('<img')
+    expect(d2.body).toContain('&lt;img')
   })
 
   it('drops an events reply that lands after the drawer moved to another account or closed', async () => {

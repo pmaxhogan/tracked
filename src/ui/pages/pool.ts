@@ -133,7 +133,9 @@ ${CAPTCHA_JS}
       if (stale) next.push(li('If the signup has not finished by <b>' + tkEsc(when(stale)) + '</b>, the pool gives up: signup failed when the form was sent, retired when it never was.'));
       if (a.canRetrySignup) next.push(li('Its signup ended without finishing; the pool accepts a retry (from the NAS, this page has no retry button).'));
     } else if (s === 'warming') {
-      const day = a.activatedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(a.activatedAt)) / DAY_MS)) : (a.rampDay ?? null);
+      // tlpool counts ramp days from activation, or from creation when that is missing (pacing.py).
+      const from = a.activatedAt || a.createdAt;
+      const day = from && !isNaN(Date.parse(from)) ? Math.max(0, Math.floor((Date.now() - Date.parse(from)) / DAY_MS)) : null;
       const len = d.rampLen;
       if (day !== null) next.push(li('Ramp day <b>' + tkEsc(day + 1) + (len ? ' of ' + len : '') + '</b>' + (len ? '' : ' (the ramp length comes from the pool settings, which did not load)') + '.'));
       if (a.budget !== null && a.budget !== undefined) next.push(li('Today: <b>' + tkEsc((a.usedToday ?? 0) + ' / ' + a.budget) + '</b> pages in the last 24 h.'));
@@ -147,8 +149,10 @@ ${CAPTCHA_JS}
       next.push(li('Nothing: it stays logged in and never fetches, until it is retired.'));
     } else if (s === 'resting' || s === 'flagged') {
       if (a.restUntil) next.push(li('Rests until <b>' + tkEsc(when(a.restUntil)) + '</b>.'));
-      if (a.retestPending) next.push(li('Then one retest with a known set: a pass puts it back to warming or active, a fail retires it, an inconclusive one rests it again.'));
-      else next.push(li('Then it goes back to warming or active on its own (the pool checks every 15 to 40 seconds).'));
+      // A passive account goes back to passive, and tlpool never retests one.
+      const back = a.passive ? 'passive' : 'warming or active';
+      if (a.retestPending && !a.passive) next.push(li('Then one retest with a known set: a pass puts it back to ' + back + ', a fail retires it, an inconclusive one rests it again.'));
+      else next.push(li('Then it goes back to ' + back + ' on its own (the pool checks every 15 to 40 seconds).'));
     } else if (s === 'retired') {
       next.push(li('It is never used again.'));
       const ev = lastEvent(evs, ['account.retired']);
@@ -214,7 +218,12 @@ ${CAPTCHA_JS}
     if (body) body.innerHTML = detailsHtml(find() || a, details);
   }
   // Closing the drawer drops whatever reply is still on its way.
-  if ($('tk-drawer')) $('tk-drawer').addEventListener('close', () => { details.seq++; });
+  // The table may have been redrawn while it was open: give keyboard focus back to the account's badge in the current table.
+  if ($('tk-drawer')) $('tk-drawer').addEventListener('close', () => {
+    details.seq++;
+    const b = details.id && document.querySelector ? document.querySelector('[data-state-acct="' + details.id + '"]') : null;
+    if (b && b.focus) b.focus();
+  });
   const confirmWords = { rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };
   let lastStatus = null;
 
