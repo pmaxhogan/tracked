@@ -211,12 +211,31 @@ async function removalSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]>
   }))
 }
 
+/**
+ * Why an mkvid request was superseded, from the error text stored when it was.
+ * Only a 1001tracklists recording counts as "an official recording"; the
+ * duplicate-URL causes (claim-time twin guard, manual twin cleanup) and a set
+ * that already resolves to an mkvid video say so. Unknown text falls through.
+ */
+export function supersededReason(error: string | null | undefined): string {
+  const e = (error ?? '').trim()
+  if (!e) return 'superseded'
+  let m = /^same tracklist as (\S+), already rendered as (\S+)$/.exec(e)
+  if (m) return `duplicate URL: kept under ${m[1]} (${m[2]})`
+  if (/^duplicate of the same 1001tracklists id under another URL/.test(e)) return 'duplicate URL: kept under another URL'
+  m = /^set already resolves to (\S+) \((1001tl|mkvid)\)$/.exec(e)
+  if (m) return m[2] === 'mkvid' ? `set already has mkvid video ${m[1]}` : `superseded by an official recording (${m[1]})`
+  m = /^1001tracklists now has (\S+)$/.exec(e)
+  if (m) return `superseded by an official recording (${m[1]})`
+  return clip(e) ?? 'superseded'
+}
+
 function mkvidDetail(r: { status: string; video_id: string | null; error: string | null }): string | null {
   switch (r.status) {
     case 'done': return r.video_id ? `uploaded ${r.video_id}` : 'uploaded'
     case 'failed': return r.error
     case 'banned': return 'banned from mkvid'
-    case 'superseded': return 'superseded by an official recording'
+    case 'superseded': return supersededReason(r.error)
     default: return null
   }
 }

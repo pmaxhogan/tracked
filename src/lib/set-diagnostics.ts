@@ -10,6 +10,7 @@ import { readCachedVideoMeta } from './video-meta'
 import { isOverridden } from './playlist-blocklist'
 import { getMkvidRequestForSet, mkvidQueuePosition } from './mkvid'
 import { readinessFor, type MkvidReadiness } from './mkvid-readiness'
+import { supersededReason } from './activity'
 
 export type SetDiagnostics = {
   url: string
@@ -52,6 +53,8 @@ export type SetDiagnostics = {
     attempts: number
     notBefore: number | null
     error: string | null
+    /** Friendly cause when status is superseded (duplicate URL vs official recording), else null. */
+    supersededReason: string | null
     videoId: string | null
     style: string | null
     account: string
@@ -263,6 +266,7 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
           attempts: req.attempts,
           notBefore: req.notBefore,
           error: req.error,
+          supersededReason: req.status === 'superseded' ? supersededReason(req.error) : null,
           videoId: req.videoId,
           style: req.style,
           account: req.account,

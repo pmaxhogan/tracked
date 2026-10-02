@@ -3,7 +3,7 @@ import { app } from '../src/index'
 import type { Env } from '../src/types'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
-import { ACTIVITY_KINDS, parseActivityQuery, encodeActivityCursor, decodeActivityCursor, labelFromSetUrl } from '../src/lib/activity'
+import { ACTIVITY_KINDS, parseActivityQuery, encodeActivityCursor, decodeActivityCursor, labelFromSetUrl, supersededReason } from '../src/lib/activity'
 
 function makeEnv(): Env {
   return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', DEV_BYPASS_CF_ACCESS: '1' } as Env
@@ -208,6 +208,44 @@ describe('activity feed', () => {
     const q = await page(env, '?kind=ban&limit=2')
     expect(q.rows.map((r) => r.ts)).toEqual([3_000, 2_000])
     expect(q.cursor).not.toBeNull()
+  })
+
+  it('names each superseded cause from the stored error', () => {
+    const twinUrl = 'https://www.1001tracklists.com/tracklist/abc123/other-url.html'
+    expect(supersededReason('duplicate of the same 1001tracklists id under another URL (removed 2026-10-02)')).toBe('duplicate URL: kept under another URL')
+    expect(supersededReason(`same tracklist as ${twinUrl}, already rendered as vidtwin0001`)).toBe(`duplicate URL: kept under ${twinUrl} (vidtwin0001)`)
+    expect(supersededReason('set already resolves to vidoffic001 (1001tl)')).toBe('superseded by an official recording (vidoffic001)')
+    expect(supersededReason('set already resolves to vidmkvid002 (mkvid)')).toBe('set already has mkvid video vidmkvid002')
+    expect(supersededReason('1001tracklists now has vidoffic003')).toBe('superseded by an official recording (vidoffic003)')
+    expect(supersededReason('set gained vidx before the upload finished')).toBe('set gained vidx before the upload finished')
+    expect(supersededReason(null)).toBe('superseded')
+    expect(supersededReason('  ')).toBe('superseded')
+  })
+
+  it('shows the stored superseded cause on mkvid rows', async () => {
+    const env = makeEnv()
+    const errors = [
+      'duplicate of the same 1001tracklists id under another URL (removed 2026-10-02)',
+      'same tracklist as https://www.1001tracklists.com/tracklist/abc123/other-url.html, already rendered as vidtwin0001',
+      'set already resolves to vidoffic001 (1001tl)',
+      'set already resolves to vidmkvid002 (mkvid)',
+      '1001tracklists now has vidoffic003',
+      null,
+    ]
+    for (const [i, error] of errors.entries()) {
+      await env.DB.prepare("INSERT INTO mkvid_requests (id, slug, set_url, set_title, source, source_url, status, error, created_at, updated_at) VALUES (?, 'dj-one', ?, 'DJ One @ Somewhere', 'soundcloud', 'https://soundcloud.com/x/y', 'superseded', ?, 1, ?)")
+        .bind(`sup-${i}`, `${SET}?n=${i}`, error, 1000 + i).run()
+    }
+    const p = await page(env, '?kind=mkvid')
+    const detail = Object.fromEntries(p.rows.filter((r) => r.ref.kind === 'mkvid').map((r) => [r.ref.key, r.detail]))
+    expect(detail).toEqual({
+      'sup-0': 'duplicate URL: kept under another URL',
+      'sup-1': 'duplicate URL: kept under https://www.1001tracklists.com/tracklist/abc123/other-url.html (vidtwin0001)',
+      'sup-2': 'superseded by an official recording (vidoffic001)',
+      'sup-3': 'set already has mkvid video vidmkvid002',
+      'sup-4': 'superseded by an official recording (vidoffic003)',
+      'sup-5': 'superseded',
+    })
   })
 
   it('treats an empty sync error as ok', async () => {

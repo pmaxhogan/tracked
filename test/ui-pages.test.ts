@@ -594,7 +594,11 @@ describe('Set diagnostics', () => {
     const done = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'done', position: null, readiness: null, videoId: 'abcdefghijk' }) }).mkvid
     expect([done.tone, done.finding]).toEqual(['ok', 'Uploaded abcdefghijk.'])
     const sup = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'superseded', position: null, readiness: null }) }).mkvid
-    expect([sup.tone, sup.finding]).toEqual(['neutral', 'Superseded by an official recording.'])
+    expect([sup.tone, sup.finding]).toEqual(['neutral', 'Superseded.'])
+    const supOfficial = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'superseded', position: null, readiness: null, supersededReason: 'superseded by an official recording (vidoffic001)' }) }).mkvid
+    expect(supOfficial.finding).toBe('Superseded by an official recording (vidoffic001).')
+    const supTwin = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'superseded', position: null, readiness: null, supersededReason: 'duplicate URL: kept under another URL' }) }).mkvid
+    expect(supTwin.finding).toBe('Duplicate URL: kept under another URL.')
   })
   it('the sticky column scrolls on its own from 1100px', async () => {
     const { SET_DIAG_CSS } = await import('../src/ui/pages/set-diag')

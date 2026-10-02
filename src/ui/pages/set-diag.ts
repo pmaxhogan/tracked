@@ -141,7 +141,7 @@ export const SET_DIAG_JS = /* js */ `
     else if (m.status === 'done') { tone = 'ok'; finding = 'Uploaded ' + (m.videoId || '(no video id)') + '.'; }
     else if (m.status === 'failed') { tone = 'bad'; finding = 'Failed: ' + (m.error || 'no error recorded') + '.'; }
     else if (m.status === 'banned') { tone = 'bad'; finding = 'Banned from mkvid.'; }
-    else if (m.status === 'superseded') { tone = 'neutral'; finding = 'Superseded by an official recording.'; }
+    else if (m.status === 'superseded') { tone = 'neutral'; const why = m.supersededReason || 'superseded'; finding = why.charAt(0).toUpperCase() + why.slice(1) + '.'; }
     else { tone = 'neutral'; finding = m.status + '.'; }
     const l = m.list;
     const facts = [
