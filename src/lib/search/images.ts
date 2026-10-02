@@ -7,14 +7,15 @@
  *
  * Sources are what 1001tracklists set pages point at (Beatport, SoundCloud,
  * YouTube channel art, ...), never a 1001tracklists page: no pool page views.
- * A source must be https on a named host, answer image/*, and be at most
- * MAX_IMAGE_BYTES; anything else is a 404 and the page shows a placeholder.
+ * A source, and every redirect it takes (at most 3), must be https on a named
+ * host; it must answer image/* (not SVG) and be at most MAX_IMAGE_BYTES; anything else is a 404 and the page shows a placeholder.
  */
 import { decodeEntities } from '../html-entities'
 import type { Env } from '../../types'
 
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024
 const FETCH_TIMEOUT_MS = 8000
+const MAX_REDIRECTS = 3
 const KEY_RE = /^[0-9a-f]{32}$/
 /** Content-addressed by source URL: a key's image never changes. */
 const CACHE_HIT = 'private, max-age=31536000, immutable'
@@ -51,6 +52,35 @@ export function extractPageImage(html: string): string | null {
 }
 
 /**
+ * Fetch an image source, following at most MAX_REDIRECTS redirects by hand:
+ * every hop's URL must pass `usableImageUrl` too, so a redirect cannot take
+ * the Worker off https or onto a bare IP/localhost. null on any failure.
+ */
+async function fetchImage(src: string): Promise<Response | null> {
+  let url = src
+  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    let res: Response
+    try {
+      res = await fetch(url, { signal, redirect: 'manual' })
+    } catch {
+      return null
+    }
+    if (res.status < 300 || res.status >= 400) return res
+    const loc = res.headers.get('location')
+    let next: string | null = null
+    try {
+      next = loc ? usableImageUrl(new URL(loc, url).toString()) : null
+    } catch {
+      next = null
+    }
+    if (!next) return null
+    url = next
+  }
+  return null
+}
+
+/**
  * GET /ui/img/<key>: R2 first; on a miss, the source from search_images is
  * fetched, checked and stored. 404 for an unknown key or an unusable source.
  */
@@ -65,12 +95,8 @@ export async function serveImage(env: Env, key: string): Promise<Response> {
   const row = await env.SEARCH_DB.prepare('SELECT src FROM search_images WHERE key = ?').bind(key).first<{ src: string }>()
   const src = usableImageUrl(row?.src)
   if (!src) return notFound()
-  let res: Response
-  try {
-    res = await fetch(src, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: 'follow' })
-  } catch {
-    return notFound()
-  }
+  const res = await fetchImage(src)
+  if (!res) return notFound()
   const type = (res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
   const declared = Number(res.headers.get('content-length') ?? '0')
   if (!res.ok || !type.startsWith('image/') || type.includes('svg') || declared > MAX_IMAGE_BYTES) return notFound()

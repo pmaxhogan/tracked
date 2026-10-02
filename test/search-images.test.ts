@@ -169,6 +169,38 @@ describe('GET /ui/img/<key>', () => {
     expect(((env.IMAGES as unknown as { _store: Map<string, unknown> })._store).size).toBe(0)
   })
 
+  it('follows a redirect only to a usable URL, at most 3 hops; a redirect to http or a bare IP stores nothing', async () => {
+    const jpg = () => new Response(jpeg, { headers: { 'content-type': 'image/jpeg' } })
+    const to = (loc: string) => new Response(null, { status: 302, headers: { location: loc } })
+    const store = (env: Env) => (env.IMAGES as unknown as { _store: Map<string, unknown> })._store
+
+    for (const bad of ['http://evil.example/x.jpg', 'https://10.0.0.1/x.jpg', 'https://localhost/x.jpg', '']) {
+      const { env, key } = await seeded(ART)
+      const spy = vi.fn(async (u: string) => (u === ART ? to(bad) : jpg()))
+      vi.stubGlobal('fetch', spy)
+      expect((await serveImage(env, key)).status).toBe(404)
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect((spy.mock.calls[0] as unknown[])[1]).toMatchObject({ redirect: 'manual' })
+      expect(store(env).size).toBe(0)
+    }
+
+    // A relative redirect on a usable host is followed and stored.
+    const ok = await seeded(ART)
+    const spy = vi.fn(async (u: string) => (u === ART ? to('/image_size/300x300/moved.jpg') : jpg()))
+    vi.stubGlobal('fetch', spy)
+    expect((await serveImage(ok.env, ok.key)).status).toBe(200)
+    expect((spy.mock.calls[1] as unknown[])[0]).toBe('https://geo-media.beatport.com/image_size/300x300/moved.jpg')
+    expect(store(ok.env).size).toBe(1)
+
+    // More than 3 redirects: given up, nothing stored.
+    const loop = await seeded(ART)
+    let n = 0
+    vi.stubGlobal('fetch', vi.fn(async () => to(`https://geo-media.beatport.com/hop${++n}.jpg`)))
+    expect((await serveImage(loop.env, loop.key)).status).toBe(404)
+    expect(n).toBe(4)
+    expect(store(loop.env).size).toBe(0)
+  })
+
   it('a stored source that is not usable (http) is never fetched', async () => {
     const { env, key } = await seeded('http://i1.sndcdn.com/a.jpg')
     const spy = vi.fn()
