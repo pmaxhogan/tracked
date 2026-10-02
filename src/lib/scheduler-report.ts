@@ -41,6 +41,7 @@ export function redactText(s: string | null | undefined): string | null {
       }
       return '[url]'
     })
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
     .replace(/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
     .replace(/\b(token|key|secret|password|passwd|pwd|auth|authorization|apikey|api_key|sig|signature)\s*[=:]\s*[^\s&,;"']+/gi, '$1=[redacted]')
   if (out.length > MAX_TEXT) out = out.slice(0, MAX_TEXT) + '…'

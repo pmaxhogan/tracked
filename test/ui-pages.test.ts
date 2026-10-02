@@ -17,6 +17,7 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/', 'Home'],
   ['/ui/pool', 'Pool accounts'],
   ['/ui/pool/settings', 'Pool settings'],
+  ['/ui/scheduler', 'Scheduler'],
   ['/ui/captcha', 'Captchas'],
   ['/ui/captcha/ch-1', 'Captcha'],
   ['/ui/set', 'Set'],

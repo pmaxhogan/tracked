@@ -68,7 +68,7 @@ const CSS = /* css */ `
   .sc-foot .btn { width: 100%; }
   .sc-foot:has(.btn[hidden]) { display: none; }
   .badge.sm { font-size: var(--fs-xs); }
-  @media (max-width: 799px) {
+  @media (max-width: 699px) {
     .sc-ticks td.items, .sc-ticks td.res { display: block; text-align: left; }
     .sc-ticks td.items::before, .sc-ticks td.res::before { display: block; margin-bottom: 2px; }
     .sc-t tr.starve, .sc-t tr.late { box-shadow: inset 3px 0 0 var(--warn); }
@@ -118,13 +118,15 @@ const JS = /* js */ `
     $('sc-asof').textContent = s.oldestTickAt ? 'history since ' + (TK.fmt.time(iso(s.oldestTickAt)) || '') : 'no ticks recorded yet';
 
     const due = s.latestDue && s.latestDue.due ? s.latestDue.due : null;
+    // A due count from a paused / backed-off stretch is stale: only one from the last hour can flag starving.
+    const freshDue = !!due && (!s.now || s.now - s.latestDue.at <= 3600);
     const last = (s.lastRun && s.lastRun.byClass) || {};
     $('sc-classes').innerHTML = CLASSES.map((c) => {
       const items = n(s.byClass && s.byClass[c]);
       const d = due ? n(due[c]) : null;
       const lr = last[c] || {};
       // Starving: work was due at the last count, yet nothing of this class ran all day.
-      const starve = d && items === 0;
+      const starve = freshDue && d && items === 0;
       return '<tr' + (starve ? ' class="starve"' : '') + '><td data-label="Class">' + esc(c) + (starve ? ' ' + badge('warn', 'starving') : '') + '</td>' +
         '<td data-label="Items" class="num">' + items + '</td>' +
         '<td data-label="Due now" class="num">' + (d == null ? '—' : esc(d)) + '</td>' +
