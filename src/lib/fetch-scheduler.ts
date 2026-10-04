@@ -40,7 +40,7 @@ import { dbOf } from './db'
 import { djScrollStep, type DjCrawlResult } from './dj-index'
 import { getAccessToken } from './google-oauth'
 import { errorFields, makeLogger, type Logger } from './log'
-import { poolConfigFromEnv, type PoolConfig, type PoolPriority } from './pool'
+import { ITEM_SCOPED_POOL_CODES, poolCodeOf, poolConfigFromEnv, type PoolConfig, type PoolFaultCode, type PoolPriority } from './pool'
 import {
   firstFetchClass,
   getPoolSettings,
@@ -71,6 +71,12 @@ const CLAIM_VERIFY_SECONDS = 2 * HOUR
 /** KV key (CACHE) holding the time before which ticks stand down, set from the pool's retryAfterSeconds. */
 export const TICK_BACKOFF_KEY = 'pool:tick_backoff_until'
 const MAX_BACKOFF_SECONDS = 6 * HOUR
+/**
+ * An item-scoped refusal (ITEM_SCOPED_POOL_CODES: one account's exit down, an
+ * excluded set of accounts, a busy pool) moves on to the next item; only a
+ * tick whose every item was refused that way stands down, for at most this.
+ */
+export const ITEM_SCOPED_BACKOFF_SECONDS = 10 * 60
 /** Schedule rows created per tick at most (the first ticks after launch spread the backlog in a few passes). */
 const INIT_BATCH = 500
 /** An overdue set with a pending mkvid request is spread over at most this, not its whole interval (its render waits on verification). */
@@ -317,7 +323,7 @@ export async function rememberDjScrollKeys(env: Env, slug: string, crawl: Pick<D
   }
 }
 
-export type BackfillStepResult = { slug: string; status: 'done' | 'no_cursor' | 'stepped' | 'soft_failed' | 'stopped'; added?: number; stopReason?: string; retryAfterSeconds?: number | null }
+export type BackfillStepResult = { slug: string; status: 'done' | 'no_cursor' | 'stepped' | 'soft_failed' | 'stopped'; added?: number; stopReason?: string; retryAfterSeconds?: number | null; poolCode?: PoolFaultCode | null }
 
 /** One "older sets" step for `slug` at priority backfill; new URLs join the DJ's discovered sets. */
 export async function runDjBackfillStep(env: Env, slug: string, log: Logger): Promise<BackfillStepResult> {
@@ -328,7 +334,7 @@ export async function runDjBackfillStep(env: Env, slug: string, log: Logger): Pr
   try {
     step = await djScrollStep(slug, bf.keys, bf.cursor, fetchOptsFromEnv(env, log, { priority: 'backfill' }))
   } catch (e) {
-    if (isStopTheBatchError(e)) return { slug, status: 'stopped', stopReason: e instanceof Error ? e.message : String(e), retryAfterSeconds: retryAfterOf(e) }
+    if (isStopTheBatchError(e)) return { slug, status: 'stopped', stopReason: e instanceof Error ? e.message : String(e), retryAfterSeconds: retryAfterOf(e), poolCode: poolCodeOf(e) }
     log.warn('scheduler.backfill_step_failed', { slug, ...errorFields(e) })
     return { slug, status: 'soft_failed' }
   }
@@ -677,7 +683,8 @@ const PRIORITY_OF: Record<ScheduledClass, PoolPriority> = { new: 'new', verify: 
 
 /**
  * One heartbeat: draw how many items to submit, pick them, run them in
- * priority order, stop at the first pool refusal. `random` / `now` are
+ * priority order, stop at the first pool-wide refusal (an item-scoped one
+ * moves on to the next item, ITEM_SCOPED_POOL_CODES). `random` / `now` are
  * injectable for tests.
  */
 export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: () => number; now?: number } = {}): Promise<TickResult> {
@@ -733,10 +740,13 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
   log.info('scheduler.tick_start', { drawn, picked: items.map((i) => `${i.kind}:${i.cls}`) })
   const results: TickItemResult[] = []
   let stoppedBy: string | undefined
+  /** Item-scoped refusals this tick: the last one's reason and the shortest retry hint. */
+  let scoped = null as { count: number; reason: string; retryAfter: number | null } | null
   for (const item of items) {
     const sub = bySlug.get(item.slug)!
     let r: TickItemResult
     let retryAfter: number | null = null
+    let poolCode: PoolFaultCode | null = null
     /** Set once a render_feed item holds its D1 claim (the row as it was before). */
     let feedClaim: { before: RenderFeedRow | null } | null = null
     try {
@@ -751,6 +761,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
         }
         r = { item, outcome: b.status, ...(b.stopReason ? { stopReason: b.stopReason } : {}) }
         retryAfter = b.retryAfterSeconds ?? null
+        poolCode = b.poolCode ?? null
       } else {
         let res: SyncOneResult
         if (item.kind === 'discovery') {
@@ -810,6 +821,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
         }
         r = { item, outcome: res.stoppedBy ? 'stopped' : res.ok ? 'ok' : 'failed', ...(res.stoppedBy ? { stopReason: res.stoppedBy.reason } : {}) }
         retryAfter = res.stoppedBy?.retryAfterSeconds ?? null
+        poolCode = res.stoppedBy?.poolCode ?? null
       }
     } catch (e) {
       log.error('scheduler.item_threw', { kind: item.kind, slug: item.slug, ...errorFields(e) })
@@ -826,6 +838,18 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
       }
     }
     results.push(r)
+    if (r.outcome === 'stopped' && poolCode && ITEM_SCOPED_POOL_CODES.has(poolCode)) {
+      // Not the whole pool: try the next item. The refused one keeps its
+      // claim (verify 2 h, recheck 6 h) or had it undone (render feed).
+      const hint = retryAfter !== null && retryAfter > 0 ? retryAfter : null
+      scoped = {
+        count: (scoped?.count ?? 0) + 1,
+        reason: r.stopReason ?? poolCode,
+        retryAfter: hint === null ? (scoped?.retryAfter ?? null) : Math.min(hint, scoped?.retryAfter ?? hint),
+      }
+      log.info('scheduler.item_refused', { kind: item.kind, poolCode, retryAfterSeconds: retryAfter, left: items.length - results.length })
+      continue
+    }
     if (r.outcome === 'stopped') {
       stoppedBy = r.stopReason
       if (retryAfter !== null && retryAfter > 0) {
@@ -835,6 +859,13 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
       log.info('scheduler.tick_stopped', { reason: stoppedBy, retryAfterSeconds: retryAfter, done: results.length, left: items.length - results.length })
       break
     }
+  }
+  if (!stoppedBy && scoped && scoped.count === results.length) {
+    // Every item was refused: stand down briefly, not for the pool's hour.
+    stoppedBy = scoped.reason
+    const until = nowSec + Math.min(ITEM_SCOPED_BACKOFF_SECONDS, Math.ceil(scoped.retryAfter ?? ITEM_SCOPED_BACKOFF_SECONDS))
+    await env.CACHE.put(TICK_BACKOFF_KEY, String(until), { expirationTtl: Math.max(60, until - nowSec + 60) })
+    log.info('scheduler.tick_stopped', { reason: stoppedBy, retryAfterSeconds: until - nowSec, done: results.length, left: 0 })
   }
   log.info('scheduler.tick_done', { drawn, ran: results.length, outcomes: results.map((x) => `${x.item.kind}:${x.outcome}`), stoppedBy: stoppedBy ?? null })
   return { drawn, items: results, due, ...(stoppedBy ? { stoppedBy } : {}) }

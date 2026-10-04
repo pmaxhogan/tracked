@@ -3,11 +3,11 @@ import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
 import { DEFAULT_POOL_SETTINGS, type PoolSettings } from '../src/lib/pool-settings'
-import { attemptBackoffSeconds, claimSetAttempt, ENSURE_STAMP_KEY, ensureSetSchedules, markSetDue, MAX_SET_ATTEMPTS_PER_DAY, pickTickItems, runSchedulerTick, scheduleAfterFetch, TICK_BACKOFF_KEY } from '../src/lib/fetch-scheduler'
+import { attemptBackoffSeconds, claimSetAttempt, ENSURE_STAMP_KEY, ensureSetSchedules, markSetDue, ITEM_SCOPED_BACKOFF_SECONDS, MAX_SET_ATTEMPTS_PER_DAY, pickTickItems, runSchedulerTick, scheduleAfterFetch, TICK_BACKOFF_KEY } from '../src/lib/fetch-scheduler'
 import { loadDjBackfill, loadSubState, saveDjBackfill, saveSubState } from '../src/lib/sync-store'
 import { noteSetFetch } from '../src/lib/verification'
 import { setPause, _resetTallyForTests } from '../src/lib/ban-state'
-import { PoolPausedError } from '../src/lib/pool'
+import { PoolPausedError, PoolUnavailableError } from '../src/lib/pool'
 
 // Network edges stubbed; the scheduler, syncOne, D1 and the verification
 // logic run for real.
@@ -236,6 +236,59 @@ describe('runSchedulerTick', () => {
     expect(state.abandonedTracklistUrls).toEqual([])
     expect(await runSchedulerTick(env, { random: always(0.99), now: NOW + 60 })).toMatchObject({ skipped: 'backoff' })
     expect(fetch1001Html).toHaveBeenCalledTimes(1)
+  })
+
+  it('an item-scoped refusal (no_healthy_account, timeout) moves on to the next item and sets no backoff', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const urls = [1, 2, 3].map((i) => setUrl(`h${i}`, 1))
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: urls, processedTracklistUrls: [] })
+    mocked(fetch1001Html)
+      .mockRejectedValueOnce(new PoolUnavailableError('no_healthy_account', undefined, 60))
+      .mockRejectedValueOnce(new PoolUnavailableError('timeout', undefined, 30))
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(r.items.map((i) => i.outcome)).toEqual(['stopped', 'stopped', 'ok'])
+    expect(r.stoppedBy).toBeUndefined()
+    expect(await env.CACHE.get(TICK_BACKOFF_KEY)).toBeNull()
+    const state = (await loadSubState(env, 'a'))!
+    expect(state.processedTracklistUrls).toHaveLength(1)
+    expect(state.failureCounts).toEqual({}) // a refusal charges nothing
+  })
+
+  it('a tick whose every item was refused item-scoped backs off at most 10 minutes, not the pool hour', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const urls = [1, 2, 3].map((i) => setUrl(`n${i}`, 1))
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: urls, processedTracklistUrls: [] })
+    mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('no_healthy_account', undefined, 3600))
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(fetch1001Html).toHaveBeenCalledTimes(3)
+    expect(r.stoppedBy).toMatch(/no_healthy_account/)
+    expect(Number(await env.CACHE.get(TICK_BACKOFF_KEY))).toBe(NOW + ITEM_SCOPED_BACKOFF_SECONDS)
+
+    // A shorter hint from the pool is honoured.
+    const env2 = makeEnv()
+    await subscribe(env2, 'a')
+    await quietDjs(env2, 'a')
+    await saveSubState(env2, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: urls, processedTracklistUrls: [] })
+    mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('no_healthy_account', undefined, 60))
+    await runSchedulerTick(env2, { random: always(0.99), now: NOW })
+    expect(Number(await env2.CACHE.get(TICK_BACKOFF_KEY))).toBe(NOW + 60)
+  })
+
+  it('a pool-wide refusal (blocked) still ends the tick at the first item', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const urls = [1, 2, 3].map((i) => setUrl(`k${i}`, 1))
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: urls, processedTracklistUrls: [] })
+    mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('blocked', undefined, 600))
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(r.stoppedBy).toMatch(/blocked/)
+    expect(Number(await env.CACHE.get(TICK_BACKOFF_KEY))).toBe(NOW + 600)
   })
 
   it('a verification second fetch runs at priority verify, avoiding the first account, and verifies on agreement', async () => {

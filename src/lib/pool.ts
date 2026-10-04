@@ -116,6 +116,18 @@ export function poolErrorFor(code: string, retryAfterSeconds: number | null): Po
   return PAUSE_CODES.has(c) ? new PoolPausedError(c, retryAfterSeconds) : new PoolUnavailableError(c, known ? undefined : `unknown error ${code.slice(0, 40)}`, retryAfterSeconds)
 }
 
+/** The tlpool code behind an error, or null when it did not come from the pool. */
+export function poolCodeOf(e: unknown): PoolFaultCode | null {
+  return e instanceof PoolPausedError || e instanceof PoolUnavailableError ? e.code : null
+}
+
+/**
+ * Refusals about the one account tlpool picked, or about this one request
+ * (every account excluded, all busy), not about the whole pool: another item
+ * may well be served right away.
+ */
+export const ITEM_SCOPED_POOL_CODES: ReadonlySet<PoolFaultCode> = new Set(['no_healthy_account', 'timeout'])
+
 function clampWait(priority: PoolPriority, maxWaitSeconds: number | undefined): number {
   const cap = priority === 'phone' ? PHONE_MAX_WAIT_SECONDS : 120
   const want = maxWaitSeconds ?? (priority === 'phone' ? PHONE_MAX_WAIT_SECONDS : DEFAULT_MAX_WAIT_SECONDS)

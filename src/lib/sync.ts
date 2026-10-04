@@ -51,7 +51,7 @@ import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUnavailableError, type Fetch1001Opts, type Via } from './upstream1001'
 import { isPaused } from './ban-state'
-import type { PoolPriority } from './pool'
+import { poolCodeOf, type PoolFaultCode, type PoolPriority } from './pool'
 import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
 import { recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
 import { isVerified } from './verification'
@@ -127,6 +127,11 @@ function stopReasonFor(e: unknown): string {
 function retryAfterOf(e: unknown): number | null {
   const r = (e as { retryAfterSeconds?: unknown } | null)?.retryAfterSeconds
   return typeof r === 'number' && Number.isFinite(r) ? r : null
+}
+
+/** A run's `stoppedBy` for a stop-the-batch error. */
+function stoppedByOf(e: unknown): NonNullable<SyncOneResult['stoppedBy']> {
+  return { reason: stopReasonFor(e), retryAfterSeconds: retryAfterOf(e), poolCode: poolCodeOf(e) }
 }
 
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
@@ -326,7 +331,7 @@ export type SyncOneResult = {
     rechecksPending: number
   }
   /** Set when a pool refusal / pause stopped the run early (charged nothing). */
-  stoppedBy?: { reason: string; retryAfterSeconds: number | null }
+  stoppedBy?: { reason: string; retryAfterSeconds: number | null; poolCode?: PoolFaultCode | null }
   /** Why the DJ-page crawl stopped, when this run crawled. */
   crawlStopReason?: string
 }
@@ -967,8 +972,8 @@ export async function syncOne(
         // route is not the set's fault: every remaining set would fail the
         // same way. Stop the run here, charge nothing, and let a later tick
         // pick up exactly where we left off.
-        stopReason = stopReasonFor(e)
-        stoppedBy = { reason: stopReason, retryAfterSeconds: retryAfterOf(e) }
+        stoppedBy = stoppedByOf(e)
+        stopReason = stoppedBy.reason
         log.error('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
         break
       }
@@ -1125,8 +1130,8 @@ export async function syncOne(
       setsRechecked += 1
     } catch (e) {
       if (isStopTheBatchError(e)) {
-        stopReason = stopReasonFor(e)
-        stoppedBy = { reason: stopReason, retryAfterSeconds: retryAfterOf(e) }
+        stoppedBy = stoppedByOf(e)
+        stopReason = stoppedBy.reason
         log.error('sync.recheck_batch_stopped_blocked', { slug: sub.slug, setUrl, setsRechecked, ...errorFields(e) })
         break
       }
