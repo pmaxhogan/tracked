@@ -1,10 +1,13 @@
 /**
- * The render mkvid is working on right now, for the mkvid page's progress
- * bar: GET <MKVID_URL>/api/videos/render-progress (mkvid's TRACKED_TOKEN as
+ * The sets mkvid is working on right now, for the mkvid page's progress
+ * bars: GET <MKVID_URL>/api/videos/render-progress (mkvid's TRACKED_TOKEN as
  * the bearer, plus the Access service token when set — the same path the
- * delete call uses). mkvid splits the job into weighted stages (download,
- * analyse, render, assemble, upload); this whitelists what comes back and
- * adds the set's URL from D1. Read-only; nothing is stored.
+ * delete call uses). mkvid runs up to two jobs at once, never in the same
+ * stage, and splits each into weighted stages (download, analyse, render,
+ * assemble, upload); a job queued for the stage the other one holds is
+ * `waiting` for it. This whitelists what comes back and adds each set's URL
+ * from D1. Read-only; nothing is stored. An mkvid from before two jobs sends
+ * only `running`.
  */
 
 import type { Env } from '../types'
@@ -18,6 +21,8 @@ export type RenderProgressView = {
   slug: string | null
   title: string | null
   stage: string
+  /** The stage this job is queued for while the other job runs it; null when it is running. */
+  waiting: string | null
   /** 0..1 over the whole job, by the stage weights. */
   fraction: number
   renderMinutesLeft: number | null
@@ -26,7 +31,11 @@ export type RenderProgressView = {
   startedAt: number | null
   stages: RenderStage[]
 }
-export type RenderProgressResult = { ok: true; running: RenderProgressView | null } | { ok: false; error: string }
+/** `running` = the first of `jobs` (oldest), for callers that show one. */
+export type RenderProgressResult = { ok: true; running: RenderProgressView | null; jobs: RenderProgressView[] } | { ok: false; error: string }
+
+/** mkvid runs two; anything past this is not a list of jobs in flight. */
+const MAX_JOBS = 4
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const KEY = /^[a-z]{1,16}$/
@@ -60,6 +69,7 @@ export function normalizeRenderProgress(raw: unknown): Omit<RenderProgressView, 
     requestId: typeof raw.requestId === 'string' && UUID.test(raw.requestId) ? raw.requestId : null,
     title: str(raw.title, 300),
     stage,
+    waiting: typeof raw.waiting === 'string' && stages.some((s) => s.key === raw.waiting) ? raw.waiting : null,
     fraction: unit(raw.fraction) ?? 0,
     renderMinutesLeft: left !== null && left >= 0 ? Math.round(left) : null,
     segments: done !== null && total !== null && total > 0 && done >= 0 ? { done: Math.min(done, total), total } : null,
@@ -81,9 +91,12 @@ export async function fetchMkvidRenderProgress(env: Env, fetcher: typeof fetch =
   if (!res.ok) return { ok: false, error: `mkvid answered ${res.status}` }
   const body = (await res.json().catch(() => null)) as unknown
   if (!isObj(body) || !('running' in body)) return { ok: false, error: 'mkvid sent an unexpected answer' }
-  if (body.running === null) return { ok: true, running: null }
-  const p = normalizeRenderProgress(body.running)
-  if (!p) return { ok: false, error: 'mkvid sent an unexpected answer' }
-  const req = p.requestId ? await getMkvidRequest(env, p.requestId).catch(() => null) : null
-  return { ok: true, running: { ...p, title: req?.setTitle ?? p.title, setUrl: req?.setUrl ?? null, slug: req?.slug ?? null } }
+  const raw = Array.isArray(body.jobs) ? body.jobs.slice(0, MAX_JOBS) : body.running === null ? [] : [body.running]
+  const parsed = raw.map(normalizeRenderProgress)
+  if (parsed.some((p) => !p)) return { ok: false, error: 'mkvid sent an unexpected answer' }
+  const jobs = await Promise.all(parsed.map(async (p) => {
+    const req = p!.requestId ? await getMkvidRequest(env, p!.requestId).catch(() => null) : null
+    return { ...p!, title: req?.setTitle ?? p!.title, setUrl: req?.setUrl ?? null, slug: req?.slug ?? null }
+  }))
+  return { ok: true, running: jobs[0] ?? null, jobs }
 }

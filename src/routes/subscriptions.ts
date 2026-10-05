@@ -860,11 +860,15 @@ subscriptionsApp.post('/api/mkvid/unpublish/:id', async (c) => {
   return unpublishResponse(c, c.req.param('id'), log)
 })
 
-/** The render mkvid is working on now, as weighted stages (the page's progress bar); `running: null` when it is idle. */
+/**
+ * The sets mkvid is working on now (up to two, oldest first), each as weighted
+ * stages (the page's progress bars); `jobs: []`, `running: null` when it is
+ * idle. `running` = the first job.
+ */
 subscriptionsApp.get('/api/mkvid/progress', async (c) => {
   const r = await fetchMkvidRenderProgress(c.env)
   if (!r.ok) return c.json({ error: 'mkvid_unavailable', message: r.error }, 503)
-  return c.json({ running: r.running })
+  return c.json({ running: r.running, jobs: r.jobs })
 })
 
 /** How many videos "Recreate all old-style videos" would queue — the confirm step. */

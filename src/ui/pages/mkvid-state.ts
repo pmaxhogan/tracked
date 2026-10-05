@@ -49,7 +49,8 @@ export const MKVID_STATE_JS = /* js */ `
     if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
     if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'MKVID_DAILY_CLAIM_CAP (and MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Set MKVID_DAILY_CLAIM_CAP to 24 (or delete the secret) to resume.'];
     // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
-    if (c.claimed) return ['ok', 'Rendering ' + c.claimed + ' set' + (c.claimed === 1 ? '' : 's') + ' now', used + '/' + cap + ' of today’s uploads used.'];
+    // mkvid works on up to two at once, only one of them rendering.
+    if (c.claimed) return ['ok', (c.claimed === 1 ? 'Rendering 1 set' : 'Working on ' + c.claimed + ' sets') + ' now', used + '/' + cap + ' of today’s uploads used.'];
     if (silent) return ['bad', poll ? 'mkvid last polled ' + TK.fmt.rel(new Date(poll.at * 1000).toISOString()) : 'mkvid has not polled yet', 'It normally polls every minute. Check the mkvid container on the NAS and that it can reach this Worker (TRACKED_URL / TRACKED_TOKEN).'];
     if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
     if (poll.outcome === 'not_connected') return ['bad', 'mkvid has no YouTube account connected', 'Its token expired or was revoked. Open mkvid.maxhogan.dev and connect YouTube again.'];

@@ -142,6 +142,27 @@ describe('/mkvid routes', () => {
     })
   })
 
+  it('/mkvid/job renews the claim of a request still claimed for that job, without moving it in the lists', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const { request } = (await (await post(env, '/mkvid/claim', {})).json()) as { request: { id: string } }
+    expect((await post(env, '/mkvid/job', { id: request.id, jobId: 'job-1' })).status).toBe(200)
+    // Two hours later, still waiting for mkvid's render slot.
+    await env.DB.prepare('UPDATE mkvid_requests SET claimed_at = claimed_at - 7200, updated_at = updated_at - 7200 WHERE id = ?').bind(request.id).run()
+    const aged = (await getMkvidRequest(env, request.id))!
+    expect((await post(env, '/mkvid/job', { id: request.id, jobId: 'job-1' })).status).toBe(200)
+    const renewed = (await getMkvidRequest(env, request.id))!
+    expect(renewed.claimedAt).toBeGreaterThanOrEqual(aged.claimedAt! + 7200)
+    expect(renewed.updatedAt).toBe(aged.updatedAt)
+    expect(renewed.jobId).toBe('job-1')
+    // Another job's renewal, or one after the request left `claimed`, changes nothing.
+    await post(env, '/mkvid/job', { id: request.id, jobId: 'job-2' })
+    expect((await getMkvidRequest(env, request.id))!.jobId).toBe('job-1')
+    expect(await retryMkvidRequest(env, request.id)).toBe(true)
+    await post(env, '/mkvid/job', { id: request.id, jobId: 'job-1' })
+    expect((await getMkvidRequest(env, request.id))!).toMatchObject({ status: 'pending', claimedAt: null })
+  })
+
   it('the claim carries the track list and whether its names can be trusted', async () => {
     const env = makeEnv()
     const html = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-matroda.html'), 'utf8')

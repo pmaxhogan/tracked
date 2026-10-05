@@ -38,10 +38,23 @@ describe('fetchMkvidRenderProgress', () => {
   const env = (over: Partial<Env> = {}) => ({ MKVID_URL: 'https://mkvid.example/', MKVID_TOKEN: 'mk', MKVID_ACCESS_CLIENT_ID: 'id', MKVID_ACCESS_CLIENT_SECRET: 'sec', DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) }, ...over }) as unknown as Env
   it('calls mkvid with the bearer and Access headers; null when idle', async () => {
     const f = vi.fn(async () => Response.json({ running: null }))
-    expect(await fetchMkvidRenderProgress(env(), f as unknown as typeof fetch)).toEqual({ ok: true, running: null })
+    expect(await fetchMkvidRenderProgress(env(), f as unknown as typeof fetch)).toEqual({ ok: true, running: null, jobs: [] })
     const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('https://mkvid.example/api/videos/render-progress')
     expect(init.headers).toMatchObject({ authorization: 'Bearer mk', 'cf-access-client-id': 'id', 'cf-access-client-secret': 'sec' })
+  })
+  it('lists every job mkvid has in flight, with the stage one waits for; an mkvid from before sends running only', async () => {
+    const REQ2 = '8c73ab46-eab0-4241-9635-46b0ad0d6b39'
+    const waiting = running({ jobId: 'j2', requestId: REQ2, stage: 'render', waiting: 'render', segments: null })
+    const two = vi.fn(async () => Response.json({ running: running(), jobs: [running(), waiting] }))
+    const r = await fetchMkvidRenderProgress(env(), two as unknown as typeof fetch)
+    expect(r.ok && r.jobs.map((j) => [j.requestId, j.stage, j.waiting])).toEqual([[REQ, 'render', null], [REQ2, 'render', 'render']])
+    expect(r.ok && r.running?.requestId).toBe(REQ)
+    const old = vi.fn(async () => Response.json({ running: running() }))
+    const o = await fetchMkvidRenderProgress(env(), old as unknown as typeof fetch)
+    expect(o.ok && o.jobs.map((j) => j.requestId)).toEqual([REQ])
+    // A waiting stage mkvid does not list is dropped, not passed on.
+    expect(normalizeRenderProgress(running({ waiting: 'nope' }))!.waiting).toBeNull()
   })
   it('reports mkvid errors and missing config', async () => {
     expect(await fetchMkvidRenderProgress(env({ MKVID_URL: undefined } as Partial<Env>), vi.fn() as unknown as typeof fetch)).toMatchObject({ ok: false })
@@ -92,8 +105,22 @@ describe('mkvid page: the running render', () => {
     expect(html).toContain('aria-valuenow="30"')
   })
 
+  it('draws a card per set, the one waiting for the other to finish rendering as up next', async () => {
+    const first = { ...normalizeRenderProgress(running())!, setUrl: null, slug: null }
+    const second = { ...normalizeRenderProgress(running({ title: 'Second set', stage: 'render', waiting: 'render', fraction: 0.04, segments: null, renderMinutesLeft: null,
+      stages: running().stages.map((s: any) => s.key === 'render' ? { ...s, progress: 0 } : s) }))!, setUrl: null, slug: null }
+    const get = page({ running: first, jobs: [first, second] })
+    await settle()
+    const html: string = get('mk-run').innerHTML
+    expect([...html.matchAll(/<div class="mk-run( waiting)?">/g)].map((m) => !!m[1])).toEqual([false, true])
+    expect(html).toContain('Rendering now')
+    expect(html).toContain('Up next')
+    expect(html).toContain('Waiting for the other set to finish rendering')
+    expect(html.split('Second set')[1]).not.toContain('min left in the render')
+  })
+
   it('stays hidden when mkvid is idle or unreachable', async () => {
-    const idle = page({ running: null })
+    const idle = page({ running: null, jobs: [] })
     await settle()
     expect(idle('mk-run').hidden).toBe(true)
     const get = page({ error: 'mkvid_unavailable' })

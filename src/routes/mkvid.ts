@@ -9,7 +9,9 @@
  *                         the request carries the `account` it was handed out for, and the set's
  *                         `tracks` [{ cueSeconds, artist, title, artworkUrl, isId, layered }] + `tracksTrusted`
  *                         (names only from a page that passed the decoy check; [] + false when none is stored)
- *   POST /mkvid/job       { id, jobId }                       attach mkvid's job id (informational)
+ *   POST /mkvid/job       { id, jobId }                       attach mkvid's job id; sent again every poll while the job is
+ *                         queued or running there, renewing the claim (claimed_at) so a set waiting for mkvid's
+ *                         render slot is not handed out again after the claim TTL
  *                         Only requests whose list is verified (and whose 7-day ID wait is over or skipped)
  *                         are handed out, so `tracksTrusted` is true and `tracks` non-empty on every claim.
  *   POST /mkvid/complete  { id, videoId, videoUrl?, privacy?, jobId?, style? }

@@ -1049,8 +1049,25 @@ async function tryClaimRow(
 }
 
 /** mkvid tells us which of its jobs is handling a claimed request (purely informational). */
+/**
+ * `POST /mkvid/job`: mkvid names the job working on a claimed request, right
+ * after the claim and again on every poll while the job is queued or running
+ * there. Each call renews the claim (`claimed_at`): mkvid runs two jobs at
+ * once, and one waiting for the render slot must not outlive the claim TTL and
+ * be handed out again. Only a request still claimed, for no job or this one,
+ * is touched (a request since retried, finished or claimed for another job is
+ * left alone). `updated_at` only moves when the job id changes: the lists page
+ * by it, and a row that moves every minute would skip or repeat across pages.
+ */
 export async function attachMkvidJob(env: Env, id: string, jobId: string): Promise<void> {
-  await dbOf(env).prepare('UPDATE mkvid_requests SET job_id = ?, updated_at = ? WHERE id = ?').bind(jobId, nowSeconds(), id).run()
+  const now = nowSeconds()
+  await dbOf(env)
+    .prepare(
+      `UPDATE mkvid_requests SET claimed_at = ?, job_id = ?, updated_at = CASE WHEN job_id IS ? THEN updated_at ELSE ? END
+       WHERE id = ? AND status = 'claimed' AND (job_id IS NULL OR job_id = ?)`,
+    )
+    .bind(now, jobId, jobId, now, id, jobId)
+    .run()
 }
 
 export type CompleteInput = {

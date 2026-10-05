@@ -8,7 +8,7 @@ import { MKVID_STATE_JS } from './mkvid-state'
 
 const BODY = /* html */ `
   <div id="mk-state" class="mk-state" role="status"><span class="skel" style="width: 18rem"></span></div>
-  <div id="mk-run" class="mk-run" hidden></div>
+  <div id="mk-run" hidden></div>
   <div id="mk-tiles" class="tk-tiles"></div>
   <div id="mk-summary" class="mk-summary">loading…</div>
   <div id="mk-error" class="err-state" role="alert" hidden><span id="mk-error-text" class="grow"></span><button type="button" id="mk-error-retry" class="btn">Retry</button></div>
@@ -59,10 +59,11 @@ const CSS = /* css */ `
   .tk-tabbar .n { color: var(--subtle); font-weight: 500; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .tk-tabbar .n:empty { display: none; }
   .mk-derr { margin-top: var(--sp-3); }
-  /* The running render: one rail, a tie at every stage boundary, section widths ~ each stage's share of the job. */
+  /* Each set mkvid is working on (up to two): one rail, a tie at every stage boundary, section widths ~ each stage's share of the job. */
   .mk-run { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-tile); padding: 10px var(--sp-3) 6px; margin-bottom: var(--sp-3); }
   .mk-run-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--sp-2); }
   .mk-run-head .k { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--subtle); font-weight: 600; }
+  .mk-run.waiting .mk-run-head .k { color: var(--warn); }
   .mk-run-head .t { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
   .mk-run-head .pct { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
   .mk-run .sub { color: var(--muted); font-size: var(--fs-sm); margin-top: 2px; }
@@ -153,7 +154,8 @@ ${MKVID_STATE_JS}
 
   let header = null, capped = false;
 
-  // ── the render mkvid is working on now (GET /ui/api/mkvid/progress, every 15 s while visible) ──
+  // ── the sets mkvid is working on now (GET /ui/api/mkvid/progress, every 15 s while visible) ──
+  // Up to two at once, never in the same stage: one queued for the stage the other holds is waiting.
   const $run = $('mk-run');
   const RUN_MIN_SHARE = 6; // narrow stages (download ~2% of a job) still get a visible section
   const RUN_SUB = {
@@ -163,6 +165,9 @@ ${MKVID_STATE_JS}
     assemble: 'Joining the segments and adding the audio',
     upload: 'Uploading to YouTube',
   };
+  const RUN_K = { download: 'Downloading', analyse: 'Analysing', render: 'Rendering now', assemble: 'Assembling', upload: 'Uploading' };
+  const RUN_DOING = { download: 'downloading', analyse: 'analysing', render: 'rendering', assemble: 'assembling', upload: 'uploading' };
+  /** One set's card. */
   function renderRun(p) {
     const st = p.stages;
     const vis = st.map((s) => Math.max(Number(s.weight) || 0, RUN_MIN_SHARE));
@@ -191,27 +196,33 @@ ${MKVID_STATE_JS}
       return '<span class="' + cls.trim() + '" style="left: ' + at.toFixed(3) + '%">' + esc(s.label) + '</span>';
     }).join('');
     const cur = st[ai] || null;
-    const bits = [RUN_SUB[p.stage] || (cur ? cur.label : '')];
-    if (p.stage === 'render' && p.segments) bits.push('segment ' + p.segments.done + ' of ' + p.segments.total);
-    if (p.stage === 'render' && p.renderMinutesLeft != null) bits.push('~' + p.renderMinutesLeft + ' min left in the render');
-    if (p.stage !== 'render' && cur && cur.progress != null) bits.push(Math.round(cur.progress * 100) + '%');
+    const waiting = !!p.waiting;
+    const bits = [waiting
+      ? 'Waiting for the other set to finish ' + (RUN_DOING[p.stage] || 'its ' + (cur ? cur.label.toLowerCase() : 'stage'))
+      : RUN_SUB[p.stage] || (cur ? cur.label : '')];
+    if (!waiting && p.stage === 'render' && p.segments) bits.push('segment ' + p.segments.done + ' of ' + p.segments.total);
+    if (!waiting && p.stage === 'render' && p.renderMinutesLeft != null) bits.push('~' + p.renderMinutesLeft + ' min left in the render');
+    if (!waiting && p.stage !== 'render' && cur && cur.progress != null) bits.push(Math.round(cur.progress * 100) + '%');
     if (p.startedAt) bits.push('started ' + TK.fmt.rel(new Date(p.startedAt * 1000).toISOString()));
     const title = p.setUrl
       ? '<a class="t" href="/ui/set?url=' + encodeURIComponent(p.setUrl) + '">' + esc(p.title || TK.fmt.setLabel(p.setUrl)) + '</a>'
       : '<span class="t">' + esc(p.title || 'a set') + '</span>';
-    $run.innerHTML =
-      '<div class="mk-run-head"><span class="k">Rendering now</span>' + title + '<span class="pct">' + pct + '%</span></div>' +
+    const k = waiting ? 'Up next' : RUN_K[p.stage] || 'In progress';
+    return '<div class="mk-run' + (waiting ? ' waiting' : '') + '">' +
+      '<div class="mk-run-head"><span class="k">' + esc(k) + '</span>' + title + '<span class="pct">' + pct + '%</span></div>' +
       '<div class="sub">' + bits.filter(Boolean).map(esc).join(' · ') + '</div>' +
-      '<div class="mk-rail" role="progressbar" aria-label="Render progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" aria-valuetext="' + esc(pct + '%, ' + (cur ? cur.label : '')) + '">' +
+      '<div class="mk-rail" role="progressbar" aria-label="Render progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" aria-valuetext="' + esc(pct + '%, ' + (cur ? cur.label : '') + (waiting ? ', waiting' : '')) + '">' +
         '<div class="bar">' + secs + '</div>' + ties + '</div>' +
-      '<div class="mk-stations" aria-hidden="true">' + stations + '</div>';
-    $run.hidden = false;
+      '<div class="mk-stations" aria-hidden="true">' + stations + '</div></div>';
   }
   async function loadRun() {
     const res = await TK.api.get('/ui/api/mkvid/progress');
-    const p = res.ok && res.data && res.data.running;
-    if (!p || !Array.isArray(p.stages) || !p.stages.length) { $run.hidden = true; $run.innerHTML = ''; }
-    else renderRun(p);
+    const d = res.ok && res.data;
+    // A Worker from before two jobs answers running only.
+    const list = (d && (Array.isArray(d.jobs) ? d.jobs : d.running ? [d.running] : [])) || [];
+    const shown = list.filter((p) => p && Array.isArray(p.stages) && p.stages.length);
+    if (!shown.length) { $run.hidden = true; $run.innerHTML = ''; }
+    else { $run.innerHTML = shown.map(renderRun).join(''); $run.hidden = false; }
     return res;
   }
   // TK.poll: pauses while hidden, backs off on errors, stops on 401/403 and after 15 min (Refresh restarts it).
