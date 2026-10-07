@@ -27,6 +27,9 @@ import { effectiveAppSettings } from '../src/routes/app-settings'
 import { saveSubState } from '../src/lib/sync-store'
 import { SETTINGS_PAGE_HTML } from '../src/ui/pages/pool-settings'
 import { SETTINGS_PAGE } from '../src/ui/pages/settings'
+import { Hono } from 'hono'
+import { app as mainApp } from '../src/index'
+import { createPoolUiApp } from '../src/routes/pool-ui'
 
 const H = 3600
 const kvEnv = () => ({ SUBS: fakeKV() }) as unknown as Env
@@ -183,4 +186,50 @@ describe('settings pages', () => {
       expect(html).toContain(b)
     },
   )
+})
+
+describe('routes', () => {
+  const routeEnv = (extra: Record<string, unknown> = {}) =>
+    ({ CACHE: fakeKV(), SUBS: fakeKV(), DB: fakeD1(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', DEV_BYPASS_CF_ACCESS: '1', TLPOOL_URL: 'https://pool.example', TLPOOL_TOKEN: 'tok', ...extra }) as unknown as Env
+  const call = (env: Env, method: string, path: string, body?: unknown, appl: { request: typeof mainApp.request } = mainApp) =>
+    appl.request(`http://x${path}`, { method, headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }, env)
+
+  it('GET/PUT /ui/api/settings through the real app (CF Access gate, same-origin guard)', async () => {
+    const env = routeEnv({ MKVID_DAILY_CLAIM_CAP: '6' })
+    const got = (await (await call(env, 'GET', '/ui/api/settings')).json()) as { settings: AppSettings; defaults: AppSettings; effective: { mkvid: { dailyClaimCap: number } } }
+    expect(got.settings).toEqual(DEFAULT_APP_SETTINGS)
+    expect(got.defaults).toEqual(DEFAULT_APP_SETTINGS)
+    expect(got.effective.mkvid.dailyClaimCap).toBe(6)
+    const put = await call(env, 'PUT', '/ui/api/settings', { mkvid: { dailyClaimCap: 0 } })
+    expect(put.status).toBe(200)
+    expect(((await put.json()) as { effective: { mkvid: { dailyClaimCap: number } } }).effective.mkvid.dailyClaimCap).toBe(0)
+    const bad = await call(env, 'PUT', '/ui/api/settings', { mkvid: { maxAttempts: 0 } })
+    expect(bad.status).toBe(400)
+    expect(((await bad.json()) as { issues: string[] }).issues[0]).toMatch(/^mkvid\.maxAttempts:/)
+    const gated = await call(routeEnv({ DEV_BYPASS_CF_ACCESS: undefined, CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CF_ACCESS_AUD: 'aud', CF_ACCESS_ALLOWED_EMAILS: 'a@example.com' }), 'GET', '/ui/api/settings')
+    expect([401, 403]).toContain(gated.status)
+  })
+
+  it('PUT /ui/api/pool/limits passes a tlpool numeric knob through, and tlpool range errors come back with its message', async () => {
+    const puts: unknown[] = []
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+      if (init?.method === 'PUT') {
+        puts.push(body)
+        if (body.navTimeoutSeconds > 85) return new Response(JSON.stringify({ error: 'bad_request', message: 'navTimeoutSeconds must be between 10 and 85' }), { status: 400, headers: { 'content-type': 'application/json' } })
+        return new Response(JSON.stringify({ budgetPerDay: 30, ...body }), { headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ budgetPerDay: 30, navTimeoutSeconds: 45 }), { headers: { 'content-type': 'application/json' } })
+    }
+    const root = new Hono<{ Bindings: Env }>()
+    root.route('/ui', createPoolUiApp({ fetcher: fetcher as never }))
+    const env = routeEnv()
+    const ok = await call(env, 'PUT', '/ui/api/pool/limits', { navTimeoutSeconds: 60 }, root)
+    expect(ok.status).toBe(200)
+    expect(puts[0]).toEqual({ navTimeoutSeconds: 60 })
+    expect(((await ok.json()) as { settings: { tuning: Record<string, number> } }).settings.tuning).toEqual({ navTimeoutSeconds: 60 })
+    const bad = await call(env, 'PUT', '/ui/api/pool/limits', { navTimeoutSeconds: 120 }, root)
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toMatchObject({ error: 'invalid', message: 'navTimeoutSeconds must be between 10 and 85' })
+  })
 })

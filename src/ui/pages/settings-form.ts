@@ -98,7 +98,7 @@ export const SETTINGS_FORM_JS = /* js */ `
         if (!el) continue;
         const raw = el.value.trim();
         if (f.kind === 'bool') { if (raw === '') { if (f.nullable) put(patch, f.path, null); } else put(patch, f.path, raw === 'true'); continue; }
-        if (raw === '') { if (f.nullable) put(patch, f.path, null); else errors[f.path] = 'Required.'; continue; }
+        if (raw === '') { if (f.nullable) put(patch, f.path, null); continue; } // blank non-nullable: left as it is (e.g. an older tlpool without the key)
         const n = Number(raw);
         if (!Number.isFinite(n)) { errors[f.path] = 'Not a number.'; continue; }
         if (f.min != null && n < f.min) { errors[f.path] = 'At least ' + f.min + '.'; continue; }
