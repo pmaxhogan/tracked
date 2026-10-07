@@ -47,6 +47,7 @@ import {
 } from './youtube-playlists'
 import { errorFields, type Logger } from './log'
 import { combinedSkipIds } from './playlist-blocklist'
+import { getAppSettings } from './app-settings'
 
 export const COMBINED_PLAYLIST_TITLE = 'All tracked artists (1001tklists)'
 export const COMBINED_PLAYLIST_DESCRIPTION =
@@ -63,12 +64,12 @@ const DAILY_INSERTS_TTL = 60 * 60 * 48
  * units = 4 000 of the 10 000/day project quota, leaving the per-artist sync
  * the 6 000 it was already sized against (30 sets × 4 subs).
  */
-export const COMBINED_DAILY_INSERT_CAP = 80
+export const COMBINED_DAILY_INSERT_CAP = 80 // default of app setting playlists.combinedDailyInsertCap
 /**
  * Max inserts in a single backfill run. Keeps one cron tick's wall clock and
  * quota bounded; the every-5-min cron picks the rest up on the next tick.
  */
-const MAX_INSERTS_PER_RUN = 20
+const MAX_INSERTS_PER_RUN = 20 // default of app setting playlists.combinedMaxInsertsPerRun
 /** Wall-clock ceiling for a backfill run, on top of whatever the sync spent. */
 const BACKFILL_DEADLINE_MS = 10_000
 
@@ -352,8 +353,9 @@ export async function mergeIntoCombinedPlaylist(
   const startState = await loadCombinedState(env)
   const unavailable = new Set(startState.unavailableVideoIds ?? [])
   const used = await dailyInsertsUsed(env)
-  const budget = Math.max(0, COMBINED_DAILY_INSERT_CAP - used)
-  const perRun = opts.maxInsertsPerRun ?? MAX_INSERTS_PER_RUN
+  const caps = (await getAppSettings(env)).playlists
+  const budget = Math.max(0, caps.combinedDailyInsertCap - used)
+  const perRun = opts.maxInsertsPerRun ?? caps.combinedMaxInsertsPerRun
   const deadline = Date.now() + (opts.deadlineMs ?? BACKFILL_DEADLINE_MS)
 
   // Plus what the owner took out (lib/playlist-blocklist.ts): never put back.
@@ -426,7 +428,7 @@ export async function mergeIntoCombinedPlaylist(
     cappedBy,
     unavailableTotal: unavailable.size,
     dailyInsertsUsed: used + handle.attempts,
-    dailyInsertCap: COMBINED_DAILY_INSERT_CAP,
+    dailyInsertCap: caps.combinedDailyInsertCap,
   }
   const endState = await loadCombinedState(env)
   await saveCombinedState(env, {
@@ -483,7 +485,7 @@ export async function readCombinedStatus(
     lastBackfillAt: state.lastBackfillAt ?? null,
     lastBackfillStats: state.lastBackfillStats ?? null,
     dailyInsertsUsed: await dailyInsertsUsed(env),
-    dailyInsertCap: COMBINED_DAILY_INSERT_CAP,
+    dailyInsertCap: (await getAppSettings(env)).playlists.combinedDailyInsertCap,
   }
   // With no playlist yet, everything in every artist playlist is "missing" —
   // that's the number the panel should show before the first backfill.

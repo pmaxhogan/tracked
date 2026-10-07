@@ -6,8 +6,9 @@
 import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import type { TickResult } from './fetch-scheduler'
+import { getAppSettings } from './app-settings'
 
-export const TICK_HISTORY_DAYS = 14
+export const TICK_HISTORY_DAYS = 14 // default; live: app setting retention.tickHistoryDays
 const MAX_TEXT = 300
 
 export type TickHistoryRow = {
@@ -77,6 +78,6 @@ export async function listSchedulerTicks(env: Env, opts: { limit?: number; befor
 }
 
 export async function pruneSchedulerTicks(env: Env, nowSec = Math.floor(Date.now() / 1000)): Promise<number> {
-  const r = await dbOf(env).prepare('DELETE FROM scheduler_ticks WHERE at < ?').bind(nowSec - TICK_HISTORY_DAYS * 86400).run()
+  const r = await dbOf(env).prepare('DELETE FROM scheduler_ticks WHERE at < ?').bind(nowSec - (await getAppSettings(env)).retention.tickHistoryDays * 86400).run()
   return r.meta.changes ?? 0
 }

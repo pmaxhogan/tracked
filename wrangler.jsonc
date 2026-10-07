@@ -79,9 +79,11 @@
   //   API_TOKEN                  bearer token Tasker uses
   //   LIKED_SONGS_TOKEN          separate bearer token for GET /liked-songs (agents/scripts)
   //   MKVID_TOKEN                bearer mkvid presents on /mkvid/*; also enables queueing sets for it
-  //   MKVID_DAILY_CLAIM_CAP      (optional) uploads/day through mkvid's own Google project, mkvid-uploads (default 24; 0 pauses).
-  //                              A secret overrides the code default: delete it (or set it) when the default changes.
-  //   MKVID_SHARED_DAILY_CLAIM_CAP (optional) uploads/day through the sync's project, tracked-youtube, once the first is full (default 6)
+  //   MKVID_DAILY_CLAIM_CAP      (optional, fallback) uploads/day through mkvid's own Google project, mkvid-uploads (default 24; 0 pauses).
+  //                              /ui/settings "mkvid uploads" overrides it when saved; blank there = this secret, else the default.
+  //   MKVID_SHARED_DAILY_CLAIM_CAP (optional, fallback) uploads/day through the sync's project, tracked-youtube, once the first is full (default 6);
+  //                              same precedence. MKVID_CLAIM_TTL_SECONDS, PLAYLIST_SWEEP_DRY_RUN, PLAYLIST_SWEEP_DAILY_REMOVALS and
+  //                              REJECT_VERTICAL work the same way (app settings, lib/app-settings.ts).
   //   YOUTUBE_API_KEY            YouTube Data API v3 key
   //   TLPOOL_URL                 tlpool (the NAS browser pool) through the tunnel; every 1001tracklists request goes there
   //   TLPOOL_TOKEN               bearer for tlpool, both directions (Worker → POST /fetch, tlpool → POST /pool/events)

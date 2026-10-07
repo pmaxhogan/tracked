@@ -978,7 +978,7 @@ describe('tlpool as shipped', () => {
     const settings = { budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.2, imagePolicy: 'allow', xhrBudgetPerDay: 60, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.75 }, minGapSeconds: 35 }
     const { fetcher } = fakePool({ 'GET /settings': () => json(settings), 'PUT /settings': (c) => (puts.push(c.body), json({ ...settings, ...(c.body as object) })) })
     const { data } = await req(mount(fetcher), '/ui/api/pool/limits')
-    expect(data.settings).toEqual({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.2, imagePolicy: 'allow', xhrBudgetPerDay: 60, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.75 } })
+    expect(data.settings).toEqual({ budgetPerDay: 30, ramp: [10, 20], reservedPhoneShare: 0.2, imagePolicy: 'allow', xhrBudgetPerDay: 60, priorityCeilings: { new: 1, verify: 1, recheck: 0.9, backfill: 0.75 }, tuning: { minGapSeconds: 35 } })
     const pg = await runPageTimed(POOL_PAGES.SETTINGS_PAGE_HTML, mount(fetcher), makeEnv())
     expect(pg.els.get('xhr')!.value).toBe(60)
     expect(pg.els.get('ceil-backfill')!.value).toBe(75)

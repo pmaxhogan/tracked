@@ -25,6 +25,7 @@
  * `error`, never the status alone: a 200 carrying `error` is an error too.
  */
 import type { Env } from '../types'
+import { TLPOOL_NUMERIC_KEYS } from './tlpool-settings-fields'
 
 /** The two vars live here, not in `types.ts`, so this file has no shared edits. */
 export type PoolEnv = Env & { TLPOOL_URL?: string; TLPOOL_TOKEN?: string }
@@ -172,6 +173,8 @@ export type PoolSettings = {
   xhrBudgetPerDay: number | null
   /** Fraction 0..1 of the budget each non-phone priority may use (backfill stops first). */
   priorityCeilings: Record<string, number> | null
+  /** tlpool's plain numeric settings (lib/tlpool-settings-fields.ts), by key; a key tlpool did not send is absent. */
+  tuning?: Record<string, number>
 }
 
 /** Non-phone priorities tlpool caps with `priorityCeilings`. */
@@ -372,7 +375,18 @@ export function normalizeSettings(raw: unknown): PoolSettings {
     imagePolicy: code(pick(raw, 'imagePolicy', 'image_policy')),
     xhrBudgetPerDay: num(pick(raw, 'xhrBudgetPerDay', 'xhr_budget_per_day')),
     priorityCeilings,
+    ...pickTuning(raw),
   }
+}
+
+/** `{ tuning }`: the TLPOOL_NUMERIC_KEYS tlpool sent as finite numbers; `{}` when it sent none. */
+function pickTuning(raw: Obj): { tuning?: Record<string, number> } {
+  const out: Record<string, number> = {}
+  for (const k of TLPOOL_NUMERIC_KEYS) {
+    const v = raw[k]
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+  }
+  return Object.keys(out).length ? { tuning: out } : {}
 }
 
 /** Validates a browser-sent settings patch against tlpool's own ranges (settings.py); only these fields ever reach tlpool. */
@@ -414,6 +428,13 @@ export function validateSettingsPatch(body: unknown): Partial<PoolSettings> {
       ceil[k] = n
     }
     out.priorityCeilings = ceil
+  }
+  // tlpool's plain numeric settings: passed through as numbers; tlpool checks the ranges (400 with the reason).
+  for (const k of TLPOOL_NUMERIC_KEYS) {
+    if (body[k] === undefined) continue
+    const v = body[k]
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new PoolAdminError('invalid', 400, 'not_a_number', null, `${k} must be a number`)
+    ;(out as Record<string, unknown>)[k] = v
   }
   if (!Object.keys(out).length) throw new PoolAdminError('invalid', 400, 'nothing_to_change')
   return out

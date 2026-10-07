@@ -42,6 +42,7 @@ import { getAccessToken } from './google-oauth'
 import { errorFields, makeLogger, type Logger } from './log'
 import { ITEM_SCOPED_POOL_CODES, poolCodeOf, poolConfigFromEnv, type PoolConfig, type PoolFaultCode, type PoolPriority } from './pool'
 import {
+  DEFAULT_POOL_SETTINGS,
   firstFetchClass,
   getPoolSettings,
   jitter,
@@ -59,43 +60,39 @@ import { fetchOptsFromEnv, isStopTheBatchError } from './upstream1001'
 import { deferVerification, dueVerifications, noteSetFetch, type VerificationResult } from './verification'
 import { syncOne, type SyncOneResult } from './sync'
 import { queueSearchIndex } from './search/index'
-import { MKVID_MAX_ATTEMPTS } from './mkvid'
+import { getAppSettings } from './app-settings'
 import { DISCOVERED_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 const HOUR = 3600
 
-/** A recheck/verify claimed by a tick waits this long before it can be picked again if the fetch fails. */
-const CLAIM_RECHECK_SECONDS = 6 * HOUR
-const CLAIM_VERIFY_SECONDS = 2 * HOUR
+/** A recheck/verify claimed by a tick waits settings.retry.claimRecheckHours / claimVerifyHours before it can be picked again if the fetch fails. */
 /** KV key (CACHE) holding the time before which ticks stand down, set from the pool's retryAfterSeconds. */
 export const TICK_BACKOFF_KEY = 'pool:tick_backoff_until'
-const MAX_BACKOFF_SECONDS = 6 * HOUR
 /**
  * An item-scoped refusal (ITEM_SCOPED_POOL_CODES: one account's exit down, an
  * excluded set of accounts, a busy pool) moves on to the next item; only a
  * tick whose every item was refused that way stands down, for at most this.
  */
-export const ITEM_SCOPED_BACKOFF_SECONDS = 10 * 60
+export const ITEM_SCOPED_BACKOFF_SECONDS = DEFAULT_POOL_SETTINGS.retry.itemScopedBackoffMinutes * 60 // live: settings.retry
 /** Schedule rows created per tick at most (the first ticks after launch spread the backlog in a few passes). */
 const INIT_BATCH = 500
-/** An overdue set with a pending mkvid request is spread over at most this, not its whole interval (its render waits on verification). */
-const MKVID_WAITING_SPREAD_SECONDS = 2 * 24 * HOUR
-/** A discovery / backfill step that did not complete is retried after about this long, not a whole interval later. */
-const DJ_RETRY_SECONDS = HOUR
+/** An overdue set with a pending mkvid request is spread over at most settings.recheck.mkvidWaitingSpreadHours, not its whole interval (its render waits on verification). */
+/** A discovery / backfill step that did not complete is retried after settings.retry.djRetryMinutes, not a whole interval later. */
 /** CACHE KV: when ensureSetSchedules last ran (unix seconds). */
 export const ENSURE_STAMP_KEY = 'scheduler:ensure_at'
 /** The render feeder submits at most this many first fetches per tick. */
-export const RENDER_FEED_MAX_PER_TICK = 1
+// The RENDER_FEED_* numbers below are the defaults of pool settings `renderFeed` (read live from there).
+export const RENDER_FEED_MAX_PER_TICK = DEFAULT_POOL_SETTINGS.renderFeed.maxPerTick
 /**
  * A set fetched this recently (by anything) is not fed; a set the feeder fed
  * is not fed again for this long whatever the outcome, doubling after each
  * failed feed fetch up to RENDER_FEED_MAX_COOLDOWN_SECONDS.
  */
-export const RENDER_FEED_REFETCH_COOLDOWN_SECONDS = 2 * 24 * HOUR
-export const RENDER_FEED_MAX_COOLDOWN_SECONDS = 14 * 24 * HOUR
+export const RENDER_FEED_REFETCH_COOLDOWN_SECONDS = DEFAULT_POOL_SETTINGS.renderFeed.cooldownHours * HOUR
+export const RENDER_FEED_MAX_COOLDOWN_SECONDS = DEFAULT_POOL_SETTINGS.renderFeed.maxCooldownDays * 24 * HOUR
 /** After this many feed fetches in a row fail (404, 5xx), the feeder gives the set up. */
-export const RENDER_FEED_MAX_FAILURES = 3
+export const RENDER_FEED_MAX_FAILURES = DEFAULT_POOL_SETTINGS.renderFeed.maxFailures
 /** CACHE KV: the feeder found no candidate; the query is not run again before this (unix seconds). */
 export const RENDER_FEED_EMPTY_KEY = 'scheduler:render_feed_empty_until'
 const RENDER_FEED_EMPTY_SECONDS = 30 * 60
@@ -135,7 +132,7 @@ export async function ensureSetSchedules(env: Env, settings: PoolSettings, nowSe
       const natural = checked + jitter(interval, settings.recheck.jitterFraction, random)
       // Overdue: somewhere inside one interval - or within two days for a set
       // mkvid is waiting on, whose render needs a verified list first.
-      const spread = Number(r.mkvid_waiting) === 1 ? Math.min(interval, MKVID_WAITING_SPREAD_SECONDS) : interval
+      const spread = Number(r.mkvid_waiting) === 1 ? Math.min(interval, settings.recheck.mkvidWaitingSpreadHours * HOUR) : interval
       next = natural > nowSec ? natural : nowSec + Math.floor(random() * spread)
     }
     return insert.bind(r.url, setDate, next, Number(r.checked_at) || null, Number(r.no_video) === 1 ? 1 : 0, nowSec)
@@ -184,10 +181,10 @@ export async function markSetDue(env: Env, url: string, atSec = nowSeconds()): P
 }
 
 /** Most fetch attempts of one set page per UTC day (review W4 #3): a set that keeps failing is not refetched every tick. */
-export const MAX_SET_ATTEMPTS_PER_DAY = 3
+export const MAX_SET_ATTEMPTS_PER_DAY = DEFAULT_POOL_SETTINGS.retry.maxSetAttemptsPerDay // live: settings.retry
 /** Wait after the Nth attempt before the next one: 15 min, 30 min, 60 min, … capped at 6 h. */
-export function attemptBackoffSeconds(attempt: number): number {
-  return Math.min(6 * HOUR, 15 * 60 * 2 ** Math.max(0, attempt - 1))
+export function attemptBackoffSeconds(attempt: number, retry: PoolSettings['retry'] = DEFAULT_POOL_SETTINGS.retry): number {
+  return Math.min(retry.attemptBackoffMaxHours * HOUR, retry.attemptBackoffBaseMinutes * 60 * 2 ** Math.max(0, attempt - 1))
 }
 const utcDay = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
 
@@ -198,7 +195,7 @@ const utcDay = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
  * completed fetch clears `retry_at` (scheduleAfterFetch). Returns the attempt
  * number for today.
  */
-export async function claimSetAttempt(env: Env, url: string, nowSec = nowSeconds()): Promise<number> {
+export async function claimSetAttempt(env: Env, url: string, nowSec = nowSeconds(), settings: PoolSettings = DEFAULT_POOL_SETTINGS): Promise<number> {
   const day = utcDay(nowSec)
   const db = dbOf(env)
   const cur = await db.prepare('SELECT attempt_day, attempts_today FROM set_schedule WHERE url = ?').bind(url).first<{ attempt_day: string | null; attempts_today: number }>()
@@ -210,13 +207,15 @@ export async function claimSetAttempt(env: Env, url: string, nowSec = nowSeconds
        ON CONFLICT(url) DO UPDATE SET retry_at = excluded.retry_at, attempt_day = excluded.attempt_day,
          attempts_today = excluded.attempts_today, updated_at = excluded.updated_at`,
     )
-    .bind(url, setDateFromUrl(url), nowSec, nowSec + attemptBackoffSeconds(attempt), day, attempt)
+    .bind(url, setDateFromUrl(url), nowSec, nowSec + attemptBackoffSeconds(attempt, settings.retry), day, attempt)
     .run()
   return attempt
 }
 
 /** SQL: the set (alias `s` = its set_schedule row, may be NULL) is not waiting out an attempt and has attempts left today. Binds now, today. */
-const ATTEMPT_OK_SQL = `(s.retry_at IS NULL OR s.retry_at <= ?) AND NOT (COALESCE(s.attempt_day, '') = ? AND s.attempts_today >= ${MAX_SET_ATTEMPTS_PER_DAY})`
+/** `max` = settings.retry.maxSetAttemptsPerDay (a zod-checked integer, safe to inline). */
+const attemptOkSql = (max: number = MAX_SET_ATTEMPTS_PER_DAY) =>
+  `(s.retry_at IS NULL OR s.retry_at <= ?) AND NOT (COALESCE(s.attempt_day, '') = ? AND s.attempts_today >= ${Math.max(1, Math.floor(max))})`
 
 async function deferSetSchedule(env: Env, url: string, untilSec: number): Promise<void> {
   await dbOf(env).prepare('UPDATE set_schedule SET next_due_at = ? WHERE url = ? AND next_due_at IS NOT NULL AND next_due_at < ?').bind(untilSec, url, untilSec).run()
@@ -389,8 +388,9 @@ function retryAfterOf(e: unknown): number | null {
  * RENDER_FEED_REFETCH_COOLDOWN_SECONDS, and one the feeder already fed whose
  * `render_feed.next_feed_at` has not come, or that it gave up on.
  */
-export async function renderFeedCandidates(env: Env, nowSec: number, limit: number): Promise<Array<{ url: string; slug: string }>> {
+export async function renderFeedCandidates(env: Env, nowSec: number, limit: number, settings: PoolSettings = DEFAULT_POOL_SETTINGS): Promise<Array<{ url: string; slug: string }>> {
   if (limit <= 0) return []
+  const maxAttempts = Math.floor((await getAppSettings(env)).mkvid.maxAttempts) // app setting, a zod-checked integer
   const res = await dbOf(env)
     .prepare(
       `SELECT r.set_url AS url, MIN(r.slug) AS slug, MIN(r.created_at) AS created, MIN(r.rowid) AS rid
@@ -400,7 +400,7 @@ export async function renderFeedCandidates(env: Env, nowSec: number, limit: numb
          LEFT JOIN mkvid_request_tracks k ON k.request_id = r.id
          LEFT JOIN set_media_facts f ON f.set_url = r.set_url
          LEFT JOIN render_feed rf ON rf.url = r.set_url
-        WHERE r.status = 'pending' AND r.attempts < ${MKVID_MAX_ATTEMPTS}
+        WHERE r.status = 'pending' AND r.attempts < ${maxAttempts}
           AND (rf.url IS NULL OR (rf.gave_up = 0 AND rf.next_feed_at <= ?))
           AND r.slug IN (SELECT slug FROM subscriptions)
           AND NOT EXISTS (SELECT 1 FROM set_verification v WHERE v.url = r.set_url)
@@ -412,10 +412,10 @@ export async function renderFeedCandidates(env: Env, nowSec: number, limit: numb
                    AND (CASE WHEN r.set_date IS NOT NULL AND r.set_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
                              THEN CAST(strftime('%s', r.set_date) AS INTEGER) ELSE ${DISCOVERED_SQL} END) > ?)
           AND (s.last_fetched_at IS NULL OR s.last_fetched_at <= ?)
-          AND ${ATTEMPT_OK_SQL}
+          AND ${attemptOkSql(settings.retry.maxSetAttemptsPerDay)}
         GROUP BY r.set_url ORDER BY created, rid LIMIT ?`,
     )
-    .bind(nowSec, nowSec - ID_WAIT_SECONDS, nowSec - RENDER_FEED_REFETCH_COOLDOWN_SECONDS, nowSec, utcDay(nowSec), limit)
+    .bind(nowSec, nowSec - ID_WAIT_SECONDS, nowSec - settings.renderFeed.cooldownHours * HOUR, nowSec, utcDay(nowSec), limit)
     .all<{ url: string; slug: string }>()
   return res.results.map((r) => ({ url: r.url, slug: r.slug }))
 }
@@ -464,7 +464,7 @@ export async function renderFeedAllowance(env: Env, settings: PoolSettings, nowS
   const { soFar, perHour } = renderFeedLimits(settings, nowSec)
   if (soFar <= 0) return 0
   const used = await renderFeedUsage(env, nowSec)
-  return Math.max(0, Math.min(RENDER_FEED_MAX_PER_TICK, soFar - used.today, perHour - used.lastHour))
+  return Math.max(0, Math.min(settings.renderFeed.maxPerTick, soFar - used.today, perHour - used.lastHour))
 }
 
 export type RenderFeedRow = { url: string; attempts: number; failures: number; last_attempt_at: number | null; next_feed_at: number; gave_up: number; updated_at: number }
@@ -492,7 +492,7 @@ export async function claimRenderFeed(env: Env, settings: PoolSettings, url: str
          next_feed_at = excluded.next_feed_at, updated_at = excluded.updated_at
         WHERE render_feed.gave_up = 0 AND render_feed.next_feed_at <= ?`,
     )
-    .bind(url, nowSec, nowSec + RENDER_FEED_REFETCH_COOLDOWN_SECONDS, nowSec, dayStart(nowSec), soFar, nowSec - HOUR, perHour, nowSec)
+    .bind(url, nowSec, nowSec + settings.renderFeed.cooldownHours * HOUR, nowSec, dayStart(nowSec), soFar, nowSec - HOUR, perHour, nowSec)
     .run()
   return (res.meta.changes ?? 0) > 0 ? before : false
 }
@@ -517,7 +517,7 @@ async function undoRenderFeed(env: Env, url: string, before: RenderFeedRow | nul
  * up to RENDER_FEED_MAX_COOLDOWN_SECONDS, and after RENDER_FEED_MAX_FAILURES
  * the set is given up on. Its recheck by age is not affected.
  */
-async function settleRenderFeed(env: Env, url: string, ok: boolean, nowSec: number, log: Logger): Promise<void> {
+async function settleRenderFeed(env: Env, url: string, ok: boolean, nowSec: number, log: Logger, feed: PoolSettings['renderFeed'] = DEFAULT_POOL_SETTINGS.renderFeed): Promise<void> {
   const db = dbOf(env)
   if (ok) {
     await db.prepare('UPDATE render_feed SET failures = 0, updated_at = ? WHERE url = ?').bind(nowSec, url).run()
@@ -525,8 +525,8 @@ async function settleRenderFeed(env: Env, url: string, ok: boolean, nowSec: numb
   }
   const row = await db.prepare('SELECT failures FROM render_feed WHERE url = ?').bind(url).first<{ failures: number }>()
   const failures = Number(row?.failures ?? 0) + 1
-  const gaveUp = failures >= RENDER_FEED_MAX_FAILURES
-  const cooldown = Math.min(RENDER_FEED_MAX_COOLDOWN_SECONDS, RENDER_FEED_REFETCH_COOLDOWN_SECONDS * 2 ** (failures - 1))
+  const gaveUp = failures >= feed.maxFailures
+  const cooldown = Math.min(feed.maxCooldownDays * 24 * HOUR, feed.cooldownHours * HOUR * 2 ** (failures - 1))
   await db
     .prepare('UPDATE render_feed SET failures = ?, gave_up = ?, next_feed_at = ?, updated_at = ? WHERE url = ?')
     .bind(failures, gaveUp ? 1 : 0, nowSec + cooldown, nowSec, url)
@@ -580,7 +580,7 @@ export async function pickTickItems(
   const pending = await db
     .prepare(
       `SELECT t.slug AS slug, t.url AS url FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
-        WHERE t.processed = 0 AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions) AND ${ATTEMPT_OK_SQL}
+        WHERE t.processed = 0 AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions) AND ${attemptOkSql(settings.retry.maxSetAttemptsPerDay)}
         ORDER BY t.discovered_at DESC, t.position ASC LIMIT 1000`,
     )
     .bind(nowSec, today)
@@ -610,7 +610,7 @@ export async function pickTickItems(
   const feedEmptyUntil = feed > 0 ? Number((await env.CACHE.get(RENDER_FEED_EMPTY_KEY)) ?? 0) || 0 : 0
   if (feed > 0 && feedEmptyUntil <= nowSec) {
     let added = 0
-    const cands = await renderFeedCandidates(env, nowSec, feed + 10)
+    const cands = await renderFeedCandidates(env, nowSec, feed + 10, settings)
     if (cands.length === 0) await env.CACHE.put(RENDER_FEED_EMPTY_KEY, String(nowSec + RENDER_FEED_EMPTY_SECONDS), { expirationTtl: 2 * RENDER_FEED_EMPTY_SECONDS })
     for (const c of cands) {
       if (added >= feed) break
@@ -630,7 +630,7 @@ export async function pickTickItems(
          FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
         WHERE t.processed = 1 AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions)
           AND (t.checked_at = 0 OR (s.next_due_at IS NOT NULL AND s.next_due_at <= ?))
-          AND ${ATTEMPT_OK_SQL}
+          AND ${attemptOkSql(settings.retry.maxSetAttemptsPerDay)}
         GROUP BY t.url ORDER BY due LIMIT ?`,
     )
     .bind(nowSec, nowSec, today, lim)
@@ -752,7 +752,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     try {
       if (item.kind === 'dj_backfill') {
         // Claim for a short while; only a completed step earns the full interval.
-        await setDjDue(env, 'next_backfill_at', item.slug, nowSec + DJ_RETRY_SECONDS, nowSec)
+        await setDjDue(env, 'next_backfill_at', item.slug, nowSec + settings.retry.djRetryMinutes * 60, nowSec)
         const b = await runDjBackfillStep(env, item.slug, log)
         if (b.status === 'stepped' || b.status === 'done' || b.status === 'no_cursor') {
           await setDjDue(env, 'next_backfill_at', item.slug, nextIn(settings.backfill.stepIntervalHours, settings.backfill.jitterHours, nowSec, random), nowSec)
@@ -765,7 +765,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
       } else {
         let res: SyncOneResult
         if (item.kind === 'discovery') {
-          await setDjDue(env, 'next_discovery_at', item.slug, nowSec + DJ_RETRY_SECONDS, nowSec)
+          await setDjDue(env, 'next_discovery_at', item.slug, nowSec + settings.retry.djRetryMinutes * 60, nowSec)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.discovery', priority: 'new', selection: { newUrls: [], recheckUrls: [] }, settings })
           if (res.crawlStopReason === 'fetch_failed' && !res.stoppedBy) {
             // The crawl swallows its fetch errors (a pool refusal included):
@@ -775,8 +775,8 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
             await setDjDue(env, 'next_discovery_at', item.slug, nextIn(settings.discovery.intervalHours, settings.discovery.jitterHours, nowSec, random), nowSec)
           }
         } else if (item.kind === 'recheck') {
-          await deferSetSchedule(env, item.url, nowSec + CLAIM_RECHECK_SECONDS)
-          await claimSetAttempt(env, item.url, nowSec)
+          await deferSetSchedule(env, item.url, nowSec + settings.retry.claimRecheckHours * HOUR)
+          await claimSetAttempt(env, item.url, nowSec, settings)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
         } else if (item.kind === 'render_feed') {
           // Claimed in D1 first (the day's share, the hourly limit and the
@@ -791,7 +791,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           feedClaim = { before }
           // A first fetch, by any account: noteSetFetch records it as pending
           // and the verify class asks a different account >= 2 h later.
-          await claimSetAttempt(env, item.url, nowSec)
+          await claimSetAttempt(env, item.url, nowSec, settings)
           res = await syncOne(env, sub, tokenInfo.accessToken, {
             log,
             trigger: 'cron.render_feed',
@@ -804,8 +804,8 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           // set counts as fetched only when its recheck completed.
           if (!res.stoppedBy && res.ok && res.stats.tracklistsRechecked < 1) res = { ...res, ok: false }
         } else if (item.kind === 'verify') {
-          await deferVerification(env, item.url, nowSec + CLAIM_VERIFY_SECONDS)
-          await claimSetAttempt(env, item.url, nowSec)
+          await deferVerification(env, item.url, nowSec + settings.retry.claimVerifyHours * HOUR)
+          await claimSetAttempt(env, item.url, nowSec, settings)
           res = await syncOne(env, sub, tokenInfo.accessToken, {
             log,
             trigger: 'cron.verify',
@@ -816,7 +816,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
             settings,
           })
         } else {
-          await claimSetAttempt(env, item.url, nowSec)
+          await claimSetAttempt(env, item.url, nowSec, settings)
           res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: PRIORITY_OF[item.cls], selection: { newUrls: [item.url], recheckUrls: [] }, settings })
         }
         r = { item, outcome: res.stoppedBy ? 'stopped' : res.ok ? 'ok' : 'failed', ...(res.stoppedBy ? { stopReason: res.stoppedBy.reason } : {}) }
@@ -832,7 +832,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
       // Anything else was a feed fetch: settle it, a failure backing the set off.
       try {
         if (r.outcome === 'stopped') await undoRenderFeed(env, item.url, feedClaim.before)
-        else await settleRenderFeed(env, item.url, r.outcome === 'ok', nowSec, log)
+        else await settleRenderFeed(env, item.url, r.outcome === 'ok', nowSec, log, settings.renderFeed)
       } catch (e) {
         log.warn('scheduler.render_feed_settle_failed', { setUrl: item.url, ...errorFields(e) })
       }
@@ -853,7 +853,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     if (r.outcome === 'stopped') {
       stoppedBy = r.stopReason
       if (retryAfter !== null && retryAfter > 0) {
-        const until = nowSec + Math.min(MAX_BACKOFF_SECONDS, Math.ceil(retryAfter))
+        const until = nowSec + Math.min(settings.retry.poolBackoffMaxHours * HOUR, Math.ceil(retryAfter))
         await env.CACHE.put(TICK_BACKOFF_KEY, String(until), { expirationTtl: Math.max(60, until - nowSec + 60) })
       }
       log.info('scheduler.tick_stopped', { reason: stoppedBy, retryAfterSeconds: retryAfter, done: results.length, left: items.length - results.length })
@@ -863,7 +863,8 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
   if (!stoppedBy && scoped && scoped.count === results.length) {
     // Every item was refused: stand down briefly, not for the pool's hour.
     stoppedBy = scoped.reason
-    const until = nowSec + Math.min(ITEM_SCOPED_BACKOFF_SECONDS, Math.ceil(scoped.retryAfter ?? ITEM_SCOPED_BACKOFF_SECONDS))
+    const scopedMax = settings.retry.itemScopedBackoffMinutes * 60
+    const until = nowSec + Math.min(scopedMax, Math.ceil(scoped.retryAfter ?? scopedMax))
     await env.CACHE.put(TICK_BACKOFF_KEY, String(until), { expirationTtl: Math.max(60, until - nowSec + 60) })
     log.info('scheduler.tick_stopped', { reason: stoppedBy, retryAfterSeconds: until - nowSec, done: results.length, left: 0 })
   }

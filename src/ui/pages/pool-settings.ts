@@ -2,6 +2,74 @@
 import { shell } from '../shell'
 import { tipAttr } from '../tip'
 import { POOL_CSS, COMMON_JS } from './pool-common'
+import { SETTINGS_FORM_CSS, SETTINGS_FORM_JS, type FormGroup } from './settings-form'
+import { TLPOOL_FIELD_GROUPS } from '../../lib/tlpool-settings-fields'
+
+// More scheduler knobs (lib/pool-settings.ts, PUT /ui/api/pool/settings) and
+// tlpool's numeric settings (PUT /ui/api/pool/limits), as field-table cards.
+const SCHED_GROUPS: FormGroup[] = [
+  {
+    id: 'sf-cadence',
+    title: 'Scheduler cadence',
+    fields: [
+      { path: 'tick.minItems', label: 'Fetches per tick, at least', help: 'Each 5-minute tick submits a random number in this range. Default 0.', min: 0, max: 20, step: 1 },
+      { path: 'tick.maxItems', label: 'Fetches per tick, at most', help: 'Default 3.', min: 0, max: 20, step: 1 },
+      { path: 'priorities.newSetMaxAgeDays', label: 'A first fetch counts as new up to', help: 'Older never-fetched sets are backfill. Default 14.', unit: 'days', min: 0, max: 3650, step: 1 },
+      { path: 'recheck.unknownAgeIntervalHours', label: 'Recheck a set of unknown date every', help: 'Default 120 (5 days).', unit: 'h', min: 1, max: 87600, step: 1 },
+      { path: 'recheck.jitterFraction', label: 'Recheck jitter', help: 'Every interval × (1 ± this), so due times never cluster. Default 0.15.', min: 0, max: 0.5, step: 0.01 },
+      { path: 'recheck.mkvidWaitingSpreadHours', label: 'Overdue sets mkvid waits on: spread over', help: 'Instead of their whole interval. Default 48.', unit: 'h', min: 1, max: 720, step: 1 },
+      { path: 'verify.minGapHours', label: 'Second fetch after at least', help: 'Verification waits this long after the first fetch. Default 2.', unit: 'h', min: 2, max: 720 },
+      { path: 'verify.jitterHours', label: 'Second fetch: plus up to', help: 'Random, so second fetches do not line up. Default 2.', unit: 'h', min: 0, max: 168 },
+      { path: 'discovery.intervalHours', label: 'Re-read each DJ page every', help: 'Default 24.', unit: 'h', min: 1, max: 720 },
+      { path: 'discovery.jitterHours', label: 'DJ page: ±', help: 'Default 4.', unit: 'h', min: 0, max: 168 },
+      { path: 'backfill.stepIntervalHours', label: 'One backfill step per DJ every', help: '10 older sets a step. Default 24.', unit: 'h', min: 1, max: 720 },
+      { path: 'backfill.jitterHours', label: 'Backfill step: ±', help: 'Default 6.', unit: 'h', min: 0, max: 168 },
+      { path: 'backfill.overdueSlotHours', label: 'Overdue backfill jumps the queue after', help: 'Gets the first slot of a tick. Default 12; 0 = off.', unit: 'h', min: 0, max: 720 },
+    ],
+  },
+  {
+    id: 'sf-retry',
+    title: 'Retries and backoffs',
+    fields: [
+      { path: 'retry.maxSetAttemptsPerDay', label: 'Fetch attempts per set per day', help: 'A set that keeps failing stops here until tomorrow. Default 3.', min: 1, max: 50, step: 1 },
+      { path: 'retry.attemptBackoffBaseMinutes', label: 'Wait after a failed attempt', help: 'Doubles per attempt. Default 15.', unit: 'min', min: 1, max: 1440 },
+      { path: 'retry.attemptBackoffMaxHours', label: 'That wait at most', help: 'Default 6.', unit: 'h', min: 0.25, max: 168 },
+      { path: 'retry.claimRecheckHours', label: 'Failed recheck: try again after', help: 'Default 6.', unit: 'h', min: 0.25, max: 168 },
+      { path: 'retry.claimVerifyHours', label: 'Failed verification: try again after', help: 'Default 2.', unit: 'h', min: 0.25, max: 168 },
+      { path: 'retry.djRetryMinutes', label: 'Failed DJ page step: try again after', help: 'Discovery or backfill. Default 60.', unit: 'min', min: 1, max: 1440 },
+      { path: 'retry.poolBackoffMaxHours', label: 'Stand down for the pool, at most', help: 'When tlpool asks ticks to wait. Default 6.', unit: 'h', min: 0.1, max: 48 },
+      { path: 'retry.itemScopedBackoffMinutes', label: 'Every item refused: stand down', help: 'No free account for any item. Default 10.', unit: 'min', min: 1, max: 1440 },
+    ],
+  },
+  {
+    id: 'sf-feed',
+    title: 'Render feeder pacing',
+    intro: 'Besides the first fetches a day above.',
+    fields: [
+      { path: 'renderFeed.maxPerTick', label: 'Fed sets per tick, at most', help: 'Default 1.', min: 0, max: 10, step: 1 },
+      { path: 'renderFeed.cooldownHours', label: 'Do not feed a set fetched within', help: 'Doubles per failed feed. Default 48.', unit: 'h', min: 1, max: 1440 },
+      { path: 'renderFeed.maxCooldownDays', label: 'That cooldown at most', help: 'Default 14.', unit: 'days', min: 1, max: 365 },
+      { path: 'renderFeed.maxFailures', label: 'Give a set up after failed feeds', help: 'In a row. Default 3.', min: 1, max: 20, step: 1 },
+    ],
+  },
+  {
+    id: 'sf-manual',
+    title: 'Manual fetches and reports',
+    fields: [
+      { path: 'manualMaxFetches', label: 'Fetches per sync or resync button', help: 'Default 10.', min: 0, max: 200, step: 1 },
+      { path: 'forcedRefetch.cooldownSeconds', label: 'Repeat refresh of a set within', help: 'Is answered from the cache. Default 120.', unit: 's', min: 0, max: 86400, step: 1 },
+      { path: 'forcedRefetch.dailyCap', label: 'Forced refetches per day', help: 'Across all sets. Default 40.', min: 0, max: 1000, step: 1 },
+      { path: 'reports.maxPerDay', label: 'Suspect-account reports per day', help: 'Each rests that account. Default 6; 0 = never.', min: 0, max: 100, step: 1 },
+      { path: 'reports.maxRestingShare', label: 'No reports while resting share is over', help: 'Of the non-passive pool. Default 0.5.', min: 0, max: 1, step: 0.05 },
+    ],
+  },
+]
+
+const TLPOOL_GROUPS: FormGroup[] = TLPOOL_FIELD_GROUPS.map((g) => ({
+  id: g.id,
+  title: 'tlpool: ' + g.title,
+  fields: g.fields.map((x) => ({ path: x.key, label: x.label, help: x.help + ' Default ' + x.def + '.', unit: x.unit, min: x.min, max: x.max, step: x.step })),
+}))
 
 const BODY = /* html */ `
 <div class="tk-grid two">
@@ -31,6 +99,8 @@ const BODY = /* html */ `
     <div class="row" style="margin-top:var(--sp-3)"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit" class="btn primary"${tipAttr('Saves the schedule, the priority order, the render feeder and the manual sync wait.')}>Save</button></div>
   </form>
 </div>
+<div id="sf-sched" class="tk-grid two"></div>
+<div id="sf-tlpool" class="tk-grid two"></div>
 `
 
 const JS = /* js */ `
@@ -147,8 +217,34 @@ ${COMMON_JS}
     await loadSched();
   });
 
+  // ── more knobs: field-table cards (ui/pages/settings-form.ts) ──
+${SETTINGS_FORM_JS}
+  const SCHED_GROUPS = ${JSON.stringify(SCHED_GROUPS)};
+  const TLPOOL_GROUPS = ${JSON.stringify(TLPOOL_GROUPS)};
+  async function loadMore() {
+    const r = await fetch('/ui/api/pool/settings', { credentials: 'same-origin' }).catch(() => null);
+    const d = r ? await r.json().catch(() => ({})) : {};
+    if (r && r.ok && d.settings) SF.fill(SCHED_GROUPS, d.settings, d.defaults);
+    const t = await api('/limits');
+    if (t.ok && t.data.settings) SF.fill(TLPOOL_GROUPS, t.data.settings.tuning || {}, null);
+  }
+  SF.mount($('sf-sched'), SCHED_GROUPS, async (patch) => {
+    const r = await fetch('/ui/api/pool/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) }).catch(() => null);
+    const d = r ? await r.json().catch(() => ({})) : { error: 'network' };
+    if (!r || !r.ok) return { ok: false, issues: d.issues || [], message: d.issues ? '' : errText(d, r ? r.status : 0) };
+    SF.fill(SCHED_GROUPS, d.settings, null);
+    return { ok: true };
+  });
+  SF.mount($('sf-tlpool'), TLPOOL_GROUPS, async (patch) => {
+    const r = await api('/limits', jsonInit('PUT', patch));
+    if (!r.ok) return { ok: false, issues: r.data && r.data.message ? [String(r.data.message)] : [], message: r.data && r.data.message ? '' : errText(r.data, r.status) };
+    SF.fill(TLPOOL_GROUPS, (r.data.settings && r.data.settings.tuning) || {}, null);
+    return { ok: true };
+  });
+
   loadLimits();
   loadSched();
+  loadMore();
 })();
 `
 
@@ -156,7 +252,7 @@ export const SETTINGS_PAGE_HTML = shell({
   nav: 'pool-settings',
   title: 'Pool settings',
   body: BODY,
-  css: POOL_CSS,
+  css: POOL_CSS + SETTINGS_FORM_CSS,
   js: JS,
   ownNavCount: false,
 })

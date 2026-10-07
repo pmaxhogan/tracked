@@ -13,8 +13,9 @@
 import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import { decodeCursor, encodeCursor, type AuditPage } from './audit-cursor'
+import { getAppSettings } from './app-settings'
 
-export const NOW_PLAYING_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
+export const NOW_PLAYING_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000 // default; live: app setting retention.auditDays
 
 export type NowPlayingAuditSummary = {
   t: string
@@ -67,6 +68,6 @@ export async function getNowPlayingAudit(env: Env, key: string): Promise<Record<
 
 /** Drop rows past the retention horizon. Returns how many went. */
 export async function pruneNowPlayingAudit(env: Env, now = Date.now()): Promise<number> {
-  const r = await dbOf(env).prepare('DELETE FROM now_playing_audit WHERE ts < ?').bind(now - NOW_PLAYING_AUDIT_RETENTION_MS).run()
+  const r = await dbOf(env).prepare('DELETE FROM now_playing_audit WHERE ts < ?').bind(now - (await getAppSettings(env)).retention.auditDays * 86_400_000).run()
   return r.meta.changes ?? 0
 }

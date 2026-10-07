@@ -58,6 +58,7 @@ import { getAccessToken } from './google-oauth'
 import { parseCueValueData } from './tracklists1001'
 import { parseSetYouTubeId } from './dj-index'
 import { pushConfigured, sendPushToAll, type PushPayload } from './web-push'
+import { getAppSettings, type AppSettings } from './app-settings'
 import {
   enqueueMkvidRequest,
   extractSetAudioSource,
@@ -90,7 +91,13 @@ export type SweepSettings = { dryRun: boolean; dailyRemovals: number }
  * first production sweep only reports. `PLAYLIST_SWEEP_DAILY_REMOVALS`
  * (default 40) caps playlistItems.delete calls per UTC day (50 units each).
  */
-export function sweepSettings(env: Pick<Env, 'PLAYLIST_SWEEP_DRY_RUN' | 'PLAYLIST_SWEEP_DAILY_REMOVALS'>): SweepSettings {
+export function sweepSettings(env: Pick<Env, 'PLAYLIST_SWEEP_DRY_RUN' | 'PLAYLIST_SWEEP_DAILY_REMOVALS'>, app?: AppSettings): SweepSettings {
+  const fromEnv = sweepSettingsFromEnv(env)
+  if (!app) return fromEnv
+  return { dryRun: app.playlists.sweepDryRun ?? fromEnv.dryRun, dailyRemovals: app.playlists.sweepDailyRemovals ?? fromEnv.dailyRemovals }
+}
+
+function sweepSettingsFromEnv(env: Pick<Env, 'PLAYLIST_SWEEP_DRY_RUN' | 'PLAYLIST_SWEEP_DAILY_REMOVALS'>): SweepSettings {
   const dryRun = !/^\s*(0|false|no|off)\s*$/i.test(env.PLAYLIST_SWEEP_DRY_RUN ?? '')
   const n = Number(env.PLAYLIST_SWEEP_DAILY_REMOVALS)
   const dailyRemovals = env.PLAYLIST_SWEEP_DAILY_REMOVALS !== undefined && env.PLAYLIST_SWEEP_DAILY_REMOVALS !== '' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_SWEEP_DAILY_REMOVALS
@@ -242,11 +249,24 @@ export type VideoVerdict = { ok: true } | { ok: false; reason: RejectReason | 'd
  * ratio. Until the orchestrator checks a known Short and a known 16:9 video
  * with read-only calls, a vertical-looking video is NOT rejected.
  */
-export function rejectVerticalEnabled(env: Pick<Env, 'REJECT_VERTICAL'>): boolean {
+export function rejectVerticalEnabled(env: Pick<Env, 'REJECT_VERTICAL'>, app?: AppSettings): boolean {
+  if (app && app.playlists.rejectVertical !== null) return app.playlists.rejectVertical
   return /^\s*(1|true|yes|on)\s*$/i.test(env.REJECT_VERTICAL ?? '')
 }
 
-export function judgeVideo(facts: SetFacts | null | undefined, meta: VideoMeta | null | undefined, opts: { rejectVertical?: boolean } = {}): VideoVerdict {
+export type JudgeOptions = { rejectVertical?: boolean; shortToleranceSeconds?: number; audioToleranceSeconds?: number }
+
+/** judgeVideo's options from the app settings (playlists.rejectVertical, the two tolerances) and REJECT_VERTICAL. */
+export async function judgeOptions(env: Env): Promise<JudgeOptions> {
+  const app = await getAppSettings(env)
+  return {
+    rejectVertical: rejectVerticalEnabled(env, app),
+    shortToleranceSeconds: app.playlists.shortToleranceMinutes * 60,
+    audioToleranceSeconds: app.playlists.audioToleranceMinutes * 60,
+  }
+}
+
+export function judgeVideo(facts: SetFacts | null | undefined, meta: VideoMeta | null | undefined, opts: JudgeOptions = {}): VideoVerdict {
   if (meta && !meta.alive) return { ok: false, reason: 'dead', detail: 'videos.list: deleted or private' }
   const d = decideFullRecording({
     notice: facts ? facts.noFullNotice : null,
@@ -256,6 +276,8 @@ export function judgeVideo(facts: SetFacts | null | undefined, meta: VideoMeta |
     embedWidth: meta?.embedWidth ?? null,
     embedHeight: meta?.embedHeight ?? null,
     rejectVertical: opts.rejectVertical === true,
+    shortToleranceSeconds: opts.shortToleranceSeconds,
+    audioToleranceSeconds: opts.audioToleranceSeconds,
   })
   return d.ok ? d : { ok: false, reason: d.reason, detail: d.detail }
 }
@@ -318,7 +340,7 @@ export async function pickSetVideo(
       .catch(() => null)
     if (swept) return { videoId: null, rejected: { videoId, reason: 'blocked', detail: 'the sweep removed it before; video lookup failed' } }
   }
-  const verdict = judgeVideo(facts, meta, { rejectVertical: rejectVerticalEnabled(env) })
+  const verdict = judgeVideo(facts, meta, await judgeOptions(env))
   if (verdict.ok) return { videoId, rejected: null }
   log.info('hygiene.video_rejected', { slug: ctx.slug, setUrl: ctx.setUrl, videoId, reason: verdict.reason, detail: verdict.detail })
   return { videoId: null, rejected: { videoId, reason: verdict.reason, detail: verdict.detail } }
@@ -342,7 +364,7 @@ export async function hasGoodVideo(env: Env, set: { slug: string; setUrl: string
   if (pl?.playlist_id && (await isBlocked(env, pl.playlist_id, set.videoId))) return false
   const facts = (await loadSetFacts(env, [set.setUrl])).get(set.setUrl)
   const meta = (await readCachedVideoMeta(env, [set.videoId])).get(set.videoId)
-  return judgeVideo(facts, meta, { rejectVertical: rejectVerticalEnabled(env) }).ok
+  return judgeVideo(facts, meta, await judgeOptions(env)).ok
 }
 
 // ─── removal log ────────────────────────────────────────────────────────────
@@ -476,7 +498,7 @@ export async function runRemovalSweep(
 ): Promise<SweepResult> {
   const { log } = opts
   const nowMs = opts.nowMs ?? Date.now()
-  const settings = opts.settings ?? sweepSettings(env)
+  const settings = opts.settings ?? sweepSettings(env, await getAppSettings(env))
   const db = dbOf(env)
   const rows = (
     await db
@@ -519,11 +541,11 @@ export async function runRemovalSweep(
     metas = await readCachedVideoMeta(env, candidates.map((r) => r.video_id))
   }
   const facts = await loadSetFacts(env, candidates.map((r) => r.url))
-  const vertical = rejectVerticalEnabled(env)
+  const judgeOpts = await judgeOptions(env)
   const rejected: Array<AddedRow & { verdict: Extract<VideoVerdict, { ok: false }> }> = []
   for (const r of candidates) {
     result.judged++
-    const verdict = judgeVideo(facts.get(r.url), metas.get(r.video_id), { rejectVertical: vertical })
+    const verdict = judgeVideo(facts.get(r.url), metas.get(r.video_id), judgeOpts)
     // Dead videos are the comparison's business (recorded, never re-added,
     // set made mkvid-eligible) — deleting their husk would only spend budget.
     if (!verdict.ok && verdict.reason !== 'dead') rejected.push({ ...r, verdict })
@@ -741,7 +763,7 @@ async function clearHold(env: Env, playlistId: string): Promise<void> {
   await env.SUBS.delete(APPROVE_PREFIX + playlistId)
 }
 
-/** Hold a playlist when more than this share of what tracked put there seems gone... */
+/** Defaults of app settings playlists.massRemoval* / runRemovalMax. Hold a playlist when more than this share of what tracked put there seems gone... */
 export const MASS_REMOVAL_RATIO = 0.3
 /** ...or more than this many videos. */
 export const MASS_REMOVAL_MAX = 5
@@ -749,9 +771,9 @@ export const MASS_REMOVAL_MAX = 5
 export const RUN_REMOVAL_MAX = 15
 
 /** Per-playlist guard against a partial view being read as a mass removal. Pure. */
-export function isMassRemoval(missing: number, expected: number): boolean {
+export function isMassRemoval(missing: number, expected: number, limits: { max: number; ratio: number } = { max: MASS_REMOVAL_MAX, ratio: MASS_REMOVAL_RATIO }): boolean {
   if (missing <= 0) return false
-  return missing > MASS_REMOVAL_MAX || (expected > 0 && missing / expected > MASS_REMOVAL_RATIO)
+  return missing > limits.max || (expected > 0 && missing / expected > limits.ratio)
 }
 
 /** Tells the owner. Resolves false when nothing was sent (push not set up, no device took it): the hold then notifies again next time. */
@@ -963,7 +985,9 @@ export async function comparePlaylists(
   const approved = new Set<string>()
   for (const p of pending) if (p.missing.length > 0 && (await approvalCovers(env, p.ctx.playlistId, p.missing, now))) approved.add(p.ctx.playlistId)
   const runMissing = pending.filter((p) => !approved.has(p.ctx.playlistId)).reduce((n, p) => n + p.missing.length, 0)
-  const breaker = runMissing > RUN_REMOVAL_MAX
+  const guard = (await getAppSettings(env)).playlists // app settings: massRemovalMax / massRemovalRatio / runRemovalMax
+  const massLimits = { max: guard.massRemovalMax, ratio: guard.massRemovalRatio }
+  const breaker = runMissing > guard.runRemovalMax
   if (breaker) log.error('hygiene.compare.run_breaker', { runMissing, playlists: pending.filter((p) => p.missing.length > 0).length })
   const newHolds: PlaylistHold[] = []
 
@@ -974,14 +998,14 @@ export async function comparePlaylists(
     else if (approved.has(ctx.playlistId)) {
       await clearHold(env, ctx.playlistId)
       log.warn('hygiene.compare.hold_approved', { ...ctx, expected: p.expected, missing: p.missing.length })
-    } else if (breaker || isMassRemoval(p.missing.length, p.expected)) hold = true
+    } else if (breaker || isMassRemoval(p.missing.length, p.expected, massLimits)) hold = true
     else await clearHold(env, ctx.playlistId)
 
     if (hold) {
       const prev = (await env.SUBS.get(HOLD_PREFIX + ctx.playlistId, 'json')) as PlaylistHold | null
       const missingIds = [...p.missing].sort().slice(0, 500)
       const sameIds = !!prev && JSON.stringify(prev.missingIds ?? []) === JSON.stringify(missingIds)
-      const h: PlaylistHold = { ...ctx, expected: p.expected, missing: p.missing.length, missingIds, runWide: breaker && !isMassRemoval(p.missing.length, p.expected), at: sameIds ? prev!.at : now, notified: sameIds ? prev!.notified : false }
+      const h: PlaylistHold = { ...ctx, expected: p.expected, missing: p.missing.length, missingIds, runWide: breaker && !isMassRemoval(p.missing.length, p.expected, massLimits), at: sameIds ? prev!.at : now, notified: sameIds ? prev!.notified : false }
       log.error('hygiene.compare.held', { ...h, missingIds: missingIds.slice(0, 20) })
       newHolds.push(h)
       results[p.slot] = { ...ctx, status: 'held', expected: p.expected, missing: p.missing.length, owner: 0, dead: 0 }

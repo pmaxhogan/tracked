@@ -47,6 +47,7 @@ import { markInPlaylist } from './playlist-blocklist'
 import { CLAIM_READY_SQL, ID_WAIT_SECONDS, pullInHeldRecheck, timedRowCounts } from './mkvid-readiness'
 import { isOldStyle, queueBannedUploadForDelete, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
 import { decodeEntities } from './html-entities'
+import { DEFAULT_APP_SETTINGS, getAppSettings, type AppSettings } from './app-settings'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
@@ -55,12 +56,11 @@ export type MkvidSource = { kind: MkvidSourceKind; url: string }
 export type MkvidStatus = 'pending' | 'claimed' | 'done' | 'failed' | 'superseded' | 'banned'
 export const MKVID_STATUSES: readonly MkvidStatus[] = ['pending', 'claimed', 'done', 'failed', 'superseded', 'banned']
 
-export const MKVID_MAX_ATTEMPTS = 3
+// Defaults: the live values are app settings `mkvid` (lib/app-settings.ts, /ui/settings):
+// maxAttempts; retryBackoffHours (a retryable failure waits this × attempts);
+// unverifiedRetryMinutes (mkvid refused a list as unverified; no attempt used).
+export const MKVID_MAX_ATTEMPTS = DEFAULT_APP_SETTINGS.mkvid.maxAttempts
 export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60
-/** A retryable failure waits this long × attempts before it can be claimed again. */
-const RETRY_BACKOFF_SECONDS = 6 * 60 * 60
-/** mkvid refused a list as unverified: look again after this long (no attempt used). */
-const UNVERIFIED_RETRY_SECONDS = 60 * 60
 /**
  * mkvid uploads through two Google Cloud projects. Since September 2026 (checked
  * with gcloud on both) YouTube meters uploads apart from everything else: each
@@ -105,7 +105,9 @@ export function quotaDayStart(nowMs = Date.now()): number {
  * a blank secret (`echo $UNSET | wrangler secret put …`) would otherwise stop
  * every upload without anyone having asked for that.
  */
-export function dailyClaimCap(env: Env, account: MkvidAccount = 'primary'): number {
+export function dailyClaimCap(env: Env, account: MkvidAccount = 'primary', app?: AppSettings): number {
+  const saved = app ? (account === 'shared' ? app.mkvid.sharedDailyClaimCap : app.mkvid.dailyClaimCap) : null
+  if (saved !== null) return saved
   const fallback = account === 'shared' ? DEFAULT_SHARED_DAILY_CLAIM_CAP : DEFAULT_DAILY_CLAIM_CAP
   const raw = ((account === 'shared' ? env.MKVID_SHARED_DAILY_CLAIM_CAP : env.MKVID_DAILY_CLAIM_CAP) ?? '').trim()
   if (!raw) return fallback
@@ -168,7 +170,8 @@ export type MkvidAccountUsage = { account: MkvidAccount; label: string; used: nu
 
 /** Today's claims against each account's cap, in fill order. */
 export async function mkvidAccountUsage(env: Env): Promise<MkvidAccountUsage[]> {
-  return Promise.all(MKVID_ACCOUNTS.map(async (account) => ({ account, label: MKVID_ACCOUNT_LABELS[account], used: await dailyClaimsUsed(env, account), cap: dailyClaimCap(env, account) })))
+  const app = await getAppSettings(env)
+  return Promise.all(MKVID_ACCOUNTS.map(async (account) => ({ account, label: MKVID_ACCOUNT_LABELS[account], used: await dailyClaimsUsed(env, account), cap: dailyClaimCap(env, account, app) })))
 }
 
 // ─── page parsing ───────────────────────────────────────────────────────────
@@ -876,7 +879,7 @@ export async function nextMkvidRequests(env: Env, limit = 5): Promise<MkvidReque
       `SELECT r.* FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id
         WHERE (${CLAIMABLE_WHERE_R}) AND ${CLAIM_READY_SQL} ${QUEUE_ORDER_R} LIMIT ?`,
     )
-    .bind(now, now - claimTtl(env), now - ID_WAIT_SECONDS, Math.min(Math.max(limit, 1), 50))
+    .bind(now, now - claimTtl(env, await getAppSettings(env)), now - ID_WAIT_SECONDS, Math.min(Math.max(limit, 1), 50))
     .all<Row>()
   return res.results.map(rowToRequest)
 }
@@ -888,7 +891,9 @@ export async function countMkvidRequests(env: Env): Promise<Record<MkvidStatus, 
   return out
 }
 
-function claimTtl(env: Env): number {
+/** Claim TTL in seconds: app setting mkvid.claimTtlMinutes, else MKVID_CLAIM_TTL_SECONDS, else 3 h. */
+export function claimTtl(env: Env, app?: AppSettings): number {
+  if (app && app.mkvid.claimTtlMinutes !== null) return app.mkvid.claimTtlMinutes * 60
   const n = Number(env.MKVID_CLAIM_TTL_SECONDS)
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CLAIM_TTL_SECONDS
 }
@@ -923,7 +928,7 @@ export type MkvidClaim = MkvidRequest & MkvidTrackList
 async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[], allowRecreate: boolean): Promise<{ request: MkvidRequest | null; outcome: MkvidPollOutcome }> {
   const db = dbOf(env)
   const now = nowSeconds()
-  const stale = now - claimTtl(env)
+  const stale = now - claimTtl(env, await getAppSettings(env))
   if (accounts.length === 0) {
     log.info('mkvid.claim_not_connected')
     return { request: null, outcome: 'not_connected' }
@@ -1017,7 +1022,7 @@ async function tryClaimRow(
       return null
     }
   }
-  if (row.attempts >= MKVID_MAX_ATTEMPTS) {
+  if (row.attempts >= (await getAppSettings(env)).mkvid.maxAttempts) {
     await db
       .prepare("UPDATE mkvid_requests SET status = 'failed', error = COALESCE(error, 'too many attempts'), updated_at = ? WHERE id = ?")
       .bind(now, row.id)
@@ -1303,12 +1308,13 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   // mkvid refused before downloading because the list it was handed is not
   // verified (a race with a re-fetch, or tracked and mkvid disagreeing): back
   // to pending without using an attempt; the claim gate decides when it is ready.
+  const app = (await getAppSettings(env)).mkvid
   if (/^unverified_tracklist\b/.test(input.error)) {
     await dbOf(env)
       .prepare(
         "UPDATE mkvid_requests SET status = 'pending', attempts = MAX(0, attempts - 1), claimed_at = NULL, not_before = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?",
       )
-      .bind(now + UNVERIFIED_RETRY_SECONDS, input.error.slice(0, 500), v(input.jobId), now, req.id)
+      .bind(now + app.unverifiedRetryMinutes * 60, input.error.slice(0, 500), v(input.jobId), now, req.id)
       .run()
     await refundLatestClaim(env, req.id, now)
     log.warn('mkvid.refused_unverified', { id: req.id, slug: req.slug, setUrl: req.setUrl, error: input.error.slice(0, 200) })
@@ -1320,12 +1326,12 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   // a reason this Worker does not recognise as final (a newer mkvid, a new
   // error text) is not believed at once: back to pending with a backoff and
   // no attempt used, the first UNKNOWN_FAILURE_GRACE times.
-  const wouldPark = !!input.permanent || req.attempts >= MKVID_MAX_ATTEMPTS
+  const wouldPark = !!input.permanent || req.attempts >= app.maxAttempts
   const unknownFailures = Number(
     (await dbOf(env).prepare('SELECT unknown_failures AS n FROM mkvid_requests WHERE id = ?').bind(req.id).first<{ n: number }>())?.n ?? 0,
   )
   if (wouldPark && !KNOWN_PERMANENT_RE.test(input.error) && unknownFailures < UNKNOWN_FAILURE_GRACE) {
-    const notBefore = now + RETRY_BACKOFF_SECONDS * (unknownFailures + 1)
+    const notBefore = now + Math.round(app.retryBackoffHours * 3600) * (unknownFailures + 1)
     await dbOf(env)
       .prepare(
         "UPDATE mkvid_requests SET status = 'pending', attempts = MAX(0, attempts - 1), unknown_failures = unknown_failures + 1, claimed_at = NULL, not_before = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?",
@@ -1335,9 +1341,9 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
     log.warn('mkvid.failed_unknown_reason', { id: req.id, slug: req.slug, setUrl: req.setUrl, unknownFailures: unknownFailures + 1, permanent: !!input.permanent, error: input.error.slice(0, 200) })
     return { status: 'pending', attempts: Math.max(0, req.attempts - 1) }
   }
-  const exhausted = req.attempts >= MKVID_MAX_ATTEMPTS
+  const exhausted = req.attempts >= app.maxAttempts
   const status: MkvidStatus = input.permanent || exhausted ? 'failed' : 'pending'
-  const notBefore = status === 'pending' ? now + RETRY_BACKOFF_SECONDS * Math.max(1, req.attempts) : null
+  const notBefore = status === 'pending' ? now + Math.round(app.retryBackoffHours * 3600) * Math.max(1, req.attempts) : null
   await dbOf(env)
     .prepare('UPDATE mkvid_requests SET status = ?, not_before = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?')
     .bind(status, notBefore, input.error.slice(0, 500), v(input.jobId), now, req.id)

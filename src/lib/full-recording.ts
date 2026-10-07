@@ -45,6 +45,9 @@ export type FullRecordingInput = {
   embedHeight: number | null
   /** Apply rule (d). Off unless `REJECT_VERTICAL` is set (lib/playlist-hygiene.ts rejectVerticalEnabled). */
   rejectVertical?: boolean
+  /** Rules (b) and (c) tolerances (app settings playlists.*ToleranceMinutes); default the constants above. */
+  shortToleranceSeconds?: number
+  audioToleranceSeconds?: number
 }
 
 export type FullRecordingDecision = { ok: true } | { ok: false; reason: RejectReason; detail: string }
@@ -67,11 +70,13 @@ export function isVertical(embedWidth: number | null, embedHeight: number | null
 export function decideFullRecording(i: FullRecordingInput): FullRecordingDecision {
   if (i.notice === true) return { ok: false, reason: 'notice', detail: 'page: "Currently no (full) recording available"' }
   if (known(i.videoSeconds) && i.videoSeconds > 0) {
-    if (known(i.lastCueSeconds) && i.videoSeconds < i.lastCueSeconds - SHORTER_THAN_CUE_TOLERANCE_SECONDS) {
-      return { ok: false, reason: 'short', detail: `video ${fmt(i.videoSeconds)} < last cue ${fmt(i.lastCueSeconds)} - 5:00` }
+    const shortTol = i.shortToleranceSeconds ?? SHORTER_THAN_CUE_TOLERANCE_SECONDS
+    const audioTol = i.audioToleranceSeconds ?? AUDIO_LONGER_TOLERANCE_SECONDS
+    if (known(i.lastCueSeconds) && i.videoSeconds < i.lastCueSeconds - shortTol) {
+      return { ok: false, reason: 'short', detail: `video ${fmt(i.videoSeconds)} < last cue ${fmt(i.lastCueSeconds)} - ${fmt(shortTol)}` }
     }
-    if (known(i.audioMaxSeconds) && i.audioMaxSeconds > i.videoSeconds + AUDIO_LONGER_TOLERANCE_SECONDS) {
-      return { ok: false, reason: 'audio_longer', detail: `audio ${fmt(i.audioMaxSeconds)} > video ${fmt(i.videoSeconds)} + 10:00` }
+    if (known(i.audioMaxSeconds) && i.audioMaxSeconds > i.videoSeconds + audioTol) {
+      return { ok: false, reason: 'audio_longer', detail: `audio ${fmt(i.audioMaxSeconds)} > video ${fmt(i.videoSeconds)} + ${fmt(audioTol)}` }
     }
   }
   if (i.rejectVertical === true && isVertical(i.embedWidth, i.embedHeight) === true) {

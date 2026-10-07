@@ -5,6 +5,50 @@ import { shell } from '../shell'
 import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 import { YOUTUBE_CARD_CSS, YOUTUBE_CARD_HTML, YOUTUBE_CARD_JS } from './youtube-card'
+import { SETTINGS_FORM_CSS, SETTINGS_FORM_JS, type FormGroup } from './settings-form'
+
+// App settings (lib/app-settings.ts, GET/PUT /ui/api/settings). A blank
+// env-backed field saves null: the env var, else the old default (shown as
+// the placeholder).
+const APP_GROUPS: FormGroup[] = [
+  {
+    id: 'sf-mkvid',
+    title: 'mkvid uploads',
+    intro: 'Blank = the env var or secret, else the default (shown greyed).',
+    fields: [
+      { path: 'mkvid.dailyClaimCap', label: 'Uploads a day, mkvid project', help: 'mkvid-uploads. 0 pauses the queue.', min: 0, max: 100, step: 1, nullable: true },
+      { path: 'mkvid.sharedDailyClaimCap', label: 'Uploads a day, shared project', help: 'tracked-youtube, once the first is full.', min: 0, max: 100, step: 1, nullable: true },
+      { path: 'mkvid.claimTtlMinutes', label: 'Hand a stuck claim out again after', help: 'mkvid died mid-job.', unit: 'min', min: 10, max: 1440, step: 1, nullable: true },
+      { path: 'mkvid.maxAttempts', label: 'Attempts before a request fails', help: 'Default 3.', min: 1, max: 10, step: 1 },
+      { path: 'mkvid.retryBackoffHours', label: 'Retry a failed render after', help: 'Times the attempts so far. Default 6.', unit: 'h', min: 0.25, max: 168 },
+      { path: 'mkvid.unverifiedRetryMinutes', label: 'List not verified: look again after', help: 'No attempt used. Default 60.', unit: 'min', min: 5, max: 1440, step: 1 },
+    ],
+  },
+  {
+    id: 'sf-playlists',
+    title: 'Playlists',
+    fields: [
+      { path: 'playlists.sweepDryRun', label: 'Removal sweep only reports', help: 'Blank = PLAYLIST_SWEEP_DRY_RUN (unset = on).', kind: 'bool', nullable: true },
+      { path: 'playlists.sweepDailyRemovals', label: 'Sweep removals a day', help: '50 quota units each. Blank = env, else 40.', min: 0, max: 500, step: 1, nullable: true },
+      { path: 'playlists.rejectVertical', label: 'Turn down vertical videos', help: 'Shorts. Blank = REJECT_VERTICAL (unset = off).', kind: 'bool', nullable: true },
+      { path: 'playlists.shortToleranceMinutes', label: 'Video shorter than the last cue by', help: 'More than this is not the full set. Default 5.', unit: 'min', min: 0, max: 60 },
+      { path: 'playlists.audioToleranceMinutes', label: 'Audio longer than the video by', help: 'More than this means the video is a cut. Default 10.', unit: 'min', min: 0, max: 120 },
+      { path: 'playlists.massRemovalMax', label: 'Hold a playlist when missing more than', help: 'Videos at once, instead of removing. Default 5.', min: 0, max: 100, step: 1 },
+      { path: 'playlists.massRemovalRatio', label: 'Or more than this share of it', help: 'Default 0.3.', min: 0, max: 1, step: 0.05 },
+      { path: 'playlists.runRemovalMax', label: 'Hold every playlist when one run misses more than', help: 'Across all playlists. Default 15.', min: 0, max: 500, step: 1 },
+      { path: 'playlists.combinedDailyInsertCap', label: 'Combined playlist inserts a day', help: '50 quota units each. Default 80.', min: 0, max: 190, step: 1 },
+      { path: 'playlists.combinedMaxInsertsPerRun', label: 'Combined playlist inserts per run', help: 'Default 20.', min: 0, max: 100, step: 1 },
+    ],
+  },
+  {
+    id: 'sf-retention',
+    title: 'Retention',
+    fields: [
+      { path: 'retention.auditDays', label: 'Keep now-playing and playlist audit', help: 'Default 90.', unit: 'days', min: 1, max: 3650, step: 1 },
+      { path: 'retention.tickHistoryDays', label: 'Keep scheduler tick history', help: 'Default 14.', unit: 'days', min: 1, max: 365, step: 1 },
+    ],
+  },
+]
 
 const BODY = /* html */ `
 ${YOUTUBE_CARD_HTML}
@@ -35,6 +79,7 @@ ${YOUTUBE_CARD_HTML}
     <li><span><span class="tip-term"${tipAttr('The shared secret mkvid uses to claim render jobs. Without it no video is queued.')}>mkvid token</span></span><span id="int-mkvid" class="badge neutral">checking…</span></li>
   </ul>
 </div>
+<div id="sf-app"></div>
 <div class="tk-card">
   <div class="st-head">
     <h2><span class="tip-term"${tipAttr('Each time 1001tracklists blocked tracked: when it started, how long it lasted and how many requests went through each route.')}>Ban episodes</span></h2>
@@ -61,7 +106,8 @@ const CSS = /* css */ `
   .st-head h2 { margin: 0; }
   .ban-eps td.open { color: var(--danger); font-weight: 600; }
   .ban-eps .muted { color: var(--muted); }
-${YOUTUBE_CARD_CSS}`
+${YOUTUBE_CARD_CSS}
+${SETTINGS_FORM_CSS}`
 
 const JS = /* js */ `
 (() => {
@@ -98,6 +144,26 @@ ${YOUTUBE_CARD_JS}
   const refreshBtn = $('ban-refresh');
   if (refreshBtn) refreshBtn.addEventListener('click', loadIntegrations);
 
+  // ── app settings: field-table cards (ui/pages/settings-form.ts) ──
+${SETTINGS_FORM_JS}
+  const APP_GROUPS = ${JSON.stringify(APP_GROUPS)};
+  async function loadApp() {
+    const r = await fetch('/ui/api/settings', { credentials: 'same-origin' }).catch(() => null);
+    const d = r ? await r.json().catch(() => ({})) : {};
+    if (r && r.ok && d.settings) SF.fill(APP_GROUPS, d.settings, Object.assign({}, d.defaults, { mkvid: Object.assign({}, d.defaults.mkvid, d.effective.mkvid), playlists: Object.assign({}, d.defaults.playlists, d.effective.playlists) }));
+  }
+  const $app = $('sf-app');
+  if ($app) {
+    SF.mount($app, APP_GROUPS, async (patch) => {
+      const r = await fetch('/ui/api/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) }).catch(() => null);
+      const d = r ? await r.json().catch(() => ({})) : {};
+      if (!r || !r.ok) return { ok: false, issues: d.issues || [], message: d.issues ? '' : 'Could not save (HTTP ' + (r ? r.status : 0) + ').' };
+      loadApp();
+      return { ok: true };
+    });
+    loadApp();
+  }
+
   YT.handleReturn();
   YT.load();
   loadIntegrations();
@@ -109,7 +175,7 @@ export const SETTINGS_PAGE: UiPage = {
   html: shell({
     nav: 'settings',
     title: 'Settings',
-    description: 'The YouTube connection, notifications, theme and integrations.',
+    description: 'The YouTube connection, notifications, theme, integrations, mkvid uploads, playlists and retention.',
     body: BODY,
     css: CSS,
     js: JS,

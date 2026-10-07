@@ -10,6 +10,7 @@
  *   POST /ui/api/set/remove-replace      the set card's "remove and replace" button
  */
 
+import { getAppSettings } from '../lib/app-settings'
 import { Hono } from 'hono'
 import type { Env } from '../types'
 import { getAccessToken } from '../lib/google-oauth'
@@ -44,7 +45,7 @@ hygieneApp.get('/api/removals', async (c) => {
   return c.json({
     ...page,
     counts: await removalCounts(c.env),
-    settings: sweepSettings(c.env),
+    settings: sweepSettings(c.env, await getAppSettings(c.env)),
     deletesUsedToday: await sweepDeletesUsed(c.env),
     holds: await listHolds(c.env),
     reasonLabels: REASON_LABELS,

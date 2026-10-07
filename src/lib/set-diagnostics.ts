@@ -5,7 +5,7 @@
 import type { Env } from '../types'
 import { dbOf } from './db'
 import { getVerification } from './verification'
-import { loadSetFacts, judgeVideo, rejectVerticalEnabled, mkvidUploadedIds, REASON_LABELS } from './playlist-hygiene'
+import { loadSetFacts, judgeVideo, judgeOptions, mkvidUploadedIds, REASON_LABELS } from './playlist-hygiene'
 import { readCachedVideoMeta } from './video-meta'
 import { isOverridden } from './playlist-blocklist'
 import { getMkvidRequestForSet, mkvidQueuePosition } from './mkvid'
@@ -182,7 +182,7 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
     const meta = metaMap.get(videoId) ?? null
     const source: '1001tl' | 'mkvid' = from === 'mkvid' || tlRow?.videoSource === 'mkvid' || mkvidOwn.has(videoId) ? 'mkvid' : '1001tl'
     const exempt = source === 'mkvid' ? 'mkvid' : null
-    const v = !exempt && (facts || meta) ? judgeVideo(facts, meta, { rejectVertical: rejectVerticalEnabled(env) }) : null
+    const v = !exempt && (facts || meta) ? judgeVideo(facts, meta, await judgeOptions(env)) : null
     video = {
       id: videoId,
       from,
