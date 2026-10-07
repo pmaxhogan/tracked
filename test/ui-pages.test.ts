@@ -33,7 +33,7 @@ export const PAGES: Array<[string, string]> = [
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
 function minimalStub() {
   const el = (): any => ({ innerHTML: '', textContent: '', value: '', hidden: false, checked: false, disabled: false, className: '', src: '', dataset: {}, style: {}, options: [],
-    addEventListener() {}, focus() {}, add() {}, remove() {}, showModal() {}, close() {}, querySelector: () => el(), querySelectorAll: () => [], closest: () => null })
+    addEventListener() {}, focus() {}, add() {}, remove() {}, showModal() {}, close() {}, setAttribute() {}, removeAttribute() {}, getAttribute: () => null, querySelector: () => el(), querySelectorAll: () => [], closest: () => null })
   const els = new Map<string, any>()
   const document = { hidden: false, getElementById: (id: string) => (els.has(id) ? els.get(id) : (els.set(id, el()), els.get(id))), querySelector: () => null, addEventListener() {} }
   return vm.createContext({ document, fetch: async () => new Response('{}', { status: 404 }), setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, console, Date,
@@ -178,7 +178,7 @@ it('pool pages report the Challenges count themselves and keep the phone-critica
 /** The minimal stub plus createElement, location, history and URLSearchParams: enough for a page script to run. */
 function richStub(fetchImpl: (u: string) => Promise<Response>, pathname: string) {
   const el = (): any => ({ innerHTML: '', textContent: '', value: '', hidden: false, checked: false, disabled: false, className: '', src: '', dataset: {}, style: {}, options: [],
-    addEventListener() {}, focus() {}, add() {}, remove() {}, showModal() {}, close() {}, querySelector: () => el(), querySelectorAll: () => [], closest: () => null })
+    addEventListener() {}, focus() {}, add() {}, remove() {}, showModal() {}, close() {}, setAttribute() {}, removeAttribute() {}, getAttribute: () => null, querySelector: () => el(), querySelectorAll: () => [], closest: () => null })
   const els = new Map<string, any>()
   const document = { hidden: false, getElementById: (id: string) => (els.has(id) ? els.get(id) : (els.set(id, el()), els.get(id))), querySelector: () => null, addEventListener() {}, createElement: () => el() }
   const ctx = vm.createContext({ document, fetch: fetchImpl, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, console, Date, URLSearchParams,
