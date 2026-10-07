@@ -783,13 +783,14 @@ describe('panel list: filters and paging', () => {
 describe('track list for mkvid', () => {
   const tl = (name: string) => parseTracklist(`https://www.1001tracklists.com/tracklist/x/${name}`, fixture(name))
 
-  it('trusts a page only when the list is verified, enough rows were checked and none contradicts itself', () => {
+  it('trusts a page only when the list is verified, enough rows were checked and it is no decoy', () => {
     expect(mkvidTracksTrusted({ named: 25, mismatched: 0, suspected: false }, true)).toBe(true)
     expect(mkvidTracksTrusted({ named: 3, mismatched: 0, suspected: false }, true)).toBe(true)
-    // Too few rows to judge, or any contradiction at all, or a suspected decoy: not trusted.
+    // A few far rows on a verified list: a second account saw the very same ones (they are in the fingerprint).
+    expect(mkvidTracksTrusted({ named: 25, mismatched: 1, suspected: false }, true)).toBe(true)
+    // Too few rows to judge, or a suspected decoy: not trusted.
     expect(mkvidTracksTrusted({ named: 2, mismatched: 0, suspected: false }, true)).toBe(false)
     expect(mkvidTracksTrusted({ named: 0, mismatched: 0, suspected: false }, true)).toBe(false)
-    expect(mkvidTracksTrusted({ named: 25, mismatched: 1, suspected: false }, true)).toBe(false)
     expect(mkvidTracksTrusted({ named: 25, mismatched: 24, suspected: true }, true)).toBe(false)
     expect(mkvidTracksTrusted(tl('tracklist-matroda.html').decoy, true)).toBe(true)
     expect(mkvidTracksTrusted(tl('tracklist-decoy-dcr839.html').decoy, true)).toBe(false)

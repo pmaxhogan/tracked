@@ -279,14 +279,15 @@ export const MKVID_MAX_TRACKS = 300
  *   - the list must be VERIFIED (lib/verification.ts, quest decision 2: a
  *     second fetch >= 2 h later by a different pool account agreed on every
  *     row) — `verified`, and
- *   - the page itself must pass the strict in-page check: at least three rows
- *     compared and not one of them contradicting itself (stricter than
- *     `looksLikeDecoy`, which needs a majority to *refuse* a page).
- *     `mismatched` counts far mismatches only; benign near ones
- *     (`nearMismatched`) never count.
+ *   - the page itself must not look like a decoy: at least three rows
+ *     compared and no majority contradicting itself. A few far rows are
+ *     fine once verified: the verification fingerprint carries them
+ *     (DecoySignal.far), so a second account saw the very same ones, which a
+ *     decoy's per-fetch names never repeat (2026-10-07: site quirks such as
+ *     "Tones & I" vs "Tones and I" kept lists unverifiable forever).
  */
 export function mkvidTracksTrusted(d: { named: number; mismatched: number; suspected: boolean }, verified = false): boolean {
-  return verified && !d.suspected && d.named >= 3 && d.mismatched === 0
+  return verified && !d.suspected && d.named >= 3
 }
 
 const nameOrNull = (s: string | null | undefined): string | null => {
@@ -328,7 +329,7 @@ export async function saveMkvidTracks(
   env: Env,
   setUrl: string,
   // `rows`, not `tracks`: every page row, anonymous "ID - ID" rows included (ScrapedTracklist.rows).
-  parsed: { rows: ReadonlyArray<ParsedTrack & { anonymous?: boolean }>; decoy: { named: number; mismatched: number; suspected: boolean } },
+  parsed: { rows: ReadonlyArray<ParsedTrack & { anonymous?: boolean }>; decoy: { named: number; mismatched: number; suspected: boolean; far?: string[] } },
 ): Promise<'saved' | 'kept' | 'no_request' | 'empty'> {
   if (parsed.rows.length === 0) return 'empty'
   const db = dbOf(env)

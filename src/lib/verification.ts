@@ -87,20 +87,26 @@ type FingerprintRow = {
   isMashupLinked?: boolean
   anonymous?: boolean
 }
-type FingerprintSource = { readonly rows: ReadonlyArray<FingerprintRow> }
+type FingerprintSource = { readonly rows: ReadonlyArray<FingerprintRow>; readonly decoy?: { readonly far?: ReadonlyArray<string> } }
 
-/** The rows reduced to what "the same list" means (decision 2). */
+/**
+ * The rows reduced to what "the same list" means (decision 2). A page with
+ * far mismatch rows adds them (DecoySignal.far): two accounts agree only when
+ * they saw the very same contradictions, which a decoy's per-fetch names never
+ * repeat. A page without any keeps the plain rows form, so fingerprints
+ * stored before 2026-10-07 still match.
+ */
 export function fingerprintInput(parsed: FingerprintSource): string {
-  return JSON.stringify(
-    parsed.rows.map((r) => [
-      norm(r.artist),
-      norm(r.title),
-      r.startSeconds ?? null,
-      r.ownStartSeconds ?? null,
-      r.isMashupLinked ? 1 : 0,
-      r.anonymous ? 1 : 0,
-    ]),
-  )
+  const rows = parsed.rows.map((r) => [
+    norm(r.artist),
+    norm(r.title),
+    r.startSeconds ?? null,
+    r.ownStartSeconds ?? null,
+    r.isMashupLinked ? 1 : 0,
+    r.anonymous ? 1 : 0,
+  ])
+  const far = parsed.decoy?.far ?? []
+  return JSON.stringify(far.length ? { rows, far } : rows)
 }
 
 export async function tracklistFingerprint(parsed: FingerprintSource): Promise<string> {
@@ -161,7 +167,6 @@ export function excludeAccountsOf(row: Pick<VerificationRow, 'exclude_accounts'>
 export type VerificationOutcome =
   | 'no_account' // the fetch did not say which account served it: cannot count
   | 'decoy' // the decoy detector called it a decoy: account reported (within the report limits), state untouched
-  | 'untrusted' // a few far mismatches: not counted, nobody reported, state untouched
   | 'first' // first passing fetch recorded; second fetch scheduled
   | 'verified' // this fetch confirmed the pending one
   | 'still_pending' // same rows but same account or too soon: waits for a proper second fetch
@@ -207,12 +212,13 @@ export async function noteSetFetch(env: Env, input: NoteInput): Promise<Verifica
       const reported = await reportAccount(env, input, account, 'decoy page')
       return { outcome: 'decoy', verified: wasVerified, reported: reported ? account : null }
     }
-    if (parsed.decoy.mismatched > 0) {
-      log?.warn('verify.untrusted_fetch', { setUrl, accountId: account, ...counts })
-      return { outcome: 'untrusted', verified: wasVerified, reported: null }
-    }
+    // A few far rows: maybe decoy rows, maybe a quirk of the site's own data.
+    // It goes through verification like any page, with those rows in its
+    // fingerprint (fingerprintInput), so only a second account that sees the
+    // same contradictions verifies it. Nobody is reported over it.
+    if (parsed.decoy.mismatched > 0) log?.warn('verify.untrusted_fetch', { setUrl, accountId: account, ...counts })
     // Zero rows: nothing to compare, nobody to blame.
-    return { outcome: 'no_account', verified: wasVerified, reported: null }
+    else return { outcome: 'no_account', verified: wasVerified, reported: null }
   }
   const fingerprint = await tracklistFingerprint(parsed)
   const rowCount = parsed.rows.length
@@ -287,9 +293,10 @@ export async function noteSetFetch(env: Env, input: NoteInput): Promise<Verifica
     // which may itself be a decoy row that differs from the first fetch. Then
     // the disagreement is no evidence against the first account: start over
     // without reporting anyone.
+    // Same for a fetch with far rows of its own (it is the suspect side, if any).
     const near = parsed.decoy.nearMismatched
-    log?.error('verify.mismatch', { setUrl, firstAccount: row.first_account, secondAccount: account, rowsFirst: row.row_count, rowsSecond: rowCount, nearMismatched: near })
-    const reported = near === 0 && (await reportAccount(env, input, row.first_account, 'verification mismatch'))
+    log?.error('verify.mismatch', { setUrl, firstAccount: row.first_account, secondAccount: account, rowsFirst: row.row_count, rowsSecond: rowCount, nearMismatched: near, mismatched: parsed.decoy.mismatched })
+    const reported = near === 0 && parsed.decoy.mismatched === 0 && (await reportAccount(env, input, row.first_account, 'verification mismatch'))
     await startOver([account, row.first_account, ...excludeAccountsOf(row)], row.mismatches + 1)
     return { outcome: 'mismatch', verified: false, reported: reported ? row.first_account : null }
   }

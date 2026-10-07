@@ -60,12 +60,15 @@ describe('near mismatches (benign meta/visible name differences)', () => {
     expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('clean')
   })
 
-  it('a single far mismatch still fails every check (0 far mismatches tolerated)', async () => {
+  it('a single far mismatch fails the in-page checks; only verification with the same far pair trusts it', async () => {
     const html = page(45, [['Artist A - Some Title', 'Somebody Else - Other Words']])
     const p = parseTracklist(URL, html)
-    expect(p.decoy).toEqual({ named: 46, mismatched: 1, nearMismatched: 0, suspected: false })
+    expect(p.decoy).toMatchObject({ named: 46, mismatched: 1, nearMismatched: 0, suspected: false })
+    expect(p.decoy.far).toHaveLength(1) // the far pair, for the verification fingerprint
     expect(passesDecoyCheck(p)).toBe(false)
-    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false)
+    // Verified means a second account saw this very far pair (it is in the fingerprint): a site quirk.
+    expect(mkvidTracksTrusted(p.decoy, true)).toBe(true)
+    expect(mkvidTracksTrusted(p.decoy, false)).toBe(false)
     expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('decoy')
   })
 
@@ -159,7 +162,8 @@ describe('near mismatches (benign meta/visible name differences)', () => {
   it('the decoy fixture: every mismatch is far, and it fails every check', async () => {
     const html = fx('tracklist-decoy-dcr839.html')
     const p = parseTracklist(URL, html)
-    expect(p.decoy).toEqual({ named: 25, mismatched: 24, nearMismatched: 0, suspected: true })
+    expect(p.decoy).toMatchObject({ named: 25, mismatched: 24, nearMismatched: 0, suspected: true })
+    expect(p.decoy.far).toHaveLength(24)
     expect(passesDecoyCheck(p)).toBe(false)
     expect(mkvidTracksTrusted(p.decoy, true)).toBe(false)
     expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('decoy')

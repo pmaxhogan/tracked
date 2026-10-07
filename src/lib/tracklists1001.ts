@@ -439,6 +439,15 @@ export type DecoySignal = {
   nearMismatched: number
   /** `looksLikeDecoy` of the two counts. */
   suspected: boolean
+  /**
+   * The far rows as `microdata ⇄ visible` pairs, in page order; absent when
+   * there are none. A decoy draws new names on every fetch, while a quirk of
+   * the site's own data (2026-10-07: "Tones & I" vs "Tones and I", an "x
+   * ANOTR" credit moved into the title) is the same on every fetch by every
+   * account, so these pairs go into the verification fingerprint: a second
+   * account that sees exactly the same ones verifies the list.
+   */
+  far?: string[]
 }
 
 /** A few named rows, and a majority of them disagreeing with themselves. */
@@ -552,6 +561,7 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
   let named = 0
   let mismatched = 0
   let nearMismatched = 0
+  const far: string[] = []
   // Whether the page row right before this one made it into the list being
   // built. A "w/" row is only linked when its base did — otherwise linking it
   // to whatever row came before would put it on top of the wrong track.
@@ -583,7 +593,10 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     named++
     if (metaName === visible) continue
     if (isNearMismatch(metaName, visible)) nearMismatched++
-    else mismatched++
+    else {
+      mismatched++
+      far.push(`${metaName} ⇄ ${visible}`)
+    }
   }
 
   return {
@@ -593,7 +606,7 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     setSoundcloudLink: extractSetSoundcloudLink(html),
     tracks,
     rows: pageRows,
-    decoy: { named, mismatched, nearMismatched, suspected: looksLikeDecoy({ named, mismatched }) },
+    decoy: { named, mismatched, nearMismatched, suspected: looksLikeDecoy({ named, mismatched }), ...(far.length ? { far } : {}) },
   }
 }
 

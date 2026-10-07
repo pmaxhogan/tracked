@@ -142,15 +142,32 @@ describe('noteSetFetch', () => {
     expect(await isVerified(env, URL1)).toBe(true)
   })
 
-  it('a page with a few far mismatches is not trusted but accuses nobody (2026-10-07)', async () => {
+  it('a page with a few far mismatches accuses nobody and verifies only when another account sees the same ones (2026-10-07)', async () => {
     const env = makeEnv()
     const { retests, pool } = retestRecorder()
-    const oneFar = { ...real, decoy: { ...real.decoy, mismatched: 1, suspected: false } }
-    expect(passesDecoyCheck(oneFar)).toBe(false)
-    expect(await note(env, oneFar, 'acct-1', T0, pool)).toEqual({ outcome: 'untrusted', verified: false, reported: null })
+    const quirk = (far: string) => ({ ...real, decoy: { ...real.decoy, mismatched: 1, suspected: false, far: [far] } })
+    const tones = quirk('tones & i - dance monkey ⇄ tones and i - dance monkey')
+    expect(passesDecoyCheck(tones)).toBe(false)
+    expect(await note(env, tones, 'acct-1', T0, pool)).toEqual({ outcome: 'first', verified: false, reported: null })
+    // The same quirk from another account: a site quirk, not a decoy.
+    expect(await note(env, tones, 'acct-2', T0 + 2 * H, pool)).toEqual({ outcome: 'verified', verified: true, reported: null })
     expect(retests).toEqual([])
-    // Not counted towards verification either.
-    expect(await getVerification(env, URL1)).toBeNull()
+    // Another far pair (a decoy draws new names every fetch) never matches, and accuses nobody.
+    const env2 = makeEnv()
+    await note(env2, tones, 'acct-1', T0, pool)
+    expect(await note(env2, quirk('x - y ⇄ x - z'), 'acct-2', T0 + 2 * H, pool)).toMatchObject({ outcome: 'mismatch', verified: false, reported: null })
+    // Nor does the clean form of the list: the far pairs are part of what has to agree.
+    const env3 = makeEnv()
+    await note(env3, tones, 'acct-1', T0, pool)
+    // The clean page is the evidence here, so the first account is reported, as for any pair that disagrees.
+    expect(await note(env3, real, 'acct-2', T0 + 2 * H, pool)).toMatchObject({ outcome: 'mismatch', reported: 'acct-1' })
+  })
+
+  it('a clean page keeps its fingerprint (rows only); far pairs change it', async () => {
+    const { tracklistFingerprint } = await import('../src/lib/verification')
+    const clean = await tracklistFingerprint(real)
+    expect(await tracklistFingerprint({ ...real, decoy: { ...real.decoy, far: [] } })).toBe(clean)
+    expect(await tracklistFingerprint({ ...real, decoy: { ...real.decoy, far: ['a ⇄ b'] } })).not.toBe(clean)
   })
 
   it('reports nobody while more than half of the non-passive pool rests', async () => {
