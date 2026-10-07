@@ -11,33 +11,33 @@
 // innerHTML and clicks are delegated (the tests run this in a stub DOM).
 import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 
 const BODY = /* html */ `
 <section class="tk-card" aria-labelledby="sc-h-day">
-  <div class="sc-head"><h2 id="sc-h-day">Last 24 hours</h2><span id="sc-asof" class="muted sc-asof"></span></div>
+  <div class="sc-head"><h2 id="sc-h-day"><span class="tip-term"${tipAttr('Every 5 minutes the scheduler wakes up (a tick), draws a few items from what is due and fetches them one at a time. This summarizes the ticks of the last day.')}>Last 24 hours</span></h2><span id="sc-asof" class="muted sc-asof"></span></div>
   <div id="sc-err" class="error"></div>
   <div id="sc-tiles" class="tk-tiles">${skelHtml(1, 'row')}</div>
   <div class="tk-grid two">
-    <div class="tk-table-wrap"><table class="tk-table sc-t"><thead><tr><th>Class</th><th class="num">Items</th><th class="num">Due now</th><th>Last picked</th><th>Last ok</th></tr></thead><tbody id="sc-classes"></tbody></table></div>
-    <div class="tk-table-wrap"><table class="tk-table sc-t"><thead><tr><th>Kind</th><th class="num">Items</th><th>Outcomes</th><th>Last picked</th><th>Last ok</th></tr></thead><tbody id="sc-kinds"></tbody></table></div>
+    <div class="tk-table-wrap"><table class="tk-table sc-t"><thead><tr><th><span class="tip-term"${tipAttr('The scheduler takes work in priority order (set in Pool settings). new: sets just discovered. verify: the second fetch that confirms a track list. recheck: sets due again by their age. backfill: older sets of a DJ.')}>Class</span></th><th class="num">Items</th><th class="num"><span class="tip-term"${tipAttr('How many items of this class were waiting at the last count. A floor: each class query has its own limit.')}>Due now</span></th><th>Last picked</th><th>Last ok</th></tr></thead><tbody id="sc-classes"></tbody></table></div>
+    <div class="tk-table-wrap"><table class="tk-table sc-t"><thead><tr><th><span class="tip-term"${tipAttr('The kind of fetch an item was: a finer split than the class.')}>Kind</span></th><th class="num">Items</th><th><span class="tip-term"${tipAttr('How the items ended: ok, stopped by a refusal, skipped, or failed.')}>Outcomes</span></th><th>Last picked</th><th>Last ok</th></tr></thead><tbody id="sc-kinds"></tbody></table></div>
   </div>
   <div class="sc-reasons" id="sc-reasons"></div>
 </section>
 
 <section class="tk-card" aria-labelledby="sc-h-djs">
-  <div class="sc-head"><h2 id="sc-h-djs">DJ due times</h2><span id="sc-djs-count" class="muted sc-asof"></span></div>
-  <p class="muted sc-note">Discovery reads each DJ's listing page about once a day; backfill takes one "older sets" step at a time. Overdue means the time passed and no tick has picked it yet.</p>
+  <div class="sc-head"><h2 id="sc-h-djs"><span class="tip-term"${tipAttr('Discovery reads each DJ\'s listing page about once a day; backfill takes one "older sets" step at a time. Overdue means the time passed and no tick has picked it up yet.')}>DJ due times</span></h2><span id="sc-djs-count" class="muted sc-asof"></span></div>
   <div class="tk-table-wrap"><table class="tk-table sc-t"><thead><tr><th>DJ</th><th>Discovery</th><th>Backfill</th></tr></thead><tbody id="sc-djs"><tr><td colspan="3">${skelHtml(3, 'row')}</td></tr></tbody></table></div>
-  <p class="sc-foot"><button id="sc-djs-all" type="button" class="btn" hidden>Show all DJs</button></p>
+  <p class="sc-foot"><button id="sc-djs-all" type="button" class="btn" hidden${tipAttr('Lists every subscribed DJ, not just the most overdue ones.')}>Show all DJs</button></p>
 </section>
 
 <section class="tk-card" aria-labelledby="sc-h-ticks">
-  <div class="sc-head"><h2 id="sc-h-ticks">Ticks</h2><span class="muted sc-asof">newest first</span></div>
+  <div class="sc-head"><h2 id="sc-h-ticks"><span class="tip-term"${tipAttr('One row per scheduler wake-up: how many items it drew, what was due, what it picked and how it ended.')}>Ticks</span></h2><span class="muted sc-asof">newest first</span></div>
   <div id="sc-ticks-err" class="error"></div>
-  <div class="tk-table-wrap"><table class="tk-table sc-t sc-ticks"><thead><tr><th>Time</th><th class="num">Took</th><th class="num">Drawn</th><th>Due n/v/r/b</th><th>Picked</th><th>Result</th></tr></thead><tbody id="sc-ticks"><tr><td colspan="6">${skelHtml(4, 'row')}</td></tr></tbody></table></div>
+  <div class="tk-table-wrap"><table class="tk-table sc-t sc-ticks"><thead><tr><th>Time</th><th class="num">Took</th><th class="num"><span class="tip-term"${tipAttr('How many items this tick drew at random from what was due (the tick size is a setting).')}>Drawn</span></th><th><span class="tip-term"${tipAttr('Items due at the time of the tick: new / verify / recheck / backfill.')}>Due n/v/r/b</span></th><th>Picked</th><th>Result</th></tr></thead><tbody id="sc-ticks"><tr><td colspan="6">${skelHtml(4, 'row')}</td></tr></tbody></table></div>
   <div id="sc-ticks-empty" class="empty" hidden>No ticks recorded yet.</div>
-  <p class="sc-foot"><button id="sc-more" type="button" class="btn" hidden>Load older</button></p>
+  <p class="sc-foot"><button id="sc-more" type="button" class="btn" hidden${tipAttr('Loads 50 older ticks.')}>Load older</button></p>
 </section>
 `
 
@@ -97,10 +97,29 @@ const JS = /* js */ `
     if (sec < 86400) { const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60); return h + 'h' + (m ? ' ' + m + 'm' : ''); }
     const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600); return d + 'd' + (h ? ' ' + h + 'h' : '');
   }
-  const when = (sec) => sec ? '<span title="' + esc(iso(sec)) + '">' + esc(TK.fmt.rel(iso(sec)) || '—') + '</span>' : '<span class="muted">never</span>';
+  const when = (sec) => sec ? '<span' + TK.tip(iso(sec)) + '>' + esc(TK.fmt.rel(iso(sec)) || '—') + '</span>' : '<span class="muted">never</span>';
   const took = (ms) => ms == null ? '—' : ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
   const outCls = (o) => GOOD.has(o) ? 'ok' : o === 'stopped' || o === 'skipped' || o === 'soft_failed' ? 'warn' : 'bad';
-  const badge = (cls, text, title) => '<span class="badge sm ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>';
+  const badge = (cls, text, tip) => '<span class="badge sm ' + cls + '"' + TK.tip(tip) + '>' + esc(text) + '</span>';
+  const OUT_TIPS = {
+    ok: 'The fetch worked.',
+    done: 'Finished: nothing more to do for this item.',
+    stepped: 'A backfill step worked; more older sets remain.',
+    no_cursor: 'The DJ had no backfill position to continue from.',
+    stopped: 'Stopped by a refusal (paused, no healthy account, captcha, timeout); the tick ended there.',
+    skipped: 'Left alone this time (for instance a cooldown).',
+    soft_failed: 'Failed in a way that is retried later without counting against the item.',
+    failed: 'The fetch failed and counts against the item (three strikes and it is abandoned).',
+    threw: 'An unexpected error. See the tick row for the message.',
+  };
+  const SKIP_TIPS = {
+    paused: 'Fetching is paused after an IP block.',
+    backoff: 'The pool asked the scheduler to wait before the next tick.',
+    pool_not_configured: 'No tlpool is set up, so nothing can be fetched.',
+    youtube_not_connected: 'YouTube is not connected, so the sync cannot add videos.',
+    nothing_due: 'Nothing was due at this tick.',
+    zero_draw: 'The random draw picked zero items (the tick size allows 0).',
+  };
   const djLink = (slug, name) => slug ? '<a href="/ui/dj/' + encodeURIComponent(slug) + '">' + esc(name || slug) + '</a>' : '';
   const n = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
   const entries = (m) => Object.keys(m || {}).map((k) => [k, n(m[k])]).filter((e) => e[1] > 0).sort((a, b) => b[1] - a[1]);
@@ -127,7 +146,7 @@ const JS = /* js */ `
       const lr = last[c] || {};
       // Starving: work was due at the last count, yet nothing of this class ran all day.
       const starve = freshDue && d && items === 0;
-      return '<tr' + (starve ? ' class="starve"' : '') + '><td data-label="Class">' + esc(c) + (starve ? ' ' + badge('warn', 'starving') : '') + '</td>' +
+      return '<tr' + (starve ? ' class="starve"' : '') + '><td data-label="Class">' + esc(c) + (starve ? ' ' + badge('warn', 'starving', 'Work was due at the last count, yet no item of this class ran in the last 24 hours.') : '') + '</td>' +
         '<td data-label="Items" class="num">' + items + '</td>' +
         '<td data-label="Due now" class="num">' + (d == null ? '—' : esc(d)) + '</td>' +
         '<td data-label="Last picked">' + when(lr.picked) + '</td>' +
@@ -142,7 +161,7 @@ const JS = /* js */ `
       const lr = lastK[k] || {};
       return '<tr><td data-label="Kind">' + esc(KIND_WORDS[k] || k) + '<span class="sub mono">' + esc(k) + '</span></td>' +
         '<td data-label="Items" class="num">' + items + '</td>' +
-        '<td data-label="Outcomes"><span class="sc-outs">' + (outs.length ? outs.map((e) => badge(outCls(e[0]), e[0] + ' ' + e[1])).join('') : '<span class="muted">—</span>') + '</span></td>' +
+        '<td data-label="Outcomes"><span class="sc-outs">' + (outs.length ? outs.map((e) => badge(outCls(e[0]), e[0] + ' ' + e[1], OUT_TIPS[e[0]])).join('') : '<span class="muted">—</span>') + '</span></td>' +
         '<td data-label="Last picked">' + when(lr.picked) + '</td>' +
         '<td data-label="Last ok">' + when(lr.ok) + '</td></tr>';
     }).join('');
@@ -158,8 +177,8 @@ const JS = /* js */ `
   let djs = [], djsAll = false;
   function dueCell(at, over) {
     if (at == null || over == null) return '<span class="muted">not scheduled</span>';
-    if (over > 0) return badge(over > OVERDUE_BAD ? 'bad' : 'warn', span(over) + ' overdue', iso(at));
-    return '<span title="' + esc(iso(at)) + '">in ' + esc(span(-over)) + '</span>';
+    if (over > 0) return badge(over > OVERDUE_BAD ? 'bad' : 'warn', span(over) + ' overdue', 'Was due ' + iso(at) + ' and no tick has picked it up yet.');
+    return '<span' + TK.tip(iso(at)) + '>in ' + esc(span(-over)) + '</span>';
   }
   function renderDjs() {
     const late = djs.filter((d) => n(d.discoveryOverdue) > 0 || n(d.backfillOverdue) > 0).length;
@@ -192,7 +211,7 @@ const JS = /* js */ `
     const what = x.label
       ? '<a class="lbl" href="/ui/set?url=' + encodeURIComponent(x.url || '') + '">' + esc(x.label) + '</a>'
       : '<span class="lbl">' + djLink(x.slug, x.slug) + '</span>';
-    return '<li>' + badge(outCls(x.outcome), x.outcome || '?') + '<span class="kind">' + esc(x.kind) + '</span>' +
+    return '<li>' + badge(outCls(x.outcome), x.outcome || '?', OUT_TIPS[x.outcome]) + '<span class="kind">' + esc(x.kind) + '</span>' +
       (x.label && x.slug ? '<span class="muted">' + djLink(x.slug, x.slug) + '</span>' : '') + what +
       (x.stopReason ? '<span class="why">' + esc(x.stopReason) + '</span>' : '') + '</li>';
   }
@@ -200,12 +219,12 @@ const JS = /* js */ `
     const due = t.due ? CLASSES.map((c) => esc(n(t.due[c]))).join('/') : '—';
     const items = Array.isArray(t.items) ? t.items : [];
     let res = '';
-    if (t.skipped) res += badge('neutral', SKIP_WORDS[t.skipped] || t.skipped);
-    if (t.stoppedBy) res += badge('warn', 'stopped') + ' <span>' + esc(t.stoppedBy) + '</span>';
+    if (t.skipped) res += badge('neutral', SKIP_WORDS[t.skipped] || t.skipped, SKIP_TIPS[t.skipped]);
+    if (t.stoppedBy) res += badge('warn', 'stopped', 'The tick ended early because of this refusal; the items left are drawn again later.') + ' <span>' + esc(t.stoppedBy) + '</span>';
     if (t.error) res += '<span class="error">' + esc(t.error) + '</span>';
-    if (!res) res = items.length ? badge('ok', 'done') : '<span class="muted">—</span>';
+    if (!res) res = items.length ? badge('ok', 'done', 'Every drawn item ran.') : '<span class="muted">—</span>';
     return '<tr' + (t.error ? ' class="late"' : t.stoppedBy ? ' class="starve"' : '') + '>' +
-      '<td data-label="Time"><span title="' + esc(iso(t.at)) + '">' + esc(TK.fmt.time(iso(t.at))) + '</span><span class="sub">' + esc(TK.fmt.rel(iso(t.at))) + '</span></td>' +
+      '<td data-label="Time"><span' + TK.tip(iso(t.at)) + '>' + esc(TK.fmt.time(iso(t.at))) + '</span><span class="sub">' + esc(TK.fmt.rel(iso(t.at))) + '</span></td>' +
       '<td data-label="Took" class="num">' + esc(took(t.ms)) + '</td>' +
       '<td data-label="Drawn" class="num">' + esc(n(t.drawn)) + '</td>' +
       '<td data-label="Due n/v/r/b" class="mono">' + due + '</td>' +
@@ -249,8 +268,8 @@ export const SCHEDULER_PAGE: UiPage = {
   html: shell({
     nav: 'scheduler',
     title: 'Scheduler',
-    description: 'Where the fetch scheduler\'s slots go, and what is waiting. Its knobs (priority order, shares, recheck schedule) are on <a href="/ui/pool/settings">Pool settings</a>.',
-    actions: '<button id="sc-refresh" type="button" class="btn">Refresh</button>',
+    description: 'Where the fetch scheduler\'s slots go, and what is waiting. Tune it on <a href="/ui/pool/settings">Pool settings</a>.',
+    actions: `<button id="sc-refresh" type="button" class="btn"${tipAttr('Reloads the summary and the tick list.')}>Refresh</button>`,
     body: BODY,
     css: CSS,
     js: JS,

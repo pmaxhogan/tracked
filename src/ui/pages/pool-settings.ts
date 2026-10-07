@@ -1,34 +1,33 @@
 // Pool settings page: tlpool's budget and browser limits, the recheck schedule, priority order and the render feeder.
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import { POOL_CSS, COMMON_JS } from './pool-common'
 
 const BODY = /* html */ `
 <div class="tk-grid two">
   <form id="lim" class="tk-card" autocomplete="off">
-    <h2>Budget and browser</h2>
+    <h2><span class="tip-term"${tipAttr('The limits tlpool, the browser pool on the NAS, applies to every account: how many pages it may load a day and what it may load.')}>Budget and browser</span></h2>
     <div id="lim-err" class="error"></div>
-    <div class="field"><label for="budget">Pages per account per day</label><input id="budget" type="number" min="0" max="1000" step="1" /><span class="hint">Default 30. Spread around the clock with random gaps.</span></div>
-    <div class="field"><label>Ramp for new accounts</label><div class="row"><span>Day 1</span><input id="ramp1" type="number" min="0" max="1000" step="1" /><span>Day 2</span><input id="ramp2" type="number" min="0" max="1000" step="1" /><span class="muted">then the full budget</span></div><span class="hint">Default 10, then 20.</span></div>
-    <div class="field"><label for="share">Reserved for the phone button</label><div class="row"><input id="share" type="number" min="0" max="90" step="1" /><span>% of each day's budget</span></div></div>
-    <div class="field"><label for="xhr">Link lookups per account per day</label><input id="xhr" type="number" min="0" max="2000" step="1" /><span class="hint">In-page lookups (media links, older-sets pages) on their own budget. Default 60.</span></div>
-    <div class="field"><label>Share of the budget each kind of work may use</label><div class="row"><span>New</span><input id="ceil-new" type="number" min="0" max="100" step="1" /><span>Verify</span><input id="ceil-verify" type="number" min="0" max="100" step="1" /><span>Recheck</span><input id="ceil-recheck" type="number" min="0" max="100" step="1" /><span>Backfill</span><input id="ceil-backfill" type="number" min="0" max="100" step="1" /><span class="muted">%</span></div><span class="hint">The phone button can always use everything. Defaults 100, 100, 90, 75: backfill stops first.</span></div>
-    <div class="field"><label for="images">First-party images</label><select id="images"><option value="block">Block</option><option value="allow">Allow</option></select><span class="hint">Video, ads and ad scripts are always blocked.</span></div>
-    <div class="row"><span id="lim-msg" class="muted"></span><span class="spacer"></span><button id="lim-save" type="submit" class="btn primary">Save</button></div>
+    <div class="field"><label for="budget"${tipAttr('How many 1001tracklists page views one account may make in a day. They are spread around the clock with random gaps. Default 30.')}>Pages per account per day</label><input id="budget" type="number" min="0" max="1000" step="1" /></div>
+    <div class="field"><label${tipAttr('A fresh account starts slowly: this many pages on its first day, then on its second day, then the full budget.')}>Ramp for new accounts</label><div class="row"><span>Day 1</span><input id="ramp1" type="number" min="0" max="1000" step="1" /><span>Day 2</span><input id="ramp2" type="number" min="0" max="1000" step="1" /><span class="muted">then the full budget</span></div><span class="hint">Default 10, then 20.</span></div>
+    <div class="field"><label for="share"${tipAttr('The part of each day\'s page budget kept for the phone now-playing button, so background work cannot use it all up.')}>Reserved for the phone button</label><div class="row"><input id="share" type="number" min="0" max="90" step="1" /><span>% of each day's budget</span></div></div>
+    <div class="field"><label for="xhr"${tipAttr('Lookups made inside an already loaded page (track media links, "older sets" pages) have their own daily budget per account. Default 60.')}>Link lookups per account per day</label><input id="xhr" type="number" min="0" max="2000" step="1" /></div>
+    <div class="field"><label${tipAttr('The most of the daily budget each kind of background work may use, so the less urgent kinds stop first. The phone button can always use everything.')}>Share of the budget each kind of work may use</label><div class="row"><span>New</span><input id="ceil-new" type="number" min="0" max="100" step="1" /><span>Verify</span><input id="ceil-verify" type="number" min="0" max="100" step="1" /><span>Recheck</span><input id="ceil-recheck" type="number" min="0" max="100" step="1" /><span>Backfill</span><input id="ceil-backfill" type="number" min="0" max="100" step="1" /><span class="muted">%</span></div><span class="hint">Defaults 100, 100, 90, 75: backfill stops first.</span></div>
+    <div class="field"><label for="images"${tipAttr('Whether the browsers load 1001tracklists\' own images. Video, ads and ad scripts are always blocked.')}>First-party images</label><select id="images"><option value="block">Block</option><option value="allow">Allow</option></select></div>
+    <div class="row"><span id="lim-msg" class="muted"></span><span class="spacer"></span><button id="lim-save" type="submit" class="btn primary"${tipAttr('Saves these limits to tlpool. They apply from the next page it loads.')}>Save</button></div>
   </form>
 
   <form id="sch" class="tk-card" autocomplete="off">
-    <h2>Recheck schedule</h2>
+    <h2><span class="tip-term"${tipAttr('How often a set page is fetched again to catch a swapped recording, by how old the set is. Newer sets are checked more often.')}>Recheck schedule</span></h2>
     <div id="sch-err" class="error"></div>
-    <p class="muted sub" style="margin-top:0">How often a set is fetched again, by its age.</p>
     <table class="sched"><thead><tr><th>Sets up to (days old)</th><th>Every (hours)</th><th></th></tr></thead><tbody id="sch-rows"></tbody></table>
-    <div class="row" style="margin:var(--sp-2) 0 var(--sp-3)"><button id="sch-add" type="button" class="btn small">+ Add row</button></div>
-    <div class="field"><label for="beyond">Older than the last row: every (hours)</label><input id="beyond" type="number" min="1" step="1" placeholder="never" /><span class="hint">Empty = never (the default).</span></div>
-    <div class="field"><label for="over180">Older sets without a good video or with ID rows: every (hours)</label><input id="over180" type="number" min="1" step="1" placeholder="never" /><span class="hint">Default 2160 (90 days).</span></div>
-    <h2 class="next">Priority order</h2>
-    <p class="muted sub" style="margin-top:0">When the budget runs short, earlier ones go first.</p>
+    <div class="row" style="margin:var(--sp-2) 0 var(--sp-3)"><button id="sch-add" type="button" class="btn small"${tipAttr('Adds an age band: sets up to this many days old are rechecked every so many hours.')}>+ Add row</button></div>
+    <div class="field"><label for="beyond"${tipAttr('How often sets older than the last row are rechecked. Empty means never.')}>Older than the last row: every (hours)</label><input id="beyond" type="number" min="1" step="1" placeholder="never" /><span class="hint">Empty = never (the default).</span></div>
+    <div class="field"><label for="over180"${tipAttr('Old sets that still lack a usable video, or still have unidentified rows, can be worth another look. Default 2160 hours (90 days).')}>Older sets without a good video or with ID rows: every (hours)</label><input id="over180" type="number" min="1" step="1" placeholder="never" /><span class="hint">Default 2160 (90 days).</span></div>
+    <h2 class="next"><span class="tip-term"${tipAttr('When the budget runs short, work earlier in the list goes first.')}>Priority order</span></h2>
     <div id="prios"></div>
-    <div class="field" style="margin-top:var(--sp-3)"><label for="feed">Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /><span class="hint">Sets mkvid is waiting on with no verified list, oldest request first, as verification fetches. Each fed set costs about 2 page views (the second fetch follows). Default 40; 0 = off.</span></div>
-    <div class="row" style="margin-top:var(--sp-3)"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit" class="btn primary">Save</button></div>
+    <div class="field" style="margin-top:var(--sp-3)"><label for="feed"${tipAttr('Sets that mkvid is waiting on but that have no verified track list yet are fetched on purpose, oldest request first. Each costs about 2 page views (the second fetch follows). Default 40; 0 turns it off.')}>Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /></div>
+    <div class="row" style="margin-top:var(--sp-3)"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit" class="btn primary"${tipAttr('Saves the schedule, the priority order and the render feeder.')}>Save</button></div>
   </form>
 </div>
 `
@@ -79,6 +78,7 @@ ${COMMON_JS}
   // The stored shape is lib/pool-settings.ts PoolSettings; PUT deep-merges a
   // partial document, and arrays (bands, order) replace.
   const PRIO_WORDS = { phone: 'Phone button', new: 'New sets', verify: 'Verification second fetches', recheck: 'Routine rechecks', backfill: 'DJ backfill' };
+  const PRIO_TIPS = { phone: 'The phone now-playing button is never made to wait.', new: 'Sets just discovered, fetched for the first time.', verify: 'The second fetch, by another account, that confirms a track list.', recheck: 'Processed sets fetched again by their age, to catch swapped recordings.', backfill: 'Older sets of a DJ, a few at a time.' };
   let sched = null;
   function rowHtml(b) {
     return '<tr><td><input type="number" min="1" step="1" data-k="maxAgeDays" value="' + esc(b.maxAgeDays ?? '') + '" /></td>' +
@@ -94,8 +94,8 @@ ${COMMON_JS}
   }
   function renderPrios() {
     const p = sched.priorities.order;
-    $('prios').innerHTML = '<div class="prio"><span class="n">0.</span><span class="name">' + esc(PRIO_WORDS.phone) + '</span><span class="muted">always first (its share is reserved in the pool)</span></div>' +
-      p.map((name, i) => '<div class="prio"><span class="n">' + (i + 1) + '.</span><span class="name">' + esc(PRIO_WORDS[name] || name) + '</span>' +
+    $('prios').innerHTML = '<div class="prio"><span class="n">0.</span><span class="name"' + tipA(PRIO_TIPS.phone) + '>' + esc(PRIO_WORDS.phone) + '</span><span class="muted">always first (its share is reserved in the pool)</span></div>' +
+      p.map((name, i) => '<div class="prio"><span class="n">' + (i + 1) + '.</span><span class="name"' + tipA(PRIO_TIPS[name]) + '>' + esc(PRIO_WORDS[name] || name) + '</span>' +
       '<button type="button" class="btn small" data-up="' + i + '" ' + (i === 0 ? 'disabled' : '') + ' aria-label="Move up">↑</button>' +
       '<button type="button" class="btn small" data-down="' + i + '" ' + (i === p.length - 1 ? 'disabled' : '') + ' aria-label="Move down">↓</button></div>').join('');
   }

@@ -62,7 +62,8 @@ describe('shell()', () => {
     expect(h).toContain('<form class="tk-search" action="/ui/search" method="get" role="search">')
     expect(h).toContain('<input id="tk-search" name="q" type="search" placeholder="Search tracks, sets, DJs" aria-label="Search tracks, sets, DJs">')
     expect(h).not.toMatch(/<form[^>]*method="?post/i)
-    expect(h).toContain('href="/ui/" title="tracked"')
+    expect(h).toContain('href="/ui/" data-tip="tracked: back to Home" data-tip-rail')
+    expect(h).not.toMatch(/ title="/)
   })
   it('its shared scripts run in the minimal pool stub', () => {
     const c = minimalStub()
@@ -152,6 +153,11 @@ describe.runIf(PAGES.length > 0)('every UI page', () => {
     for (const s of scripts) expect(() => new vm.Script(s)).not.toThrow()
     const c = minimalStub()
     for (const s of scripts.slice(0, 4)) expect(() => vm.runInContext(s, c)).not.toThrow()
+    // Hover hints are data-tip tooltips (src/ui/tip.ts), never the browser's title="" (an iframe's title is its accessible name, not a hint).
+    expect(text).not.toMatch(/<(?!iframe\b)[a-z][^>]*\stitle="/i)
+    expect(text).not.toMatch(/\b(?!document\b)\w+\.title = /)
+    // Every tooltip says something, and the copy has no em dash.
+    for (const m of text.matchAll(/ data-tip="([^"]*)"/g)) { expect(m[1]!.trim()).not.toBe(''); expect(m[1]).not.toContain('\u2014') }
   })
   it.each(PAGES)('%s answers 401 without Access and never reaches tlpool', async (path) => {
     const spy = vi.fn(async () => new Response('{}'))

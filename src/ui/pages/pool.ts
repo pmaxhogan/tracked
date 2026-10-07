@@ -1,14 +1,15 @@
 // Pool accounts page: stats, pending challenges, accounts table and the Add account dialog.
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import { POOL_CSS, COMMON_JS, CAPTCHA_JS } from './pool-common'
 
 const BODY = /* html */ `
   <div id="err" class="banner bad" hidden></div>
   <div id="stats" class="tk-tiles"></div>
   <div id="prio" class="tk-card" hidden></div>
-  <h2 class="pool-h2">Pending challenges</h2>
+  <h2 class="pool-h2"><span class="tip-term"${tipAttr('Captchas that a pool account ran into and that wait for a person. An unanswered one expires, and its account rests for 6 hours.')}>Pending challenges</span></h2>
   <div id="chals"><div class="empty">loading…</div></div>
-  <h2 class="pool-h2">Accounts</h2>
+  <h2 class="pool-h2"><span class="tip-term"${tipAttr('The logged-in 1001tracklists accounts the pool fetches with. Each has its own exit IP and daily page budget.')}>Accounts</span></h2>
   <div id="accts"><div class="empty">loading…</div></div>
   <p class="muted stat-note">Accounts are shown by their opaque id only. Usernames, emails and passwords stay on the NAS.</p>
 
@@ -43,10 +44,10 @@ ${CAPTCHA_JS}
     // An account still signing up whose signup challenge tlpool names: the badge
     // is a button that reopens the Add account progress view for that signup.
     if (IN_CREATION.test(s) && a.signupChallengeId) {
-      return '<button type="button" class="badge badge-btn ' + cls + '" data-signup="' + esc(a.signupChallengeId) + '" data-acct="' + esc(a.id) + '" aria-haspopup="dialog" aria-label="' + esc(a.id + ' is ' + s + ': show its signup progress') + '" title="Show signup progress">' + esc(s) + '</button>';
+      return '<button type="button" class="badge badge-btn ' + cls + '" data-signup="' + esc(a.signupChallengeId) + '" data-acct="' + esc(a.id) + '" aria-haspopup="dialog" aria-label="' + esc(a.id + ' is ' + s + ': show its signup progress') + '"' + tipA('Being created. Opens the signup progress: the exit, the form, the confirmation email and the first login.') + '>' + esc(s) + '</button>';
     }
     // Every other state: the badge opens the state details drawer for that account.
-    return '<button type="button" class="badge badge-btn ' + cls + '" data-state-acct="' + esc(a.id) + '" aria-haspopup="dialog" aria-label="' + esc(a.id + ' is ' + s + ': show what that means and what happens next') + '" title="What this state means">' + esc(s) + '</button>';
+    return '<button type="button" class="badge badge-btn ' + cls + '" data-state-acct="' + esc(a.id) + '" aria-haspopup="dialog" aria-label="' + esc(a.id + ' is ' + s + ': show what that means and what happens next') + '"' + tipA(stateTip(s) + ' Press for details.') + '>' + esc(s) + '</button>';
   };
   const badgeClass = (a) => { const m = /class="badge (?:badge-btn )?([a-z]*)"/.exec(stateBadge(a)); return m ? m[1] : ''; };
 
@@ -224,6 +225,12 @@ ${CAPTCHA_JS}
     const b = details.id && document.querySelector ? document.querySelector('[data-state-acct="' + details.id + '"]') : null;
     if (b && b.focus) b.focus();
   });
+  // The first sentence of what a state means, for the badge tooltip.
+  function stateTip(s) {
+    const m = STATE_MEANS[STATE_ALIASES[s] || s];
+    return m ? m.split('. ')[0].replace(/\\.$/, '') + '.' : 'A state this page does not know yet.';
+  }
+  const ACT_TIPS = { rest: 'Takes the account out of rotation for 72 hours. It goes back by itself afterwards.', retest: 'Fetches one known set with this account to check whether the site still trusts it. A pass puts it back, a fail retires it.', retire: 'Takes the account out for good. Its exit stays unused for 30 days.' };
   const confirmWords = { rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };
   let lastStatus = null;
 
@@ -233,18 +240,19 @@ ${CAPTCHA_JS}
     const fetching = live.filter((a) => !a.passive && !a.flagged && (a.state === 'active' || a.state === 'warming' || a.state === 'ok' || a.state === 'healthy' || a.state === 'ramping'));
     const budget = fetching.reduce((s, a) => s + (a.budget || 0), 0);
     const used = fetching.reduce((s, a) => s + (a.usedToday || 0), 0);
-    const tile = (v, k) => '<div class="tk-tile"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>';
+    const tile = (v, k, tip) => '<div class="tk-tile"><div class="k"><span class="tip-term"' + tipA(tip) + '>' + esc(k) + '</span></div><div class="v">' + esc(v) + '</div></div>';
     $('stats').innerHTML =
-      tile(st.requestsToday ?? '—', 'page views today') +
-      tile(used + ' / ' + budget, 'used / budget (fetching accounts)') +
-      tile(st.queueDepth ?? '—', 'queued fetches') +
-      tile(fetching.length + ' / ' + live.length, 'fetching / live accounts') +
-      tile(chals.length, 'pending challenges');
-    const chips = (m) => Object.keys(m).map((k) => '<span class="chip">' + esc(k) + ' <b>' + esc(m[k]) + '</b></span>').join('');
+      tile(st.requestsToday ?? '—', 'page views today', '1001tracklists pages the pool has loaded today, for every account and every kind of work.') +
+      tile(used + ' / ' + budget, 'used / budget (fetching accounts)', 'Page views of the last 24 hours out of the combined daily budget of the accounts that fetch. Passive, flagged and retired accounts are not counted.') +
+      tile(st.queueDepth ?? '—', 'queued fetches', 'Fetches waiting for a free account. They run in priority order, and pause when budgets are spent.') +
+      tile(fetching.length + ' / ' + live.length, 'fetching / live accounts', 'Accounts that fetch right now (active or warming) out of all accounts that are not retired. Resting, passive and flagged ones are live but do not fetch.') +
+      tile(chals.length, 'pending challenges', 'Captchas waiting for you. Solve them under Challenges before they expire.');
+    const PRIO_TIPS = { phone: 'The phone now-playing button. Never made to wait.', new: 'Sets just discovered, fetched for the first time.', verify: 'The second fetch, by another account, that confirms a track list.', recheck: 'Processed sets fetched again by their age, to catch swapped recordings.', backfill: 'Older sets of a DJ, a few at a time.', medialink: 'Track link lookups.' };
+    const chips = (m) => Object.keys(m).map((k) => '<span class="chip"' + tipA(PRIO_TIPS[k]) + '>' + esc(k) + ' <b>' + esc(m[k]) + '</b></span>').join('');
     const bp = st.requestsByPriority || {}, qp = st.queueByPriority || {};
     const parts = [];
-    if (Object.keys(bp).length) parts.push('<div class="muted sub">Requests today by priority</div><div class="chips">' + chips(bp) + '</div>');
-    if (Object.keys(qp).length) parts.push('<div class="muted sub" style="margin-top:var(--sp-3)">Queue by priority</div><div class="chips">' + chips(qp) + '</div>');
+    if (Object.keys(bp).length) parts.push('<div class="muted sub"><span class="tip-term"' + tipA('Every fetch has a priority; when the budget is short the higher ones go first.') + '>Requests today by priority</span></div><div class="chips">' + chips(bp) + '</div>');
+    if (Object.keys(qp).length) parts.push('<div class="muted sub" style="margin-top:var(--sp-3)"><span class="tip-term"' + tipA('Fetches waiting for a free account, by priority.') + '>Queue by priority</span></div><div class="chips">' + chips(qp) + '</div>');
     $('prio').hidden = !parts.length;
     $('prio').innerHTML = parts.join('');
   }
@@ -263,13 +271,13 @@ ${CAPTCHA_JS}
   function renderAccounts(accts) {
     if (!accts.length) { $('accts').innerHTML = '<div class="empty">No accounts yet. Press + Add account.</div>'; return; }
     const rows = accts.map((a) => {
-      const flag = a.flagged ? '<span class="badge bad">flagged</span>' + (a.flagReason ? ' <span class="muted">' + esc(a.flagReason.replace(/_/g, ' ')) + '</span>' : '') : '<span class="muted">no</span>';
+      const flag = a.flagged ? '<span class="badge bad"' + tipA('1001tracklists flagged this account (for instance it served decoy track names). It rests 72 hours, then gets one retest.') + '>flagged</span>' + (a.flagReason ? ' <span class="muted">' + esc(a.flagReason.replace(/_/g, ' ')) + '</span>' : '') : '<span class="muted">no</span>';
       const acts = a.state === 'retired' ? '<span class="muted">retired</span>' :
-        ['rest', 'retest', 'retire'].map((act) => '<button type="button" class="btn small" data-act="' + act + '" data-id="' + esc(a.id) + '">' + act[0].toUpperCase() + act.slice(1) + '</button>').join('');
+        ['rest', 'retest', 'retire'].map((act) => '<button type="button" class="btn small" data-act="' + act + '" data-id="' + esc(a.id) + '"' + tipA(ACT_TIPS[act]) + '>' + act[0].toUpperCase() + act.slice(1) + '</button>').join('');
       return '<tr>' +
-        '<td data-label="Account"><b class="mono">' + esc(a.id) + '</b> ' + (a.passive ? '<span class="badge info">passive</span>' : '') + '</td>' +
+        '<td data-label="Account"><b class="mono">' + esc(a.id) + '</b> ' + (a.passive ? '<span class="badge info"' + tipA('A control account: logged in on its own exit but never used for fetching.') + '>passive</span>' : '') + '</td>' +
         '<td data-label="State">' + stateBadge(a) + (a.restUntil ? ' <span class="muted">until ' + esc(fmtTime(a.restUntil)) + '</span>' : '') + '</td>' +
-        '<td data-label="Exit"><span class="mono">' + esc(a.exitLabel || '—') + '</span>' + (a.exitKind ? ' <span class="badge neutral">' + esc(a.exitKind) + '</span>' : '') + '</td>' +
+        '<td data-label="Exit"><span class="mono">' + esc(a.exitLabel || '—') + '</span>' + (a.exitKind ? ' <span class="badge neutral"' + tipA('Where the traffic of this account leaves from: your own IP, Mullvad or AirVPN.') + '>' + esc(a.exitKind) + '</span>' : '') + '</td>' +
         '<td data-label="Today" class="num">' + esc(a.usedToday ?? '—') + ' / ' + esc(a.budget ?? '—') + '</td>' +
         '<td data-label="Ramp day" class="num">' + esc(a.rampDay ?? '—') + '</td>' +
         '<td data-label="Last success">' + esc(ago(a.lastOkAt)) + '</td>' +
@@ -278,7 +286,7 @@ ${CAPTCHA_JS}
         '<td class="acts-cell"><div class="acts" data-acts="' + esc(a.id) + '">' + acts + '</div></td>' +
         '</tr>';
     }).join('');
-    $('accts').innerHTML = '<div class="tk-table-wrap"><table class="tk-table"><thead><tr><th>Account</th><th>State</th><th>Exit</th><th>Today</th><th>Ramp</th><th>Last ok</th><th>Last challenge</th><th>Flagged</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    $('accts').innerHTML = '<div class="tk-table-wrap"><table class="tk-table"><thead><tr><th>Account</th><th><span class="tip-term"' + tipA('Where the account is in its life: new, warming, active, passive, resting or retired. Press a state badge for details.') + '>State</span></th><th><span class="tip-term"' + tipA('The IP address route this account is pinned to. Each account keeps one exit for good.') + '>Exit</span></th><th><span class="tip-term"' + tipA('Page views in the last 24 hours out of the account daily budget.') + '>Today</span></th><th><span class="tip-term"' + tipA('Which day of its ramp a new account is on. New accounts get a smaller budget for their first days.') + '>Ramp</span></th><th><span class="tip-term"' + tipA('When this account last loaded a page successfully.') + '>Last ok</span></th><th><span class="tip-term"' + tipA('When this account last hit a captcha.') + '>Last challenge</span></th><th><span class="tip-term"' + tipA('Whether 1001tracklists flagged the account as suspicious.') + '>Flagged</span></th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
   }
 
   // In-page confirmation (no confirm()): the buttons of that row turn into a question.

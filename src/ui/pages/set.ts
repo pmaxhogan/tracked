@@ -4,6 +4,7 @@
 // set is or is not in the playlists, from GET /ui/api/set (set-diag.ts); the
 // two calls run in parallel and either renders without the other.
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
 import { SET_DIAG_CSS, SET_DIAG_JS } from './set-diag'
@@ -11,7 +12,7 @@ import { SET_DIAG_CSS, SET_DIAG_JS } from './set-diag'
 const BODY = /* html */ `
   <form id="load-form" class="tk-card set-form">
     <div class="field grow"><label for="url">Tracklist URL</label><input id="url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" required autofocus /></div>
-    <button id="load-btn" type="submit" class="btn primary">Load</button>
+    <button id="load-btn" type="submit" class="btn primary"${tipAttr('Fetches the tracklist (from cache when recent; otherwise one 1001tracklists page view) and shows why it is or is not in your playlists.')}>Load</button>
   </form>
   <div class="set-layout">
   <aside id="diag" class="tk-card set-diag" aria-label="Diagnostics" hidden></aside>
@@ -20,8 +21,8 @@ const BODY = /* html */ `
   <div id="setmeta" class="tk-row muted set-meta" hidden></div>
   <div id="cachebar" class="tk-row cachebar" hidden>
     <span id="cache-age" class="muted"></span>
-    <button type="button" id="refresh" class="btn small">Refresh track list</button>
-    <button type="button" id="load-links" class="btn small" title="Look up Apple Music / YouTube links for every identified track (one page view per track not cached yet)">Load links</button>
+    <button type="button" id="refresh" class="btn small"${tipAttr('Throws away the cached track list and fetches the page again. Costs one 1001tracklists page view and is limited per set and per day.')}>Refresh track list</button>
+    <button type="button" id="load-links" class="btn small"${tipAttr('Looks up Apple Music and YouTube links for every identified track. Costs one 1001tracklists page view per track not already cached (cached for 30 days).')}>Load links</button>
     <span id="refresh-result" class="result muted" role="status"></span>
   </div>
   <div id="tracks" class="tk-card" hidden></div>
@@ -69,9 +70,9 @@ ${SET_DIAG_JS}
     const count = document.createElement('span');
     count.textContent = (data.trackCount || 0) + ' track' + (data.trackCount === 1 ? '' : 's');
     $setmeta.appendChild(count);
-    const src = pill(data.tracklistUrl, '1001tracklists page ↗');
+    const src = pill(data.tracklistUrl, '1001tracklists page ↗', 'Opens this set on 1001tracklists.');
     if (src) $setmeta.appendChild(src);
-    const al = pill(data.setAppleLink, 'Apple Music (full set) ↗');
+    const al = pill(data.setAppleLink, 'Apple Music (full set) ↗', 'The whole set on Apple Music.');
     if (al) $setmeta.appendChild(al);
     $setmeta.hidden = false;
     $cacheAge.textContent = fmtAge(data.cacheAgeSeconds);

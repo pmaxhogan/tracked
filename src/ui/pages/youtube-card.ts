@@ -10,7 +10,7 @@ export const YOUTUBE_CARD_HTML = /* html */ `
       <div id="yt-title" class="yt-title">YouTube</div>
       <div id="yt-sub" class="muted sub">Loading…</div>
     </div>
-    <a id="yt-signin" class="btn primary" href="/ui/oauth/start" hidden>Sign in with YouTube</a>
+    <a id="yt-signin" class="btn primary" href="/ui/oauth/start" hidden data-tip="Opens Google's consent screen so tracked can create and update playlists on your channel.">Sign in with YouTube</a>
     <button id="yt-action" type="button" class="btn" hidden></button>
   </div>
 </div>`
@@ -31,7 +31,8 @@ export const YOUTUBE_CARD_JS = /* js */ `
       $sub.textContent = sub;
       $signin.hidden = !signin;
       $action.hidden = !action;
-      if (action) { $action.textContent = action.label; $action.className = 'btn' + (action.danger ? ' danger' : ''); $action.onclick = action.run; }
+      if (action) { $action.textContent = action.label; $action.className = 'btn' + (action.danger ? ' danger' : ''); $action.onclick = action.run;
+        if (action.tip) $action.setAttribute('data-tip', action.tip); else $action.removeAttribute('data-tip'); }
     }
 
     // Resolves the status object, or null when it could not be loaded (a network error included).
@@ -39,10 +40,10 @@ export const YOUTUBE_CARD_JS = /* js */ `
       const res = await TK.api.get('/ui/api/youtube/status');
       const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
       if (!d) {
-        show('YouTube', 'Could not load the YouTube status: ' + TK.errText(res, 'failed (' + res.status + ')'), false, { label: 'Retry', run: load });
+        show('YouTube', 'Could not load the YouTube status: ' + TK.errText(res, 'failed (' + res.status + ')'), false, { label: 'Retry', run: load, tip: 'Asks for the YouTube status again.' });
         return null;
       }
-      if (d.connected) show('YouTube · ' + (d.channelTitle || 'connected'), 'Granted: ' + (d.scope || '(unknown scope)'), false, { label: 'Disconnect', danger: true, run: disconnect });
+      if (d.connected) show('YouTube · ' + (d.channelTitle || 'connected'), 'Granted: ' + (d.scope || '(unknown scope)'), false, { label: 'Disconnect', danger: true, run: disconnect, tip: 'Forgets the stored YouTube login. Syncing stops until you sign in again; existing playlists are untouched.' });
       else show('YouTube', 'Connect your account to let this app create and update playlists.', true, null);
       return d;
     }

@@ -17,12 +17,12 @@ export const MKVID_STATE_JS = /* js */ `
   function mkWhy(rd, short, capped) {
     if (!rd) return '';
     const day = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
-    if (rd.state === 'unverified') return '<span class="why">not verified' + (short ? '' : ' — the track list needs a second matching fetch before anything is rendered') + '</span>';
-    if (rd.state === 'untimed') return '<span class="why">too few cue times' + (short ? '' : ' (' + TK.esc(rd.timedRows) + ' of ' + TK.esc(rd.baseRows) + ' tracks timed, 90% needed; rechecked weekly)') + '</span>';
-    if (rd.state === 'waiting_ids') return '<span class="why">waiting for IDs until ' + TK.esc(day(rd.until)) + (short ? '' : ' (' + TK.esc(rd.idRows) + ' ID row' + (rd.idRows === 1 ? '' : 's') + '; Render now skips the wait)') + '</span>';
-    if (rd.state === 'backoff') return '<span class="why">retry ' + untilTime(rd.until) + '</span>';
-    if (capped) return '<span class="why">capped — today’s uploads are used</span>';
-    return '<span class="why ready">ready</span>';
+    if (rd.state === 'unverified') return '<span class="why"' + TK.tip('Nothing is rendered from an unverified track list. It needs a second fetch, by another account, that matches the first.') + '>not verified' + (short ? '' : ' — the track list needs a second matching fetch before anything is rendered') + '</span>';
+    if (rd.state === 'untimed') return '<span class="why"' + TK.tip('Fewer than 90% of the tracks have a cue time, so the video could not show the right track. Rechecked weekly.') + '>too few cue times' + (short ? '' : ' (' + TK.esc(rd.timedRows) + ' of ' + TK.esc(rd.baseRows) + ' tracks timed, 90% needed; rechecked weekly)') + '</span>';
+    if (rd.state === 'waiting_ids') return '<span class="why"' + TK.tip('Some tracks are still unidentified. The set waits until it is 7 days old for names to arrive, then renders with ID shown. Render now skips the wait.') + '>waiting for IDs until ' + TK.esc(day(rd.until)) + (short ? '' : ' (' + TK.esc(rd.idRows) + ' ID row' + (rd.idRows === 1 ? '' : 's') + '; Render now skips the wait)') + '</span>';
+    if (rd.state === 'backoff') return '<span class="why"' + TK.tip('A failed attempt is tried again after a pause, so a broken set does not loop.') + '>retry ' + untilTime(rd.until) + '</span>';
+    if (capped) return '<span class="why"' + TK.tip('Every daily upload slot is used. The next set goes out after the caps reset at midnight Pacific.') + '>capped — today’s uploads are used</span>';
+    return '<span class="why ready"' + TK.tip('Verified and allowed to render: mkvid takes it when its turn comes.') + '>ready</span>';
   }
 
   // The caps that actually apply: only the accounts mkvid offered on its last

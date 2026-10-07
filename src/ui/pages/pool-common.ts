@@ -96,6 +96,8 @@ export const COMMON_JS = /* js */ `
     return { ok: r.ok, status: r.status, data };
   }
   const jsonInit = (method, body) => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // ' data-tip="..."' for an element's attributes (the tooltip component, src/ui/tip.ts).
+  const tipA = (t) => (t ? ' data-tip="' + esc(t) + '"' : '');
 
   // Every polling loop on these pages goes through poller(): it pauses while
   // the tab is hidden (and runs once when it comes back), backs off on errors
@@ -192,6 +194,7 @@ export const COMMON_JS = /* js */ `
   };
   const reasonText = (r) => r ? (REASONS[r] || String(r).replace(/_/g, ' ')) : 'The site asked for a human check';
   const typeText = (t) => t === 'checkbox' ? 'checkbox (live view)' : 'image captcha';
+  const typeTip = (t) => t === 'checkbox' ? 'An "I am human" checkbox wall. Tap the box in the live view of the pool browser.' : 'A picture of distorted text. Type what you see.';
 `
 
 /**
@@ -210,8 +213,8 @@ export const CAPTCHA_JS = /* js */ `
       root.innerHTML =
         '<p><b>Tap the checkbox</b> in the view below. It is the real browser on the NAS. This page checks every few seconds; if it has not noticed, press <b>Done, I clicked it</b>.</p>' +
         '<iframe class="cap-live" data-r="live" title="Live view of the pool browser" src="' + esc(src) + '" allow="clipboard-read; clipboard-write"></iframe>' +
-        '<div class="cap-form"><button type="button" class="btn primary" data-r="done">Done, I clicked it</button></div>' +
-        '<div class="cap-tools"><a class="btn" href="' + esc(src) + '" target="_blank" rel="noopener">Open the live view full screen ↗</a><button type="button" class="btn" data-r="reload">↻ Reload the view</button></div>' +
+        '<div class="cap-form"><button type="button" class="btn primary" data-r="done"' + tipA('Tells the pool you clicked the box so it checks right away, instead of waiting for its next look.') + '>Done, I clicked it</button></div>' +
+        '<div class="cap-tools"><a class="btn" href="' + esc(src) + '" target="_blank" rel="noopener"' + tipA('Opens the live view alone in a new tab, easier to tap on a phone.') + '>Open the live view full screen ↗</a><button type="button" class="btn" data-r="reload"' + tipA('Reloads the live view if it looks stuck or blank.') + '>↻ Reload the view</button></div>' +
         '<div class="cap-msg" data-r="msg"></div>';
       const msg = root.querySelector('[data-r=msg]'), doneBtn = root.querySelector('[data-r=done]'), live = root.querySelector('[data-r=live]');
       const setMsg = (t, cls) => { msg.textContent = t; msg.className = 'cap-msg ' + (cls || ''); };
@@ -235,7 +238,7 @@ export const CAPTCHA_JS = /* js */ `
     }
     root.innerHTML =
       '<img class="cap-img" data-r="img" alt="Captcha image from the pool browser" />' +
-      '<div class="cap-tools"><button type="button" class="btn" data-r="refresh">↻ New screenshot</button></div>' +
+      '<div class="cap-tools"><button type="button" class="btn" data-r="refresh"' + tipA('Takes a fresh picture of the captcha if this one is hard to read.') + '>↻ New screenshot</button></div>' +
       '<form class="cap-form" data-r="form" autocomplete="off">' +
       '<input data-r="text" type="text" autofocus inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="send" aria-label="Captcha answer" placeholder="Type what you see" required maxlength="64" />' +
       '<button type="submit" class="btn primary" data-r="submit">Submit answer</button>' +
