@@ -155,6 +155,9 @@ export const COMMON_JS = /* js */ `
     not_ready: 'There is nothing to answer yet. The captcha has not appeared.',
     challenge_closed: 'This challenge is already closed.',
     json_required: 'The page sent a request the Worker refuses. Reload the page.',
+    bad_scheduled_at: 'That date and time was not understood.',
+    scheduled_at_past: 'Pick a time in the future, or leave the box empty to start now.',
+    scheduled_at_too_far: 'The pool queues an account at most 90 days ahead.',
     cross_origin: 'The Worker refused a request from another site.',
   };
   function errText(d, status) {

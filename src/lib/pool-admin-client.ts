@@ -71,6 +71,12 @@ export const LIVE_PATH_RE = /^(?:|websockify|(?:core|vendor)\/[A-Za-z0-9._\-/]+\
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 export const ACCOUNT_ACTIONS = ['rest', 'retire', 'retest'] as const
 export type AccountAction = (typeof ACCOUNT_ACTIONS)[number]
+/** A scheduled creation waiting in tlpool's queue (not an account yet): `queued-<n>`. */
+export const QUEUED_ID_RE = /^queued-\d+$/
+/** The furthest ahead an account creation may be scheduled. */
+export const MAX_SCHEDULE_MS = 90 * 86400_000
+/** How far in the past a scheduledAt may be (clock skew between the browser and the Worker). */
+export const SCHEDULE_PAST_SLACK_MS = 5 * 60_000
 
 export type PoolAccount = {
   id: string
@@ -114,7 +120,16 @@ export type PoolAccount = {
   canRetrySignup: boolean
   /** What the pool is doing with it right now: `signup`, `retest`, `fetch:<priority>`. */
   busy: string | null
+  /** A scheduled creation (tlpool state "queued", id `queued-<n>`): not an account yet, never counted as one. */
+  queued: boolean
+  /** When a queued creation is due (ISO, UTC). */
+  scheduledAt: string | null
+  /** How many times a queued creation was tried and failed (see lastError). */
+  attempts: number | null
 }
+
+/** `queued` (+ scheduledAt, and a `queued-<n>` accountId, no challengeId) only when tlpool queued the creation instead of starting it. */
+export type CreateAccountResult = { challengeId: string | null; accountId: string | null; queued?: true; scheduledAt?: string | null }
 
 export type PoolStatus = {
   accounts: PoolAccount[]
@@ -270,6 +285,9 @@ export function normalizeAccount(raw: unknown): PoolAccount | null {
     exitProblem: accountText(pick(raw, 'exitProblem', 'exit_problem')),
     pendingChallengeId: opaqueId(pick(raw, 'pendingChallenge', 'pendingChallengeId', 'pending_challenge')),
     canRetrySignup: bool(pick(raw, 'canRetrySignup', 'can_retry_signup')),
+    queued: state === 'queued' || QUEUED_ID_RE.test(id) || bool(raw.queued),
+    scheduledAt: iso(pick(raw, 'scheduledAt', 'scheduled_at')),
+    attempts: num(raw.attempts),
     busy: typeof raw.busy === 'string' && /^[a-z][a-z0-9_]{0,23}(?::[a-z0-9_]{1,24})?$/.test(raw.busy) ? raw.busy : null,
   }
 }
@@ -503,15 +521,34 @@ export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init)
       return accountList(await json('GET', '/accounts'))
     },
 
-    /** Starts the signup flow; tlpool answers the id of the challenge that tracks it. */
-    async createAccount(passive: boolean, exitKind: ExitKindChoice = 'auto'): Promise<{ challengeId: string; accountId: string | null }> {
+    /**
+     * Starts the signup flow; tlpool answers the id of the challenge that tracks it. With `scheduledAt`
+     * (a validated ISO string) tlpool queues the creation instead: `{queued: true, accountId: 'queued-<n>', scheduledAt}`.
+     */
+    async createAccount(passive: boolean, exitKind: ExitKindChoice = 'auto', scheduledAt?: string): Promise<CreateAccountResult> {
       // "auto" is tlpool's default: leave the field out rather than send it.
-      const body = exitKind === 'auto' ? { passive } : { passive, exitKind }
+      const body: Record<string, unknown> = exitKind === 'auto' ? { passive } : { passive, exitKind }
+      if (scheduledAt) body.scheduledAt = scheduledAt
       const j = await json('POST', '/accounts', { body, timeoutMs: 30_000 })
       const o = isObj(j) ? j : {}
+      if (bool(o.queued)) {
+        const accountId = opaqueId(pick(o, 'accountId', 'account_id', 'id'))
+        if (!accountId || !QUEUED_ID_RE.test(accountId)) throw new PoolAdminError('bad_response', 503)
+        return { queued: true, challengeId: null, accountId, scheduledAt: iso(pick(o, 'scheduledAt', 'scheduled_at')) ?? scheduledAt ?? null }
+      }
       const challengeId = opaqueId(pick(o, 'challengeId', 'challenge_id', 'challenge', 'id'))
       if (!challengeId) throw new PoolAdminError('bad_response', 503)
       return { challengeId, accountId: opaqueId(pick(o, 'accountId', 'account_id', 'account')) }
+    },
+
+    /** Removes a queued creation (`queued-<n>`); tlpool answers 404 for an unknown one. */
+    async cancelQueued(id: string): Promise<void> {
+      if (!QUEUED_ID_RE.test(id)) throw new PoolAdminError('invalid', 400, 'bad_id')
+      await json('POST', `/accounts/${seg(id)}/cancel`, { body: {} }).catch((e) => {
+        // An empty / 204 answer is still a success.
+        if (e instanceof PoolAdminError && e.code === 'bad_response') return null
+        throw e
+      })
     },
 
     async accountAction(id: string, action: AccountAction): Promise<PoolAccount | null> {

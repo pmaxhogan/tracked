@@ -17,14 +17,17 @@ const BODY = /* html */ `
   <div id="add-form">
     <p class="muted sub">The pool picks a free exit IP, generates the username and password, fills the signup form and confirms the email on its own. You only solve the captcha.</p>
     <div class="field"><label for="add-exit">Exit type</label><select id="add-exit"><option value="auto" selected>Auto (default)</option><option value="own">Own IP</option><option value="mullvad">Mullvad</option><option value="airvpn">AirVPN</option></select><span class="hint">Where the new account's traffic leaves from. Auto lets the pool pick a free exit of any kind.</span></div>
+    <div class="field"><label for="add-when">Create at (optional)</label><input id="add-when" type="datetime-local" /><span class="hint">Leave empty to start now. Pick a date and time (your local time, up to 90 days ahead) and the pool creates the account then, on its own; you only solve a captcha if one shows up. It waits in the table as "queued" until then.</span></div>
     <label class="switch"><input id="add-passive" type="checkbox" /><span><b>Passive</b> (control group, never used for fetching)<br><span class="muted sub">Pinned to its own exit and logged in, but never fetches. It shows whether flags come from use or from simply existing.</span></span></label>
+    <div id="add-form-msg"></div>
     <div class="row" style="margin-top:var(--sp-4)"><span class="spacer"></span><button id="add-create" type="button" class="btn primary">Create</button></div>
+    <div id="add-active" hidden></div>
   </div>
   <div id="add-progress" hidden>
     <ol id="add-steps" class="steps"></ol>
     <div id="add-captcha" class="tk-card" hidden></div>
     <div id="add-msg"></div>
-    <div class="row" style="margin-top:var(--sp-3)"><span class="spacer"></span><button id="add-retry" type="button" class="btn" hidden>Try again</button></div>
+    <div class="row" style="margin-top:var(--sp-3)"><button id="add-back" type="button" class="btn">Back</button><span class="spacer"></span><button id="add-retry" type="button" class="btn" hidden>Try again</button></div>
   </div>
 </dialog>
 `
@@ -38,6 +41,8 @@ ${CAPTCHA_JS}
   const IN_CREATION = /^(creating|signup|pending|new)$/;
   const stateBadge = (a) => {
     const s = String(a.state || 'unknown');
+    // A scheduled creation is not an account yet: no details drawer, no signup progress, just the chip.
+    if (a.queued || s === 'queued') return '<span class="badge queued" title="Waiting for its start time">queued</span>';
     // tlpool states: new (signing up), warming (ramp days 1-2), active, passive, resting, retired.
     const cls = a.flagged || s === 'flagged' ? 'bad' : s === 'retired' ? '' : s === 'resting' || s === 'new' || s === 'creating' ? 'warn' : s === 'warming' || s === 'ramping' ? 'info' : s === 'active' || s === 'ok' || s === 'healthy' ? 'ok' : 'info';
     // An account still signing up whose signup challenge tlpool names: the badge
@@ -224,11 +229,13 @@ ${CAPTCHA_JS}
     const b = details.id && document.querySelector ? document.querySelector('[data-state-acct="' + details.id + '"]') : null;
     if (b && b.focus) b.focus();
   });
-  const confirmWords = { rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };
+  const confirmWords = { cancel: 'Cancel this scheduled account?', rest: 'Rest it for 72 hours?', retest: 'Retest it with one known set?', retire: 'Retire it for good? Its exit stays unused for 30 days.' };
   let lastStatus = null;
 
   function renderStats(st, chals) {
-    const accts = st.accounts || [];
+    // Scheduled creations ("queued") are not accounts: never in the totals, shown as their own tile.
+    const accts = (st.accounts || []).filter((a) => !a.queued && a.state !== 'queued');
+    const queuedN = (st.accounts || []).length - accts.length;
     const live = accts.filter((a) => a.state !== 'retired');
     const fetching = live.filter((a) => !a.passive && !a.flagged && (a.state === 'active' || a.state === 'warming' || a.state === 'ok' || a.state === 'healthy' || a.state === 'ramping'));
     const budget = fetching.reduce((s, a) => s + (a.budget || 0), 0);
@@ -239,7 +246,8 @@ ${CAPTCHA_JS}
       tile(used + ' / ' + budget, 'used / budget (fetching accounts)') +
       tile(st.queueDepth ?? '—', 'queued fetches') +
       tile(fetching.length + ' / ' + live.length, 'fetching / live accounts') +
-      tile(chals.length, 'pending challenges');
+      tile(chals.length, 'pending challenges') +
+      (queuedN ? tile(queuedN, 'queued accounts (scheduled)') : '');
     const chips = (m) => Object.keys(m).map((k) => '<span class="chip">' + esc(k) + ' <b>' + esc(m[k]) + '</b></span>').join('');
     const bp = st.requestsByPriority || {}, qp = st.queueByPriority || {};
     const parts = [];
@@ -261,8 +269,24 @@ ${CAPTCHA_JS}
   }
 
   function renderAccounts(accts) {
+    accts = accts || [];
     if (!accts.length) { $('accts').innerHTML = '<div class="empty">No accounts yet. Press + Add account.</div>'; return; }
+    // Real accounts first, then the scheduled creations (soonest first).
+    const queued = accts.filter((a) => a.queued || a.state === 'queued').sort((x, y) => String(x.scheduledAt || '').localeCompare(String(y.scheduledAt || '')));
+    accts = accts.filter((a) => !a.queued && a.state !== 'queued').concat(queued);
     const rows = accts.map((a) => {
+      if (a.queued || a.state === 'queued') {
+        const left = Date.parse(a.scheduledAt) - Date.now();
+        const due = Number.isFinite(left) ? (left > 0 ? 'in ' + fmtDur(left) : 'due now') : '';
+        const tries = a.attempts ? '<div class="sub error">' + esc(a.attempts === 1 ? 'Tried once, failed' : 'Tried ' + a.attempts + ' times, failed') + (a.lastError ? ': ' + esc(a.lastError) : '') + '. Trying again every 30 min.</div>' : a.lastError ? '<div class="sub error">' + esc(a.lastError) + '</div>' : '';
+        return '<tr class="queued-row">' +
+          '<td data-label="Account"><b class="mono">' + esc(a.id) + '</b> ' + (a.passive ? '<span class="badge info">passive</span>' : '') + '</td>' +
+          '<td data-label="State">' + stateBadge(a) + '<div class="muted sub" title="Your local time">creates ' + esc(fmtDateTime(a.scheduledAt)) + (due ? ' (' + esc(due) + ')' : '') + '</div>' + tries + '</td>' +
+          '<td data-label="Exit">' + (a.exitKind ? '<span class="badge neutral">' + esc(a.exitKind) + '</span>' : '<span class="muted">auto</span>') + '</td>' +
+          '<td data-label="Today" class="num">—</td><td data-label="Ramp day" class="num">—</td><td data-label="Last success">—</td><td data-label="Last challenge">—</td><td data-label="Flagged"><span class="muted">no</span></td>' +
+          '<td class="acts-cell"><div class="acts" data-acts="' + esc(a.id) + '"><button type="button" class="btn small" data-act="cancel" data-id="' + esc(a.id) + '">Cancel</button></div></td>' +
+          '</tr>';
+      }
       const flag = a.flagged ? '<span class="badge bad">flagged</span>' + (a.flagReason ? ' <span class="muted">' + esc(a.flagReason.replace(/_/g, ' ')) + '</span>' : '') : '<span class="muted">no</span>';
       const acts = a.state === 'retired' ? '<span class="muted">retired</span>' :
         ['rest', 'retest', 'retire'].map((act) => '<button type="button" class="btn small" data-act="' + act + '" data-id="' + esc(a.id) + '">' + act[0].toUpperCase() + act.slice(1) + '</button>').join('');
@@ -292,8 +316,8 @@ ${CAPTCHA_JS}
     if (b.dataset.act) {
       const act = b.dataset.act;
       box.innerHTML = '<div class="confirm"><span>' + esc(id) + ': ' + esc(confirmWords[act]) + '</span>' +
-        '<button type="button" class="btn small ' + (act === 'retire' ? 'danger' : 'primary') + '" data-yes="' + act + '">Yes, ' + act + '</button>' +
-        '<button type="button" class="btn small" data-no="1">Cancel</button></div>';
+        '<button type="button" class="btn small ' + (act === 'retire' ? 'danger' : 'primary') + '" data-yes="' + act + '">Yes, ' + (act === 'cancel' ? 'cancel it' : act) + '</button>' +
+        '<button type="button" class="btn small" data-no="1">No</button></div>';
       return;
     }
     if (b.dataset.no) { load(); return; }
@@ -342,15 +366,27 @@ ${CAPTCHA_JS}
   // Below the pollers' 15-minute hard stop, so a stuck signup is called stuck before watching ends.
   const NO_PROGRESS_MS = 10 * 60000;
   const dlg = $('add-dlg');
-  let flow = null; // { challengeId, accountId, stepIdx, lastChange, poller, captchaShown, captchaSeen, widget }
+
+  // Every creation the page follows is its own flow object, kept here: { key, challengeId, accountId, stepIdx,
+  // lastChange, startedAt, poller, captchaSeen, needCaptcha, ch, msg, active, failed, done }. The dialog shows at
+  // most one of them (shown) or the form; the others keep their own state, and every write to the dialog goes
+  // through paint(f), which draws only the one on screen. So "+ Add account" always opens a fresh form, however many
+  // creations are running, and each one can be reopened from the list under the form or from its "new" badge.
+  const flows = new Map();
+  let shown = null;
+  let flowSeq = 0;
+  let captchaOwner = null; // the flow whose captcha widget is in #add-captcha
+
+  const newFlow = () => ({ key: 'f' + (++flowSeq), challengeId: null, accountId: null, stepIdx: -1, lastChange: Date.now(), startedAt: Date.now(), poller: null, captchaSeen: false, needCaptcha: false, ch: null, msg: '', active: true, failed: false, done: false });
+  const findFlow = (challengeId) => { for (const f of flows.values()) if (f.challengeId === challengeId) return f; return null; };
 
   function stepIndex(step) { const s = STEP_ALIASES[step] || step; return STEPS.findIndex((x) => x[0] === s); }
   // The captcha step is optional: tlpool's real signup form usually has none,
   // and then goes from form_opened straight to submitted. A step this page
   // never saw is shown as skipped only for that optional step.
   const OPTIONAL_STEP = 'awaiting_captcha';
-  function renderSteps(idx, failed) {
-    const skipCaptcha = flow && !flow.captchaSeen && idx > stepIndex(OPTIONAL_STEP);
+  function renderSteps(f, idx, failed) {
+    const skipCaptcha = !f.captchaSeen && idx > stepIndex(OPTIONAL_STEP);
     $('add-steps').innerHTML = STEPS.map((s, i) => {
       if (s[0] === OPTIONAL_STEP && skipCaptcha) return '<li class="skip"><span class="dot">–</span>' + esc('No captcha needed') + '</li>';
       const cls = failed && i === idx ? 'fail' : i < idx || (i === idx && s[0] === 'done') ? 'done' : i === idx ? 'cur' : '';
@@ -358,131 +394,234 @@ ${CAPTCHA_JS}
       return '<li class="' + cls + '"><span class="dot">' + dot + '</span>' + esc(s[1]) + '</li>';
     }).join('');
   }
-  function stopFlow() { if (flow) { if (flow.poller) flow.poller.stop(); flow.active = false; } }
-  function failFlow(text) {
-    stopFlow();
-    renderSteps(flow ? Math.max(flow.stepIdx, 0) : 0, true);
-    $('add-captcha').hidden = true;
-    $('add-msg').innerHTML = '<div class="banner bad">' + esc(text) + '</div>';
-    $('add-retry').hidden = false;
+
+  // Draws one flow into the dialog, if it is the one on screen.
+  function paint(f) {
+    if (shown !== f) return;
+    $('add-form').hidden = true; $('add-progress').hidden = false;
+    renderSteps(f, f.failed ? Math.max(f.stepIdx, 0) : f.stepIdx, f.failed);
+    $('add-msg').innerHTML = f.msg || '';
+    $('add-retry').hidden = !f.failed;
+    const wantCaptcha = !f.failed && f.needCaptcha && f.ch && f.ch.type;
+    if (wantCaptcha) {
+      if (captchaOwner !== f) { $('add-captcha').hidden = false; mountCaptcha($('add-captcha'), f.ch, {}); captchaOwner = f; }
+    } else {
+      $('add-captcha').hidden = true;
+      if (captchaOwner) { $('add-captcha').innerHTML = ''; captchaOwner = null; }
+    }
   }
+  function stopFlow(f) { if (f.poller) f.poller.stop(); f.active = false; }
+  function failFlow(f, text) {
+    stopFlow(f);
+    f.failed = true;
+    f.msg = '<div class="banner bad">' + esc(text) + '</div>';
+    paint(f);
+    renderActive();
+  }
+  function flowStatus(f) {
+    if (f.failed) return 'failed';
+    if (f.needCaptcha) return 'waiting for your captcha';
+    return f.stepIdx >= 0 && STEPS[f.stepIdx] ? STEPS[f.stepIdx][1] : 'starting';
+  }
+  // The creations still running (or failed, until dismissed) that are not on screen: the ones this page started, and
+  // accounts the pool is still signing up that this page has not opened yet.
+  function renderActive() {
+    const items = [];
+    for (const f of flows.values()) if (!f.done) items.push('<li><div class="row"><b class="mono">' + esc(f.accountId || 'new account') + '</b><span class="muted sub">' + esc(flowStatus(f)) + '</span><span class="spacer"></span><button type="button" class="btn small" data-flow="' + esc(f.key) + '">Show progress</button></div></li>');
+    for (const a of ((lastStatus && lastStatus.accounts) || [])) {
+      if (IN_CREATION.test(String(a.state)) && a.signupChallengeId && !findFlow(a.signupChallengeId)) items.push('<li><div class="row"><b class="mono">' + esc(a.id) + '</b><span class="muted sub">being created</span><span class="spacer"></span><button type="button" class="btn small" data-signup="' + esc(a.signupChallengeId) + '" data-acct="' + esc(a.id) + '">Show progress</button></div></li>');
+    }
+    $('add-active').hidden = !items.length;
+    $('add-active').innerHTML = items.length ? '<h3 class="pool-h2" style="margin-top:var(--sp-4)">Creations in progress</h3><ul class="plain">' + items.join('') + '</ul>' : '';
+  }
+  const pad2 = (n) => String(n).padStart(2, '0');
+  // The value format of <input type="datetime-local">: local time, minutes.
+  const localInput = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  // A fresh form: nothing of any running creation on screen (they carry on in their own flow objects).
   function resetDialog() {
-    stopFlow(); flow = null;
+    shown = null; captchaOwner = null;
     $('add-form').hidden = false; $('add-progress').hidden = true; $('add-retry').hidden = true;
     $('add-captcha').hidden = true; $('add-captcha').innerHTML = ''; $('add-msg').innerHTML = '';
+    $('add-form-msg').innerHTML = '';
     $('add-create').disabled = false;
+    const now = new Date();
+    $('add-when').min = localInput(now);
+    $('add-when').max = localInput(new Date(now.getTime() + 90 * DAY_MS));
+    renderActive();
   }
 
-  const stalled = () => flow && Date.now() - flow.lastChange > NO_PROGRESS_MS;
-  async function poll() {
-    if (!flow) return;
+  const stalled = (f) => Date.now() - f.lastChange > NO_PROGRESS_MS;
+  async function poll(f) {
+    if (!flows.has(f.key)) return;
     // The stall guard runs before any early return, errors included.
-    if (stalled()) { failFlow('No progress for 10 minutes. The flow may be stuck on the NAS.'); return; }
-    // A reply that lands after the dialog moved to another signup (closed, reopened elsewhere, + Add account) is dropped.
-    const f = flow;
-    const r = await api('/challenges/' + encodeURIComponent(flow.challengeId));
-    if (flow !== f) return r;
+    if (stalled(f)) { failFlow(f, 'No progress for 10 minutes. The flow may be stuck on the NAS.'); return; }
+    const r = await api('/challenges/' + encodeURIComponent(f.challengeId));
+    // A reply that lands after this creation was dismissed is dropped.
+    if (!flows.has(f.key) || f.failed || f.done) return r;
     let ch = r.ok ? r.data.challenge : null;
-    if (!r.ok && r.status === 404 && flow.stepIdx >= stepIndex('submitted') && flow.accountId) {
+    if (!r.ok && r.status === 404 && f.stepIdx >= stepIndex('submitted') && f.accountId) {
       // The solved challenge may be gone already; follow the account instead.
       const a = await api('/accounts');
-      if (flow !== f) return a;
-      const acct = a.ok ? (a.data.accounts || []).find((x) => x.id === flow.accountId) : null;
+      if (!flows.has(f.key)) return a;
+      const acct = a.ok ? (a.data.accounts || []).find((x) => x.id === f.accountId) : null;
       if (acct && !IN_CREATION.test(acct.state)) { ch = { state: 'solved', step: 'done' }; }
       else return a.ok ? r : a;
     } else if (!r.ok) {
       if (r.status === 401 || r.status === 403) return r; // the poller stops and says sign in again
       // tlpool may only create the challenge record once the form is open: a
       // 404 in the first 90 s (before any step was seen) means "still starting".
-      if (r.status === 404 && flow.stepIdx < 0 && Date.now() - flow.startedAt < 90000) { $('add-msg').innerHTML = '<div class="muted">Starting…</div>'; return r; }
-      if (r.status === 404) { failFlow('The pool lost track of this signup. Check the accounts table, then try again.'); return r; }
-      $('add-msg').innerHTML = '<div class="muted">' + esc(errText(r.data, r.status)) + ' Still trying…</div>';
+      if (r.status === 404 && f.stepIdx < 0 && Date.now() - f.startedAt < 90000) { f.msg = '<div class="muted">Starting…</div>'; paint(f); return r; }
+      if (r.status === 404) { failFlow(f, 'The pool lost track of this signup. Check the accounts table, then try again.'); return r; }
+      f.msg = '<div class="muted">' + esc(errText(r.data, r.status)) + ' Still trying…</div>'; paint(f);
       return r;
     }
     // Steps come from tlpool as it reports them; an unknown or missing step keeps the last one.
     let idx = ch.step ? stepIndex(ch.step) : -1;
-    if (idx < 0) idx = flow.stepIdx;
-    if (idx !== flow.stepIdx) { flow.stepIdx = idx; flow.lastChange = Date.now(); }
-    if (ch.state === 'failed') { failFlow('The signup failed' + (ch.error ? ': ' + ch.error : '.')); return r; }
-    if (ch.state === 'expired') { failFlow(errText({ error: 'captcha_expired' })); return r; }
+    if (idx < 0) idx = f.stepIdx;
+    if (idx !== f.stepIdx) { f.stepIdx = idx; f.lastChange = Date.now(); }
+    if (ch.state === 'failed') { failFlow(f, 'The signup failed' + (ch.error ? ': ' + ch.error : '.')); return r; }
+    if (ch.state === 'expired') { failFlow(f, errText({ error: 'captcha_expired' })); return r; }
     // Only a challenge tlpool marks ready has a captcha to answer (the form showed one).
-    const needCaptcha = ch.state === 'pending' && ch.ready !== false;
-    if (needCaptcha) flow.captchaSeen = true;
-    renderSteps(idx, false);
-    if (needCaptcha && !flow.captchaShown && ch.type) {
-      flow.captchaShown = true;
-      $('add-captcha').hidden = false;
-      flow.widget = mountCaptcha($('add-captcha'), ch, {});
-    }
-    if (!needCaptcha && flow.captchaShown) { $('add-captcha').hidden = true; }
+    f.needCaptcha = ch.state === 'pending' && ch.ready !== false;
+    if (f.needCaptcha) { f.captchaSeen = true; f.ch = ch; }
     if (STEPS[idx] && STEPS[idx][0] === 'done') {
-      stopFlow();
-      $('add-msg').innerHTML = '<div class="banner ok">Account ' + esc(flow.accountId || '') + ' is ready.</div>';
+      stopFlow(f);
+      f.done = true; f.needCaptcha = false;
+      f.msg = '<div class="banner ok">Account ' + esc(f.accountId || '') + ' is ready.</div>';
+      paint(f); renderActive();
       load();
       return r;
     }
-    $('add-msg').innerHTML = '';
+    f.msg = '';
+    paint(f); renderActive();
     return r;
   }
-  function watchFlow() {
-    flow.poller = poller(poll, 2500, {
-      onAuth: () => { $('add-msg').innerHTML = '<div class="banner bad">' + esc(SIGN_IN_AGAIN) + '</div>'; },
-      onTimeout: () => { $('add-msg').innerHTML = '<div class="banner info">Stopped watching after 15 minutes. The signup carries on in the pool; close and reopen this dialog to look again.</div>'; },
+  function watchFlow(f) {
+    f.poller = poller(() => poll(f), 2500, {
+      onAuth: () => { f.msg = '<div class="banner bad">' + esc(SIGN_IN_AGAIN) + '</div>'; paint(f); },
+      onTimeout: () => { f.msg = '<div class="banner info">Stopped watching after 15 minutes. The signup carries on in the pool; close and reopen this dialog to look again.</div>'; paint(f); },
     });
   }
-
-  function exitBody(passive, exit) {
-    return exit && exit !== 'auto' ? { passive, exitKind: exit } : { passive };
+  // Start (or restart, after the dialog was closed) watching every creation still running.
+  function resumeFlow(f) {
+    if (!f.active || !f.challengeId || (f.poller && !f.poller.isStopped())) return;
+    f.lastChange = Date.now();
+    poll(f);
+    watchFlow(f);
   }
+
+  function exitBody(passive, exit, scheduledAt) {
+    const b = exit && exit !== 'auto' ? { passive, exitKind: exit } : { passive };
+    if (scheduledAt) b.scheduledAt = scheduledAt;
+    return b;
+  }
+  // The "create at" box: '' (now), or the picked local time as an ISO UTC string. null: not usable (message shown).
+  function pickedTime() {
+    const v = $('add-when') && $('add-when').value;
+    if (!v) return '';
+    const t = new Date(v);
+    const bad = (m) => { $('add-form-msg').innerHTML = '<div class="banner bad">' + esc(m) + '</div>'; return null; };
+    if (!Number.isFinite(t.getTime())) return bad('That date and time was not understood.');
+    if (t.getTime() < Date.now() - 60000) return bad('Pick a time in the future, or clear the box to start now.');
+    if (t.getTime() > Date.now() + 90 * DAY_MS) return bad('The pool queues an account at most 90 days ahead.');
+    return t.toISOString();
+  }
+  const fmtDateTime = (iso) => (!iso || !Number.isFinite(Date.parse(iso)) ? '—' : new Date(iso).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
 
   async function create() {
+    $('add-form-msg').innerHTML = '';
+    const scheduledAt = pickedTime();
+    if (scheduledAt === null) return;
+    const body = exitBody($('add-passive').checked, $('add-exit') && $('add-exit').value, scheduledAt);
     $('add-create').disabled = true;
-    $('add-form').hidden = true; $('add-progress').hidden = false; $('add-retry').hidden = true;
-    $('add-msg').innerHTML = '<div class="muted">Starting…</div>';
-    renderSteps(-1, false);
-    const r = await api('/accounts', jsonInit('POST', exitBody($('add-passive').checked, $('add-exit') && $('add-exit').value)));
-    if (!r.ok) { flow = { stepIdx: 0 }; failFlow(errText(r.data, r.status)); return; }
-    flow = { challengeId: r.data.challengeId, accountId: r.data.accountId, stepIdx: -1, lastChange: Date.now(), startedAt: Date.now(), poller: null, captchaShown: false, captchaSeen: false, active: true };
-    poll();
-    watchFlow();
+    if (scheduledAt) {
+      // Scheduled: nothing starts now, so there is no progress to show. tlpool queues it; the table lists it.
+      const r = await api('/accounts', jsonInit('POST', body));
+      $('add-create').disabled = false;
+      if (!r.ok) { $('add-form-msg').innerHTML = '<div class="banner bad">' + esc(r.status === 401 || r.status === 403 ? SIGN_IN_AGAIN : errText(r.data, r.status)) + '</div>'; return; }
+      if (r.data.queued) {
+        $('add-when').value = '';
+        dlg.close();
+        if (typeof TK !== 'undefined' && TK.toast) TK.toast('Queued: will be created around ' + fmtDateTime(r.data.scheduledAt || scheduledAt), 'ok');
+        load();
+        return;
+      }
+      // tlpool started it right away (the time was too close to now): follow it like any other creation.
+      begin(r.data);
+      return;
+    }
+    const f = newFlow();
+    flows.set(f.key, f);
+    shown = f;
+    f.msg = '<div class="muted">Starting…</div>';
+    paint(f);
+    const r = await api('/accounts', jsonInit('POST', body));
+    if (!r.ok) { f.stepIdx = 0; failFlow(f, errText(r.data, r.status)); return; }
+    attach(f, r.data);
+  }
+  // A creation tlpool just started with no flow made for it yet (the scheduled path).
+  function begin(data) {
+    const f = newFlow();
+    flows.set(f.key, f);
+    shown = f;
+    attach(f, data);
+  }
+  function attach(f, data) {
+    f.challengeId = data.challengeId; f.accountId = data.accountId;
+    f.startedAt = Date.now(); f.lastChange = Date.now();
+    paint(f);
+    // The dialog was closed while the request ran: watching starts when it is opened again.
+    if (dlg.open !== false) resumeFlow(f);
   }
 
+  // Show one creation's progress: from the list under the form or from the "new" badge of its row.
+  function showFlow(f) {
+    shown = f;
+    resumeFlow(f);
+    paint(f);
+    if (!dlg.open) dlg.showModal();
+  }
   // Reopen the progress view for an account that is still being created (its
   // "new" badge): follow its signup challenge exactly as create() does.
   function openFlow(challengeId, accountId) {
-    if (flow && flow.active && flow.challengeId === challengeId) {
-      if (flow.poller && flow.poller.isStopped()) { flow.lastChange = Date.now(); poll(); watchFlow(); }
-      dlg.showModal();
-      return;
+    let f = findFlow(challengeId);
+    if (!f) {
+      f = newFlow();
+      f.challengeId = challengeId; f.accountId = accountId;
+      f.startedAt = 0; // the challenge already exists in tlpool, so a 404 is not "still starting"
+      f.msg = '<div class="muted">Loading…</div>';
+      flows.set(f.key, f);
     }
-    resetDialog();
-    $('add-form').hidden = true; $('add-progress').hidden = false;
-    $('add-msg').innerHTML = '<div class="muted">Loading…</div>';
-    renderSteps(-1, false);
-    // startedAt 0: the challenge already exists in tlpool, so a 404 is not "still starting".
-    flow = { challengeId, accountId, stepIdx: -1, lastChange: Date.now(), startedAt: 0, poller: null, captchaShown: false, captchaSeen: false, active: true, reopened: true };
-    poll();
-    watchFlow();
-    dlg.showModal();
+    showFlow(f);
   }
 
-  // Closing the dialog stops watching (the signup itself carries on in the
-  // pool); reopening resumes watching it. A flow opened from a badge is not
-  // the one "+ Add account" resumes: that button always offers a new account then.
+  // "+ Add account" always opens a fresh form. Closing the dialog stops the pollers (the signups themselves carry on
+  // in the pool); opening it again picks them up.
   $('add-btn').addEventListener('click', () => {
-    if (!flow || !flow.active || flow.reopened) resetDialog();
-    else if (flow.poller && flow.poller.isStopped()) { flow.lastChange = Date.now(); poll(); watchFlow(); }
+    resetDialog();
+    for (const f of flows.values()) resumeFlow(f);
     dlg.showModal();
   });
   $('add-close').addEventListener('click', () => dlg.close());
   $('add-create').addEventListener('click', create);
-  $('add-retry').addEventListener('click', () => { resetDialog(); });
-  dlg.addEventListener('close', () => { if (flow && flow.active && flow.poller) flow.poller.stop(); load(); });
+  // Dismiss the failed creation on screen and go back to the form.
+  $('add-retry').addEventListener('click', () => { if (shown) flows.delete(shown.key); resetDialog(); });
+  $('add-back').addEventListener('click', () => { resetDialog(); });
+  $('add-active').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    if (b.dataset.flow) { const f = flows.get(b.dataset.flow); if (f) showFlow(f); return; }
+    if (b.dataset.signup) openFlow(b.dataset.signup, b.dataset.acct || null);
+  });
+  dlg.addEventListener('close', () => { for (const f of flows.values()) if (f.poller) f.poller.stop(); load(); });
 })();
 `
 
 /** The state details drawer (TK.drawer). */
 const DETAILS_CSS = /* css */ `
+  .badge.queued { color: var(--accent); background: var(--elev); box-shadow: inset 0 0 0 1px var(--accent); }
+  .tk-table tr.queued-row td { background: color-mix(in srgb, var(--elev) 40%, transparent); }
+  #add-form input[type=datetime-local] { max-width: 100%; }
   .sd h3 { font-size: var(--fs-sm); margin: var(--sp-4) 0 var(--sp-2); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .sd p { margin: 0 0 var(--sp-2); }
   .sd ul.sd-list { margin: 0; padding-left: 1.2rem; display: grid; gap: var(--sp-1); }

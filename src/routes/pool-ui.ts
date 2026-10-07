@@ -11,7 +11,8 @@
  *
  *   GET  /api/pool/status               tlpool GET /status (+ GET /challenges)
  *   GET  /api/pool/accounts             tlpool GET /accounts
- *   POST /api/pool/accounts             tlpool POST /accounts {passive, exitKind?}
+ *   POST /api/pool/accounts             tlpool POST /accounts {passive, exitKind?, scheduledAt?}
+ *   POST /api/pool/accounts/queued-N/cancel  tlpool POST /accounts/queued-N/cancel (a scheduled creation)
  *   POST /api/pool/accounts/:id/:action tlpool POST /accounts/:id/{rest,retire,retest}
  *   GET  /api/pool/accounts/:id/events  that account's newest pool events (D1 pool_events, lib/pool-events.ts)
  *   GET  /api/pool/challenges           tlpool GET /challenges
@@ -39,7 +40,10 @@ import {
   EXIT_KINDS,
   createPoolAdminClient,
   ID_RE,
+  MAX_SCHEDULE_MS,
   PoolAdminError,
+  QUEUED_ID_RE,
+  SCHEDULE_PAST_SLACK_MS,
   validateSettingsPatch,
   type AccountAction,
   type Fetcher,
@@ -106,21 +110,45 @@ export function createPoolUiApp(opts: { fetcher?: Fetcher } = {}) {
   app.get('/api/pool/accounts', async (c) => c.json({ accounts: await client(c.env).listAccounts() }))
 
   app.post('/api/pool/accounts', async (c) => {
-    const body = (await c.req.json().catch(() => null)) as { passive?: unknown; exitKind?: unknown } | null
+    const body = (await c.req.json().catch(() => null)) as { passive?: unknown; exitKind?: unknown; scheduledAt?: unknown } | null
     if (body !== null && typeof body !== 'object') return c.json({ error: 'invalid', detail: 'body_not_object' }, 400)
     const passive = body?.passive === true
     const kind = CreateAccountExit.safeParse(body?.exitKind)
     if (!kind.success) return c.json({ error: 'invalid', detail: 'bad_exit_kind' }, 400)
     const exitKind = kind.data ?? 'auto'
+    // Optional: create it later. An ISO string with Z or an offset, at most 90 days ahead (a few minutes back is
+    // forgiven: clock skew, and "now" typed into the picker). Sent on as a normalised UTC string.
+    let scheduledAt: string | undefined
+    if (body?.scheduledAt !== undefined && body.scheduledAt !== null && body.scheduledAt !== '') {
+      const raw = body.scheduledAt
+      if (typeof raw !== 'string' || raw.length > 40 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)) return c.json({ error: 'invalid', detail: 'bad_scheduled_at' }, 400)
+      const t = Date.parse(raw)
+      if (!Number.isFinite(t)) return c.json({ error: 'invalid', detail: 'bad_scheduled_at' }, 400)
+      const now = Date.now()
+      if (t < now - SCHEDULE_PAST_SLACK_MS) return c.json({ error: 'invalid', detail: 'scheduled_at_past' }, 400)
+      if (t > now + MAX_SCHEDULE_MS) return c.json({ error: 'invalid', detail: 'scheduled_at_too_far' }, 400)
+      scheduledAt = new Date(t).toISOString()
+    }
     const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'pool_ui.create_account', by: c.get('cfAccessEmail') })
-    const r = await client(c.env).createAccount(passive, exitKind)
-    log.info('pool_ui.account_create_started', { passive, exitKind, challengeId: r.challengeId, accountId: r.accountId })
+    const r = await client(c.env).createAccount(passive, exitKind, scheduledAt)
+    log.info('pool_ui.account_create_started', { passive, exitKind, challengeId: r.challengeId, accountId: r.accountId, queued: r.queued === true, scheduledAt: r.scheduledAt ?? null })
     return c.json(r)
+  })
+
+  // Cancel a scheduled creation: queued-<n> ids only (a real account is rested or retired, never cancelled).
+  app.post('/api/pool/accounts/:id/cancel', async (c) => {
+    const id = c.req.param('id')
+    if (!QUEUED_ID_RE.test(id)) return c.json({ error: 'invalid', detail: 'bad_id' }, 400)
+    const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'pool_ui.cancel_queued', by: c.get('cfAccessEmail') })
+    await client(c.env).cancelQueued(id)
+    log.info('pool_ui.queued_cancelled', { accountId: id })
+    return c.json({ ok: true })
   })
 
   app.post('/api/pool/accounts/:id/:action', async (c) => {
     const { id, action } = c.req.param()
-    if (!ID_RE.test(id)) return c.json({ error: 'invalid', detail: 'bad_id' }, 400)
+    // queued-<n> entries take only /cancel; the other actions are for accounts.
+    if (!ID_RE.test(id) || QUEUED_ID_RE.test(id)) return c.json({ error: 'invalid', detail: 'bad_id' }, 400)
     if (!(ACCOUNT_ACTIONS as readonly string[]).includes(action)) return c.json({ error: 'not_found', detail: 'unknown_action' }, 404)
     const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'pool_ui.account_action', by: c.get('cfAccessEmail') })
     const account = await client(c.env).accountAction(id, action as AccountAction)

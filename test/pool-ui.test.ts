@@ -227,7 +227,7 @@ describe('pool UI: accounts and status', () => {
       id: 'acct-1', state: 'active', passive: false, exitLabel: 'own-2', exitKind: 'own', usedToday: 12, budget: 30, rampDay: 3,
       lastOkAt: '2026-09-29T10:00:00.000Z', lastChallengeAt: null, flagged: false, flagReason: null, restUntil: null, xhrUsedToday: null, xhrBudget: null, signupChallengeId: null,
       stateChangedAt: null, restReason: null, retestPending: false, createdAt: null, activatedAt: null, retiredAt: null, submittedAt: null,
-      lastError: null, exitProblem: null, pendingChallengeId: null, canRetrySignup: false, busy: null,
+      lastError: null, exitProblem: null, pendingChallengeId: null, canRetrySignup: false, busy: null, queued: false, scheduledAt: null, attempts: null,
     })
     expect(data.status.accounts[1]).toMatchObject({ id: 'acct-2', flagged: true, passive: true, flagReason: 'decoy_names' })
     expect(data.status.queueDepth).toBe(12)
@@ -473,8 +473,8 @@ describe('normalisers', () => {
   it('drop every field outside the whitelist', () => {
     const a = normalizeAccount(upstreamAccount('acct-1', { exit: { label: 'x', wgPrivateKey: 'k' } }))!
     expect(Object.keys(a).sort()).toEqual([
-      'activatedAt', 'budget', 'busy', 'canRetrySignup', 'createdAt', 'exitKind', 'exitLabel', 'exitProblem', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastError', 'lastOkAt',
-      'passive', 'pendingChallengeId', 'rampDay', 'restReason', 'restUntil', 'retestPending', 'retiredAt', 'signupChallengeId', 'state', 'stateChangedAt', 'submittedAt', 'usedToday', 'xhrBudget', 'xhrUsedToday',
+      'activatedAt', 'attempts', 'budget', 'busy', 'canRetrySignup', 'createdAt', 'exitKind', 'exitLabel', 'exitProblem', 'flagReason', 'flagged', 'id', 'lastChallengeAt', 'lastError', 'lastOkAt',
+      'passive', 'pendingChallengeId', 'queued', 'rampDay', 'restReason', 'restUntil', 'retestPending', 'retiredAt', 'scheduledAt', 'signupChallengeId', 'state', 'stateChangedAt', 'submittedAt', 'usedToday', 'xhrBudget', 'xhrUsedToday',
     ])
     expect(JSON.stringify(a)).not.toContain('wgPrivateKey')
     const c = normalizeChallenge(upstreamChallenge('ch-1'))!
@@ -1052,10 +1052,14 @@ describe('pool page: reopening the signup progress of an account still being cre
     // It keeps watching that same challenge.
     await pg.fire(2500)
     expect(calls.slice(n).filter((c) => c.url.endsWith('/challenges/ch_n2')).length).toBeGreaterThan(1)
-    // "+ Add account" afterwards offers a new account, not the reopened signup.
+    // "+ Add account" afterwards offers a new account, not the reopened signup, which is listed under the form.
     ;(pg.els.get('add-btn')!.handlers as Record<string, () => void>).click!()
     expect(pg.els.get('add-form')!.hidden).toBe(false)
     expect(pg.els.get('add-progress')!.hidden).toBe(true)
+    expect(pg.els.get('add-active')!.innerHTML).toContain('data-flow=')
+    expect(pg.els.get('add-active')!.innerHTML).toContain('acct-2')
+    // Closing the dialog stops watching it.
+    await (dlg.handlers as Record<string, () => void>).close!()
     const m = calls.length
     await pg.fire(2500)
     expect(calls.slice(m).filter((c) => c.url.includes('/challenges/ch_n2'))).toHaveLength(0)
@@ -1317,5 +1321,301 @@ describe('pool page: state details for every other account state', () => {
     await settle()
     expect(pg2.els.get('tk-drawer-body')!.innerHTML).not.toContain('stale reply marker')
     expect(pg2.els.get('tk-drawer-body')!.innerHTML).toContain('Loading…')
+  })
+})
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scheduled creation, queued rows, several creations at once
+// ─────────────────────────────────────────────────────────────────────────────
+
+const queuedEntry = (n: number, extra: Record<string, unknown> = {}) => ({
+  id: `queued-${n}`, state: 'queued', queued: true, scheduledAt: '2099-01-02T15:30:00Z', passive: false, exitKind: 'mullvad', attempts: 0, lastError: null, createdAt: '2026-10-07T12:00:00Z', ...extra,
+})
+const postJson = (appl: Appl, path: string, body: unknown) => req(appl, path, { method: 'POST', headers: { 'content-type': 'application/json', ...browserHeaders }, body: JSON.stringify(body) })
+const inDays = (d: number) => new Date(Date.now() + d * 86400_000).toISOString()
+
+describe('pool UI: scheduled account creation', () => {
+  it('passes a valid scheduledAt to tlpool as a normalised UTC string and returns the queued reply', async () => {
+    const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ queued: true, accountId: 'queued-3', scheduledAt: '2099-01-01T00:00:00Z', username: SECRET_USER }) })
+    const when = new Date(Date.now() + 2 * 86400_000)
+    const withOffset = when.toISOString().replace('Z', '+00:00')
+    const { r, data, text } = await postJson(mount(fetcher), '/ui/api/pool/accounts', { passive: true, exitKind: 'airvpn', scheduledAt: withOffset })
+    expect(r.status).toBe(200)
+    expect(calls[0]!.body).toEqual({ passive: true, exitKind: 'airvpn', scheduledAt: when.toISOString() })
+    expect(data).toEqual({ queued: true, challengeId: null, accountId: 'queued-3', scheduledAt: '2099-01-01T00:00:00.000Z' })
+    expectNoCredentials(text)
+  })
+
+  it('an empty or null scheduledAt means "now": it is not sent', async () => {
+    const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ challengeId: 'ch-n', accountId: 'acct-1' }) })
+    for (const v of ['', null]) {
+      const { r, data } = await postJson(mount(fetcher), '/ui/api/pool/accounts', { scheduledAt: v })
+      expect(r.status).toBe(200)
+      expect(data).toEqual({ challengeId: 'ch-n', accountId: 'acct-1' })
+    }
+    expect(calls.map((c) => c.body)).toEqual([{ passive: false }, { passive: false }])
+  })
+
+  it('refuses an unparseable, offset-less, past or too-far scheduledAt without calling tlpool', async () => {
+    const { fetcher, calls } = fakePool({ 'POST /accounts': () => json({ queued: true, accountId: 'queued-1' }) })
+    const appl = mount(fetcher)
+    const cases: Array<[unknown, string]> = [
+      ['tomorrow', 'bad_scheduled_at'],
+      [5, 'bad_scheduled_at'],
+      [{}, 'bad_scheduled_at'],
+      ['2099-13-45T99:00:00Z', 'bad_scheduled_at'],
+      [inDays(2).replace('Z', ''), 'bad_scheduled_at'], // no offset: the Worker would have to guess the zone
+      [new Date(Date.now() - 3600_000).toISOString(), 'scheduled_at_past'],
+      [inDays(91), 'scheduled_at_too_far'],
+    ]
+    for (const [v, detail] of cases) {
+      const { r, data } = await postJson(appl, '/ui/api/pool/accounts', { scheduledAt: v })
+      expect(r.status, JSON.stringify(v)).toBe(400)
+      expect(data).toMatchObject({ error: 'invalid', detail })
+    }
+    expect(calls).toHaveLength(0)
+    // The edges that are fine: a minute ago (skew / "now" in the picker) and 89 days ahead.
+    for (const v of [new Date(Date.now() - 60_000).toISOString(), inDays(89)]) {
+      expect((await postJson(appl, '/ui/api/pool/accounts', { scheduledAt: v })).r.status).toBe(200)
+    }
+    expect(calls).toHaveLength(2)
+  })
+
+  it('a queued reply with a non-queued id is a bad_response, not a signup to follow', async () => {
+    const { fetcher } = fakePool({ 'POST /accounts': () => json({ queued: true, accountId: 'acct-9' }) })
+    const { r, data } = await postJson(mount(fetcher), '/ui/api/pool/accounts', { scheduledAt: inDays(1) })
+    expect(r.status).toBe(503)
+    expect(data.error).toBe('bad_response')
+  })
+
+  it('tlpool\'s own refusal of a scheduledAt reaches the page as an error', async () => {
+    const { fetcher } = fakePool({ 'POST /accounts': () => json({ error: 'bad_request', message: 'scheduledAt too far' }, 400) })
+    const { r, data } = await postJson(mount(fetcher), '/ui/api/pool/accounts', { scheduledAt: inDays(1) })
+    expect(r.status).toBe(400)
+    expect(data.error).toBe('invalid')
+  })
+})
+
+describe('pool UI: cancelling a queued account', () => {
+  it('POST /accounts/queued-N/cancel reaches tlpool; an empty 204 answer is a success', async () => {
+    const { fetcher, calls } = fakePool({ 'POST /accounts/queued-3/cancel': () => new Response(null, { status: 204 }) })
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/accounts/queued-3/cancel', { method: 'POST', headers: browserHeaders })
+    expect(r.status).toBe(200)
+    expect(data).toEqual({ ok: true })
+    expect(calls[0]!.url).toBe(`${POOL}/accounts/queued-3/cancel`)
+    expectAuthed(calls[0])
+  })
+
+  it('an unknown queue entry is a 404 from tlpool', async () => {
+    const { fetcher } = fakePool({}) // the fake pool answers 404 not_found
+    const { r, data } = await req(mount(fetcher), '/ui/api/pool/accounts/queued-99/cancel', { method: 'POST' })
+    expect(r.status).toBe(404)
+    expect(data.error).toBe('not_found')
+  })
+
+  it('only queued-<n> ids can be cancelled, and queued ids take no other action', async () => {
+    const { fetcher, calls } = fakePool({})
+    const appl = mount(fetcher)
+    for (const id of ['acct-4', 'queued-', 'queued-x', 'queued-1x', 'queued--1', 'Queued-1', 'x']) {
+      const { r } = await req(appl, `/ui/api/pool/accounts/${id}/cancel`, { method: 'POST' })
+      expect(r.status, id).toBe(400)
+    }
+    for (const action of ['rest', 'retire', 'retest']) {
+      const { r, data } = await req(appl, `/ui/api/pool/accounts/queued-3/${action}`, { method: 'POST' })
+      expect(r.status).toBe(400)
+      expect(data.detail).toBe('bad_id')
+    }
+    // The existing validation is unchanged: an unknown action 404s.
+    expect((await req(appl, '/ui/api/pool/accounts/acct-4/delete', { method: 'POST' })).r.status).toBe(404)
+    expect(calls).toHaveLength(0)
+  })
+})
+
+describe('queued entries in the status', () => {
+  it('normalizeAccount keeps a queue entry\'s fields and marks it queued', () => {
+    const q = normalizeAccount(queuedEntry(4, { attempts: 2, lastError: 'no free exit' }))!
+    expect(q).toMatchObject({ id: 'queued-4', state: 'queued', queued: true, scheduledAt: '2099-01-02T15:30:00.000Z', passive: false, exitKind: 'mullvad', attempts: 2, lastError: 'no free exit' })
+    expect(normalizeAccount(upstreamAccount('acct-1'))).toMatchObject({ queued: false, scheduledAt: null, attempts: null })
+  })
+
+  it('GET /status and GET /accounts list queue entries next to the accounts', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': () => json({ accounts: [upstreamAccount('acct-1'), queuedEntry(1)], queueDepth: 0 }),
+      'GET /accounts': () => json({ accounts: [upstreamAccount('acct-1'), queuedEntry(1)] }),
+      'GET /challenges': () => json([]),
+    })
+    const appl = mount(fetcher)
+    expect((await req(appl, '/ui/api/pool/status')).data.status.accounts.map((a: { id: string }) => a.id)).toEqual(['acct-1', 'queued-1'])
+    expect((await req(appl, '/ui/api/pool/accounts')).data.accounts[1]).toMatchObject({ id: 'queued-1', queued: true })
+  })
+})
+
+describe('pool page: queued rows and several creations at once', () => {
+  const clickOn = (dataset: Record<string, string>) => ({ target: { closest: (sel: string) => (sel === 'button' ? { dataset, closest: () => null } : null) } })
+  const handler = (pg: { els: Map<string, StubEl> }, id: string, type = 'click') => (pg.els.get(id)!.handlers as Record<string, unknown>)[type] as (ev?: unknown) => Promise<void>
+  const statusOf = (accounts: unknown[]) => () => json({ accounts, queueDepth: 0, totals: { requests_today: 5 } })
+
+  it('lists a queued entry as its own row: queued chip, local time, cancel; not counted as an account', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': statusOf([
+        upstreamAccount('acct-1'), upstreamAccount('acct-2', { state: 'retired' }),
+        queuedEntry(2, { scheduledAt: '2099-03-01T00:00:00Z', attempts: 2, lastError: 'no free exit', passive: true }),
+        queuedEntry(1),
+      ]),
+      'GET /challenges': () => json([]),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const accts = pg.els.get('accts')!.innerHTML
+    // Real accounts first, then queued by time (queued-1 is due before queued-2).
+    expect(accts.indexOf('acct-1')).toBeLessThan(accts.indexOf('queued-1'))
+    expect(accts.indexOf('queued-1')).toBeLessThan(accts.indexOf('queued-2'))
+    expect(accts).toContain('<span class="badge queued"')
+    expect(accts).toContain('>queued</span>')
+    expect(accts).toContain('creates ')
+    expect(accts).toContain('Tried 2 times, failed: no free exit')
+    expect(accts).toContain('data-act="cancel" data-id="queued-1"')
+    // A queued row has no state-details button and no rest/retest/retire.
+    expect(accts).not.toContain('data-state-acct="queued-')
+    expect(accts).not.toMatch(/data-act="(rest|retest|retire)" data-id="queued-/)
+    // Totals: 1 live (acct-1); the retired one and the queued ones do not count; queued has its own tile.
+    const stats = pg.els.get('stats')!.innerHTML
+    expect(stats).toMatch(/<div class="v">1 \/ 1<\/div>/)
+    expect(stats).toMatch(/<div class="k">queued accounts \(scheduled\)<\/div>/)
+    expect(stats).toMatch(/<div class="k">queued accounts \(scheduled\)<\/div><div class="v">2<\/div>/)
+  })
+
+  it('shows no queued tile without queued entries, and a table with only queued entries still renders', async () => {
+    const a = fakePool({ 'GET /status': statusOf([upstreamAccount('acct-1')]), 'GET /challenges': () => json([]) })
+    const pa = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(a.fetcher), makeEnv())
+    expect(pa.els.get('stats')!.innerHTML).not.toContain('queued accounts')
+    const b = fakePool({ 'GET /status': statusOf([queuedEntry(1)]), 'GET /challenges': () => json([]) })
+    const pb = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(b.fetcher), makeEnv())
+    expect(pb.els.get('accts')!.innerHTML).toContain('queued-1')
+    expect(pb.els.get('stats')!.innerHTML).toMatch(/<div class="v">0 \/ 0<\/div>/)
+  })
+
+  it('Cancel asks first, then calls the cancel route', async () => {
+    const { fetcher, calls } = fakePool({
+      'GET /status': statusOf([queuedEntry(1)]), 'GET /challenges': () => json([]),
+      'POST /accounts/queued-1/cancel': () => json({ ok: true }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const box = stubEl(); box.dataset = { acts: 'queued-1' }
+    const click = (dataset: Record<string, string>) => ({ target: { closest: (sel: string) => (sel === 'button' ? { dataset, closest: () => box, disabled: false } : null) } })
+    await handler(pg, 'accts')(click({ act: 'cancel', id: 'queued-1' }))
+    expect(box.innerHTML).toContain('Cancel this scheduled account?')
+    expect(box.innerHTML).toContain('data-yes="cancel"')
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0)
+    await handler(pg, 'accts')(click({ yes: 'cancel' }))
+    await settle()
+    expect(calls.filter((c) => c.method === 'POST').map((c) => c.url)).toEqual([`${POOL}/accounts/queued-1/cancel`])
+  })
+
+  it('a scheduled Create sends scheduledAt (UTC ISO), closes the dialog and starts no flow', async () => {
+    const { fetcher, calls } = fakePool({
+      'GET /status': statusOf([]), 'GET /challenges': () => json([]),
+      'POST /accounts': () => json({ queued: true, accountId: 'queued-5', scheduledAt: '2099-01-02T15:30:00Z' }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const d = new Date(Date.now() + 3 * 86400_000)
+    const local = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    const when = stubEl(); when.value = local
+    pg.els.set('add-when', when)
+    const close = vi.fn(); pg.els.get('add-dlg')!.close = close
+    await handler(pg, 'add-create')()
+    await settle()
+    const post = calls.find((c) => c.method === 'POST')!
+    expect(post.body).toEqual({ passive: false, scheduledAt: new Date(local).toISOString() })
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(when.value).toBe('')
+    // No challenge to follow for a queued account.
+    await pg.fire(2500)
+    expect(calls.filter((c) => c.url.includes('/challenges/'))).toHaveLength(0)
+  })
+
+  it('a scheduled Create refuses a past or too-far time in the page, before any request', async () => {
+    const { fetcher, calls } = fakePool({ 'GET /status': statusOf([]), 'GET /challenges': () => json([]) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const when = stubEl(); pg.els.set('add-when', when)
+    const msg = stubEl(); pg.els.set('add-form-msg', msg)
+    for (const v of ['2001-01-01T00:00', '2999-01-01T00:00']) {
+      when.value = v
+      msg.innerHTML = ''
+      await handler(pg, 'add-create')()
+      await settle()
+      expect(msg.innerHTML).toContain('banner bad')
+    }
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0)
+    expect(pg.els.get('add-create')!.disabled).toBe(false)
+  })
+
+  it('the dialog has a datetime-local box, empty by default', () => {
+    expect(POOL_PAGES.POOL_PAGE_HTML).toContain('<input id="add-when" type="datetime-local" />')
+  })
+
+  it('"+ Add account" opens a fresh dialog while creations run, and each creation keeps its own progress', async () => {
+    let n = 0
+    const { fetcher, calls } = fakePool({
+      'GET /status': statusOf([]), 'GET /challenges': () => json([]),
+      'POST /accounts': () => { n++; return json(n === 1 ? { challengeId: 'ch_a', accountId: 'acct-21' } : { challengeId: 'ch_b', accountId: 'acct-22' }) },
+      'GET /challenges/ch_a': () => json({ id: 'ch_a', type: 'image', state: 'pending', step: 'form_opened', ready: false, account: 'acct-21' }),
+      'GET /challenges/ch_b': () => json({ id: 'ch_b', type: 'image', state: 'pending', step: 'awaiting_email', ready: false, account: 'acct-22' }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    // First creation, then a fresh form, then a second one.
+    await handler(pg, 'add-btn')(); await handler(pg, 'add-create')(); await settle()
+    expect(pg.els.get('add-steps')!.innerHTML).toMatch(/<li class="cur">.*Signup form opened/)
+    await handler(pg, 'add-btn')()
+    expect(pg.els.get('add-form')!.hidden).toBe(false) // the bug: this used to show creation 1's progress instead
+    expect(pg.els.get('add-progress')!.hidden).toBe(true)
+    expect(pg.els.get('add-create')!.disabled).toBe(false)
+    expect(pg.els.get('add-active')!.innerHTML).toContain('acct-21')
+    await handler(pg, 'add-create')(); await settle()
+    expect(calls.filter((c) => c.method === 'POST' && c.url.endsWith('/accounts'))).toHaveLength(2)
+    expect(pg.els.get('add-steps')!.innerHTML).toMatch(/<li class="cur">.*Waiting for the confirmation email/)
+    // Both are polled, and a third click lists both with their own step.
+    const m = calls.length
+    await pg.fire(2500)
+    const polled = calls.slice(m).map((c) => c.url.slice(POOL.length))
+    expect(polled).toContain('/challenges/ch_a'); expect(polled).toContain('/challenges/ch_b')
+    await handler(pg, 'add-btn')()
+    const list = pg.els.get('add-active')!.innerHTML
+    expect(list).toContain('acct-21'); expect(list).toContain('acct-22')
+    expect(list).toContain('Signup form opened'); expect(list).toContain('Waiting for the confirmation email')
+    // Reopen the first one from the list: its own steps are drawn, not the second one's.
+    const key = /data-flow="([^"]+)"/.exec(list)![1]!
+    await handler(pg, 'add-active')(clickOn({ flow: key }))
+    expect(pg.els.get('add-progress')!.hidden).toBe(false)
+    expect(pg.els.get('add-steps')!.innerHTML).toMatch(/<li class="cur">.*Signup form opened/)
+    await handler(pg, 'add-back')()
+    expect(pg.els.get('add-form')!.hidden).toBe(false)
+  })
+
+  it('a creation that finishes in the background does not repaint the dialog the owner is on', async () => {
+    const { fetcher } = fakePool({
+      'GET /status': statusOf([]), 'GET /challenges': () => json([]),
+      'POST /accounts': () => json({ challengeId: 'ch_a', accountId: 'acct-21' }),
+      'GET /challenges/ch_a': () => json({ id: 'ch_a', type: 'image', state: 'solved', step: 'done', ready: false, account: 'acct-21' }),
+    })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await handler(pg, 'add-btn')(); await handler(pg, 'add-create')(); await settle()
+    expect(pg.els.get('add-msg')!.innerHTML).toContain('acct-21 is ready')
+    await handler(pg, 'add-btn')() // fresh form
+    pg.els.get('add-msg')!.innerHTML = 'untouched'
+    await pg.fire(2500)
+    expect(pg.els.get('add-msg')!.innerHTML).toBe('untouched')
+    expect(pg.els.get('add-form')!.hidden).toBe(false)
+  })
+
+  it('a failed create stays on screen with Try again; Try again returns to the form', async () => {
+    const { fetcher } = fakePool({ 'GET /status': statusOf([]), 'GET /challenges': () => json([]), 'POST /accounts': () => json({ error: 'no_free_exit' }, 409) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    await handler(pg, 'add-btn')(); await handler(pg, 'add-create')(); await settle()
+    expect(pg.els.get('add-retry')!.hidden).toBe(false)
+    await handler(pg, 'add-retry')()
+    expect(pg.els.get('add-form')!.hidden).toBe(false)
+    expect(pg.els.get('add-active')!.hidden).toBe(true)
   })
 })
