@@ -20,7 +20,7 @@
 
 import { extractIPBlockedAddress, IPBlockedError, isIPBlocked, looksLikeCfShell, type ChallengeState } from './fetch'
 import { isPaused } from './ban-state'
-import { poolConfigFromEnv, poolFetch, type PoolConfig, type PoolKind, type PoolPriority } from './pool'
+import { poolCodeOf, poolConfigFromEnv, poolFetch, type PoolConfig, type PoolFetchOk, type PoolFetchRequest, type PoolKind, type PoolPriority } from './pool'
 import { UpstreamHttpError, UpstreamPausedError, UpstreamTransportError, UpstreamUnavailableError } from './upstream-errors'
 import { capturePage, type PageStoreOpts, type PageVerdict } from './page-store'
 import type { Logger } from './log'
@@ -98,20 +98,29 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
   }
   const kind = opts.kind ?? 'set'
   const priority = opts.priority ?? 'phone'
-  const r = await poolFetch(
-    opts.pool ?? null,
-    {
-      url,
-      kind,
-      priority,
-      ...(opts.excludeAccounts?.length ? { excludeAccounts: opts.excludeAccounts } : {}),
-      ...(opts.maxWaitSeconds !== undefined ? { maxWaitSeconds: opts.maxWaitSeconds } : {}),
-      ...(opts.method ? { method: opts.method } : {}),
-      ...(opts.form ? { form: opts.form } : {}),
-      ...(opts.headers ? { headers: opts.headers } : {}),
-    },
-    log,
-  )
+  const req: PoolFetchRequest = {
+    url,
+    kind,
+    priority,
+    ...(opts.excludeAccounts?.length ? { excludeAccounts: opts.excludeAccounts } : {}),
+    ...(opts.maxWaitSeconds !== undefined ? { maxWaitSeconds: opts.maxWaitSeconds } : {}),
+    ...(opts.method ? { method: opts.method } : {}),
+    ...(opts.form ? { form: opts.form } : {}),
+    ...(opts.headers ? { headers: opts.headers } : {}),
+  }
+  let r: PoolFetchOk
+  try {
+    r = await poolFetch(opts.pool ?? null, req, log)
+  } catch (e) {
+    // A pool timeout is usually one account's browser hanging on its page
+    // load (2026-10-07: acct-34 stalled and a whole DJ sync stopped). Ask
+    // once more: tlpool never hands a request to an account still busy with
+    // the stalled one, so the retry lands on another account. Not for phone,
+    // whose caller is waiting under the 25 s contract.
+    if (poolCodeOf(e) !== 'timeout' || priority === 'phone') throw e
+    log?.warn('fetch1001.pool_timeout_retry', { url, kind, priority })
+    r = await poolFetch(opts.pool ?? null, req, log)
+  }
   if (opts.pages) {
     // Background, never awaited: index.ts drains it into ctx.waitUntil.
     const blocked = isIPBlocked(r.html) || looksLikeCfShell(r.html)

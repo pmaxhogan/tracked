@@ -146,6 +146,34 @@ describe('fetch1001 — the only 1001tracklists route', () => {
     expect(calls[0]!.body).toMatchObject({ kind: 'set', priority: 'phone', maxWaitSeconds: 25 })
   })
 
+  it('a pool timeout is asked once more (another account serves it); a second timeout stops the batch', async () => {
+    let n = 0
+    const { calls, pool } = fakePool(() => (++n === 1 ? json({ error: 'timeout', retryAfterSeconds: 30 }) : page(TRACKLIST_HTML, { accountId: 'acct-17' })))
+    const r = await fetch1001(TL, { pool, priority: 'new', excludeAccounts: ['acct-9'] })
+    expect(r.accountId).toBe('acct-17')
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.body).toEqual(calls[0]!.body)
+    expect(calls[1]!.body).toMatchObject({ excludeAccounts: ['acct-9'] })
+
+    const always = fakePool(() => json({ error: 'timeout', retryAfterSeconds: 30 }))
+    const e = await fetch1001(TL, { pool: always.pool, priority: 'recheck' }).catch((x) => x)
+    expect(e).toBeInstanceOf(PoolUnavailableError)
+    expect(e).toMatchObject({ code: 'timeout' })
+    expect(isStopTheBatchError(e)).toBe(true)
+    expect(always.calls).toHaveLength(2)
+  })
+
+  it('no retry for a phone fetch or for any other pool refusal', async () => {
+    const phone = fakePool(() => json({ error: 'timeout', retryAfterSeconds: 30 }))
+    await fetch1001(TL, { pool: phone.pool }).catch((x) => x)
+    expect(phone.calls).toHaveLength(1)
+    for (const error of ['no_healthy_account', 'blocked', 'budget_exhausted']) {
+      const other = fakePool(() => json({ error, retryAfterSeconds: 30 }))
+      await fetch1001(TL, { pool: other.pool, priority: 'new' }).catch((x) => x)
+      expect(other.calls, error).toHaveLength(1)
+    }
+  })
+
   it('a 404/410 from the site is final for the URL; a 5xx is a blip; 401/403/429 is the account, not the URL', async () => {
     for (const [status, cls] of [
       [404, UpstreamHttpError],
