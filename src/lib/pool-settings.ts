@@ -38,6 +38,8 @@ export const PoolSettingsSchema = z.object({
     unknownAgeIntervalHours: z.number().positive().max(24 * 3650),
     /** Every interval is multiplied by 1 ± this, so due times never re-cluster (default 0.15). */
     jitterFraction: z.number().min(0).max(0.5),
+    /** An overdue set with a pending mkvid request is spread over at most this, not its whole interval (default 48 h). */
+    mkvidWaitingSpreadHours: z.number().positive().max(24 * 30),
   }),
   priorities: z.object({
     /** Order the scheduler fills a tick in when there is more due than it submits. Must list each class once. */
@@ -107,6 +109,33 @@ export const PoolSettingsSchema = z.object({
     maxPerDay: z.number().int().min(0).max(100),
     maxRestingShare: z.number().min(0).max(1),
   }),
+  /** Retries and backoffs of the scheduler (lib/fetch-scheduler.ts); formerly constants. */
+  retry: z.object({
+    /** Fetch attempts of one set page per UTC day at most (default 3). */
+    maxSetAttemptsPerDay: z.number().int().min(1).max(50),
+    /** Wait after a failed attempt: base × 2^(n-1), capped (defaults 15 min, 6 h). */
+    attemptBackoffBaseMinutes: z.number().positive().max(24 * 60),
+    attemptBackoffMaxHours: z.number().positive().max(24 * 7),
+    /** A claimed recheck / verification whose fetch failed is picked again after this (defaults 6 h, 2 h). */
+    claimRecheckHours: z.number().positive().max(24 * 7),
+    claimVerifyHours: z.number().positive().max(24 * 7),
+    /** A DJ discovery / backfill step that did not complete is retried after this (default 60 min). */
+    djRetryMinutes: z.number().positive().max(24 * 60),
+    /** Ticks stand down for the pool's retryAfter, at most this (default 6 h). */
+    poolBackoffMaxHours: z.number().positive().max(48),
+    /** A tick whose every item was refused item-scoped stands down at most this (default 10 min). */
+    itemScopedBackoffMinutes: z.number().positive().max(24 * 60),
+  }),
+  /** The render feeder's pacing besides renderFeedPerDay; formerly constants. */
+  renderFeed: z.object({
+    /** First fetches per tick at most (default 1). */
+    maxPerTick: z.number().int().min(0).max(10),
+    /** A set fetched or fed this recently is not fed (default 48 h), doubling per failed feed up to maxCooldownDays (default 14). */
+    cooldownHours: z.number().positive().max(24 * 60),
+    maxCooldownDays: z.number().positive().max(365),
+    /** After this many failed feed fetches in a row the set is given up (default 3). */
+    maxFailures: z.number().int().min(1).max(20),
+  }),
 })
 
 export type PoolSettings = z.infer<typeof PoolSettingsSchema>
@@ -123,6 +152,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
     beyondExceptionIntervalHours: 90 * 24,
     unknownAgeIntervalHours: 5 * 24,
     jitterFraction: 0.15,
+    mkvidWaitingSpreadHours: 48,
   },
   priorities: { order: ['new', 'verify', 'recheck', 'backfill'], newSetMaxAgeDays: 14 },
   tick: { minItems: 0, maxItems: 3 },
@@ -133,6 +163,17 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   forcedRefetch: { cooldownSeconds: 120, dailyCap: 40 },
   renderFeedPerDay: 40,
   reports: { maxPerDay: 6, maxRestingShare: 0.5 },
+  retry: {
+    maxSetAttemptsPerDay: 3,
+    attemptBackoffBaseMinutes: 15,
+    attemptBackoffMaxHours: 6,
+    claimRecheckHours: 6,
+    claimVerifyHours: 2,
+    djRetryMinutes: 60,
+    poolBackoffMaxHours: 6,
+    itemScopedBackoffMinutes: 10,
+  },
+  renderFeed: { maxPerTick: 1, cooldownHours: 48, maxCooldownDays: 14, maxFailures: 3 },
 }
 
 type Plain = Record<string, unknown>

@@ -20,8 +20,9 @@ import { batchChunked, dbOf, parseJson } from './db'
 import { decodeCursor, encodeCursor, type AuditPage } from './audit-cursor'
 import type { CombinedAdditionStatus } from './combined-playlist'
 import { errorFields, type Logger } from './log'
+import { getAppSettings } from './app-settings'
 
-export const PLAYLIST_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
+export const PLAYLIST_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000 // default; live: app setting retention.auditDays
 
 /**
  * Outcome for one tracklist the sync looked at:
@@ -193,6 +194,6 @@ export async function failureRowsSince(env: Env, sinceMs: number): Promise<Playl
 
 /** Drop rows past the retention horizon. Returns how many went. */
 export async function prunePlaylistAdditions(env: Env, now = Date.now()): Promise<number> {
-  const r = await dbOf(env).prepare('DELETE FROM playlist_additions WHERE ts < ?').bind(now - PLAYLIST_AUDIT_RETENTION_MS).run()
+  const r = await dbOf(env).prepare('DELETE FROM playlist_additions WHERE ts < ?').bind(now - (await getAppSettings(env)).retention.auditDays * 86_400_000).run()
   return r.meta.changes ?? 0
 }
