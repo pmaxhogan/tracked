@@ -22,12 +22,13 @@ function makeEnv(): Env {
   return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k' } as Env
 }
 
-/** A fake tlpool that records retest requests. */
-function retestRecorder() {
+/** A fake tlpool that records retest requests and answers /status with `status`. */
+function retestRecorder(status: unknown = {}) {
   const retests: string[] = []
   const fetchImpl = (async (input: RequestInfo | URL) => {
     const m = String(input).match(/\/accounts\/([^/]+)\/retest$/)
     if (m) retests.push(decodeURIComponent(m[1]!))
+    if (String(input).endsWith('/status')) return new Response(JSON.stringify(status), { status: 200 })
     return new Response('{}', { status: 200 })
   }) as unknown as typeof fetch
   return { retests, pool: { url: 'https://tlpool.example', token: 't', fetchImpl } }
@@ -139,6 +140,46 @@ describe('noteSetFetch', () => {
     expect(await note(env, decoy, 'acct-4', T0 + 10 * H, pool)).toEqual({ outcome: 'decoy', verified: true, reported: 'acct-4' })
     expect(retests).toEqual(['acct-4'])
     expect(await isVerified(env, URL1)).toBe(true)
+  })
+
+  it('a page with a few far mismatches is not trusted but accuses nobody (2026-10-07)', async () => {
+    const env = makeEnv()
+    const { retests, pool } = retestRecorder()
+    const oneFar = { ...real, decoy: { ...real.decoy, mismatched: 1, suspected: false } }
+    expect(passesDecoyCheck(oneFar)).toBe(false)
+    expect(await note(env, oneFar, 'acct-1', T0, pool)).toEqual({ outcome: 'untrusted', verified: false, reported: null })
+    expect(retests).toEqual([])
+    // Not counted towards verification either.
+    expect(await getVerification(env, URL1)).toBeNull()
+  })
+
+  it('reports nobody while more than half of the non-passive pool rests', async () => {
+    const acct = (id: string, state: string, passive = false) => ({ id, state, passive })
+    const busyPool = { accounts: [acct('a1', 'resting'), acct('a2', 'resting'), acct('a3', 'resting'), acct('a4', 'active'), acct('a5', 'warming'), acct('p1', 'resting', true), acct('p2', 'resting', true), acct('r1', 'retired'), acct('n1', 'new')] }
+    const env = makeEnv()
+    const { retests, pool } = retestRecorder(busyPool)
+    expect(await note(env, decoy, 'acct-4', T0, pool)).toEqual({ outcome: 'decoy', verified: false, reported: null })
+    expect(retests).toEqual([])
+    // Exactly half resting (passive, retired and new accounts do not count) still reports.
+    const half = retestRecorder({ accounts: [acct('a1', 'resting'), acct('a2', 'resting'), acct('a3', 'active'), acct('a4', 'active'), acct('p1', 'resting', true)] })
+    expect((await note(makeEnv(), decoy, 'acct-4', T0, half.pool)).reported).toBe('acct-4')
+    expect(half.retests).toEqual(['acct-4'])
+  })
+
+  it('sends at most reports.maxPerDay reports per UTC day of the fetch', async () => {
+    const env = makeEnv()
+    const { retests, pool } = retestRecorder()
+    const settings = { ...DEFAULT_POOL_SETTINGS, reports: { maxPerDay: 1, maxRestingShare: 0.5 } }
+    const send = (accountId: string, fetchedAt: number) => noteSetFetch(env, { setUrl: URL1, parsed: decoy, accountId, fetchedAt, settings, pool })
+    expect((await send('acct-1', T0)).reported).toBe('acct-1')
+    expect((await send('acct-2', T0 + 60)).reported).toBeNull()
+    expect((await send('acct-3', T0 + 24 * H)).reported).toBe('acct-3')
+    expect(retests).toEqual(['acct-1', 'acct-3'])
+    // 0 = never report.
+    const never = retestRecorder()
+    const off = { ...DEFAULT_POOL_SETTINGS, reports: { maxPerDay: 0, maxRestingShare: 0.5 } }
+    expect((await noteSetFetch(makeEnv(), { setUrl: URL1, parsed: decoy, accountId: 'acct-1', fetchedAt: T0, settings: off, pool: never.pool })).reported).toBeNull()
+    expect(never.retests).toEqual([])
   })
 
   it('losing verification downgrades a stored mkvid list (trusted = 1 only while verified)', async () => {

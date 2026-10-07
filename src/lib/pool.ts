@@ -212,9 +212,36 @@ export async function poolFetch(cfg: PoolConfig | null, req: PoolFetchRequest, l
 }
 
 /**
+ * How much of the non-passive pool rests right now, from tlpool's /status:
+ * `resting` of `total` accounts that are warming, active or resting (new,
+ * failed and retired ones do not count). null when tlpool cannot say.
+ * Never throws.
+ */
+export async function poolRestingShare(cfg: PoolConfig | null, log?: Logger): Promise<{ resting: number; total: number } | null> {
+  if (!cfg) return null
+  try {
+    const res = await poolCall(cfg, '/status', { method: 'GET', timeoutMs: 10_000 })
+    const body = (await res.json().catch(() => null)) as { accounts?: unknown } | null
+    if (!res.ok || !body || !Array.isArray(body.accounts)) return null
+    let resting = 0
+    let total = 0
+    for (const a of body.accounts as Array<{ state?: unknown; passive?: unknown }>) {
+      if (a?.passive === true || (a?.state !== 'warming' && a?.state !== 'active' && a?.state !== 'resting')) continue
+      total++
+      if (a.state === 'resting') resting++
+    }
+    return { resting, total }
+  } catch (e) {
+    log?.warn('pool.status_failed', { error: e instanceof Error ? e.message : String(e) })
+    return null
+  }
+}
+
+/**
  * Report an account as possibly flagged (a decoy page, or a verification pair
  * that disagreed): tlpool rests it and retests it with a known set (decision
- * 14). Best-effort — never throws.
+ * 14). Best-effort — never throws. Callers go through verification.ts's
+ * reportAccount, which applies the pool settings' `reports` limits first.
  */
 export async function poolRetestAccount(cfg: PoolConfig | null, accountId: string, reason: string, log?: Logger): Promise<boolean> {
   if (!cfg || !/^[A-Za-z0-9_-]{1,64}$/.test(accountId)) return false

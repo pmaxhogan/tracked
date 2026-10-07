@@ -31,8 +31,17 @@
  *   - A verified list changes on a later recheck: 1001tracklists users edit
  *     lists (IDs get identified), so this resets verification without
  *     accusing anyone.
- *   - Any fetch the decoy detector rejects reports its account to tlpool and
- *     leaves the state untouched.
+ *   - A fetch the decoy detector calls a decoy (`suspected`: most rows
+ *     contradict themselves) reports its account to tlpool and leaves the
+ *     state untouched.
+ *   - A fetch with only a few far mismatches is not trusted (it does not
+ *     count towards verification) but accuses nobody: real pages carry the
+ *     odd credit difference the near rule does not know yet, identical on
+ *     every fetch by every account (2026-10-07: one such row on 19 sets had
+ *     rested 19 accounts for 72 h each).
+ *   - Every report goes through `reportAccount`, which holds to the pool
+ *     settings' `reports` limits (a daily cap, and none while most of the
+ *     non-passive pool already rests).
  *
  * `isVerified(env, setUrl)` is the gate W7's render eligibility and
  * `mkvidTracksTrusted` use: names are only burned into a video from a
@@ -41,8 +50,8 @@
 
 import { dbOf, parseJson } from './db'
 import type { Logger } from './log'
-import { poolRetestAccount, type PoolConfig } from './pool'
-import type { PoolSettings } from './pool-settings'
+import { poolRestingShare, poolRetestAccount, type PoolConfig } from './pool'
+import { DEFAULT_POOL_SETTINGS, type PoolSettings } from './pool-settings'
 import type { ScrapedTracklist } from './tracklists1001'
 import type { Env } from '../types'
 
@@ -151,7 +160,8 @@ export function excludeAccountsOf(row: Pick<VerificationRow, 'exclude_accounts'>
 
 export type VerificationOutcome =
   | 'no_account' // the fetch did not say which account served it: cannot count
-  | 'decoy' // failed the decoy detector: account reported, state untouched
+  | 'decoy' // the decoy detector called it a decoy: account reported (within the report limits), state untouched
+  | 'untrusted' // a few far mismatches: not counted, nobody reported, state untouched
   | 'first' // first passing fetch recorded; second fetch scheduled
   | 'verified' // this fetch confirmed the pending one
   | 'still_pending' // same rows but same account or too soon: waits for a proper second fetch
@@ -180,7 +190,7 @@ type NoteInput = {
  * reads `isVerified` for that set.
  */
 export async function noteSetFetch(env: Env, input: NoteInput): Promise<VerificationResult> {
-  const { setUrl, parsed, fetchedAt, settings, pool, log } = input
+  const { setUrl, parsed, fetchedAt, settings, log } = input
   const random = input.random ?? Math.random
   const account = input.accountId && input.accountId !== 'unknown' ? input.accountId : null
   const db = dbOf(env)
@@ -191,10 +201,15 @@ export async function noteSetFetch(env: Env, input: NoteInput): Promise<Verifica
     return { outcome: 'no_account', verified: wasVerified, reported: null }
   }
   if (!passesDecoyCheck(parsed)) {
-    if (parsed.decoy.suspected || parsed.decoy.mismatched > 0) {
-      log?.error('verify.decoy_fetch', { setUrl, accountId: account, named: parsed.decoy.named, mismatched: parsed.decoy.mismatched, nearMismatched: parsed.decoy.nearMismatched })
-      await poolRetestAccount(pool, account, 'decoy page', log)
-      return { outcome: 'decoy', verified: wasVerified, reported: account }
+    const counts = { named: parsed.decoy.named, mismatched: parsed.decoy.mismatched, nearMismatched: parsed.decoy.nearMismatched }
+    if (parsed.decoy.suspected) {
+      log?.error('verify.decoy_fetch', { setUrl, accountId: account, ...counts })
+      const reported = await reportAccount(env, input, account, 'decoy page')
+      return { outcome: 'decoy', verified: wasVerified, reported: reported ? account : null }
+    }
+    if (parsed.decoy.mismatched > 0) {
+      log?.warn('verify.untrusted_fetch', { setUrl, accountId: account, ...counts })
+      return { outcome: 'untrusted', verified: wasVerified, reported: null }
     }
     // Zero rows: nothing to compare, nobody to blame.
     return { outcome: 'no_account', verified: wasVerified, reported: null }
@@ -274,15 +289,49 @@ export async function noteSetFetch(env: Env, input: NoteInput): Promise<Verifica
     // without reporting anyone.
     const near = parsed.decoy.nearMismatched
     log?.error('verify.mismatch', { setUrl, firstAccount: row.first_account, secondAccount: account, rowsFirst: row.row_count, rowsSecond: rowCount, nearMismatched: near })
-    if (near === 0) await poolRetestAccount(pool, row.first_account, 'verification mismatch', log)
+    const reported = near === 0 && (await reportAccount(env, input, row.first_account, 'verification mismatch'))
     await startOver([account, row.first_account, ...excludeAccountsOf(row)], row.mismatches + 1)
-    return { outcome: 'mismatch', verified: false, reported: near === 0 ? row.first_account : null }
+    return { outcome: 'mismatch', verified: false, reported: reported ? row.first_account : null }
   }
   // Same account, different rows: the list was edited in between (or the
   // account turned). Restart from the newer rows without accusing anyone.
   await startOver([account], row.mismatches)
   log?.warn('verify.changed_same_account', { setUrl, accountId: account })
   return { outcome: 'changed', verified: false, reported: null }
+}
+
+/**
+ * Report a suspect account to tlpool, which rests it (72 h for a decoy), but
+ * only within the pool settings' `reports` limits: at most `maxPerDay` sent
+ * per UTC day of the fetch (a KV counter in CACHE, approximate like
+ * page-store's), and none while more than `maxRestingShare` of the
+ * non-passive pool already rests. When tlpool's /status cannot be read the
+ * share check is skipped; the daily cap still holds. Returns whether the
+ * report was sent. Never throws.
+ */
+async function reportAccount(env: Env, input: Pick<NoteInput, 'pool' | 'settings' | 'fetchedAt' | 'log'>, account: string, reason: string): Promise<boolean> {
+  const { pool, log } = input
+  const { maxPerDay, maxRestingShare } = input.settings.reports ?? DEFAULT_POOL_SETTINGS.reports
+  if (!pool) return false
+  const key = `pool-reports:${new Date(input.fetchedAt * 1000).toISOString().slice(0, 10)}`
+  try {
+    const sent = Number((await env.CACHE.get(key)) ?? '0') || 0
+    if (sent >= maxPerDay) {
+      log?.warn('pool.report_skipped', { accountId: account, reason, why: 'daily_cap', sent, maxPerDay })
+      return false
+    }
+    const share = maxRestingShare < 1 ? await poolRestingShare(pool, log) : null
+    if (share && share.total > 0 && share.resting / share.total > maxRestingShare) {
+      log?.warn('pool.report_skipped', { accountId: account, reason, why: 'pool_resting', resting: share.resting, total: share.total, maxRestingShare })
+      return false
+    }
+    const ok = await poolRetestAccount(pool, account, reason, log)
+    if (ok) await env.CACHE.put(key, String(sent + 1), { expirationTtl: 172800 })
+    return ok
+  } catch (e) {
+    log?.warn('pool.report_failed', { accountId: account, reason, error: e instanceof Error ? e.message : String(e) })
+    return false
+  }
 }
 
 /** Pending verifications whose second fetch is due, oldest first, with a DJ slug to run them under. */

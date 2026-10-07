@@ -96,6 +96,17 @@ export const PoolSettingsSchema = z.object({
    * verification started (default 40; 0 = off). Paced across the day.
    */
   renderFeedPerDay: z.number().int().min(0).max(500),
+  /**
+   * Reports of a suspect account to tlpool (lib/verification.ts), each of
+   * which rests that account: at most `maxPerDay` per UTC day (default 6;
+   * 0 = never report), and none while more than `maxRestingShare` (default
+   * 0.5) of the non-passive pool already rests. 2026-10-07: false reports had
+   * 28 of 33 accounts resting at once.
+   */
+  reports: z.object({
+    maxPerDay: z.number().int().min(0).max(100),
+    maxRestingShare: z.number().min(0).max(1),
+  }),
 })
 
 export type PoolSettings = z.infer<typeof PoolSettingsSchema>
@@ -121,6 +132,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   manualMaxFetches: 10,
   forcedRefetch: { cooldownSeconds: 120, dailyCap: 40 },
   renderFeedPerDay: 40,
+  reports: { maxPerDay: 6, maxRestingShare: 0.5 },
 }
 
 type Plain = Record<string, unknown>

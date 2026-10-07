@@ -121,6 +121,41 @@ describe('near mismatches (benign meta/visible name differences)', () => {
     expect(isNearMismatch('beyonce - halo', 'beyoncé - halo (live)')).toBe(true)
   })
 
+  // 2026-10-07: 28 pool accounts rested on one far row each, the same row text
+  // on every fetch by every account (19 of them on the Coolio row, across 19 sets).
+  const LIVE_1007: Array<[string, string]> = [
+    ["coolio - gangsta's paradise (machaki remix)", "coolio ft. l.v. - gangsta's paradise (machaki remix)"],
+    ['matroda ft. dances with white girls - bang', 'matroda ft. dances - bang'],
+    ['chance the rapper - cocoa butter kisses (levity remix)', 'chance the rapper ft. vic mensa & twista - cocoa butter kisses (levity remix)'],
+    ['calvin harris & d.o.d - sweet nothing (2025 edit)', 'calvin harris & d.o.d ft. florence welch - sweet nothing (2025 edit)'],
+    ['enne (br) & black keusen - aperta & empina', 'enne & black keusen - aperta & empina'],
+    ['celo (us) & alienpark - id', 'celo & alienpark - id'],
+    ['emcy (col) & nic vesperi & koby gray - 2 lives', 'emcy & nic vesperi & koby gray - 2 lives'],
+  ]
+
+  it('a featured-artist credit on either side, or a country tag only in the microdata, is near', () => {
+    for (const [m, s] of LIVE_1007) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(true)
+  })
+
+  it('still far: a featured artist in place of the artist, a dropped word, a dropped or swapped longer credit', () => {
+    const far: Array<[string, string]> = [
+      ['coolio - song', 'someone ft. coolio - song'],
+      ['chemical surf & jetlag music - kids', 'chemical surf & jetlag - kids'],
+      ['artist (live band) - song', 'artist - song'],
+      ['a - t (x remix)', 'a - t (y remix)'],
+      ['ft. a - song', 'ft. b - song'],
+    ]
+    for (const [m, s] of far) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(false)
+  })
+
+  it('a page with the 2026-10-07 Coolio row passes every check', async () => {
+    const html = page(30, [["Coolio - Gangsta's Paradise (Machaki Remix)", "Coolio ft. L.V. - Gangsta's Paradise (Machaki Remix)"]])
+    const p = parseTracklist(URL, html)
+    expect(p.decoy).toEqual({ named: 31, mismatched: 0, nearMismatched: 1, suspected: false })
+    expect(passesDecoyCheck(p)).toBe(true)
+    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('clean')
+  })
+
   it('the decoy fixture: every mismatch is far, and it fails every check', async () => {
     const html = fx('tracklist-decoy-dcr839.html')
     const p = parseTracklist(URL, html)

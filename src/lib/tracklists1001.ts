@@ -650,21 +650,32 @@ function nameTokens(s: string): Set<string> {
  *   "The Prodigy - No Good (ALOK Remix)"   / "The Prodigy - No Good (Start The Dance) (ALOK Remix)"
  *   "Adam Beyer & Charles D - Rave Repeat" / "Adam Beyer & Charles D (USA) - Rave Repeat"
  *
+ * And, 2026-10-07 (28 pool accounts rested on one row each; 19 were this one):
+ *   "Coolio - Gangsta's Paradise (Machaki Remix)" / "Coolio ft. L.V. - Gangsta's Paradise (Machaki Remix)"
+ *   "Matroda ft. Dances With White Girls - Bang"  / "Matroda ft. Dances - Bang"
+ *   "Enne (BR) & Black Keusen - Aperta & Empina"  / "Enne & Black Keusen - Aperta & Empina"
+ * The microdata name drops or keeps featured artists and country tags on its
+ * own, the same way on every fetch by every account.
+ *
  * Both names are split at the first " - " (as parseRow splits the name) and
  * each side is compared on its own:
- *   - every word of the microdata side is on the same side of the visible text;
- *   - every word the visible side adds is inside parentheses or brackets, or
- *     repeats a word of the microdata side ("& Lies").
+ *   - the words outside parentheses/brackets and outside a trailing
+ *     "ft./feat./featuring ..." credit are the same set on both sides
+ *     (a repeated word, "& Lies", is no difference);
+ *   - every parenthetical of the microdata side is also on the visible side,
+ *     except a country tag ("(BR)": one word of at most 3 letters); the
+ *     visible side may add any parenthetical.
  * So an added artist ("Modjo & Someone"), an added title, an artist/title
- * swap or the meta words turning up only in a remix credit are all far.
+ * swap, a dropped or swapped remix credit or the meta words turning up only
+ * in a remix credit are all far.
  *
  * Not a similarity score: a decoy row swaps one part of the name (the artist
  * or the remixer) and keeps the rest, so its two names overlap a lot (Jaccard
  * up to 0.71 on the decoy fixture). None of the 24 decoy rows in that one
  * fixture is near under this rule, but a decoy that only adds a parenthetical
- * would be; what keeps such a row from reaching users is the strict 0-far
- * check on the rest of the page plus verification (a second account's fetch
- * must give the same rows).
+ * or a featured artist would be; what keeps such a row from reaching users is
+ * the strict 0-far check on the rest of the page plus verification (a second
+ * account's fetch must give the same rows).
  */
 export function isNearMismatch(metaName: string, visible: string): boolean {
   const meta = splitName(metaName)
@@ -672,14 +683,40 @@ export function isNearMismatch(metaName: string, visible: string): boolean {
   if (meta.length !== shown.length) return false
   let metaWords = 0
   for (let i = 0; i < meta.length; i++) {
-    const m = nameTokens(meta[i]!)
-    metaWords += m.size
-    const s = nameTokens(shown[i]!)
-    for (const w of m) if (!s.has(w)) return false
-    for (const w of nameTokens(withoutParentheticals(shown[i]!))) if (!m.has(w)) return false
+    metaWords += nameTokens(meta[i]!).size
+    const core = nameTokens(coreName(meta[i]!))
+    if (core.size === 0 || !sameWords(core, nameTokens(coreName(shown[i]!)))) return false
+    const shownGroups = new Set(parentheticals(shown[i]!))
+    for (const g of parentheticals(meta[i]!)) if (!shownGroups.has(g) && !isCountryTag(g)) return false
   }
   return metaWords >= 2
 }
+
+const sameWords = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((w) => b.has(w))
+
+/** The name without its parentheticals and without a featured-artist credit ("Coolio ft. L.V." → "Coolio"). */
+function coreName(s: string): string {
+  const core = withoutParentheticals(s)
+  const ft = core.search(/(?:^|\s)(?:ft|feat|featuring)\b/i)
+  return ft >= 0 ? core.slice(0, ft) : core
+}
+
+/** Each (...) / [...] group's words, innermost first, as one comparable string per group. */
+function parentheticals(s: string): string[] {
+  const out: string[] = []
+  let prev: string
+  do {
+    prev = s
+    s = s.replace(/\(([^()]*)\)|\[([^[\]]*)\]/g, (_m, a?: string, b?: string) => {
+      out.push([...nameTokens(a ?? b ?? '')].join(' '))
+      return ' '
+    })
+  } while (s !== prev)
+  return out
+}
+
+/** "(BR)", "(US)", "(COL)": a one-word tag of at most 3 letters. */
+const isCountryTag = (group: string): boolean => /^\p{L}{1,3}$/u.test(group)
 
 /** [artist, title] at the first " - ", or [name] when there is none. */
 function splitName(s: string): string[] {
