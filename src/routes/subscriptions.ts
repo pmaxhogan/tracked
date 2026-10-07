@@ -63,6 +63,7 @@ import { banMkvidRequest, countMkvidRequests, getMkvidLastPoll, listMkvidDjs, li
 import { requeueBanVictims } from '../lib/sync'
 import { getBanStatus, manualClear, simulateBan } from '../lib/ban-state'
 import { poolSettingsApp } from './pool-api'
+import { appSettingsApp } from './app-settings'
 import {
   deletePushSubscription,
   isPushSubscription,
@@ -563,6 +564,8 @@ subscriptionsApp.get('/api/state/:slug', async (c) => {
 
 // GET/PUT /ui/api/pool/settings, behind the same CF Access gate.
 subscriptionsApp.route('/api/pool', poolSettingsApp)
+// GET/PUT /ui/api/settings (app settings, lib/app-settings.ts), same gate.
+subscriptionsApp.route('/api', appSettingsApp)
 
 // ─── IP-ban state, Web Push, service worker ──────────────────────────────────
 

@@ -47,7 +47,7 @@ export const MKVID_STATE_JS = /* js */ `
     // The heartbeat is rewritten at most every 10 min, so only a longer silence means anything.
     const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
     if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
-    if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'MKVID_DAILY_CLAIM_CAP (and MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Set MKVID_DAILY_CLAIM_CAP to 24 (or delete the secret) to resume.'];
+    if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'The daily caps (Settings → mkvid uploads, else MKVID_DAILY_CLAIM_CAP / MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Raise them on /ui/settings to resume.'];
     // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
     // mkvid works on up to two at once, only one of them rendering.
     if (c.claimed) return ['ok', (c.claimed === 1 ? 'Rendering 1 set' : 'Working on ' + c.claimed + ' sets') + ' now', used + '/' + cap + ' of today’s uploads used.'];
