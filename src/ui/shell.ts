@@ -11,6 +11,7 @@ import { TOKENS_CSS } from './tokens'
 import { BASE_CSS } from './base'
 import { icon, type IconName } from './icons'
 import { THEME_BOOT_JS, RUNTIME_JS } from './runtime'
+import { TIP_CSS, TIP_JS, tipAttr } from './tip'
 import { BAN_BANNER_HTML, BAN_JS } from '../routes/ban-ui'
 
 export type NavKey = 'home' | 'djs' | 'search' | 'playlists' | 'removed' | 'mkvid' | 'activity'
@@ -41,7 +42,7 @@ export const NAV: NavItem[] = [
   { key: 'mkvid', label: 'mkvid', href: '/ui/mkvid', icon: 'mkvid', group: 'Pipeline', tab: 'mkvid' },
   { key: 'activity', label: 'Activity', href: '/ui/activity', icon: 'activity', group: 'Pipeline' },
   { key: 'pool', label: 'Accounts', href: '/ui/pool', icon: 'pool', group: 'Pool', tab: 'Pool' },
-  { key: 'captcha', label: 'Challenges', href: '/ui/captcha', icon: 'captcha', group: 'Pool', extra: '<span class="count" id="nav-count-captcha" hidden></span>' },
+  { key: 'captcha', label: 'Challenges', href: '/ui/captcha', icon: 'captcha', group: 'Pool', extra: '<span class="count" id="nav-count-captcha" data-tip="Captchas waiting for you to solve." hidden></span>' },
   { key: 'pool-settings', label: 'Pool settings', href: '/ui/pool/settings', icon: 'sliders', group: 'Pool' },
   { key: 'scheduler', label: 'Scheduler', href: '/ui/scheduler', icon: 'clock', group: 'Pool' },
   { key: 'settings', label: 'Settings', href: '/ui/settings', icon: 'settings', group: null },
@@ -83,7 +84,8 @@ function sideNav(nav: NavKey | null): string {
       out += item.group ? `<div class="grp">${esc(item.group)}</div>` : '<div class="grp" aria-hidden="true"></div>'
       group = item.group
     }
-    out += `<a href="${esc(item.href)}" title="${esc(item.label)}"${current(item.key === nav)}>${icon(item.icon)}<span class="lbl">${esc(item.label)}</span>${item.extra ?? ''}</a>`
+    // data-tip-rail: the label is also the tooltip, shown only while the icon rail hides the text.
+    out += `<a href="${esc(item.href)}"${tipAttr(item.label)} data-tip-rail${current(item.key === nav)}>${icon(item.icon)}<span class="lbl">${esc(item.label)}</span>${item.extra ?? ''}</a>`
   }
   return out
 }
@@ -152,11 +154,11 @@ export const SHELL_JS = /* js */ `
   const pill = $('tk-status');
   if (pill) TK.api.get('/ui/api/ban/status').then((r) => {
     const s = r && r.ok && r.data;
-    if (!s) { pill.textContent = 'Unknown'; pill.className = 'badge neutral'; pill.title = 'Fetch status unavailable'; return; }
+    if (!s) { pill.textContent = 'Unknown'; pill.className = 'badge neutral'; pill.setAttribute('data-tip', 'The fetch status could not be loaded.'); return; }
     const st = s.pause ? ['Paused', 'bad'] : !s.poolConfigured ? ['Pool offline', 'warn'] : ['Active', 'ok'];
     pill.textContent = st[0];
     pill.className = 'badge ' + st[1];
-    pill.title = 'Fetching from 1001tracklists: ' + st[0];
+    pill.setAttribute('data-tip', s.pause ? 'Fetching from 1001tracklists is paused after an IP block. See the banner above.' : !s.poolConfigured ? 'The browser pool (tlpool) is not set up, so nothing can be fetched from 1001tracklists.' : 'Fetching from 1001tracklists is running.');
   }).catch(() => {});
 
   // ── Challenges count ──
@@ -175,15 +177,15 @@ export function shell(o: ShellOptions): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light"><title>${title} · tracked</title>
-<style>${TOKENS_CSS}${BASE_CSS}${o.css ?? ''}</style>
+<style>${TOKENS_CSS}${BASE_CSS}${TIP_CSS}${o.css ?? ''}</style>
 <script>${THEME_BOOT_JS}</script></head>
 <body data-ban-page="${o.banPage ?? 'other'}"${own}>
 <div class="tk-shell">
   <aside class="tk-side">
-    <a class="tk-brand" href="/ui/" title="tracked">${icon('playlist')}<span class="lbl">tracked</span></a>
+    <a class="tk-brand" href="/ui/"${tipAttr('tracked: back to Home')} data-tip-rail>${icon('playlist')}<span class="lbl">tracked</span></a>
     <nav class="tk-nav" aria-label="Pages">${sideNav(o.nav)}</nav>
     <div class="tk-side-foot">
-      <span id="tk-status" class="badge neutral" title="Fetch status">…</span>
+      <span id="tk-status" class="badge neutral" data-tip="Whether fetching from 1001tracklists is running.">…</span>
       <label class="lbl">Theme <select id="tk-theme" aria-label="Theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
       <span class="lbl">Signed in via Access</span>
     </div>
@@ -201,6 +203,7 @@ export function shell(o: ShellOptions): string {
 <dialog id="tk-confirm" class="tk-dialog"><p id="tk-confirm-text"></p><div class="actions"><button type="button" id="tk-confirm-no" class="btn">Cancel</button><button type="button" id="tk-confirm-yes" class="btn primary">Yes</button></div></dialog>
 <dialog id="tk-drawer" class="tk-drawer"><div class="tk-drawer-head"><h2 id="tk-drawer-title"></h2><button type="button" id="tk-drawer-close" class="btn icon" aria-label="Close">${icon('close')}</button></div><div id="tk-drawer-body"></div></dialog>
 <div id="tk-toasts" class="tk-toasts" aria-live="polite"></div>
-<script>${RUNTIME_JS}</script><script>${SHELL_JS}</script><script>${BAN_JS}</script>${o.js ? `<script>${o.js}</script>` : ''}
+<script>${RUNTIME_JS}
+${TIP_JS}</script><script>${SHELL_JS}</script><script>${BAN_JS}</script>${o.js ? `<script>${o.js}</script>` : ''}
 </body></html>`
 }

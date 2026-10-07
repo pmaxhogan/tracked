@@ -13,8 +13,8 @@ export const FIX_DIALOG_HTML = /* html */ `
   <div class="actions"><button id="fix-close" type="button" class="btn">Close</button></div>
 </dialog>`
 
-/** For a title="" attribute. */
-export const FIX_TITLES_TITLE = 'Rename DJ playlists still titled &quot;Tracklists By …&quot; to the artist name (shows the list first)'
+/** Tooltip text for the Fix titles button (use with tipAttr). */
+export const FIX_TITLES_TITLE = 'Renames DJ playlists still titled "Tracklists By ..." to the artist name. Shows the list first and asks before changing anything on YouTube.'
 
 export const DJ_ACTIONS_CSS = /* css */ `
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }

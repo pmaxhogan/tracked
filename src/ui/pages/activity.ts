@@ -11,6 +11,7 @@
 // value goes through esc.
 import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import { icon } from '../icons'
 import type { UiPage } from './index'
 import { ACTIVITY_DETAIL_CSS, ACTIVITY_DETAIL_JS } from './activity-detail'
@@ -19,6 +20,16 @@ const KINDS: Array<[string, string]> = [
   ['request', 'Requests'], ['playlist', 'Playlist'], ['hygiene', 'Hygiene'], ['mkvid', 'mkvid'],
   ['pool', 'Pool'], ['sync', 'Sync'], ['ban', 'IP blocks'],
 ]
+const KIND_TIPS: Record<string, string> = {
+  request: 'Now-playing lookups from your phone: which set and track it found.',
+  playlist: 'Videos added to, replaced in or skipped for a playlist by the sync.',
+  hygiene: 'Videos removed from playlists, or found missing from them.',
+  mkvid: 'Sets queued for, rendered by and uploaded through mkvid.',
+  pool: 'Events from the account pool: accounts created, flagged or retired, and captchas.',
+  sync: 'DJs whose last sync ended in an error.',
+  ban: 'Times 1001tracklists blocked tracked.',
+}
+const RANGE_TIPS: Record<string, string> = { '24h': 'The last 24 hours.', '7d': 'The last 7 days.', '30d': 'The last 30 days.', '90d': 'The last 90 days (the longest the logs are kept).' }
 const RANGES = ['24h', '7d', '30d', '90d']
 const DEFAULT_RANGE = '7d'
 
@@ -36,6 +47,15 @@ const KIND_ICON: Record<string, string> = {
 export const ACTIVITY_ROW_JS = /* js */ `
   const KIND_ICON = ${JSON.stringify(KIND_ICON)};
   const ACTIVITY_OK = new Set(['ok', 'added', 'done', 'claimed', 'verified', 'challenge.solved', 'account.created', 'ended']);
+  const STATUS_TIPS = {
+    ok: 'It worked.', added: 'The video was added to the playlist.', duplicate: 'The video was already in the playlist.',
+    replaced: 'A recheck found the set recording swapped: the old video was replaced.', no_youtube: 'The set page had no YouTube recording to add.',
+    failed: 'It failed and will be tried again.', abandoned: 'Given up after repeated failures.', error: 'The last sync of this DJ ended in an error.',
+    claimed: 'mkvid took this job.', done: 'Finished.', verified: 'Two fetches by different accounts agreed on the track list.',
+    open: 'The block is still active.', ended: 'The block is over.', refunded: 'mkvid gave the job back without uploading, so it does not count against the daily cap.',
+    pending: 'Waiting its turn.', banned: 'Excluded from mkvid.', removed: 'Taken out of the playlists.', would_remove: 'Dry run: would be removed, nothing was deleted.', recorded: 'Found missing from a playlist and noted; it is never re-added.', undone: 'You undid this.',
+  };
+  const activityTip = (r) => STATUS_TIPS[r.status] || (r.problem ? 'This event is flagged as a problem.' : '');
   function activityIso(ts) { try { return new Date(ts).toISOString(); } catch (e) { return ''; } }
   function activityRowHtml(r, i) {
     const cls = r.problem ? 'bad' : ACTIVITY_OK.has(r.status) ? 'ok' : 'neutral';
@@ -45,10 +65,10 @@ export const ACTIVITY_ROW_JS = /* js */ `
     return '<div class="a-item" role="listitem">' +
       '<button type="button" class="a-row' + (r.problem ? ' err' : '') + '" data-i="' + i + '">' +
         '<span class="a-ico">' + (KIND_ICON[r.kind] || '') + '</span>' +
-        '<span class="badge ' + cls + '">' + esc(r.status || '?') + '</span>' +
+        '<span class="badge ' + cls + '"' + TK.tip(activityTip(r)) + '>' + esc(r.status || '?') + '</span>' +
         '<span class="a-main"><span class="a-title">' + esc(r.title || '(untitled)') + '</span>' +
           (r.detail ? '<span class="a-detail muted">' + esc(r.detail) + '</span>' : '') + '</span>' +
-        '<span class="a-when" title="' + esc(iso) + '">' + esc(TK.fmt.rel(iso)) + '</span>' +
+        '<span class="a-when"' + TK.tip(iso) + '>' + esc(TK.fmt.rel(iso)) + '</span>' +
       '</button>' +
       (links ? '<span class="a-links">' + links + '</span>' : '') +
     '</div>';
@@ -120,22 +140,22 @@ export const ACTIVITY_ROW_CSS = /* css */ `
   }
 `
 
-const chip = (attr: string, value: string, label: string, on: boolean) =>
-  `<button type="button" class="chip${on ? ' on' : ''}" data-${attr}="${value}" aria-pressed="${on}">${label}</button>`
+const chip = (attr: string, value: string, label: string, on: boolean, tip = '') =>
+  `<button type="button" class="chip${on ? ' on' : ''}" data-${attr}="${value}" aria-pressed="${on}"${tipAttr(tip)}>${label}</button>`
 
 const BODY = /* html */ `
 <div class="tk-filters" id="a-filters">
-  <div id="a-kinds" class="chips a-chips" role="group" aria-label="Kinds">${KINDS.map(([k, l]) => chip('kind', k, l, false)).join('')}</div>
+  <div id="a-kinds" class="chips a-chips" role="group" aria-label="Kinds">${KINDS.map(([k, l]) => chip('kind', k, l, false, KIND_TIPS[k])).join('')}</div>
   <div class="a-ctl">
-    <span id="a-toggle" class="chips a-chips"><button id="a-problems" type="button" class="chip" aria-pressed="false">Problems only</button></span>
+    <span id="a-toggle" class="chips a-chips"><button id="a-problems" type="button" class="chip" aria-pressed="false"${tipAttr('Only events that failed or were flagged.')}>Problems only</button></span>
     <select id="a-dj" aria-label="DJ"><option value="">All DJs</option></select>
-    <div id="a-ranges" class="chips a-chips" role="group" aria-label="Range">${RANGES.map((r) => chip('range', r, r, r === DEFAULT_RANGE)).join('')}</div>
+    <div id="a-ranges" class="chips a-chips" role="group" aria-label="Range">${RANGES.map((r) => chip('range', r, r, r === DEFAULT_RANGE, RANGE_TIPS[r])).join('')}</div>
   </div>
 </div>
 <div id="a-list" class="tk-card a-list" role="list" hidden></div>
 <div id="a-skel">${skelHtml(8, 'card')}</div>
 <div id="a-empty" class="empty" hidden></div>
-<p class="a-foot"><button id="a-more" type="button" class="btn" hidden>Load older</button></p>
+<p class="a-foot"><button id="a-more" type="button" class="btn" hidden${tipAttr('Loads 50 older events.')}>Load older</button></p>
 `
 
 export const ACTIVITY_PAGE_CSS = /* css */ `
@@ -166,6 +186,8 @@ ${ACTIVITY_DETAIL_JS}
 ${ACTIVITY_ROW_JS}
 ${ACTIVITY_DRAWER_JS}
   const KINDS = ${JSON.stringify(KINDS)};
+  const KIND_TIPS = ${JSON.stringify(KIND_TIPS)};
+  const RANGE_TIPS = ${JSON.stringify(RANGE_TIPS)};
   const RANGE_MS = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000, '90d': 90 * 86400000 };
   const $filters = $('a-filters'), $kinds = $('a-kinds'), $toggle = $('a-toggle'), $ranges = $('a-ranges'), $dj = $('a-dj');
   const $list = $('a-list'), $empty = $('a-empty'), $skel = $('a-skel'), $more = $('a-more'), $refresh = $('a-refresh');
@@ -179,11 +201,11 @@ ${ACTIVITY_DRAWER_JS}
   const kindList = () => KINDS.map((k) => k[0]).filter((k) => kinds.has(k));
   const filtered = () => kinds.size > 0 || problems || !!dj;
 
-  const chip = (attr, value, label, on) => '<button type="button" class="chip' + (on ? ' on' : '') + '" data-' + attr + '="' + value + '" aria-pressed="' + on + '">' + esc(label) + '</button>';
+  const chip = (attr, value, label, on, tip) => '<button type="button" class="chip' + (on ? ' on' : '') + '" data-' + attr + '="' + value + '" aria-pressed="' + on + '"' + TK.tip(tip) + '>' + esc(label) + '</button>';
   function renderFilters() {
-    $kinds.innerHTML = KINDS.map((k) => chip('kind', k[0], k[1], kinds.has(k[0]))).join('');
-    $toggle.innerHTML = '<button id="a-problems" type="button" class="chip' + (problems ? ' on' : '') + '" aria-pressed="' + problems + '">Problems only</button>';
-    $ranges.innerHTML = Object.keys(RANGE_MS).map((r) => chip('range', r, r, r === range)).join('');
+    $kinds.innerHTML = KINDS.map((k) => chip('kind', k[0], k[1], kinds.has(k[0]), KIND_TIPS[k[0]])).join('');
+    $toggle.innerHTML = '<button id="a-problems" type="button" class="chip' + (problems ? ' on' : '') + '" aria-pressed="' + problems + '"' + TK.tip('Only events that failed or were flagged.') + '>Problems only</button>';
+    $ranges.innerHTML = Object.keys(RANGE_MS).map((r) => chip('range', r, r, r === range, RANGE_TIPS[r])).join('');
   }
   function sync() { TK.qs.set({ kind: kindList().join(','), problems: problems ? '1' : '', dj, range }); }
 
@@ -288,7 +310,7 @@ export const ACTIVITY_PAGE: UiPage = {
     nav: 'activity',
     title: 'Activity',
     description: 'Everything tracked did, newest first: requests, playlist additions, hygiene, mkvid, pool, sync and IP blocks.',
-    actions: '<button id="a-refresh" type="button" class="btn">Refresh</button>',
+    actions: `<button id="a-refresh" type="button" class="btn"${tipAttr('Reloads the newest events.')}>Refresh</button>`,
     body: BODY,
     css: ACTIVITY_PAGE_CSS,
     js: JS,

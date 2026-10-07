@@ -27,9 +27,9 @@ export const BAN_BANNER_HTML = /* html */ `
       </div>
     </div>
     <div class="ban-actions">
-      <a id="ban-captcha" class="ban-btn primary" href="${UNBLOCK_URL}" target="_blank" rel="noopener noreferrer">Open the captcha ↗</a>
-      <button id="ban-enable" class="ban-btn" type="button" hidden>Enable notifications</button>
-      <button id="ban-dismiss" class="ban-btn subtle" type="button" hidden>Dismiss</button>
+      <a id="ban-captcha" class="ban-btn primary" href="${UNBLOCK_URL}" target="_blank" rel="noopener noreferrer" data-tip="Opens the 1001tracklists unblock form in a new tab.">Open the captcha ↗</a>
+      <button id="ban-enable" class="ban-btn" type="button" hidden data-tip="Asks this browser for permission to push ban and captcha alerts to this device.">Enable notifications</button>
+      <button id="ban-dismiss" class="ban-btn subtle" type="button" hidden data-tip="Hides this banner. It does not lift a fetching pause or change the ban record.">Dismiss</button>
     </div>
     <div class="ban-foot" id="ban-foot"></div>
   </div>`
@@ -252,7 +252,7 @@ export const BAN_JS = /* js */ `
     if (!subs.length) { $devices.hidden = false; $devices.innerHTML = 'Push devices: <span class="muted">none yet — enable notifications on your phone and desktop.</span>'; return; }
     const uaShort = (ua) => { if (!ua) return 'unknown device'; const m = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : 'device'; const b = /Edg\\//.test(ua) ? 'Edge' : /Chrome\\//.test(ua) ? 'Chrome' : /Firefox\\//.test(ua) ? 'Firefox' : /Safari\\//.test(ua) ? 'Safari' : ''; return (b ? b + ' on ' : '') + m; };
     $devices.hidden = false;
-    $devices.innerHTML = 'Push devices (' + subs.length + '): ' + subs.map((d) => '<span title="' + esc(d.ua || '') + '">' + esc(uaShort(d.ua)) + '</span>' + (d.lastError ? ' <span class="bad" title="' + esc(d.lastError) + '">⚠</span>' : d.lastOkAt ? ' <span class="ok" title="last delivered ' + esc(fmtTime(d.lastOkAt)) + '">✓</span>' : '')).join(' · ');
+    $devices.innerHTML = 'Push devices (' + subs.length + '): ' + subs.map((d) => '<span data-tip="' + esc(d.ua || 'Unknown browser') + '">' + esc(uaShort(d.ua)) + '</span>' + (d.lastError ? ' <span class="bad" data-tip="' + esc('Last delivery failed: ' + d.lastError) + '">⚠</span>' : d.lastOkAt ? ' <span class="ok" data-tip="' + esc('Last delivered ' + fmtTime(d.lastOkAt)) + '">✓</span>' : '')).join(' · ');
   }
 
   function renderEpisodes(s) {
@@ -268,11 +268,11 @@ export const BAN_JS = /* js */ `
         '<td data-label="Lasted">' + esc(dur) + '</td>' +
         '<td data-label="IP" class="mono">' + esc(e.ip || '—') + '</td>' +
         '<td data-label="Seen by / cleared">' + esc(e.source) + (e.clearedBy ? ' → ' + esc(e.clearedBy) : '') + '</td>' +
-        '<td data-label="Pool / BrightData req">' + e.poolRequests + ' / ' + e.brightdataRequests + (e.allBlockedHits ? ' <span class="bad" title="times every route was blocked">' + e.allBlockedHits + '⛔</span>' : '') + '</td>' +
+        '<td data-label="Pool / BrightData req">' + e.poolRequests + ' / ' + e.brightdataRequests + (e.allBlockedHits ? ' <span class="bad" data-tip="Times every route was blocked during this episode.">' + e.allBlockedHits + '⛔</span>' : '') + '</td>' +
         '<td data-label="Push start · clear" class="muted">' + esc(push) + '</td>' +
         '</tr>';
     }).join('');
-    $eps.innerHTML = '<table class="ban-eps"><thead><tr><th>Started</th><th>Lasted</th><th>IP</th><th>Seen by / cleared</th><th>Pool / BrightData req</th><th>Push start · clear</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    $eps.innerHTML = '<table class="ban-eps"><thead><tr><th>Started</th><th>Lasted</th><th><span class="tip-term" data-tip="The address 1001tracklists blocked, when it was known.">IP</span></th><th><span class="tip-term" data-tip="What noticed the block, and what cleared it.">Seen by / cleared</span></th><th><span class="tip-term" data-tip="Requests sent through the browser pool and through BrightData during the episode.">Pool / BrightData req</span></th><th><span class="tip-term" data-tip="Push notifications delivered when the ban started, and when it ended (sent out of devices).">Push start · clear</span></th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
   if ($refresh) $refresh.addEventListener('click', () => refresh(true));

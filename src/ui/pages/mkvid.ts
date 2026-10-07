@@ -4,6 +4,7 @@
 // (behaviour contract section 3). Data: the Access-gated GET /ui/api/mkvid,
 // keyset-paged per list; actions are the POST /ui/api/mkvid/* routes.
 import { shell } from '../shell'
+import { tipAttr, tipTerm } from '../tip'
 import { MKVID_STATE_JS } from './mkvid-state'
 
 const BODY = /* html */ `
@@ -11,7 +12,7 @@ const BODY = /* html */ `
   <div id="mk-run" hidden></div>
   <div id="mk-tiles" class="tk-tiles"></div>
   <div id="mk-summary" class="mk-summary">loading…</div>
-  <div id="mk-error" class="err-state" role="alert" hidden><span id="mk-error-text" class="grow"></span><button type="button" id="mk-error-retry" class="btn">Retry</button></div>
+  <div id="mk-error" class="err-state" role="alert" hidden><span id="mk-error-text" class="grow"></span><button type="button" id="mk-error-retry" class="btn"${tipAttr('Asks for the mkvid status again.')}>Retry</button></div>
   <div class="mk-filters" role="search">
     <input id="mk-q" type="search" placeholder="search set, DJ or URL" aria-label="Search the mkvid queue" />
     <select id="mk-status" aria-label="Status">
@@ -35,7 +36,7 @@ const BODY = /* html */ `
       <option value="shared">shared</option>
     </select>
     <select id="mk-dj" aria-label="DJ"><option value="">any DJ</option></select>
-    <button type="button" id="mk-clear" class="btn ghost" hidden>Clear</button>
+    <button type="button" id="mk-clear" class="btn ghost" hidden${tipAttr('Removes every filter and search.')}>Clear</button>
   </div>
   <div id="mk-tabs" class="tk-tabbar" role="tablist" aria-label="mkvid lists"></div>
   <div id="mk-p-queue" role="tabpanel" aria-labelledby="mk-tab-queue"><div id="mk-queue"></div></div>
@@ -137,6 +138,7 @@ ${MKVID_STATE_JS}
   const SOURCES = ['', 'soundcloud', 'hearthis'];
   const ACCOUNTS = ['', 'primary', 'shared'];
   const TABS = [['queue', 'Queue'], ['settled', 'Finished'], ['old', 'Old videos']];
+  const TAB_TIPS = { queue: 'Sets waiting for mkvid, in the order it will take them, and the ones it is working on.', settled: 'Requests that are over: uploaded, failed, superseded or banned.', old: 'Videos that a recreation replaced and that still have to be deleted from YouTube.' };
   const BADGE = { pending: 'info', claimed: 'warn', done: 'ok', failed: 'bad', superseded: 'neutral', banned: 'bad' };
 
   // Filter state lives here (and in the query string); the controls mirror it.
@@ -179,7 +181,7 @@ ${MKVID_STATE_JS}
     const secs = st.map((s, i) => {
       const w = s.state === 'done' ? 100 : s.state === 'active' && s.progress != null ? Math.round(s.progress * 1000) / 10 : 0;
       const indet = s.state === 'active' && s.progress == null;
-      return '<div class="sec ' + esc(s.state) + (indet ? ' indet' : '') + '" style="flex: 0 0 ' + pos[i].width.toFixed(3) + '%" title="' + esc(s.label) + (s.state === 'active' && !indet ? ' ' + Math.round(w) + '%' : '') + '"><div class="fill" style="width: ' + w + '%"></div></div>';
+      return '<div class="sec ' + esc(s.state) + (indet ? ' indet' : '') + '" style="flex: 0 0 ' + pos[i].width.toFixed(3) + '%"' + TK.tip(s.label + (s.state === 'active' && !indet ? ' ' + Math.round(w) + '%' : s.state === 'done' ? ' (done)' : '')) + '><div class="fill" style="width: ' + w + '%"></div></div>';
     }).join('');
     const ties = st.map((_, i) => pos[i].left).concat([100]).map((left, i) =>
       '<span class="tie' + (i <= ai ? ' past' : '') + '" style="left: ' + left.toFixed(3) + '%"></span>').join('');
@@ -261,10 +263,10 @@ ${MKVID_STATE_JS}
     return p.map((kv) => kv[0] + '=' + encodeURIComponent(kv[1])).join('&');
   }
 
-  function link(u, label, cls) {
+  function link(u, label, cls, tip) {
     const h = TK.safeHref(u);
     if (!h) return u ? esc(u) : '—';
-    return '<a' + (cls ? ' class="' + cls + '"' : '') + ' href="' + esc(h) + '" target="_blank" rel="noreferrer noopener">' + esc(label || u) + '</a>';
+    return '<a' + (cls ? ' class="' + cls + '"' : '') + ' href="' + esc(h) + '" target="_blank" rel="noreferrer noopener"' + TK.tip(tip) + '>' + esc(label || u) + '</a>';
   }
   const isoOf = (sec) => { try { return new Date(sec * 1000).toISOString(); } catch (e) { return ''; } };
   const rel = (sec) => TK.fmt.rel(isoOf(sec));
@@ -305,22 +307,22 @@ ${MKVID_STATE_JS}
 
     const tiles = (d.accounts || []).map((a) => {
       const pct = a.cap > 0 ? Math.min(100, Math.round((a.used / a.cap) * 100)) : 100;
-      return '<div class="tk-tile" title="uploads through the ' + esc(a.label) + ' Google project today"><div class="k">' + esc(a.label) + '</div><div class="v">' + esc(a.used) + ' / ' + esc(a.cap) + '</div>' +
+      return '<div class="tk-tile"' + TK.tip('Uploads through the ' + a.label + ' Google project today, out of its daily cap. Each project has its own YouTube upload limit, reset at midnight Pacific.') + '><div class="k">' + esc(a.label) + '</div><div class="v">' + esc(a.used) + ' / ' + esc(a.cap) + '</div>' +
         '<div class="s">uploads today</div><div class="tk-meter"><i style="width: ' + pct + '%"></i></div></div>';
     });
     const perDay = eff.cap || d.dailyClaimCap;
-    tiles.push('<div class="tk-tile"><div class="k">Waiting</div><div class="v">' + esc(c.pending || 0) + '</div><div class="s">' +
+    tiles.push('<div class="tk-tile"' + TK.tip('Sets queued for mkvid. The backlog estimate divides them by the uploads allowed per day.') + '><div class="k">Waiting</div><div class="v">' + esc(c.pending || 0) + '</div><div class="s">' +
       (perDay > 0 && c.pending ? 'backlog ≈ ' + esc(Math.ceil(c.pending / perDay)) + ' day' + (c.pending > perDay ? 's' : '') : 'nothing queued') + '</div></div>');
-    tiles.push('<div class="tk-tile"><div class="k">Uploaded</div><div class="v">' + esc(c.done || 0) + '</div><div class="s">' + (c.failed ? esc(c.failed) + ' failed' : 'none failed') + '</div></div>');
+    tiles.push('<div class="tk-tile"' + TK.tip('Videos mkvid has rendered and uploaded, and put in the playlists.') + '><div class="k">Uploaded</div><div class="v">' + esc(c.done || 0) + '</div><div class="s">' + (c.failed ? esc(c.failed) + ' failed' : 'none failed') + '</div></div>');
     $tiles.innerHTML = tiles.join('');
 
     const bits = [esc(c.done || 0) + ' uploaded', esc(c.pending || 0) + ' waiting'];
     if (c.failed) bits.push('<span class="warn">' + esc(c.failed) + ' failed</span>');
     if (c.superseded) bits.push(esc(c.superseded) + ' superseded');
     if (c.banned) bits.push(esc(c.banned) + ' banned');
-    for (const a of d.accounts || []) bits.push('<span title="uploads through the ' + esc(a.label) + ' Google project today">' + esc(a.label) + ' ' + esc(a.used) + '/' + esc(a.cap) + '</span>');
-    if (perDay > 0 && c.pending) bits.push('<span title="' + esc(c.pending) + ' sets at ' + esc(perDay) + ' uploads a day">backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + esc(perDay) + '/day</span>');
-    if (d.lastPoll) bits.push('<span title="refreshed at most every 10 min">mkvid seen ' + esc(rel(d.lastPoll.at)) + '</span>');
+    for (const a of d.accounts || []) bits.push('<span' + TK.tip('Uploads through the ' + a.label + ' Google project today, out of its daily cap.') + '>' + esc(a.label) + ' ' + esc(a.used) + '/' + esc(a.cap) + '</span>');
+    if (perDay > 0 && c.pending) bits.push('<span' + TK.tip(c.pending + ' waiting sets at ' + perDay + ' uploads a day.') + '>backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + esc(perDay) + '/day</span>');
+    if (d.lastPoll) bits.push('<span' + TK.tip('The last time mkvid asked for work. This is only recorded every 10 minutes.') + '>mkvid seen ' + esc(rel(d.lastPoll.at)) + '</span>');
     const olds = d.oldVideos || [];
     if (olds.length) bits.push('<span class="warn">' + olds.length + ' replaced video' + (olds.length === 1 ? '' : 's') + ' not deleted yet</span>');
     if (filtered()) bits.unshift('<strong>' + esc(queueTotal + settledTotal) + ' match this filter</strong>');
@@ -335,8 +337,10 @@ ${MKVID_STATE_JS}
   // Reorder / ban controls on a waiting row. The list reloads after each, so
   // positions stay honest.
   const ACTS = [['top', '⤒', 'Move to the top'], ['up', '↑', 'Move up one'], ['down', '↓', 'Move down one'], ['bottom', '⤓', 'Move to the bottom'], ['ban', '✕', 'Never upload this set via mkvid']];
+  const ACT_TIPS = { top: 'Moves this set to the front of the queue, ahead of everything dated up to today.', up: 'Moves this set up one place.', down: 'Moves this set down one place.', bottom: 'Moves this set to the back of the queue.', ban: 'Bans this set: it is never rendered by mkvid and the sync cannot queue it again. Unban it from its details.' };
+  const STATUS_TIPS = { pending: 'Waiting in the queue for its turn.', claimed: 'mkvid took this set and is rendering and uploading it.', done: 'Uploaded and added to the playlists.', failed: 'Rendering or uploading failed. Retry it from its details.', superseded: 'The set gained a real recording, or the video was replaced, so no render is needed.', banned: 'Never rendered. Unban it from its details.' };
   function actsHtml(id) {
-    return '<span class="mk-acts">' + ACTS.map((a) => '<button type="button" class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '" data-id="' + esc(id) + '" title="' + a[2] + '" aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
+    return '<span class="mk-acts">' + ACTS.map((a) => '<button type="button" class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '" data-id="' + esc(id) + '"' + TK.tip(ACT_TIPS[a[0]]) + ' aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
   }
 
   function rowHtml(r, withPos) {
@@ -345,16 +349,16 @@ ${MKVID_STATE_JS}
     if (r.status === 'pending' && r.readiness) meta.push(mkWhy(r.readiness, true, capped));
     else if (backoff) meta.push('retry ' + untilTime(r.notBefore));
     else if (r.status !== 'pending') meta.push(esc(rel(r.updatedAt)));
-    if (r.replacesVideoId) meta.push('<span class="why">recreating</span>');
-    if (r.status === 'done' && r.oldStyle) meta.push('old style');
+    if (r.replacesVideoId) meta.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
+    if (r.status === 'done' && r.oldStyle) meta.push('<span' + TK.tip('Rendered in an older visual style than the current scene style. It can be recreated.') + '>old style</span>');
     if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(r.error) + '</span>');
     const lead = withPos && r.position != null
-      ? '<span class="mk-pos">#' + esc(r.position) + '</span>'
-      : '<span class="badge ' + (BADGE[r.status] || 'neutral') + '">' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>';
+      ? '<span class="mk-pos"' + TK.tip('Place in the whole queue: the newest set goes first, undated sets last.') + '>#' + esc(r.position) + '</span>'
+      : '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(STATUS_TIPS[r.status]) + '>' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>';
     return '<div class="mk-row' + (r.status === 'failed' ? ' err' : '') + '" data-id="' + esc(r.id) + '">' + lead +
       '<div class="mk-main"><button type="button" class="mk-title" data-open="' + esc(r.id) + '">' + esc(titleOf(r)) + '</button>' +
       '<div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
-      (r.videoId ? link(videoHref(r), 'watch', 'mk-watch') : '') +
+      (r.videoId ? link(videoHref(r), 'watch', 'mk-watch', 'Opens the uploaded video on YouTube.') : '') +
       (withPos ? actsHtml(r.id) : '') + '</div>';
   }
 
@@ -365,10 +369,10 @@ ${MKVID_STATE_JS}
     else if (o.lastError) meta.push('<span class="flag">' + esc(o.lastError) + '</span>', 'try ' + esc((o.attempts || 0) + 1) + ' ' + untilTime(o.nextTryAt));
     else meta.push('deleting');
     return '<div class="mk-row old' + (o.state === 'refused' || o.attempts > 0 ? ' err' : '') + '">' +
-      '<span class="badge ' + (o.state === 'refused' ? 'bad' : 'info') + '">' + esc(o.state) + '</span>' +
+      '<span class="badge ' + (o.state === 'refused' ? 'bad' : 'info') + '"' + TK.tip(o.state === 'refused' ? 'mkvid refused to delete this video from YouTube. See the reason beside it.' : 'Out of the playlists, waiting for mkvid to delete it from YouTube. The delete is retried on a schedule.') + '>' + esc(o.state) + '</span>' +
       '<div class="mk-main"><span class="mono">' + esc(o.videoId) + '</span><div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
-      link('https://youtu.be/' + encodeURIComponent(o.videoId), 'watch', 'mk-watch') +
-      ' <button type="button" class="btn small" data-old="' + esc(o.videoId) + '">Retry now</button></div>';
+      link('https://youtu.be/' + encodeURIComponent(o.videoId), 'watch', 'mk-watch', 'Opens the old video on YouTube.') +
+      ' <button type="button" class="btn small" data-old="' + esc(o.videoId) + '"' + TK.tip('Asks mkvid to delete this replaced video from YouTube again now, instead of waiting for the next scheduled try.') + '>Retry now</button></div>';
   }
 
   const showing = (shown, total) => (total > shown ? ' · showing ' + shown + ' of ' + total : '');
@@ -417,7 +421,7 @@ ${MKVID_STATE_JS}
   function renderTabs(focus, counts) {
     if (counts) tabCounts = counts;
     if (!tabsBuilt) {
-      $tabs.innerHTML = TABS.map((t) => '<button type="button" role="tab" id="mk-tab-' + t[0] + '" data-tab="' + t[0] + '" aria-controls="mk-p-' + t[0] + '" aria-selected="' + (tab === t[0]) + '" tabindex="' + (tab === t[0] ? '0' : '-1') + '">' +
+      $tabs.innerHTML = TABS.map((t) => '<button type="button" role="tab" id="mk-tab-' + t[0] + '" data-tab="' + t[0] + '" aria-controls="mk-p-' + t[0] + '" aria-selected="' + (tab === t[0]) + '" tabindex="' + (tab === t[0] ? '0' : '-1') + '"' + TK.tip(TAB_TIPS[t[0]]) + '>' +
         t[1] + '<span class="n" id="mk-n-' + t[0] + '"></span></button>').join('');
       tabsBuilt = true;
     }
@@ -547,7 +551,7 @@ ${MKVID_STATE_JS}
     ]));
     out.push('<div class="mk-dgrp">Upload</div>');
     out.push(dl([
-      ['status', '<span class="badge ' + (BADGE[r.status] || 'neutral') + '">' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(r.error) + '</span>' : '')],
+      ['status', '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(STATUS_TIPS[r.status]) + '>' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(r.error) + '</span>' : '')],
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '—'],
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy !== 'unlisted' ? ' <span class="warn">(unlisted was requested — an unverified OAuth app forces private)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + esc(rel(r.notBefore)) : '')],
@@ -562,16 +566,16 @@ ${MKVID_STATE_JS}
     ]));
     const btns = [];
     if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed' || r.status === 'banned') {
-      btns.push('<button type="button" class="btn" data-do="retry">' + (r.status === 'claimed' ? 'Release &amp; retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
+      btns.push('<button type="button" class="btn" data-do="retry"' + TK.tip(r.status === 'banned' ? 'Lifts the ban: the set goes back in the queue.' : r.status === 'claimed' ? 'Gives the job back, whatever mkvid is doing with it, so it can be claimed again. Use it when mkvid died mid-job.' : 'Puts the request back in the queue with a fresh start.') + '>' + (r.status === 'claimed' ? 'Release &amp; retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
     }
     if (r.readiness && r.readiness.state === 'waiting_ids' && !r.skipIdWait) {
-      btns.push('<button type="button" class="btn" data-do="render-now" title="Render with the IDs shown instead of waiting until the set is 7 days old">Render now</button>');
+      btns.push('<button type="button" class="btn" data-do="render-now"' + TK.tip('Renders now with ID shown for the unidentified tracks, instead of waiting until the set is 7 days old. The track list must still be verified.') + '>Render now</button>');
     }
     if (r.status === 'done' && r.videoId && !r.replacesVideoId) {
-      btns.push('<button type="button" class="btn danger" data-do="recreate" title="Render the set again (back of the queue, counts against the daily cap); the old video is deleted once the new one is in the playlists">Delete and recreate</button>');
-      btns.push('<button type="button" class="btn danger" data-do="unpublish" title="Take the video out of the playlists and delete it from YouTube now; the set goes back in the queue and renders again when it is ready">Delete video</button>');
+      btns.push('<button type="button" class="btn danger" data-do="recreate"' + TK.tip('Renders the set again at the back of the queue (it counts against the daily upload cap). The old video stays up until the new one is in the playlists, then it is deleted.') + '>Delete and recreate</button>');
+      btns.push('<button type="button" class="btn danger" data-do="unpublish"' + TK.tip('Takes the video out of the playlists and deletes it from YouTube right now. The set goes back in the queue and renders again when it is ready.') + '>Delete video</button>');
     }
-    btns.push('<a class="btn" href="/ui/set?url=' + encodeURIComponent(r.setUrl || '') + '">Open set page</a>');
+    btns.push('<a class="btn" href="/ui/set?url=' + encodeURIComponent(r.setUrl || '') + '"' + TK.tip('Opens this set in the tracked viewer, with its track list and diagnostics.') + '>Open set page</a>');
     // A failed action's reason, shown here: a toast would sit under the modal drawer.
     out.push('<div class="err-state mk-derr" role="alert" data-derr hidden></div>');
     out.push('<div class="actions">' + btns.join('') + '</div>');
@@ -654,8 +658,8 @@ ${MKVID_STATE_JS}
 export const MKVID_PAGE_HTML = shell({
   nav: 'mkvid',
   title: 'mkvid',
-  description: 'Sets with no YouTube recording but a SoundCloud or hearthis.at one, rendered and uploaded by mkvid. Where each request stands and why nothing is uploading.',
-  actions: '<button type="button" id="mk-recreate-old" class="btn" hidden title="Delete and recreate every done video made with a style other than scene">Recreate all old-style videos</button><button type="button" id="mk-refresh" class="btn">Refresh</button>',
+  description: `Sets with no YouTube recording, ${tipTerm('rendered into a video by mkvid', 'Sets that have no YouTube recording but a SoundCloud or hearthis.at one are handed to mkvid, a service on the NAS that renders a video from the audio and uploads it as unlisted.')}. Where each request stands and why nothing is uploading.`,
+  actions: `<button type="button" id="mk-recreate-old" class="btn" hidden${tipAttr('Renders every finished video made in a style other than scene again, at the back of the queue. They count against the daily cap, and each old video is deleted once its replacement is in the playlists.')}>Recreate all old-style videos</button><button type="button" id="mk-refresh" class="btn"${tipAttr('Reloads the queue and the progress bar.')}>Refresh</button>`,
   body: BODY,
   css: CSS,
   js: JS,

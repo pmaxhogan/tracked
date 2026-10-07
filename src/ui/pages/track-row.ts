@@ -33,7 +33,7 @@ export const TRACK_ROW_JS = /* js */ `
     a.className = 'pill';
     a.href = href; a.target = '_blank'; a.rel = 'noreferrer noopener';
     a.textContent = label;
-    if (title) a.title = title;
+    if (title) a.setAttribute('data-tip', title);
     return a;
   }
   async function fetchLinks(ids) {
@@ -54,13 +54,13 @@ export const TRACK_ROW_JS = /* js */ `
   function lazyLinkButton(t, actions, fill) {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'btn small links-btn'; b.textContent = 'links';
-    b.title = 'Look up Apple Music / YouTube links (one 1001tracklists page view, cached 30 days)';
+    b.setAttribute('data-tip', 'Looks up Apple Music and YouTube links for this track. Costs one 1001tracklists page view; the result is cached for 30 days.');
     linkRows.set(b, { t, actions, fill });
     b.addEventListener('click', async (ev) => {
       if (ev && ev.stopPropagation) ev.stopPropagation();
       b.disabled = true; b.textContent = '…';
       try { const r = await fetchLinks([t.trackId]); applyLinks(b, r.links[t.trackId]); if (r.error && !r.links[t.trackId]) throw new Error(r.error); }
-      catch (e) { b.disabled = false; b.textContent = 'links'; b.title = 'failed: ' + (e && e.message ? e.message : e); }
+      catch (e) { b.disabled = false; b.textContent = 'links'; b.setAttribute('data-tip', 'Lookup failed: ' + (e && e.message ? e.message : e) + ' Press to try again.'); }
     });
     return b;
   }
@@ -81,11 +81,11 @@ export const TRACK_ROW_JS = /* js */ `
     if (status) status.textContent = ids.length ? 'Links loaded for ' + ids.length + ' tracks.' : 'No tracks left to look up.';
   }
   function fillRowActions(actions, t) {
-    const yt = pill(t.youtubeLink, 'YouTube', 'Play on YouTube'); if (yt) actions.appendChild(yt);
-    const sc = pill(t.soundcloudLink, 'SoundCloud', 'Play on SoundCloud (free, ad-supported)'); if (sc) actions.appendChild(sc);
-    const ap = pill(t.appleLink, 'Apple Music', 'Open in Apple Music'); if (ap) actions.appendChild(ap);
+    const yt = pill(t.youtubeLink, 'YouTube', 'Play this track on YouTube'); if (yt) actions.appendChild(yt);
+    const sc = pill(t.soundcloudLink, 'SoundCloud', 'Play this track on SoundCloud (free, with ads)'); if (sc) actions.appendChild(sc);
+    const ap = pill(t.appleLink, 'Apple Music', 'Open this track in Apple Music'); if (ap) actions.appendChild(ap);
   }
-  function tagEl(text) { const s = document.createElement('span'); s.className = 'tag'; s.textContent = text; return s; }
+  function tagEl(text, tip) { const s = document.createElement('span'); s.className = 'tag'; s.textContent = text; if (tip) s.setAttribute('data-tip', tip); return s; }
   function trackRow(t) {
     const row = document.createElement('div');
     row.className = 'trk';
@@ -116,15 +116,15 @@ export const TRACK_ROW_JS = /* js */ `
     const sub = document.createElement('div');
     sub.className = 'sub';
     if (t.startTime) { const n = document.createElement('span'); n.textContent = '#' + ((t.index ?? 0) + 1); sub.appendChild(n); }
-    if (t.idStatus) sub.appendChild(tagEl(t.idStatus));
-    else if (t.isUnidentified) sub.appendChild(tagEl('ID'));
-    if (t.isMashupLinked) sub.appendChild(tagEl('w/'));
+    if (t.idStatus) sub.appendChild(tagEl(t.idStatus, 'Only partly identified: 1001tracklists knows the base track but not the exact version (remix, edit or mashup).'));
+    else if (t.isUnidentified) sub.appendChild(tagEl('ID', 'Not identified yet: nobody has told 1001tracklists what this track is.'));
+    if (t.isMashupLinked) sub.appendChild(tagEl('w/', 'Played together with the track above it (a mashup or layered over it), not after it.'));
     if (sub.childNodes.length) txt.appendChild(sub);
     row.appendChild(txt);
     const actions = document.createElement('div');
     actions.className = 'links';
     fillRowActions(actions, t);
-    const tl = pill(t.trackUrl, '1001tl', 'Track page on 1001tracklists'); if (tl) actions.appendChild(tl);
+    const tl = pill(t.trackUrl, '1001tl', 'This track on 1001tracklists'); if (tl) actions.appendChild(tl);
     if (LINKABLE(t)) actions.appendChild(lazyLinkButton(t, actions, fillRowActions));
     row.appendChild(actions);
     return row;

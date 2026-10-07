@@ -10,14 +10,21 @@
 // external href through safeHref, and highlight() escapes the original text
 // piece by piece, so no markup can come from data.
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
 
 const TABS: Array<[string, string]> = [['all', 'All'], ['tracks', 'Tracks'], ['sets', 'Sets'], ['djs', 'DJs']]
+const TAB_TIPS: Record<string, string> = {
+  all: 'DJs first, then tracks and sets ranked together by relevance.',
+  tracks: 'Individual tracks, with the sets they were played in.',
+  sets: 'Whole DJ sets, by title or by a track played in them.',
+  djs: 'DJs, subscribed or not, that appear in the searched track lists.',
+}
 
 const BODY = /* html */ `
 <div class="sq-bar"><input id="sq" type="search" autofocus autocomplete="off" aria-label="Search tracks, sets, DJs" placeholder="Track, set or DJ" role="combobox" aria-controls="sq-results" aria-expanded="true"></div>
-<div id="sq-tabs" class="chips" role="group" aria-label="Result type">${TABS.map(([k, l]) => `<button type="button" class="chip${k === 'all' ? ' on' : ''}" data-kind="${k}" aria-pressed="${k === 'all'}">${l}</button>`).join('')}</div>
+<div id="sq-tabs" class="chips" role="group" aria-label="Result type">${TABS.map(([k, l]) => `<button type="button" class="chip${k === 'all' ? ' on' : ''}" data-kind="${k}" aria-pressed="${k === 'all'}"${tipAttr(TAB_TIPS[k])}>${l}</button>`).join('')}</div>
 <div id="sq-corrected" class="sq-corrected" role="status" hidden></div>
 <div id="sq-results" role="listbox" aria-label="Search results"></div>
 <div id="sq-empty" class="empty" role="status">Search every verified track list: tracks, sets and DJs.</div>
@@ -63,6 +70,8 @@ const JS = /* js */ `
   const $ = TK.$, esc = TK.esc;
 ${TRACK_ROW_JS}
   const TABS = ${JSON.stringify(TABS)};
+  const TAB_TIPS = ${JSON.stringify(TAB_TIPS)};
+  const EXT_TIPS = { '1001tl': 'Opens this on 1001tracklists.', YouTube: 'Plays this track on YouTube.', SoundCloud: 'Plays this track on SoundCloud (free, with ads).', 'Apple Music': 'Opens this track in Apple Music.' };
   const $sq = $('sq'), $tabs = $('sq-tabs'), $note = $('sq-corrected'), $res = $('sq-results'), $empty = $('sq-empty');
   const EMPTY_HINT = 'Search every verified track list: tracks, sets and DJs.';
 
@@ -111,7 +120,7 @@ ${TRACK_ROW_JS}
 
   // ── rendering ──
   const setHref = (url) => '/ui/set?url=' + encodeURIComponent(url);
-  const ext = (url, label, cls) => { const h = TK.safeHref(url); return h ? '<a class="' + (cls || 'pill') + '" href="' + esc(h) + '" target="_blank" rel="noreferrer noopener">' + esc(label) + '</a>' : ''; };
+  const ext = (url, label, cls) => { const h = TK.safeHref(url); return h ? '<a class="' + (cls || 'pill') + '" href="' + esc(h) + '" target="_blank" rel="noreferrer noopener"' + TK.tip(EXT_TIPS[label]) + '>' + esc(label) + '</a>' : ''; };
   const hl = (s) => highlight(s, tokens);
   const IMG_RE = /^\\/ui\\/img\\/[0-9a-f]{32}$/;
   // The thumbnail: the image over a lettered placeholder (a failed image is removed, see the error listener).
@@ -135,7 +144,7 @@ ${TRACK_ROW_JS}
     if (!t.youtubeLink && !t.soundcloudLink && !t.appleLink && t.trackId && /^\\d+$/.test(t.trackId)) {
       if (st === 'none') h += '<span class="muted">no links</span>';
       else h += '<button type="button" class="btn small links-btn" data-links="' + esc(t.trackKey) + '"' + (st === 'loading' ? ' disabled' : '') +
-        ' title="' + esc(st && st.indexOf('err:') === 0 ? 'failed: ' + st.slice(4) : 'Look up Apple Music / YouTube links (one 1001tracklists page view, cached 30 days)') + '">' + (st === 'loading' ? '…' : 'links') + '</button>';
+        TK.tip(st && st.indexOf('err:') === 0 ? 'Lookup failed: ' + st.slice(4) + ' Press to try again.' : 'Looks up Apple Music and YouTube links for this track. Costs one 1001tracklists page view; the result is cached for 30 days.') + '>' + (st === 'loading' ? '…' : 'links') + '</button>';
     }
     return h;
   }
@@ -156,9 +165,9 @@ ${TRACK_ROW_JS}
       '<a href="' + esc(setHref(s.url)) + '">Set page</a>' + ext(s.url, '1001tl', 'sq-ext') + '</li>').join('') + '</ul>' : '';
     return rowOpen(n, '', t.image, t.artist, 'tracks') +
       '<div class="sq-main">' + tag('tracks') + '<span class="sq-ttl">' + hl(t.artist) + ' – ' + hl(t.title) + '</span>' +
-        (t.label ? '<span class="badge neutral">' + hl(t.label) + '</span>' : '') + '</div>' +
+        (t.label ? '<span class="badge neutral"' + TK.tip('The record label of this track.') + '>' + hl(t.label) + '</span>' : '') + '</div>' +
       '<div class="sq-acts">' + trackLinks(t) +
-        (sets.length ? '<button type="button" class="btn small" data-exp="' + esc(t.trackKey) + '" aria-expanded="' + open + '">' + sets.length + (sets.length === 1 ? ' set' : ' sets') + '</button>' : '') +
+        (sets.length ? '<button type="button" class="btn small" data-exp="' + esc(t.trackKey) + '" aria-expanded="' + open + '"' + TK.tip(open ? 'Hides the sets this track was played in.' : 'Shows the sets this track was played in, with the time it was cued.') + '>' + sets.length + (sets.length === 1 ? ' set' : ' sets') + '</button>' : '') +
       '</div>' + lines + rowClose;
   }
   function setRowHtml(s, n) {
@@ -167,15 +176,15 @@ ${TRACK_ROW_JS}
       '<div class="sq-main">' + tag('sets') + '<span class="sq-ttl"><a href="' + esc(setHref(s.url)) + '">' + hl(s.title) + '</a></span></div>' +
       '<div class="sq-meta"><a href="/ui/dj/' + encodeURIComponent(s.djSlug) + '">' + hl(s.djName) + '</a>' +
         (s.date ? '<span>' + esc(s.date) + '</span>' : '') +
-        '<span>' + esc(s.idedCount) + '/' + esc(s.trackCount) + ' IDs</span>' +
-        (s.videoId ? '<span class="badge ok">video</span>' : '<span class="badge warn">no video</span>') + '</div>' +
+        '<span' + TK.tip('Tracks identified out of all tracks in the set.') + '>' + esc(s.idedCount) + '/' + esc(s.trackCount) + ' IDs</span>' +
+        (s.videoId ? '<span class="badge ok"' + TK.tip('The set has a video in the playlists.') + '>video</span>' : '<span class="badge warn"' + TK.tip('The set has no video in the playlists yet: it has no usable recording, or it has not been processed.') + '>no video</span>') + '</div>' +
       '<div class="sq-acts"><a class="pill" href="' + esc(setHref(s.url)) + '">Set page</a>' + ext(s.url, '1001tl') + '</div>' + rowClose;
   }
   function djRowHtml(d, n) {
     primaries[n] = '/ui/dj/' + encodeURIComponent(d.slug);
     return rowOpen(n, '', d.image, d.name, 'djs') +
       '<div class="sq-main">' + tag('djs') + '<span class="sq-ttl"><a href="' + esc(primaries[n]) + '">' + hl(d.name) + '</a></span>' +
-        (d.subscribed ? '<span class="badge ok">subscribed</span>' : '') + '</div>' +
+        (d.subscribed ? '<span class="badge ok"' + TK.tip('You are subscribed to this DJ.') + '>subscribed</span>' : '') + '</div>' +
       '<div class="sq-meta"><span>' + esc(d.sets) + (d.sets === 1 ? ' set' : ' sets') + '</span></div>' +
       '<div class="sq-acts"><a class="pill" href="' + esc(primaries[n]) + '">Profile</a></div>' + rowClose;
   }
@@ -207,7 +216,7 @@ ${TRACK_ROW_JS}
   }
 
   function renderTabs() {
-    $tabs.innerHTML = TABS.map((t) => '<button type="button" class="chip' + (t[0] === kind ? ' on' : '') + '" data-kind="' + t[0] + '" aria-pressed="' + (t[0] === kind) + '">' + t[1] + '</button>').join('');
+    $tabs.innerHTML = TABS.map((t) => '<button type="button" class="chip' + (t[0] === kind ? ' on' : '') + '" data-kind="' + t[0] + '" aria-pressed="' + (t[0] === kind) + '"' + TK.tip(TAB_TIPS[t[0]]) + '>' + t[1] + '</button>').join('');
   }
   function setActive(n) {
     const old = $('sq-r' + active);
@@ -228,7 +237,7 @@ ${TRACK_ROW_JS}
     const to = {};
     for (const x of c) to[x.from] = x.to;
     const shown = wordsOf(q).map((w) => (Object.prototype.hasOwnProperty.call(to, w) ? to[w] : w)).join(' ');
-    $note.innerHTML = '<span>Showing results for <strong>' + esc(shown) + '</strong>.</span> <button type="button" id="sq-exact" class="btn small">Search exactly for ' + esc(q) + '</button>';
+    $note.innerHTML = '<span>Showing results for <strong>' + esc(shown) + '</strong>.</span> <button type="button" id="sq-exact" class="btn small"' + TK.tip('Searches for what you typed, without the spelling correction.') + '>Search exactly for ' + esc(q) + '</button>';
     $note.hidden = false;
   }
 

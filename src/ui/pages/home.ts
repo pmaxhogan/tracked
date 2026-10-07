@@ -13,6 +13,7 @@
 // upstream value goes through TK.esc.
 import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 import { MKVID_STATE_JS } from './mkvid-state'
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from './dj-actions'
@@ -20,22 +21,22 @@ import { ACTIVITY_DETAIL_CSS, ACTIVITY_DETAIL_JS } from './activity-detail'
 import { ACTIVITY_DRAWER_JS, ACTIVITY_ROW_CSS, ACTIVITY_ROW_JS } from './activity'
 
 const ACTIONS = /* html */ `
-<button id="h-sync-all" type="button" class="btn">Sync all</button>
-<button id="h-backfill" type="button" class="btn">Backfill combined</button>
-<button id="h-compare" type="button" class="btn" title="Compare every playlist with its last snapshot now (playlist hygiene)">Run hygiene compare</button>`
+<button id="h-sync-all" type="button" class="btn"${tipAttr('Syncs every DJ one after another: looks for new sets and adds their videos. Each DJ is limited to a few fetches per press.')}>Sync all</button>
+<button id="h-backfill" type="button" class="btn"${tipAttr('Adds videos missing from the combined playlist (every artist playlist in one), up to the daily YouTube insert cap. This also happens by itself on every scheduler tick.')}>Backfill combined</button>
+<button id="h-compare" type="button" class="btn"${tipAttr('Lists every playlist on YouTube now and compares it with what tracked put there, to notice videos you removed by hand. A playlist that lost too many videos is held for your approval. Normally runs every 6 hours.')}>Run hygiene compare</button>`
 
-const tile = (id: string, href: string, label: string) => /* html */ `
-  <a class="tk-tile h-tile" href="${href}"><div class="k">${label}</div><div id="${id}"><div class="v"><span class="skel w"></span></div><div class="s">&nbsp;</div></div></a>`
+const tile = (id: string, href: string, label: string, tip: string) => /* html */ `
+  <a class="tk-tile h-tile" href="${href}"${tipAttr(tip)}><div class="k">${label}</div><div id="${id}"><div class="v"><span class="skel w"></span></div><div class="s">&nbsp;</div></div></a>`
 
 const BODY = /* html */ `
 <div class="tk-tiles h-tiles">
-  ${tile('t-fetch', '/ui/pool', 'Fetching')}
-  ${tile('t-yt', '/ui/playlists', 'YouTube')}
-  ${tile('t-mk', '/ui/mkvid', 'mkvid')}
-  ${tile('t-chal', '/ui/captcha', 'Challenges')}
+  ${tile('t-fetch', '/ui/pool', 'Fetching', 'Whether fetching from 1001tracklists is running, and how many of today\'s page views the pool of accounts has used.')}
+  ${tile('t-yt', '/ui/playlists', 'YouTube', 'The connected YouTube channel and how many of today\'s combined-playlist inserts are used.')}
+  ${tile('t-mk', '/ui/mkvid', 'mkvid', 'The mkvid renderer, which makes videos for sets that have no recording, and how much of each Google project\'s daily upload cap is used.')}
+  ${tile('t-chal', '/ui/captcha', 'Challenges', 'Captchas that a pool account ran into and that need a person to solve them. Unsolved ones expire.')}
 </div>
 <div class="tk-card h-attn-card">
-  <h2>Needs attention</h2>
+  <h2><span class="tip-term"${tipAttr('Problems found by the checks below. A red "fix" is broken or blocking something; an amber "check" is worth a look but nothing is blocked.')}>Needs attention</span></h2>
   <ul id="attn" class="h-attn"></ul>
   <div id="attn-empty" class="muted">Checking…</div>
   <div id="attn-err" class="error" hidden></div>
@@ -43,7 +44,7 @@ const BODY = /* html */ `
 <div class="tk-card h-recent">
   <div class="h-recent-head">
     <h2>Recent activity</h2>
-    <span class="h-recent-links"><a href="/ui/activity">View all</a><a href="/ui/activity?problems=1">Problems</a></span>
+    <span class="h-recent-links"><a href="/ui/activity"${tipAttr('The full log of syncs, additions and other events.')}>View all</a><a href="/ui/activity?problems=1"${tipAttr('Only the events that failed or were abandoned.')}>Problems</a></span>
   </div>
   <div id="act-list" class="a-list" role="list"></div>
   <div id="act-skel">${skelHtml(6, 'row')}</div>
@@ -110,7 +111,7 @@ ${ACTIVITY_DRAWER_JS}
       if (a.error) { failed.push(NAMES[k] + ' (' + a.error + ')'); continue; }
       for (const it of a.items) items.push(it);
     }
-    $('attn').innerHTML = items.map((it) => '<li><a href="' + esc(it.href) + '"><span class="badge ' + esc(it.kind) + '">' + (it.kind === 'bad' ? 'fix' : 'check') + '</span>' +
+    $('attn').innerHTML = items.map((it) => '<li><a href="' + esc(it.href) + '"><span class="badge ' + esc(it.kind) + '"' + TK.tip(it.kind === 'bad' ? 'Something is broken or blocked and needs you.' : 'Worth a look, but nothing is blocked.') + '>' + (it.kind === 'bad' ? 'fix' : 'check') + '</span>' +
       '<span class="txt">' + esc(it.text) + '</span>' + (it.sub ? '<span class="sub">' + esc(it.sub) + '</span>' : '') +
       '<span class="go">' + esc(it.go || 'Open') + ' →</span></a></li>').join('');
     const $empty = $('attn-empty'), $err = $('attn-err');

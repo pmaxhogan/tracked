@@ -14,7 +14,7 @@ ${CAPTCHA_JS}
   function renderHead() {
     const l = leftText(ch.expiresAt);
     $('head').innerHTML =
-      '<div class="row"><b class="mono">' + esc(ch.accountId || 'new account') + '</b><span class="badge info">' + esc(typeText(ch.type)) + '</span><span class="spacer"></span><span id="left" class="left' + (l.soon ? ' soon' : '') + '">' + esc(l.text) + '</span></div>' +
+      '<div class="row"><b class="mono">' + esc(ch.accountId || 'new account') + '</b><span class="badge info"' + tipA(typeTip(ch.type)) + '>' + esc(typeText(ch.type)) + '</span><span class="spacer"></span><span id="left" class="left' + (l.soon ? ' soon' : '') + '">' + esc(l.text) + '</span></div>' +
       '<div class="muted sub" style="margin-top:var(--sp-1)">' + esc(reasonText(ch.reason)) + ' · since ' + esc(fmtTime(ch.createdAt)) + '</div>';
   }
   function tick() {

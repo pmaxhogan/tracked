@@ -2,17 +2,18 @@
 // requeue of ban victims and the migration status. BAN_JS (banPage 'other')
 // handles #ban-simulate by id.
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 
 const BODY = /* html */ `
 <div class="tk-card">
   <div class="tl-head">
-    <h2>YouTube video JSON</h2>
-    <button id="ytjson-copy" type="button" class="btn small" hidden>Copy</button>
+    <h2><span class="tip-term"${tipAttr('Shows the raw YouTube Data API record for a video: its duration, embed size, privacy and whether it is still alive. Costs 1 YouTube quota unit.')}>YouTube video JSON</span></h2>
+    <button id="ytjson-copy" type="button" class="btn small" hidden${tipAttr('Copies the JSON below to the clipboard.')}>Copy</button>
   </div>
   <form id="ytjson-form" class="tl-form">
     <div class="field grow"><label for="ytjson-url">Video URL or id</label><input id="ytjson-url" type="text" placeholder="https://www.youtube.com/watch?v=… (or a bare video id)" /></div>
-    <button id="ytjson-go" type="submit" class="btn primary">Fetch</button>
+    <button id="ytjson-go" type="submit" class="btn primary"${tipAttr('Asks YouTube for this video\'s record (1 quota unit).')}>Fetch</button>
   </form>
   <div id="ytjson-status" class="tl-status muted" role="status"></div>
   <pre id="ytjson-out" class="tl-pre" hidden></pre>
@@ -22,36 +23,36 @@ const BODY = /* html */ `
   <p class="muted tl-note">Drops the cached list and fetches it again now (costs one upstream fetch).</p>
   <form id="purge-form" class="tl-form">
     <div class="field grow"><label for="purge-url">Tracklist URL</label><input id="purge-url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" /></div>
-    <button id="purge-go" type="submit" class="btn primary">Purge and refetch</button>
+    <button id="purge-go" type="submit" class="btn primary"${tipAttr('Deletes the cached track list and fetches the set page again, costing one 1001tracklists page view. Limited per set and per day.')}>Purge and refetch</button>
   </form>
   <div id="purge-result" class="tl-status muted" role="status"></div>
 </div>
 <div class="tk-card">
-  <h2>Simulate a ban</h2>
+  <h2><span class="tip-term"${tipAttr('Opens a fake ban so you can check the banner and the push alert. Nothing real is blocked and the banner can be dismissed.')}>Simulate a ban</span></h2>
   <p class="muted tl-note">Test the whole alert path without a real ban: <a href="#" id="ban-simulate">simulate a ban</a> (banner and push; dismiss from the banner).</p>
 </div>
 <div class="tk-card">
-  <h2>Requeue ban victims</h2>
+  <h2><span class="tip-term"${tipAttr('During a ban, sets can be given up on only because every route was blocked. This puts those sets back in the queue.')}>Requeue ban victims</span></h2>
   <p class="muted tl-note">Re-queues sets that were abandoned only because every fetch route was blocked.</p>
   <form id="rq-form" class="tl-form">
     <div class="field"><label for="rq-days">Days back</label><input id="rq-days" type="number" min="1" value="14" /></div>
-    <label class="tl-check"><input id="rq-dry" type="checkbox" checked /> Dry run (preview only)</label>
-    <button id="rq-go" type="submit" class="btn primary">Requeue</button>
+    <label class="tl-check"${tipAttr('Only lists which sets would be requeued. Untick it to really requeue them.')}><input id="rq-dry" type="checkbox" checked /> Dry run (preview only)</label>
+    <button id="rq-go" type="submit" class="btn primary"${tipAttr('Requeues sets abandoned in the last N days only because every route was blocked (or previews them, with Dry run ticked).')}>Requeue</button>
   </form>
   <pre id="rq-out" class="tl-pre" hidden></pre>
 </div>
 <div class="tk-card">
   <div class="tl-head">
-    <h2>Migration status</h2>
-    <button id="mig-go" type="button" class="btn small">Check</button>
+    <h2><span class="tip-term"${tipAttr('Progress of the one-off move of sync data from KV into D1.')}>Migration status</span></h2>
+    <button id="mig-go" type="button" class="btn small"${tipAttr('Reads the migration status again.')}>Check</button>
   </div>
   <pre id="mig-out" class="tl-pre" hidden></pre>
 </div>
 <div class="tk-card" id="search-card">
-  <h2>Search index</h2>
+  <h2><span class="tip-term"${tipAttr('The table behind the Search page. Sets and tracks are added as their track lists get verified.')}>Search index</span></h2>
   <p class="muted tl-note">Verified track lists are indexed as they verify. Rebuild adds sets from trusted mkvid track lists, 500 per press, in requests of about 60.</p>
   <dl class="si-dl" id="si-stats"><dt>Sets</dt><dd id="si-sets">—</dd><dt>Tracks</dt><dd id="si-tracks">—</dd><dt>Last indexed</dt><dd id="si-last">—</dd></dl>
-  <button class="btn primary" id="si-rebuild" type="button">Rebuild 500 more</button>
+  <button class="btn primary" id="si-rebuild" type="button"${tipAttr('Indexes up to 500 more sets from trusted mkvid track lists, in requests of about 60 sets. Press again until it says done.')}>Rebuild 500 more</button>
   <div class="tl-status muted" id="si-status" role="status"></div>
 </div>
 `

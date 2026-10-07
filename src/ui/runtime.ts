@@ -29,6 +29,9 @@ var TK = (() => {
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
+  // Tooltips (see src/ui/tip.ts): tip(text) is ' data-tip="..."' for an element's attributes, tipTerm wraps inline text.
+  const tip = (text) => { const t = text == null ? '' : String(text).trim(); return t ? ' data-tip="' + esc(t) + '"' : ''; };
+  const tipTerm = (label, text) => '<span class="tip-term"' + tip(text) + '>' + esc(label) + '</span>';
   const safeHref = (u) => (/^https?:\\/\\//i.test(String(u || '')) ? String(u) : null);
 
   // ── API ──
@@ -381,7 +384,7 @@ var TK = (() => {
   };
 
   return {
-    $, esc, safeHref, api, errText, toast, ask, drawer, busy, poll, qs, navCount, theme, skel,
+    $, esc, tip, tipTerm, safeHref, api, errText, toast, ask, drawer, busy, poll, qs, navCount, theme, skel,
     fmt: { time: fmtTime, dur: fmtDur, ago, rel: relTime, clock, until: untilTime, date: fmtDate, setLabel },
   };
 })();

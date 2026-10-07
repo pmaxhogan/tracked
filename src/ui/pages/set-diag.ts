@@ -159,6 +159,16 @@ export const SET_DIAG_JS = /* js */ `
   }
 
   const DIAG_BADGE = { ok: 'ok', warn: 'check', bad: 'problem', info: 'info', neutral: 'n/a' };
+  const DIAG_BADGE_TIP = { ok: 'Nothing wrong here.', warn: 'Worth a look: this may explain a missing video.', bad: 'A problem: this is likely why the set is not in the playlists.', info: 'Just information, or not known yet.', neutral: 'Does not apply to this set.' };
+  const DIAG_LABEL_TIP = {
+    discovered: 'Whether a subscribed DJ lists this set, and whether the sync processed it or gave up.',
+    recording: 'The YouTube video the set page links, and when the sync will look at the page again.',
+    verification: 'Track lists are fetched twice by different pool accounts; only a list both agree on is trusted.',
+    rule: 'The check that a video is a full recording of the set (long enough, no "not the full set" notice).',
+    playlist: 'What happened when the sync tried to put the video in the playlists.',
+    hygiene: 'Whether the video was removed from a playlist (by the sweep, by you, or because it died) and is blocked from coming back.',
+    mkvid: 'The mkvid renderer makes a video from the set audio when the set has no recording.',
+  };
   function renderDiag(d) {
     const e = TK.esc;
     const h = d.hygiene || {};
@@ -171,7 +181,7 @@ export const SET_DIAG_JS = /* js */ `
         if (r.key === 'hygiene' && ((h.removed || []).length || (h.removals || []).length)) link = '<a href="/ui/removed">Removed videos</a>';
         if (r.key === 'mkvid' && d.mkvid) link = '<a href="/ui/mkvid">Open mkvid</a>';
         return '<details class="diag-row"' + (r.tone === 'bad' || r.tone === 'warn' ? ' open' : '') + '>' +
-          '<summary><span class="diag-label">' + e(r.label) + '</span><span class="badge ' + r.tone + '">' + DIAG_BADGE[r.tone] + '</span>' +
+          '<summary><span class="diag-label"' + TK.tip(DIAG_LABEL_TIP[r.key]) + '>' + e(r.label) + '</span><span class="badge ' + r.tone + '"' + TK.tip(DIAG_BADGE_TIP[r.tone]) + '>' + DIAG_BADGE[r.tone] + '</span>' +
           '<span class="diag-finding">' + e(r.finding) + '</span></summary>' +
           (facts ? '<dl class="diag-facts">' + facts + '</dl>' : '') +
           (link ? '<p class="diag-link">' + link + '</p>' : '') +

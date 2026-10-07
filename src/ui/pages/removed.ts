@@ -2,6 +2,7 @@
 // remove), videos found missing from the playlists, and comparisons held back
 // for approval. Data comes from the Access-gated GET /ui/api/removals.
 import { shell } from '../shell'
+import { tipAttr, tipTerm } from '../tip'
 
 const BODY = /* html */ `
   <div id="bar" class="tk-row rm-bar"></div>
@@ -13,12 +14,12 @@ const BODY = /* html */ `
   </div>
   <div id="wrap" class="tk-card tk-table-wrap" hidden>
     <table class="tk-table">
-      <thead><tr><th>When</th><th>Source</th><th>Status</th><th>DJ / set</th><th>Video</th><th>Playlist</th><th>Why</th><th></th></tr></thead>
+      <thead><tr><th>When</th><th><span class="tip-term"${tipAttr('What removed the video: the sweep, you on YouTube, a dead video, or the Remove & replace button.')}>Source</span></th><th><span class="tip-term"${tipAttr('Whether the removal happened (removed), only would happen (would remove), was only noted (recorded), failed, or was undone.')}>Status</span></th><th>DJ / set</th><th>Video</th><th>Playlist</th><th>Why</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
   <div id="empty" class="empty" hidden></div>
-  <p><button id="more" type="button" class="btn" hidden>Older</button></p>
+  <p><button id="more" type="button" class="btn" hidden${tipAttr('Loads the next page of older entries.')}>Older</button></p>
 `
 
 const CSS = /* css */ `
@@ -49,6 +50,20 @@ const JS = /* js */ `
   if (!SOURCE_OF[source]) source = 'all';
   let djSlug = TK.qs.get('dj') || '';
 
+  const STATUS_TIPS = {
+    would_remove: 'Dry run: the sweep would remove this video, but nothing was deleted.',
+    removed: 'The video was taken out of the playlists.',
+    recorded: 'The video was found missing from a playlist. tracked noted it and will never add it back.',
+    failed: 'YouTube refused the removal. It is tried again on a later sweep.',
+    undone: 'You undid this: the video was put back (or will never be judged again).',
+  };
+  const SOURCE_TIPS = {
+    sweep: 'The automatic sweep: the video is not a full recording of the set.',
+    owner: 'You removed it from the playlist by hand on YouTube.',
+    dead: 'The video was deleted or made private on YouTube.',
+    button: 'You used Remove & replace on the set.',
+  };
+  function tip(e, text) { if (text) e.setAttribute('data-tip', text); return e; }
   function el(tag, text, cls) { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
   function link(href, text) {
     const a = el('a', text);
@@ -62,9 +77,10 @@ const JS = /* js */ `
   function renderBar(d) {
     $bar.textContent = '';
     const s = d.settings || {};
-    $bar.appendChild(el('span', s.dryRun ? 'DRY RUN — nothing is removed' : 'LIVE — removals are applied', 'badge ' + (s.dryRun ? 'warn' : 'bad')));
-    $bar.appendChild(el('span', 'deletes today ' + (d.deletesUsedToday || 0) + ' / ' + s.dailyRemovals, 'badge neutral'));
-    for (const k of Object.keys(d.counts || {})) $bar.appendChild(el('span', k.replace('_', ' ') + ': ' + d.counts[k], 'badge neutral'));
+    $bar.appendChild(tip(el('span', s.dryRun ? 'DRY RUN — nothing is removed' : 'LIVE — removals are applied', 'badge ' + (s.dryRun ? 'warn' : 'bad')),
+      s.dryRun ? 'The sweep only reports which videos it would remove; it deletes nothing from YouTube until it is switched to live.' : 'The sweep really removes videos that fail the full-recording check from the artist and combined playlists.'));
+    $bar.appendChild(tip(el('span', 'deletes today ' + (d.deletesUsedToday || 0) + ' / ' + s.dailyRemovals, 'badge neutral'), 'Videos the sweep has removed today, out of its daily limit. Each removal costs 50 YouTube quota units.'));
+    for (const k of Object.keys(d.counts || {})) $bar.appendChild(tip(el('span', k.replace('_', ' ') + ': ' + d.counts[k], 'badge neutral'), STATUS_TIPS[k] || ''));
   }
 
   function renderHolds(holds) {
@@ -76,6 +92,7 @@ const JS = /* js */ `
       const p = el('p', (h.kind === 'combined' ? 'Combined playlist' : (h.slug || h.playlistId)) + ': ' + h.missing + ' of ' + h.expected + ' missing (since ' + when(h.at) + ')', 'rm-hold');
       const b = el('button', 'They really are removed — apply once', 'btn');
       b.type = 'button';
+      tip(b, 'Confirms that you removed these videos on purpose. They are recorded as removed once, at the next comparison, and not re-added. Valid for 24 hours.');
       b.addEventListener('click', async () => {
         b.disabled = true;
         const res = await TK.api.post('/ui/api/removals/holds/' + encodeURIComponent(h.playlistId) + '/approve', {});
@@ -93,10 +110,10 @@ const JS = /* js */ `
   function row(r) {
     const tr = document.createElement('tr');
     const w = cell('When', 'rm-when'); w.textContent = when(r.at); tr.appendChild(w);
-    const src = cell('Source'); src.textContent = r.source; tr.appendChild(src);
+    const src = cell('Source'); src.appendChild(tip(el('span', r.source), SOURCE_TIPS[r.source] || '')); tr.appendChild(src);
     const st = cell('Status');
     const kind = r.status === 'would_remove' ? 'warn' : (r.status === 'undone' ? 'neutral' : 'bad');
-    st.appendChild(el('span', String(r.status).replace('_', ' '), 'badge ' + kind));
+    st.appendChild(tip(el('span', String(r.status).replace('_', ' '), 'badge ' + kind), STATUS_TIPS[r.status] || ''));
     tr.appendChild(st);
     const set = cell('DJ / set');
     const setBox = el('div', null, 'rm-stack'); set.appendChild(setBox);
@@ -114,7 +131,7 @@ const JS = /* js */ `
     if (r.source !== 'dead' && (r.status === 'removed' || r.status === 'recorded' || r.status === 'would_remove')) {
       const b = el('button', r.status === 'would_remove' ? 'Keep it' : 'Undo (re-add)', 'btn small');
       b.type = 'button';
-      b.title = r.status === 'would_remove' ? 'Never remove this video' : 'Put the video back and never judge it again';
+      tip(b, r.status === 'would_remove' ? 'Marks this video as an exception so the sweep never removes it.' : 'Puts the video back in the playlist and never judges it again. Costs 50 YouTube quota units.');
       b.addEventListener('click', async () => {
         b.disabled = true; $err.textContent = '';
         const res = await TK.api.post('/ui/api/removals/' + r.id + '/undo', {});
@@ -198,8 +215,8 @@ const JS = /* js */ `
 export const REMOVED_PAGE_HTML = shell({
   nav: 'removed',
   title: 'Removed videos',
-  description: 'Videos the playlist sweep removed (or, in a dry run, would remove) for not being full recordings, and videos found missing from the playlists that the sync will never re-add.',
-  actions: '<button type="button" id="btn-compare" class="btn">Compare playlists now</button><button type="button" id="btn-sweep" class="btn">Run sweep now</button>',
+  description: `Videos taken out of the playlists, and ${tipTerm('videos found missing', 'Videos you removed from a playlist by hand, or that died on YouTube. The sync notes them and never adds them back.')} that the sync will not re-add.`,
+  actions: `<button type="button" id="btn-compare" class="btn"${tipAttr('Lists every playlist on YouTube now and compares it with what tracked added, to notice videos removed by hand. A playlist that lost too many videos is held for your approval.')}>Compare playlists now</button><button type="button" id="btn-sweep" class="btn"${tipAttr('Judges every video the sync added against the full-recording rule now. In a dry run it only reports; when live it removes the failures, within the daily limit.')}>Run sweep now</button>`,
   body: BODY,
   css: CSS,
   js: JS,

@@ -5,27 +5,28 @@
 import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
 import type { UiPage } from './index'
+import { tipAttr } from '../tip'
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from './dj-actions'
 
 const ACTIONS = /* html */ `
 <form id="add-form" class="dj-add">
   <input id="url" type="url" placeholder="1001tracklists DJ URL" aria-label="1001tracklists DJ URL" required />
-  <button id="add-btn" type="submit" class="btn primary">Add DJ</button>
+  <button id="add-btn" type="submit" class="btn primary"${tipAttr("Subscribes to this DJ. Their sets are found over the next scheduler ticks and each one gets a video added to the DJ's YouTube playlist.")}>Add DJ</button>
 </form>
-<button id="sync-all" type="button" class="btn" hidden>Sync all</button>
-<button id="resync-all" type="button" class="btn danger" hidden title="Forget what the sync trusts about every DJ's sets and re-fetch them all: swapped recordings get replaced. Drains over a few cron ticks.">Invalidate &amp; resync all</button>
-<button id="fix-titles" type="button" class="btn" title="${FIX_TITLES_TITLE}">Fix titles</button>`
+<button id="sync-all" type="button" class="btn" hidden${tipAttr('Syncs every DJ one after another: looks for new sets and adds their videos. Each DJ is limited to a few fetches per press.')}>Sync all</button>
+<button id="resync-all" type="button" class="btn danger" hidden${tipAttr('Marks every set of every DJ as due for a re-check and re-reads the playlists from YouTube, so swapped recordings get replaced. One shared budget of 10 fetches per press; the scheduler drains the rest over the next few ticks.')}>Invalidate &amp; resync all</button>
+<button id="fix-titles" type="button" class="btn"${tipAttr(FIX_TITLES_TITLE)}>Fix titles</button>`
 
 const BODY = /* html */ `
 <div id="filters" class="dj-filters" hidden>
   <div class="field"><label for="f-text">Filter</label><input id="f-text" type="search" placeholder="Filter DJs by name" /></div>
-  <div class="field check"><input id="f-err" type="checkbox" /><label for="f-err">with errors</label></div>
+  <div class="field check"><input id="f-err" type="checkbox" /><label for="f-err"${tipAttr('Only DJs whose last sync ended in an error.')}>with errors</label></div>
   <span id="f-count" class="muted sub"></span>
 </div>
 <div id="error" class="err-state" role="alert" hidden></div>
 <div id="wrap" class="tk-card tk-table-wrap" hidden>
   <table class="tk-table">
-    <thead><tr><th>DJ</th><th>Sets</th><th>Last sync</th><th>Playlist</th><th>Actions</th></tr></thead>
+    <thead><tr><th>DJ</th><th><span class="tip-term"${tipAttr('Sets processed (given a video) out of every set found on the DJ page.')}>Sets</span></th><th><span class="tip-term"${tipAttr('When the sync last ran for this DJ.')}>Last sync</span></th><th>Playlist</th><th>Actions</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
 </div>
@@ -90,9 +91,9 @@ ${DJ_ACTIONS_JS}
     else if (r.failed) { sets = last = playlist = '<span class="muted">state unavailable</span>'; }
     else if (!st) { sets = '—'; last = '<span class="muted">never synced</span>'; playlist = '—'; }
     else {
-      sets = esc(sum.processed + ' of ' + sum.known) + (sum.pending ? ' <span class="badge info">' + sum.pending + ' pending</span>' : '');
+      sets = esc(sum.processed + ' of ' + sum.known) + (sum.pending ? ' <span class="badge info"' + TK.tip(sum.pending + ' set' + (sum.pending === 1 ? ' is' : 's are') + ' found on the DJ page but not processed yet. The scheduler works through them a few at a time.') + '>' + sum.pending + ' pending</span>' : '');
       const when = DJA.lastRun(st);
-      last = (when ? esc(when) : '<span class="muted">never</span>') + (st.lastError ? ' <span class="badge bad" title="' + esc(st.lastError) + '">error</span>' : '');
+      last = (when ? esc(when) : '<span class="muted">never</span>') + (st.lastError ? ' <span class="badge bad"' + TK.tip('The last sync failed: ' + st.lastError + ' (retried on a later scheduler tick)') + '>error</span>' : '');
       const href = DJA.playlistHref(st);
       playlist = href ? '<a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener">Playlist ↗</a> <span class="muted">' + sum.videos + ' video' + (sum.videos === 1 ? '' : 's') + '</span>' : '—';
     }
@@ -104,9 +105,9 @@ ${DJ_ACTIONS_JS}
     } else {
       const dis = r.busy || bulk ? ' disabled' : '';
       actions = '<span class="dj-actions">' +
-        '<button type="button" class="btn small" data-act="sync" data-slug="' + slug + '"' + dis + '>' + (r.busy === 'sync' ? 'Syncing…' : 'Sync') + '</button>' +
-        '<button type="button" class="btn small" data-act="resync" data-slug="' + slug + '"' + dis + ' title="Forget the cached video for every set and re-check them all">' + (r.busy === 'resync' ? 'Resyncing…' : 'Invalidate &amp; resync') + '</button>' +
-        '<button type="button" class="btn small danger" data-act="remove" data-slug="' + slug + '"' + dis + '>Remove</button></span>';
+        '<button type="button" class="btn small" data-act="sync" data-slug="' + slug + '"' + dis + TK.tip('Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.') + '>' + (r.busy === 'sync' ? 'Syncing…' : 'Sync') + '</button>' +
+        '<button type="button" class="btn small" data-act="resync" data-slug="' + slug + '"' + dis + TK.tip('Marks every processed set of this DJ as due for a re-check and re-reads its playlists from YouTube, so swapped recordings are replaced. Costs up to 10 fetches per press; the scheduler does the rest over later ticks.') + '>' + (r.busy === 'resync' ? 'Resyncing…' : 'Invalidate &amp; resync') + '</button>' +
+        '<button type="button" class="btn small danger" data-act="remove" data-slug="' + slug + '"' + dis + TK.tip('Unsubscribes from this DJ. Their YouTube playlist and videos stay as they are.') + '>Remove</button></span>';
     }
     return '<tr><td data-label="DJ">' + who + '</td><td data-label="Sets" class="num">' + sets + '</td><td data-label="Last sync">' + last +
       '</td><td data-label="Playlist">' + playlist + '</td><td data-label="Actions">' + actions + '</td></tr>';

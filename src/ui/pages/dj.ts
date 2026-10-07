@@ -2,6 +2,7 @@
 // next to a sticky summary column. The slug is read client-side from the path
 // (/ui/dj/<slug>); nothing user-controlled is templated into the markup.
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from './dj-actions'
@@ -9,24 +10,24 @@ import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from './dj-actions'
 const BODY = /* html */ `
 <div class="dj-layout">
   <aside class="tk-card dj-side">
-    <div class="tk-row"><span id="dj-sub" class="badge ok" hidden>subscribed</span></div>
+    <div class="tk-row"><span id="dj-sub" class="badge ok" hidden${tipAttr('You are subscribed: the sync keeps this DJ\'s playlist up to date with their sets.')}>subscribed</span></div>
     <p class="mono dj-slug"><span id="dj-slug"></span></p>
     <p id="counts" class="muted sub"><span class="skel" style="width:70%"></span></p>
     <p id="dj-playlist" class="sub" hidden></p>
     <p id="dj-last" class="sub" hidden></p>
     <p class="sub"><a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> · <a href="/ui/djs">All DJs</a></p>
     <div class="dj-actions">
-      <button id="sync" type="button" class="btn primary" hidden>Sync</button>
-      <button id="resync" type="button" class="btn danger" hidden title="Forget the cached video for every set and re-check them all">Invalidate &amp; resync</button>
-      <button id="refresh" type="button" class="btn">Refresh from 1001tracklists</button>
+      <button id="sync" type="button" class="btn primary" hidden${tipAttr('Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.')}>Sync</button>
+      <button id="resync" type="button" class="btn danger" hidden${tipAttr('Marks every processed set of this DJ as due for a re-check and re-reads its playlists from YouTube, so swapped recordings are replaced. Costs up to 10 fetches per press; the scheduler does the rest over later ticks.')}>Invalidate &amp; resync</button>
+      <button id="refresh" type="button" class="btn"${tipAttr('Crawls this DJ\'s page on 1001tracklists again to list the newest sets. Does not change the playlist.')}>Refresh from 1001tracklists</button>
     </div>
   </aside>
   <section class="dj-main">
     <div id="chips" class="chips" role="group" aria-label="Filter sets">
-      <button type="button" class="chip on" data-f="all" aria-pressed="true">all</button>
-      <button type="button" class="chip" data-f="video" aria-pressed="false">with video</button>
-      <button type="button" class="chip" data-f="novideo" aria-pressed="false">no video</button>
-      <button type="button" class="chip" data-f="partial" aria-pressed="false">partial ID</button>
+      <button type="button" class="chip on" data-f="all" aria-pressed="true"${tipAttr('Every set.')}>all</button>
+      <button type="button" class="chip" data-f="video" aria-pressed="false"${tipAttr('Sets that have a YouTube recording attached on 1001tracklists. Only sets you have opened can be classified.')}>with video</button>
+      <button type="button" class="chip" data-f="novideo" aria-pressed="false"${tipAttr('Sets with no YouTube recording on 1001tracklists. Only sets you have opened can be classified.')}>no video</button>
+      <button type="button" class="chip" data-f="partial" aria-pressed="false"${tipAttr('Sets where at least one track is still unidentified. Only sets you have opened can be classified.')}>partial ID</button>
     </div>
     <p id="filter-note" class="muted sub" hidden></p>
     <div id="error" class="err-state" role="alert" hidden></div>
@@ -145,6 +146,7 @@ ${DJ_ACTIONS_JS}
     const badge = document.createElement('span');
     badge.className = 'badge ' + (full ? 'ok' : 'warn');
     badge.textContent = full ? 'full tracklist' : 'partial';
+    badge.setAttribute('data-tip', full ? 'Every track in this set is identified.' : 'Some tracks in this set are still unidentified (' + (total - ided) + ' of ' + total + ').');
     head.insertBefore(badge, head.querySelector('.date'));
 
     const meta = document.createElement('div');
@@ -157,18 +159,19 @@ ${DJ_ACTIONS_JS}
     const links = document.createElement('div');
     links.className = 'set-links';
     const l1001 = pill(set.url, '1001tracklists ↗'); if (l1001) links.appendChild(l1001);
-    const lyt = pill(data.setYoutubeLink, 'YouTube', 'Watch the set on YouTube'); if (lyt) links.appendChild(lyt);
-    const lsc = pill(data.setSoundcloudLink, 'SoundCloud', 'Listen to the set on SoundCloud'); if (lsc) links.appendChild(lsc);
-    const lap = pill(data.setAppleLink, 'Apple Music', 'Full set on Apple Music'); if (lap) links.appendChild(lap);
+    const lyt = pill(data.setYoutubeLink, 'YouTube', 'Watch the whole set on YouTube'); if (lyt) links.appendChild(lyt);
+    const lsc = pill(data.setSoundcloudLink, 'SoundCloud', 'Listen to the whole set on SoundCloud'); if (lsc) links.appendChild(lsc);
+    const lap = pill(data.setAppleLink, 'Apple Music', 'The whole set on Apple Music'); if (lap) links.appendChild(lap);
     const viewer = document.createElement('a');
     viewer.className = 'pill';
     viewer.href = '/ui/set?url=' + encodeURIComponent(set.url);
     viewer.textContent = 'Open set page';
+    viewer.setAttribute('data-tip', 'Opens this set in the tracked viewer, with its track list and diagnostics.');
     links.appendChild(viewer);
     // Remove and replace (routes/playlist-hygiene.ts): out of both playlists now, never re-added, queued for mkvid.
     const rr = document.createElement('button');
     rr.type = 'button'; rr.className = 'btn small'; rr.textContent = 'Remove & replace video';
-    rr.title = "Take this set's video out of the playlists for good and render one from its audio instead";
+    rr.setAttribute('data-tip', 'Takes this set\\'s video out of the artist and combined playlists for good (it is never re-added) and queues the set for an mkvid render from its audio instead.');
     rr.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       if (!(await TK.ask("Remove this set's video from the playlists and never re-add it?", { yes: 'Remove', danger: true }))) return;
@@ -181,7 +184,7 @@ ${DJ_ACTIONS_JS}
     links.appendChild(rr);
     const ll = document.createElement('button');
     ll.type = 'button'; ll.className = 'btn small'; ll.textContent = 'Load links';
-    ll.title = 'Look up Apple Music / YouTube links for every identified track (one page view per track not cached yet)';
+    ll.setAttribute('data-tip', 'Looks up Apple Music and YouTube links for every identified track. Costs one 1001tracklists page view per track not already cached (cached for 30 days).');
     const llStatus = document.createElement('span'); llStatus.className = 'muted sub';
     links.appendChild(ll); links.appendChild(llStatus);
     body.appendChild(links);
@@ -228,7 +231,7 @@ ${DJ_ACTIONS_JS}
       head.setAttribute('role', 'button');
       const chev = document.createElement('span'); chev.className = 'chev'; chev.textContent = '▸'; head.appendChild(chev);
       const title = document.createElement('span'); title.className = 'title'; title.textContent = set.title; head.appendChild(title);
-      const nl = document.createElement('span'); nl.className = 'badge neutral nl'; nl.textContent = 'not loaded'; head.appendChild(nl);
+      const nl = document.createElement('span'); nl.className = 'badge neutral nl'; nl.textContent = 'not loaded'; nl.setAttribute('data-tip', 'The tracklist has not been fetched yet. Open this set to load it.'); head.appendChild(nl);
       const date = document.createElement('span'); date.className = 'date'; date.textContent = set.date || ''; head.appendChild(date);
       card.appendChild(head);
       const body = document.createElement('div');
@@ -283,7 +286,7 @@ ${DJ_ACTIONS_JS}
       if (st.lastRunAt) {
         $last.textContent = 'Last sync ' + TK.fmt.rel(new Date(st.lastRunAt * 1000).toISOString()) + ' ';
         if (st.lastError) {
-          const b = document.createElement('span'); b.className = 'badge bad'; b.textContent = 'error'; b.title = String(st.lastError);
+          const b = document.createElement('span'); b.className = 'badge bad'; b.textContent = 'error'; b.setAttribute('data-tip', 'The last sync failed: ' + String(st.lastError) + ' (retried on a later scheduler tick)');
           $last.appendChild(b);
         }
         $last.hidden = false;

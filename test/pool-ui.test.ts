@@ -1481,8 +1481,7 @@ describe('pool page: queued rows and several creations at once', () => {
     // Totals: 1 live (acct-1); the retired one and the queued ones do not count; queued has its own tile.
     const stats = pg.els.get('stats')!.innerHTML
     expect(stats).toMatch(/<div class="v">1 \/ 1<\/div>/)
-    expect(stats).toMatch(/<div class="k">queued accounts \(scheduled\)<\/div>/)
-    expect(stats).toMatch(/<div class="k">queued accounts \(scheduled\)<\/div><div class="v">2<\/div>/)
+    expect(stats).toMatch(/<div class="k"><span class="tip-term"[^>]*>queued accounts \(scheduled\)<\/span><\/div><div class="v">2<\/div>/)
   })
 
   it('shows no queued tile without queued entries, and a table with only queued entries still renders', async () => {

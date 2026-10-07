@@ -4,32 +4,33 @@
 // per row (four at a time) and one GET /ui/api/removals.
 import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
+import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from './dj-actions'
 import { YOUTUBE_CARD_CSS, YOUTUBE_CARD_HTML, YOUTUBE_CARD_JS } from './youtube-card'
 
-const ACTIONS = /* html */ `<button id="fix-titles" type="button" class="btn" title="${FIX_TITLES_TITLE}">Fix titles</button>`
+const ACTIONS = /* html */ `<button id="fix-titles" type="button" class="btn"${tipAttr(FIX_TITLES_TITLE)}>Fix titles</button>`
 
 const BODY = /* html */ `
 ${YOUTUBE_CARD_HTML}
 <div id="hygiene" class="tk-card pl-hygiene" hidden></div>
 <div id="cmb-card" class="tk-card">
   <div class="pl-head">
-    <h2>Combined playlist</h2>
+    <h2><span class="tip-term"${tipAttr('One YouTube playlist holding every video from every artist playlist. New videos are added by the sync and a backfill fills in the rest, within the daily insert cap.')}>Combined playlist</span></h2>
     <div class="tk-row">
-      <button id="cmb-backfill" type="button" class="btn small" disabled>Backfill now</button>
-      <button id="cmb-refresh" type="button" class="btn small">Refresh</button>
+      <button id="cmb-backfill" type="button" class="btn small" disabled${tipAttr('Adds videos that are missing from the combined playlist right now, up to the daily insert cap. It also runs by itself on every scheduler tick.')}>Backfill now</button>
+      <button id="cmb-refresh" type="button" class="btn small"${tipAttr('Reads the playlist from YouTube again to update these numbers.')}>Refresh</button>
     </div>
   </div>
   <div id="cmb-body"><span class="muted">Loading…</span></div>
   <div id="cmb-meter" class="tk-meter" hidden><i id="cmb-fill"></i></div>
 </div>
 <div class="tk-card">
-  <div class="pl-head"><h2>DJ playlists</h2></div>
+  <div class="pl-head"><h2><span class="tip-term"${tipAttr('Each subscribed DJ has its own YouTube playlist, filled with one video per set.')}>DJ playlists</span></h2></div>
   <div id="error" class="err-state" role="alert" hidden></div>
   <div id="wrap" class="tk-table-wrap" hidden>
     <table class="tk-table">
-      <thead><tr><th>Playlist</th><th>DJ</th><th class="num">Videos</th><th>Last run</th><th class="num">mkvid videos</th></tr></thead>
+      <thead><tr><th>Playlist</th><th>DJ</th><th class="num">Videos</th><th>Last run</th><th class="num"><span class="tip-term"${tipAttr('Videos in this playlist that mkvid rendered from a set\'s audio because the set had no recording.')}>mkvid videos</span></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -204,9 +205,9 @@ ${YOUTUBE_CARD_JS}
     if (!d) { $hygiene.innerHTML = '<span class="muted">Hygiene status unavailable.</span> <a href="/ui/removed">Removed videos →</a>'; return; }
     const s = d.settings || {};
     const held = (d.holds || []).length;
-    $hygiene.innerHTML = '<span class="badge ' + (s.dryRun ? 'warn' : 'bad') + '">' + (s.dryRun ? 'DRY RUN' : 'LIVE') + '</span>' +
-      '<span class="badge neutral">deletes today ' + (d.deletesUsedToday || 0) + ' / ' + (s.dailyRemovals || 0) + '</span>' +
-      '<span class="badge ' + (held ? 'bad' : 'neutral') + '">' + held + ' held</span>' +
+    $hygiene.innerHTML = '<span class="badge ' + (s.dryRun ? 'warn' : 'bad') + '"' + TK.tip(s.dryRun ? 'The sweep only reports which videos it would remove (videos that are not a full recording, for instance); it deletes nothing yet.' : 'The sweep really removes videos that fail the full-recording check, from the artist and combined playlists.') + '>' + (s.dryRun ? 'DRY RUN' : 'LIVE') + '</span>' +
+      '<span class="badge neutral"' + TK.tip('Videos the sweep has removed from playlists today, out of its daily limit.') + '>deletes today ' + (d.deletesUsedToday || 0) + ' / ' + (s.dailyRemovals || 0) + '</span>' +
+      '<span class="badge ' + (held ? 'bad' : 'neutral') + '"' + TK.tip(held ? 'Playlists that lost many videos at once and are waiting for you to approve or undo on the Removed videos page.' : 'No playlist is waiting for your approval.') + '>' + held + ' held</span>' +
       '<a href="/ui/removed">Removed videos →</a>';
   }
 
