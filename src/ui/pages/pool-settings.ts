@@ -1,4 +1,4 @@
-// Pool settings page: tlpool's budget and browser limits, the recheck schedule, priority order and the render feeder.
+// Pool settings page: tlpool's budget and browser limits, the recheck schedule, priority order, the render feeder and the manual-sync queue wait.
 import { shell } from '../shell'
 import { POOL_CSS, COMMON_JS } from './pool-common'
 
@@ -28,6 +28,7 @@ const BODY = /* html */ `
     <p class="muted sub" style="margin-top:0">When the budget runs short, earlier ones go first.</p>
     <div id="prios"></div>
     <div class="field" style="margin-top:var(--sp-3)"><label for="feed">Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /><span class="hint">Sets mkvid is waiting on with no verified list, oldest request first, as verification fetches. Each fed set costs about 2 page views (the second fetch follows). Default 40; 0 = off.</span></div>
+    <div class="field"><label for="mqueue">Manual sync: wait for a free browser (seconds)</label><input id="mqueue" type="number" min="0" max="900" step="1" /><span class="hint">How long each page of a Sync / Resync button press may queue while every pool browser is busy. Default 600; 0 = no queueing (fails after 20 s, like the scheduler).</span></div>
     <div class="row" style="margin-top:var(--sp-3)"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit" class="btn primary">Save</button></div>
   </form>
 </div>
@@ -90,6 +91,7 @@ ${COMMON_JS}
     $('beyond').value = sched.recheck.beyondIntervalHours ?? '';
     $('over180').value = sched.recheck.beyondExceptionIntervalHours ?? '';
     $('feed').value = sched.renderFeedPerDay ?? '';
+    $('mqueue').value = sched.manualQueueSeconds ?? '';
     renderPrios();
   }
   function renderPrios() {
@@ -134,6 +136,7 @@ ${COMMON_JS}
     if (rows.length) recheck.bands = rows;
     const body = { recheck, priorities: { order: sched.priorities.order } };
     if (numOrNull('feed') != null) body.renderFeedPerDay = numOrNull('feed');
+    if (numOrNull('mqueue') != null) body.manualQueueSeconds = numOrNull('mqueue');
     $('sch-save').disabled = true; $('sch-msg').textContent = 'saving…';
     const r = await fetch('/ui/api/pool/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
     $('sch-save').disabled = false;

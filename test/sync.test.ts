@@ -26,6 +26,8 @@ import {
 } from '../src/lib/sync'
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
 import { makeLogger } from '../src/lib/log'
+import { PoolUnavailableError } from '../src/lib/pool'
+import { POOL_SETTINGS_KEY } from '../src/lib/pool-settings'
 import { UpstreamPausedError, UpstreamUnavailableError } from '../src/lib/upstream1001'
 import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
 import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
@@ -1841,5 +1843,58 @@ describe('BLOCK_SHAPED_FAILURE', () => {
     expect(BLOCK_SHAPED_FAILURE.test('HTTP 403')).toBe(true)
     expect(BLOCK_SHAPED_FAILURE.test('set id 14031 not found')).toBe(false)
     expect(BLOCK_SHAPED_FAILURE.test('parse error on row 4030')).toBe(false)
+  })
+})
+
+describe('manual syncs queue for a pool browser; pool faults read as what they are (2026-10-07)', () => {
+  beforeEach(() => _resetTallyForTests())
+  const pending = { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'], processedTracklistUrls: [] }
+
+  it('a manual.* run asks with queueSeconds = manualQueueSeconds (crawl included); the scheduler does not', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, pending)
+    mockCrawl([])
+    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
+    expect((crawlDjIndex as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({ queueSeconds: 600 })
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({ queueSeconds: 600 })
+
+    vi.mocked(fetch1001Html).mockClear()
+    await env.SUBS.put(POOL_SETTINGS_KEY, JSON.stringify({ manualQueueSeconds: 120 }))
+    await saveSubState(env, 'other', pending)
+    await syncOne(env, { ...sub, slug: 'other' }, 'tok', { trigger: 'manual.resync', skipDjCrawl: true })
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({ queueSeconds: 120 })
+
+    vi.mocked(fetch1001Html).mockClear()
+    await saveSubState(env, 'cron', pending)
+    await syncOne(env, { ...sub, slug: 'cron' }, 'tok', { trigger: 'cron.tick', skipDjCrawl: true, selection: { newUrls: ['https://x/tracklist/a'], recheckUrls: [] } })
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).not.toHaveProperty('queueSeconds')
+  })
+
+  it('a pool timeout stops the run with the pool\'s own words as lastError, not "1001tracklists unreachable"', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, pending)
+    vi.mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('timeout', undefined, 0, { reason: 'queued', waitedSeconds: 600 }))
+    const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(r.stoppedBy).toMatchObject({ reason: 'pool busy: waited 600 s for a free browser (other fetches were running)', poolCode: 'timeout' })
+    expect((await loadSubState(env, sub.slug))!.lastError).toBe('pool busy: waited 600 s for a free browser (other fetches were running)')
+  })
+
+  it('a pool refusal on the DJ page stops the run there and is recorded (it used to say "synced, 0 sets")', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, pending)
+    const page1Error = new PoolUnavailableError('timeout', undefined, null, { reason: 'running', accountId: 'acct-34', waitedSeconds: 600 })
+    ;(crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({ artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error })
+    const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
+    expect(fetch1001Html).not.toHaveBeenCalled()
+    expect(r.crawlStopReason).toBe('fetch_failed')
+    expect(r.stoppedBy).toMatchObject({ reason: "pool slow: acct-34's page load had not finished after 600 s", poolCode: 'timeout' })
+    expect((await loadSubState(env, sub.slug))!.lastError).toBe("pool slow: acct-34's page load had not finished after 600 s")
+
+    // A page-1 failure that is not a route fault (a parse problem, a 404) still just carries on.
+    ;(crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({ artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error: new Error('boom') })
+    const r2 = await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
+    expect(r2.stoppedBy).toBeUndefined()
+    expect(fetch1001Html).toHaveBeenCalled()
   })
 })

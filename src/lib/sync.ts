@@ -51,7 +51,7 @@ import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
 import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUnavailableError, type Fetch1001Opts, type Via } from './upstream1001'
 import { isPaused } from './ban-state'
-import { poolCodeOf, type PoolFaultCode, type PoolPriority } from './pool'
+import { poolCodeOf, PoolUnavailableError, type PoolFaultCode, type PoolPriority } from './pool'
 import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
 import { recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
 import { isVerified } from './verification'
@@ -118,6 +118,9 @@ export { loadSubState, saveSubState, type SubState, type TracklistVideo }
 
 /** Human label for why a batch stopped early (surfaces as the sub's lastError). */
 function stopReasonFor(e: unknown): string {
+  // The pool's own line already says what happened ("pool busy: waited 600 s
+  // for a free browser ..."); an "unavailable:" prefix made it read like an outage.
+  if (e instanceof PoolUnavailableError) return e.message
   if (e instanceof UpstreamPausedError) return `paused: ${e.message}`
   if (e instanceof UpstreamUnavailableError) return `unavailable: ${e.message}`
   return `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
@@ -146,9 +149,10 @@ const DEFAULT_MAX_SETS_PER_RUN = 30
 // costs no scroll request at all. A brand-new subscription gets its newest
 // 45 sets here; older history comes from the backfill below.
 const DEFAULT_MAX_DJ_PAGES = 4
-// Hard wall-clock deadline so we save state and return cleanly before
-// Cloudflare kills the worker. Workers' fetch event budget is ~30 s; we
-// leave headroom for network I/O on the response itself.
+// Soft wall-clock deadline: no new fetch starts after it, so a run returns in
+// reasonable time. Workers do not limit an HTTP request's wall clock while the
+// client is connected (CPU time is what counts), so a manual run that may queue
+// for the pool gets its queue time on top (see syncOne).
 const SYNC_DEADLINE_MS = 25_000
 /**
  * The recheck interval of a set whose date cannot be read from its URL (the
@@ -261,6 +265,12 @@ export type SyncOpts = {
   excludeAccounts?: string[]
   /** Settings to use (the scheduler passes the ones it read); read from KV when absent. */
   settings?: PoolSettings
+  /**
+   * How long each fetch may wait for a free pool browser (lib/pool.ts
+   * `queueSeconds`). Absent = `manualQueueSeconds` for a `manual.*` trigger,
+   * else 0.
+   */
+  queueSeconds?: number
   /** Cap how many already-processed tracklists we re-fetch to look for a swapped video. */
   maxRechecksPerRun?: number
   /**
@@ -513,7 +523,7 @@ export async function syncOne(
   const log = opts.log ?? makeLogger({ task: 'sync.one', slug: sub.slug })
   const maxSets = opts.maxSetsPerRun ?? DEFAULT_MAX_SETS_PER_RUN
   const maxRechecks = opts.maxRechecksPerRun ?? DEFAULT_MAX_RECHECKS_PER_RUN
-  const deadline = Date.now() + SYNC_DEADLINE_MS
+  const startedAt = Date.now()
   const loaded = await loadSubState(env, sub.slug, log)
   // A snapshot of what was loaded: the final save diffs against it so only
   // rows this run changed are written. Cloned because the run mutates the
@@ -529,7 +539,16 @@ export async function syncOne(
       ? await seedTracklistVideosFromAudit(env, sub.slug, new Set(state.processedTracklistUrls), log)
       : {})
   const settings = opts.settings ?? (await getPoolSettings(env))
-  const fetchOpts = fetchOptsFromEnv(env, log, opts.excludeAccounts?.length ? { excludeAccounts: opts.excludeAccounts } : {})
+  // A button press (manual.one / manual.all / manual.resync) may wait for a
+  // free pool browser; the scheduler keeps its short waits and moves on.
+  const queueSeconds = opts.queueSeconds ?? (opts.trigger?.startsWith('manual.') ? settings.manualQueueSeconds : 0)
+  // Room for one full queue wait, so a run whose first fetch queued still
+  // gets on with its sets afterwards.
+  const deadline = startedAt + SYNC_DEADLINE_MS + queueSeconds * 1000
+  const fetchOpts = fetchOptsFromEnv(env, log, {
+    ...(opts.excludeAccounts?.length ? { excludeAccounts: opts.excludeAccounts } : {}),
+    ...(queueSeconds > 0 ? { queueSeconds } : {}),
+  })
   /** Pool options for one set fetch: the run's priority, else by kind (see SyncOpts.priority). */
   const setFetchOpts = (setUrl: string, phase: 'new' | 'recheck'): Fetch1001Opts => ({
     ...fetchOpts,
@@ -562,6 +581,8 @@ export async function syncOne(
   const discovered = new Set<string>(state.discoveredTracklistUrls ?? [])
   let artistName: string
   let crawlStopReason: string | undefined
+  /** Page 1 of the DJ listing refused by the pool / paused: the run stops there, like a set fetch would. */
+  let crawlStoppedBy: SyncOneResult['stoppedBy']
   // A manual run's crawl costs page views too: page 1 is charged to its
   // budget, and a spent budget skips the crawl.
   const crawlBudgetOk = opts.skipDjCrawl || takeFetch(opts.fetchBudget)
@@ -586,6 +607,12 @@ export async function syncOne(
     })
     artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
     crawlStopReason = crawl.stopReason
+    if (crawl.page1Error !== undefined && isStopTheBatchError(crawl.page1Error)) {
+      // Until 2026-10-07 this was swallowed: the run said "synced, 0 sets"
+      // after waiting out the pool, with no lastError.
+      crawlStoppedBy = stoppedByOf(crawl.page1Error)
+      log.error('sync.batch_stopped_at_dj_page', { slug: sub.slug, ...errorFields(crawl.page1Error) })
+    }
     // Union with previously-discovered URLs — earlier pages may have failed
     // to fetch this run but we don't want to lose them from the todo set.
     const knownBefore = discovered.size
@@ -662,7 +689,7 @@ export async function syncOne(
   const abandoned = new Set(state.abandonedTracklistUrls ?? [])
   const failureCounts: Record<string, number> = { ...(state.failureCounts ?? {}) }
   const allUrls = [...discovered]
-  const todo = (opts.selection ? opts.selection.newUrls.filter((u) => discovered.has(u)) : allUrls)
+  const todo = (crawlStoppedBy ? [] : opts.selection ? opts.selection.newUrls.filter((u) => discovered.has(u)) : allUrls)
     .filter((u) => !processed.has(u) && !abandoned.has(u))
     .slice(0, maxSets)
   log.info('sync.todo_window', {
@@ -679,8 +706,8 @@ export async function syncOne(
   let setsProcessed = 0
   let setsAbandonedThisRun = 0
   /** Set when a block/pause stopped the run early; recorded as lastError and skips the recheck window. */
-  let stopReason: string | null = null
-  let stoppedBy: SyncOneResult['stoppedBy']
+  let stopReason: string | null = crawlStoppedBy?.reason ?? null
+  let stoppedBy: SyncOneResult['stoppedBy'] = crawlStoppedBy
   let setsRechecked = 0
   let videosReplaced = 0
   // Artist-playlist membership changed (insert or removal) → write the

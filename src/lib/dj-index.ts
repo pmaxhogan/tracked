@@ -187,6 +187,8 @@ export type DjCrawlResult = {
   tail: ScrollCursor | null
   /** The scroll request keys page 1 carried; stored so a later backfill step needs no page-1 fetch. */
   keys?: ScrollKeys | null
+  /** What page 1's fetch threw (stopReason `fetch_failed` with nothing walked), for a caller that reports it. */
+  page1Error?: unknown
   /** Present when a backfill was asked for. */
   backfill?: {
     /** Scroll steps spent on the backfill this call. */
@@ -269,7 +271,7 @@ export async function crawlDjIndex(
     page1Html = r.html
   } catch (e) {
     log?.warn('crawlDjIndex.page1_failed', { slug, error: e instanceof Error ? e.message : String(e) })
-    return { artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null }
+    return { artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error: e }
   }
   const parsed1 = parseDjIndex(page1Html)
   const seenSet = new Set<string>(parsed1.tracklistUrls)

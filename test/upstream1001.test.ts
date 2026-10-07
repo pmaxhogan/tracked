@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -14,7 +14,7 @@ import {
   UpstreamTransportError,
   UpstreamUnavailableError,
 } from '../src/lib/upstream1001'
-import { PHONE_MAX_WAIT_SECONDS, PoolPausedError, PoolUnavailableError, poolConfigFromEnv, poolFetch, poolRetestAccount } from '../src/lib/pool'
+import { PHONE_MAX_WAIT_SECONDS, PoolPausedError, PoolUnavailableError, poolConfigFromEnv, poolFetch, poolRestingShare, poolRetestAccount } from '../src/lib/pool'
 import { fetchMediaLinks, fetchTracklist, searchByTitle, searchByYouTubeUrl } from '../src/lib/tracklists1001'
 import { fetch1001Html } from '../src/lib/dj-index'
 import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
@@ -126,6 +126,119 @@ describe('poolFetch — the tlpool /fetch contract', () => {
   })
 })
 
+describe('poolFetch — queueSeconds (long queueing across re-POSTs)', () => {
+  const T0 = Date.parse('2026-10-07T18:00:00Z')
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+  })
+  afterEach(() => vi.useRealTimers())
+  /** tlpool holding each POST for its full maxWaitSeconds before answering. */
+  const holds = (answer: (body: Record<string, any>, n: number) => Response) => {
+    let n = 0
+    return fakePool((body) => {
+      vi.setSystemTime(Date.now() + body.maxWaitSeconds * 1000)
+      return answer(body, ++n)
+    })
+  }
+
+  it('re-POSTs the identical request (each wait <= 90 s) while tlpool says queued, then returns the page', async () => {
+    const { calls, pool } = holds((_b, n) => (n <= 3 ? json({ error: 'timeout', reason: 'queued', retryAfterSeconds: 0, queuedSeconds: n * 90 }) : page('<html>ok</html>')))
+    const r = await poolFetch(pool, { url: TL, kind: 'set', priority: 'new', queueSeconds: 600, excludeAccounts: ['acct-1'] })
+    expect(r.html).toBe('<html>ok</html>')
+    expect(calls).toHaveLength(4)
+    for (const c of calls) {
+      expect(c.body!.maxWaitSeconds).toBeLessThanOrEqual(90)
+      const { maxWaitSeconds: _w, ...rest } = c.body!
+      expect(rest).toEqual({ url: TL, kind: 'set', priority: 'new', excludeAccounts: ['acct-1'], queueSeconds: 600 })
+    }
+  })
+
+  it('stops at the queue budget and says how long it waited and why', async () => {
+    const log = makeLogger({ test: true })
+    const { calls, pool } = holds(() => json({ error: 'timeout', reason: 'queued', retryAfterSeconds: 0 }))
+    const e = await poolFetch(pool, { url: TL, kind: 'set', priority: 'new', queueSeconds: 600 }, log).catch((x) => x)
+    expect(calls.map((c) => c.body!.maxWaitSeconds)).toEqual([90, 90, 90, 90, 90, 90, 60])
+    expect(e).toBeInstanceOf(PoolUnavailableError)
+    expect(e).toMatchObject({ code: 'timeout', poolReason: 'queued', waitedSeconds: 600 })
+    expect(e.message).toBe('pool busy: waited 600 s for a free browser (other fetches were running)')
+    expect(isStopTheBatchError(e)).toBe(true)
+    expect(log.counters.poolCalls).toBe(7)
+
+    const running = holds(() => json({ error: 'timeout', reason: 'running', accountId: 'acct-34', retryAfterSeconds: 0 }))
+    const e2 = await poolFetch(running.pool, { url: TL, kind: 'set', priority: 'new', queueSeconds: 120 }).catch((x) => x)
+    expect(running.calls.map((c) => c.body!.maxWaitSeconds)).toEqual([90, 30])
+    expect(e2.message).toBe("pool slow: acct-34's page load had not finished after 120 s")
+  })
+
+  it('any other answer ends the loop at once: a stalled page load, an old tlpool without a reason, a pause', async () => {
+    for (const reply of [
+      { error: 'timeout', reason: 'browser', accountId: 'acct-34', retryAfterSeconds: 0 },
+      { error: 'timeout', retryAfterSeconds: 30 },
+      { error: 'budget_exhausted', retryAfterSeconds: 900 },
+    ]) {
+      const { calls, pool } = holds(() => json(reply))
+      await poolFetch(pool, { url: TL, kind: 'set', priority: 'new', queueSeconds: 600 }).catch(() => {})
+      expect(calls, JSON.stringify(reply)).toHaveLength(1)
+    }
+  })
+
+  it('a tlpool answering "queued" instantly cannot make it spin', async () => {
+    const { calls, pool } = fakePool(() => json({ error: 'timeout', reason: 'queued', retryAfterSeconds: 0 }))
+    await poolFetch(pool, { url: TL, kind: 'set', priority: 'new', queueSeconds: 600 }).catch(() => {})
+    expect(calls).toHaveLength(22)
+  })
+
+  it('phone never queues; without queueSeconds one POST waits the default 20 s, capped at 90', async () => {
+    const phone = holds(() => json({ error: 'timeout', reason: 'queued', retryAfterSeconds: 0 }))
+    const e = await poolFetch(phone.pool, { url: TL, kind: 'set', priority: 'phone', queueSeconds: 600 }).catch((x) => x)
+    expect(phone.calls).toHaveLength(1)
+    expect(phone.calls[0]!.body).toMatchObject({ maxWaitSeconds: PHONE_MAX_WAIT_SECONDS })
+    expect(phone.calls[0]!.body).not.toHaveProperty('queueSeconds')
+    expect(e.message).toBe('pool busy: waited 25 s for a free browser (other fetches were running)')
+
+    const plain = holds(() => json({ error: 'timeout', retryAfterSeconds: 30 }))
+    const e2 = await poolFetch(plain.pool, { url: TL, kind: 'set', priority: 'new' }).catch((x) => x)
+    expect(plain.calls[0]!.body).toMatchObject({ maxWaitSeconds: 20 })
+    expect(e2.message).toBe('pool timeout: no page within 20 s (pool busy or a page load stalled)')
+    const long = fakePool(() => page('x'))
+    await poolFetch(long.pool, { url: TL, kind: 'set', priority: 'new', maxWaitSeconds: 120 })
+    expect(long.calls[0]!.body).toMatchObject({ maxWaitSeconds: 90 })
+  })
+
+  it('fetch1001 passes queueSeconds through, and a stalled load inside the queue still gets its one retry elsewhere', async () => {
+    const { calls, pool } = holds((_b, n) =>
+      n === 1 ? json({ error: 'timeout', reason: 'queued', retryAfterSeconds: 0 }) : n === 2 ? json({ error: 'timeout', reason: 'browser', accountId: 'acct-34', retryAfterSeconds: 0 }) : page(TRACKLIST_HTML, { accountId: 'acct-8' }),
+    )
+    const r = await fetch1001(TL, { pool, priority: 'new', queueSeconds: 600 })
+    expect(r.accountId).toBe('acct-8')
+    expect(calls.map((c) => [c.body!.queueSeconds, c.body!.excludeAccounts ?? []])).toEqual([[600, []], [600, []], [600, ['acct-34']]])
+  })
+})
+
+describe('pool fault messages', () => {
+  it('say what happened, never "1001tracklists unreachable" for a pool fault', async () => {
+    const down = { url: POOL, token: 't', fetchImpl: (async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch }
+    const e = await poolFetch(down, { url: TL, kind: 'set', priority: 'new' }).catch((x) => x)
+    expect(e.message).toBe('pool unreachable: tlpool or its tunnel did not answer (fetch failed)')
+    expect(new PoolUnavailableError('no_healthy_account').message).toBe('pool: no healthy account free for this fetch')
+    expect(new PoolUnavailableError('timeout', undefined, null, { reason: 'net_error', accountId: 'acct-2' }).message).toBe('page load failed on acct-2 (network error in the pool browser)')
+  })
+
+  it('poolRestingShare ignores scheduled creations (state "queued") and passive accounts', async () => {
+    const accounts = [
+      { id: 'acct-1', state: 'active' },
+      { id: 'acct-2', state: 'resting' },
+      { id: 'acct-3', state: 'warming' },
+      { id: 'acct-4', state: 'resting', passive: true },
+      { id: 'queued-1', state: 'queued', queued: true, scheduledAt: '2026-10-08T00:00:00Z', passive: false },
+      { id: 'acct-5', state: 'retired' },
+    ]
+    const { pool } = fakePool(() => json({ accounts }))
+    expect(await poolRestingShare(pool)).toEqual({ resting: 1, total: 3 })
+  })
+})
+
 describe('fetch1001 — the only 1001tracklists route', () => {
   it('ban:pause is the master switch: nothing is sent to the pool', async () => {
     const env = makeEnv()
@@ -161,6 +274,32 @@ describe('fetch1001 — the only 1001tracklists route', () => {
     expect(e).toMatchObject({ code: 'timeout' })
     expect(isStopTheBatchError(e)).toBe(true)
     expect(always.calls).toHaveLength(2)
+  })
+
+  it('reason "browser" (a stalled page load) retries once with that account excluded; the error tells both halves', async () => {
+    let n = 0
+    const { calls, pool } = fakePool(() => (++n === 1 ? json({ error: 'timeout', reason: 'browser', accountId: 'acct-34', retryAfterSeconds: 0 }) : page(TRACKLIST_HTML, { accountId: 'acct-17' })))
+    const r = await fetch1001(TL, { pool, priority: 'new', excludeAccounts: ['acct-9'] })
+    expect(r.accountId).toBe('acct-17')
+    expect(calls.map((c) => c.body!.excludeAccounts)).toEqual([['acct-9'], ['acct-9', 'acct-34']])
+
+    let m = 0
+    const twice = fakePool(() => json({ error: 'timeout', reason: 'browser', accountId: ++m === 1 ? 'acct-34' : 'acct-5', retryAfterSeconds: 0 }))
+    const e = await fetch1001(TL, { pool: twice.pool, priority: 'recheck' }).catch((x) => x)
+    expect(e).toBeInstanceOf(PoolUnavailableError)
+    expect(e).toMatchObject({ code: 'timeout', poolReason: 'browser', accountId: 'acct-5' })
+    expect(e.message).toBe('page load stalled on acct-34 (tlpool stopped it); retried on another account: page load stalled on acct-5 (tlpool stopped it)')
+    expect(isStopTheBatchError(e)).toBe(true)
+    expect(twice.calls).toHaveLength(2)
+  })
+
+  it('no fetch1001 retry for queued / running / net_error / internal timeouts', async () => {
+    for (const reason of ['queued', 'running', 'net_error', 'internal']) {
+      const { calls, pool } = fakePool(() => json({ error: 'timeout', reason, accountId: 'acct-3', retryAfterSeconds: 0 }))
+      const e = await fetch1001(TL, { pool, priority: 'new' }).catch((x) => x)
+      expect(e, reason).toMatchObject({ code: 'timeout', poolReason: reason })
+      expect(calls, reason).toHaveLength(1)
+    }
   })
 
   it('no retry for a phone fetch or for any other pool refusal', async () => {

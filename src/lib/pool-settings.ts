@@ -81,6 +81,14 @@ export const PoolSettingsSchema = z.object({
   /** 1001tracklists fetches one manual button press (sync / resync) may spend (default 10). */
   manualMaxFetches: z.number().int().min(0).max(200),
   /**
+   * How long one fetch of a manual button press (sync / resync) may wait for
+   * a free pool browser, re-asking tlpool (`queueSeconds`, lib/pool.ts) while
+   * it says queued/running (default 600; 0 = one ask, like the scheduler).
+   * 2026-10-07: twelve sync clicks at once outran tlpool's 4 browsers and six
+   * failed after 20 s.
+   */
+  manualQueueSeconds: z.number().int().min(0).max(900),
+  /**
    * Forced refetches of one set's list (purge routes, the viewer's Refresh,
    * /now-playing `refresh: true`): a repeat for the same set within
    * `cooldownSeconds` (default 120) is answered from the cache, and at most
@@ -130,6 +138,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   discovery: { intervalHours: 24, jitterHours: 4 },
   backfill: { stepIntervalHours: 24, jitterHours: 6, overdueSlotHours: 12 },
   manualMaxFetches: 10,
+  manualQueueSeconds: 600,
   forcedRefetch: { cooldownSeconds: 120, dailyCap: 40 },
   renderFeedPerDay: 40,
   reports: { maxPerDay: 6, maxRestingShare: 0.5 },

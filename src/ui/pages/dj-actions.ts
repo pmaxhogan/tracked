@@ -33,12 +33,20 @@ export const DJ_ACTIONS_JS = /* js */ `
       TK.toast(REAUTH_TEXT, 'bad', null, { href: '/ui/oauth/start', text: 'Reconnect YouTube' });
     }
 
+    // A manual sync's fetches may each wait for a free pool browser (pool
+    // setting manualQueueSeconds, default 10 min): the request stays open that
+    // long. Past this point the toast says so, so the button does not look hung.
+    const QUEUE_HINT_MS = 20000;
+
     // Sync or Invalidate & resync one DJ. btn is optional (rows that track their own busy state pass null).
     // Resolves { ok, reauth?, data? }; the toast says what happened.
     async function syncSlug(slug, btn, opts) {
       const resync = !!(opts && opts.resync);
       return TK.busy(btn, resync ? 'Resyncing…' : 'Syncing…', async () => {
-        const res = await TK.api.post('/ui/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {});
+        const hint = setTimeout(() => TK.toast((resync ? 'resyncing ' : 'syncing ') + slug + ': each page may queue for a free pool browser (up to 10 min per page)…', 'ok'), QUEUE_HINT_MS);
+        let res;
+        try { res = await TK.api.post('/ui/api/' + (resync ? 'resync' : 'sync') + '/' + encodeURIComponent(slug), {}); }
+        finally { clearTimeout(hint); }
         const data = res.data && typeof res.data === 'object' ? res.data : {};
         if (!res.ok) {
           if (res.status === 412 && data.error === 'youtube_reauth_required') { reauthToast(); return { ok: false, reauth: true }; }
@@ -59,9 +67,15 @@ export const DJ_ACTIONS_JS = /* js */ `
         const combined = stats.combinedVideoIdsAdded ? ' · ' + stats.combinedVideoIdsAdded + ' into the combined playlist' : '';
         const rechecked = stats.tracklistsRechecked ? ' · rechecked ' + stats.tracklistsRechecked + ', replaced ' + (stats.videosReplaced || 0) : '';
         const inv = data.invalidated ? ' (invalidated ' + (data.invalidated.tracklistsMarked || 0) + ' cached videos)' : '';
-        TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + (stats.videoIdsAdded || 0) + ' new of ' +
+        const summary = (stats.videoIdsAdded || 0) + ' new of ' +
           (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
-          ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + rechecked + combined + more, 'ok');
+          ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + rechecked + combined + more;
+        // A run the pool stopped (busy, a stalled page load, paused) is not "synced": say why.
+        if (data.stoppedBy && data.stoppedBy.reason) {
+          TK.toast((resync ? 'resync ' : 'sync ') + slug + ' stopped: ' + data.stoppedBy.reason + inv + ' — ' + summary, 'bad');
+          return { ok: true, stopped: true, data };
+        }
+        TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + summary, 'ok');
         return { ok: true, data };
       });
     }
@@ -73,7 +87,10 @@ export const DJ_ACTIONS_JS = /* js */ `
       const yes = await TK.ask('Re-fetch every set of every DJ? Swapped recordings get replaced in the playlists. This drains over the next few cron ticks.', { yes: 'Resync all', danger: true });
       if (!yes) return null;
       return TK.busy(btn, 'Resyncing all…', async () => {
-        const res = await TK.api.post('/ui/api/resync', {});
+        const hint = setTimeout(() => TK.toast('resyncing all: each page may queue for a free pool browser (up to 10 min per page)…', 'ok'), QUEUE_HINT_MS);
+        let res;
+        try { res = await TK.api.post('/ui/api/resync', {}); }
+        finally { clearTimeout(hint); }
         const data = res.data && typeof res.data === 'object' ? res.data : {};
         if (!res.ok) {
           if (res.status === 412 && data.error === 'youtube_reauth_required') { reauthToast(); return { ok: false, reauth: true }; }
@@ -89,10 +106,12 @@ export const DJ_ACTIONS_JS = /* js */ `
         const invalidated = (data.invalidated || []).reduce((a, x) => a + (x.tracklistsMarked || 0), 0);
         const pending = sum((s) => (s.rechecksPending || 0) + (s.tracklistsPending || 0));
         const failed = results.filter((x) => x.ok === false).map((x) => x.slug);
+        const stopped = results.find((x) => x.stoppedBy && x.stoppedBy.reason);
         TK.toast('resynced ' + results.length + ' of ' + total + ' DJs this pass (invalidated ' + invalidated + ' cached videos) — rechecked ' + sum((s) => s.tracklistsRechecked) +
           ', replaced ' + sum((s) => s.videosReplaced) + ', ' + sum((s) => s.videoIdsAdded) + ' new' +
           (pending ? ' · ' + pending + ' still pending — auto-continuing every 5 min' : '') +
-          (failed.length ? ' · failed: ' + failed.join(', ') : ''), 'ok');
+          (failed.length ? ' · failed: ' + failed.join(', ') : '') +
+          (stopped ? ' · stopped at ' + stopped.slug + ': ' + stopped.stoppedBy.reason : ''), stopped ? 'bad' : 'ok');
         return { ok: true, data };
       });
     }

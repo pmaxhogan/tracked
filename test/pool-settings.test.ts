@@ -105,6 +105,19 @@ describe('stored settings', () => {
     expect(await e.SUBS.get(POOL_SETTINGS_KEY)).toBeNull()
   })
 
+  it('manualQueueSeconds: 600 by default, 0..900, stored like any other field', async () => {
+    const e = env()
+    expect((await getPoolSettings(e)).manualQueueSeconds).toBe(600)
+    expect((await updatePoolSettings(e, { manualQueueSeconds: 901 })).ok).toBe(false)
+    expect((await updatePoolSettings(e, { manualQueueSeconds: -1 })).ok).toBe(false)
+    expect((await updatePoolSettings(e, { manualQueueSeconds: 12.5 })).ok).toBe(false)
+    expect((await updatePoolSettings(e, { manualQueueSeconds: 0 })).ok).toBe(true)
+    expect((await getPoolSettings(e)).manualQueueSeconds).toBe(0)
+    // A document stored before the field existed still reads, with the default.
+    await e.SUBS.put(POOL_SETTINGS_KEY, JSON.stringify({ manualMaxFetches: 7 }))
+    expect(await getPoolSettings(e)).toMatchObject({ manualMaxFetches: 7, manualQueueSeconds: 600 })
+  })
+
   it('a stored document that no longer validates is ignored', async () => {
     const e = env()
     await e.SUBS.put(POOL_SETTINGS_KEY, JSON.stringify({ tick: { minItems: -1 } }))

@@ -20,7 +20,7 @@
 
 import { extractIPBlockedAddress, IPBlockedError, isIPBlocked, looksLikeCfShell, type ChallengeState } from './fetch'
 import { isPaused } from './ban-state'
-import { poolCodeOf, poolConfigFromEnv, poolFetch, type PoolConfig, type PoolFetchOk, type PoolFetchRequest, type PoolKind, type PoolPriority } from './pool'
+import { poolConfigFromEnv, poolFetch, PoolUnavailableError, type PoolConfig, type PoolFetchOk, type PoolFetchRequest, type PoolKind, type PoolPriority } from './pool'
 import { UpstreamHttpError, UpstreamPausedError, UpstreamTransportError, UpstreamUnavailableError } from './upstream-errors'
 import { capturePage, type PageStoreOpts, type PageVerdict } from './page-store'
 import type { Logger } from './log'
@@ -48,6 +48,8 @@ export type Fetch1001Opts = {
   /** Accounts that must not serve this fetch (verification second fetches). */
   excludeAccounts?: string[]
   maxWaitSeconds?: number
+  /** Re-ask while tlpool says queued/running, up to this long (lib/pool.ts). Manual syncs only. */
+  queueSeconds?: number
   method?: 'GET' | 'POST'
   /** Form fields for POST (tlpool sends them application/x-www-form-urlencoded). */
   form?: Record<string, string>
@@ -104,6 +106,7 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
     priority,
     ...(opts.excludeAccounts?.length ? { excludeAccounts: opts.excludeAccounts } : {}),
     ...(opts.maxWaitSeconds !== undefined ? { maxWaitSeconds: opts.maxWaitSeconds } : {}),
+    ...(opts.queueSeconds ? { queueSeconds: opts.queueSeconds } : {}),
     ...(opts.method ? { method: opts.method } : {}),
     ...(opts.form ? { form: opts.form } : {}),
     ...(opts.headers ? { headers: opts.headers } : {}),
@@ -112,14 +115,31 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
   try {
     r = await poolFetch(opts.pool ?? null, req, log)
   } catch (e) {
-    // A pool timeout is usually one account's browser hanging on its page
-    // load (2026-10-07: acct-34 stalled and a whole DJ sync stopped). Ask
-    // once more: tlpool never hands a request to an account still busy with
-    // the stalled one, so the retry lands on another account. Not for phone,
-    // whose caller is waiting under the 25 s contract.
-    if (poolCodeOf(e) !== 'timeout' || priority === 'phone') throw e
-    log?.warn('fetch1001.pool_timeout_retry', { url, kind, priority })
-    r = await poolFetch(opts.pool ?? null, req, log)
+    // One account's browser hanging on its page load (2026-10-07: acct-34
+    // stalled and a whole DJ sync stopped) is worth one more ask, on another
+    // account. tlpool says so with reason "browser" (it killed the load);
+    // that account is excluded, which also makes the retry a new job rather
+    // than an attach to the failed one. An old tlpool sends no reason: retry
+    // as before (it never hands a request to an account still busy with the
+    // stalled one). Not retried: "queued" / "running" (poolFetch already
+    // waited the whole queue budget, or the caller chose a short wait: asking
+    // again only re-joins the same queue), net_error / internal (pool-side,
+    // a retry would hammer), and phone, whose caller waits under 25 s.
+    const why = e instanceof PoolUnavailableError && e.code === 'timeout' ? e.poolReason : undefined
+    if (priority === 'phone' || !(e instanceof PoolUnavailableError) || why === undefined || (why !== null && why !== 'browser')) throw e
+    const stalled = why === 'browser' ? e.accountId : null
+    const retryReq: PoolFetchRequest = stalled ? { ...req, excludeAccounts: [...(req.excludeAccounts ?? []), stalled] } : req
+    log?.warn('fetch1001.pool_timeout_retry', { url, kind, priority, reason: why, stalledAccount: stalled, first: e.message })
+    try {
+      r = await poolFetch(opts.pool ?? null, retryReq, log)
+    } catch (e2) {
+      if (!(e2 instanceof PoolUnavailableError)) throw e2
+      // Same code, reason and retry hint as the second failure (the scheduler
+      // and the batch loops key off those); the message tells both halves.
+      const both = new PoolUnavailableError(e2.code, undefined, e2.retryAfterSeconds, { reason: e2.poolReason, accountId: e2.accountId, waitedSeconds: e2.waitedSeconds })
+      both.message = `${e.message}; retried on another account: ${e2.message}`
+      throw both
+    }
   }
   if (opts.pages) {
     // Background, never awaited: index.ts drains it into ctx.waitUntil.

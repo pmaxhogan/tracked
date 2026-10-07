@@ -265,7 +265,7 @@ describe('runSchedulerTick', () => {
     mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('no_healthy_account', undefined, 3600))
     const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
     expect(fetch1001Html).toHaveBeenCalledTimes(3)
-    expect(r.stoppedBy).toMatch(/no_healthy_account/)
+    expect(r.stoppedBy).toMatch(/^pool: no healthy account/)
     expect(Number(await env.CACHE.get(TICK_BACKOFF_KEY))).toBe(NOW + ITEM_SCOPED_BACKOFF_SECONDS)
 
     // A shorter hint from the pool is honoured.
@@ -392,6 +392,21 @@ describe('hand-made rechecks and failure handling', () => {
     const r = await runSchedulerTick(env, { random: always(0.99), now: NOW }) // draws 3: discovery, then the pending set
     expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([['discovery', 'stopped']])
     expect(fetch1001Html).not.toHaveBeenCalled()
+    const next = (await env.DB.prepare('SELECT next_discovery_at FROM dj_schedule WHERE slug = ?').bind('a').first<{ next_discovery_at: number }>())!.next_discovery_at
+    expect(next).toBe(NOW + H)
+  })
+
+  it('a discovery whose page the pool timed out on is item-scoped: it says why, and the tick moves on', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [setUrl('x', 1)], processedTracklistUrls: [] })
+    await env.DB.prepare('INSERT INTO dj_schedule (slug, next_discovery_at, next_backfill_at, updated_at) VALUES (?, ?, ?, ?)').bind('a', NOW - 1, NOW + 30 * D, NOW).run()
+    const page1Error = new PoolUnavailableError('timeout', undefined, null, { reason: 'queued', waitedSeconds: 20 })
+    mocked(crawlDjIndex).mockResolvedValue({ artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error })
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(r.items[0]).toMatchObject({ item: { kind: 'discovery' }, outcome: 'stopped', stopReason: 'pool busy: waited 20 s for a free browser (other fetches were running)' })
+    expect(r.items.length).toBeGreaterThan(1)
+    expect(fetch1001Html).toHaveBeenCalled()
     const next = (await env.DB.prepare('SELECT next_discovery_at FROM dj_schedule WHERE slug = ?').bind('a').first<{ next_discovery_at: number }>())!.next_discovery_at
     expect(next).toBe(NOW + H)
   })
