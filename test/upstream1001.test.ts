@@ -293,8 +293,30 @@ describe('fetch1001 — the only 1001tracklists route', () => {
     expect(twice.calls).toHaveLength(2)
   })
 
-  it('no fetch1001 retry for queued / running / net_error / internal timeouts', async () => {
-    for (const reason of ['queued', 'running', 'net_error', 'internal']) {
+  it('reason "net_error" (the page load failed in the account browser, usually its exit) retries once with that account excluded', async () => {
+    let n = 0
+    const { calls, pool } = fakePool(() => (++n === 1 ? json({ error: 'timeout', reason: 'net_error', accountId: 'acct-13', retryAfterSeconds: 60 }) : page(TRACKLIST_HTML, { accountId: 'acct-17' })))
+    const r = await fetch1001(TL, { pool, priority: 'new' })
+    expect(r.accountId).toBe('acct-17')
+    expect(calls.map((c) => c.body!.excludeAccounts)).toEqual([undefined, ['acct-13']])
+
+    let m = 0
+    const twice = fakePool(() => json({ error: 'timeout', reason: 'net_error', accountId: ++m === 1 ? 'acct-13' : 'acct-5', retryAfterSeconds: 60 }))
+    const e = await fetch1001(TL, { pool: twice.pool, priority: 'backfill', excludeAccounts: ['acct-9'] }).catch((x) => x)
+    expect(e).toBeInstanceOf(PoolUnavailableError)
+    expect(e).toMatchObject({ code: 'timeout', poolReason: 'net_error', accountId: 'acct-5', retryAfterSeconds: 60 })
+    expect(e.message).toBe('page load failed on acct-13 (network error in the pool browser); retried on another account: page load failed on acct-5 (network error in the pool browser)')
+    expect(isStopTheBatchError(e)).toBe(true)
+    expect(twice.calls.map((c) => c.body!.excludeAccounts)).toEqual([['acct-9'], ['acct-9', 'acct-13']])
+
+    // A phone fetch is never retried (its caller waits under 25 s).
+    const phone = fakePool(() => json({ error: 'timeout', reason: 'net_error', accountId: 'acct-13', retryAfterSeconds: 60 }))
+    await fetch1001(TL, { pool: phone.pool }).catch((x) => x)
+    expect(phone.calls).toHaveLength(1)
+  })
+
+  it('no fetch1001 retry for queued / running / internal timeouts', async () => {
+    for (const reason of ['queued', 'running', 'internal']) {
       const { calls, pool } = fakePool(() => json({ error: 'timeout', reason, accountId: 'acct-3', retryAfterSeconds: 0 }))
       const e = await fetch1001(TL, { pool, priority: 'new' }).catch((x) => x)
       expect(e, reason).toMatchObject({ code: 'timeout', poolReason: reason })

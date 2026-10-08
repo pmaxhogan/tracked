@@ -134,7 +134,7 @@ export class PoolUnavailableError extends UpstreamUnavailableError {
   readonly retryAfterSeconds: number | null
   /** tlpool's `reason` (PoolFaultInfo), null when it sent none. */
   readonly poolReason: string | null
-  /** The account the reason is about (running, browser), when tlpool named one. */
+  /** The account the reason is about (running, browser, net_error), when tlpool named one. */
   readonly accountId: string | null
   readonly waitedSeconds: number | null
   constructor(code: PoolFaultCode, detail?: string, retryAfterSeconds: number | null = null, info: PoolFaultInfo = {}) {

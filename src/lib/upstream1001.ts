@@ -119,15 +119,19 @@ export async function fetch1001(url: string, opts: Fetch1001Opts = {}): Promise<
     // stalled and a whole DJ sync stopped) is worth one more ask, on another
     // account. tlpool says so with reason "browser" (it killed the load);
     // that account is excluded, which also makes the retry a new job rather
-    // than an attach to the failed one. An old tlpool sends no reason: retry
-    // as before (it never hands a request to an account still busy with the
-    // stalled one). Not retried: "queued" / "running" (poolFetch already
-    // waited the whole queue budget, or the caller chose a short wait: asking
-    // again only re-joins the same queue), net_error / internal (pool-side,
-    // a retry would hammer), and phone, whose caller waits under 25 s.
+    // than an attach to the failed one. Same for "net_error": the page load
+    // failed in that account's browser before reaching the site, which is
+    // usually its exit (2026-10-07: 1001tracklists dropped acct-13's Mullvad
+    // IP and every fetch it drew failed for a day), so another account
+    // usually gets through. An old tlpool sends no reason: retry as before
+    // (it never hands a request to an account still busy with the stalled
+    // one). Not retried: "queued" / "running" (poolFetch already waited the
+    // whole queue budget, or the caller chose a short wait: asking again only
+    // re-joins the same queue), internal (pool-side, a retry would hammer),
+    // and phone, whose caller waits under 25 s.
     const why = e instanceof PoolUnavailableError && e.code === 'timeout' ? e.poolReason : undefined
-    if (priority === 'phone' || !(e instanceof PoolUnavailableError) || why === undefined || (why !== null && why !== 'browser')) throw e
-    const stalled = why === 'browser' ? e.accountId : null
+    if (priority === 'phone' || !(e instanceof PoolUnavailableError) || why === undefined || (why !== null && why !== 'browser' && why !== 'net_error')) throw e
+    const stalled = why === 'browser' || why === 'net_error' ? e.accountId : null
     const retryReq: PoolFetchRequest = stalled ? { ...req, excludeAccounts: [...(req.excludeAccounts ?? []), stalled] } : req
     log?.warn('fetch1001.pool_timeout_retry', { url, kind, priority, reason: why, stalledAccount: stalled, first: e.message })
     try {
