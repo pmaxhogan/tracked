@@ -328,6 +328,22 @@ describe('queue lifecycle', () => {
     expect(await claimMkvidRequest(off, log)).toBeNull()
   })
 
+  it('preferAccount takes the named account while it is offered and has claims left, else the fill order', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '5', MKVID_SHARED_DAILY_CLAIM_CAP: '1' })
+    for (const n of [1, 2, 3, 4]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: `2026-09-0${5 - n}` })
+    const both = ['primary', 'shared'] as const
+    // Not offered: ignored.
+    expect((await claimMkvidRequest(env, log, ['primary'], null, 'shared'))!).toMatchObject({ setUrl: 'https://x/tracklist/1', account: 'primary' })
+    expect((await claimMkvidRequest(env, log, both, null, 'shared'))!).toMatchObject({ setUrl: 'https://x/tracklist/2', account: 'shared' })
+    // The shared cap (1) is used: back to the fill order.
+    expect((await claimMkvidRequest(env, log, both, null, 'shared'))!).toMatchObject({ setUrl: 'https://x/tracklist/3', account: 'primary' })
+    expect((await claimMkvidRequest(env, log, both, null, 'primary'))!).toMatchObject({ setUrl: 'https://x/tracklist/4', account: 'primary' })
+    expect(await mkvidAccountUsage(env)).toEqual([
+      { account: 'primary', label: 'mkvid-uploads', used: 3, cap: 5 },
+      { account: 'shared', label: 'tracked-youtube', used: 1, cap: 1 },
+    ])
+  })
+
   it('fills the primary account first, spills to the shared one, and only among the accounts mkvid offers', async () => {
     const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '1', MKVID_SHARED_DAILY_CLAIM_CAP: '2' })
     for (const n of [1, 2, 3, 4]) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: `2026-09-0${5 - n}` })

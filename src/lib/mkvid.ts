@@ -949,8 +949,10 @@ export async function claimMkvidRequest(
   accounts: readonly MkvidAccount[] = ['primary'],
   /** The style mkvid renders tracked jobs with. Recreations are only handed to a `scene` mkvid. */
   style: string | null = null,
+  /** Upload through this account if it is offered and has claims left today (mkvid spreading concurrent uploads); else the fill order. */
+  preferAccount: MkvidAccount | null = null,
 ): Promise<MkvidClaim | null> {
-  const { request, outcome } = await claimNext(env, log, accounts, style === RECREATE_STYLE)
+  const { request, outcome } = await claimNext(env, log, accounts, style === RECREATE_STYLE, preferAccount)
   await recordMkvidPoll(env, outcome, accounts)
   if (!request) return null
   return { ...request, ...(await getMkvidTracks(env, request.id)) }
@@ -962,9 +964,11 @@ export type MkvidClaim = MkvidRequest & MkvidTrackList
 /**
  * `accounts` is what mkvid can upload with right now (a configured client
  * with a connected YouTube account); the first of them with claims left today
- * gets the request, so the primary project fills before the shared one.
+ * gets the request, so the primary project fills before the shared one —
+ * unless mkvid asks for `preferAccount` and that one is offered and has
+ * claims left (it spreads uploads running at once over both projects).
  */
-async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[], allowRecreate: boolean): Promise<{ request: MkvidRequest | null; outcome: MkvidPollOutcome }> {
+async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[], allowRecreate: boolean, preferAccount: MkvidAccount | null = null): Promise<{ request: MkvidRequest | null; outcome: MkvidPollOutcome }> {
   const db = dbOf(env)
   const now = nowSeconds()
   const stale = now - claimTtl(env, await getAppSettings(env))
@@ -973,7 +977,7 @@ async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[
     return { request: null, outcome: 'not_connected' }
   }
   const usage = (await mkvidAccountUsage(env)).filter((u) => accounts.includes(u.account))
-  const slot = usage.find((u) => u.used < u.cap)
+  const slot = (preferAccount ? usage.find((u) => u.account === preferAccount && u.used < u.cap) : undefined) ?? usage.find((u) => u.used < u.cap)
   if (!slot) {
     log.info('mkvid.claim_capped', { accounts: usage.map((u) => `${u.account} ${u.used}/${u.cap}`) })
     return { request: null, outcome: 'capped' }
@@ -1003,7 +1007,7 @@ async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[
     if (!fresh.length) return { request: null, outcome: 'empty' }
     for (const row of fresh) {
       seen.add(row.id)
-      const r = await tryClaimRow(env, log, row, { account, used, cap, now })
+      const r = await tryClaimRow(env, log, row, { account, used, cap, now, preferAccount })
       if (r) return { request: r, outcome: 'claimed' }
     }
   }
@@ -1015,7 +1019,7 @@ async function tryClaimRow(
   env: Env,
   log: Logger,
   row: Row,
-  a: { account: MkvidAccount; used: number; cap: number; now: number },
+  a: { account: MkvidAccount; used: number; cap: number; now: number; preferAccount?: MkvidAccount | null },
 ): Promise<MkvidRequest | null> {
   const db = dbOf(env)
   const { account, used, cap, now } = a
@@ -1088,7 +1092,7 @@ async function tryClaimRow(
     .bind(row.id, account, now, row.replaces_video_id ? 1 : 0)
     .run()
   const claimed = await getMkvidRequest(env, row.id)
-  log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, account, dailyClaims: used + 1, cap, recreate: !!row.replaces_video_id })
+  log.info('mkvid.claimed', { id: row.id, slug: row.slug, setUrl: row.set_url, source: row.source, attempt: claimed?.attempts ?? 0, account, dailyClaims: used + 1, cap, recreate: !!row.replaces_video_id, ...(a.preferAccount ? { preferAccount: a.preferAccount } : {}) })
   return claimed
 }
 

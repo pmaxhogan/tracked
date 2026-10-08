@@ -3,7 +3,9 @@
  * own bearer token (`MKVID_TOKEN`) — never the Tasker token — and mounted in
  * src/index.ts *above* the API_TOKEN wildcard gate, which also skips this path.
  *
- *   POST /mkvid/claim     { accounts?: ['primary'|'shared'…], style? } → { request } (null when nothing is queued / claimable)
+ *   POST /mkvid/claim     { accounts?: ['primary'|'shared'…], style?, preferAccount? } → { request } (null when nothing is queued / claimable)
+ *                         `preferAccount` = upload through that account if it is offered and has claims left today
+ *                         (else the usual fill order); an mkvid spreading concurrent uploads over both projects sends it
  *                         `style` = what mkvid renders tracked jobs with; a recreation is only handed out when it is `scene`
  *                         `accounts` = the Google projects mkvid can upload through right now (default ['primary']);
  *                         the request carries the `account` it was handed out for, and the set's
@@ -92,7 +94,7 @@ mkvidApp.post('/claim', async (c) => {
   if (!parsed.success) return c.json({ error: 'invalid_request' }, 400)
   const accounts = parsed.data.accounts ?? ['primary']
   try {
-    return c.json({ request: await claimMkvidRequest(c.env, log, accounts, parsed.data.style ?? null) })
+    return c.json({ request: await claimMkvidRequest(c.env, log, accounts, parsed.data.style ?? null, parsed.data.preferAccount ?? null) })
   } catch (e) {
     log.error('mkvid.claim_threw', errorFields(e))
     await recordMkvidPoll(c.env, 'error', accounts)

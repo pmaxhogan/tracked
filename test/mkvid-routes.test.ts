@@ -299,6 +299,15 @@ describe('/mkvid routes', () => {
     expect(((await (await post(env, '/mkvid/claim', { accounts: [] })).json()) as { request: unknown }).request).toBeNull()
   })
 
+  it('the claim body may name a preferAccount, honoured while that account has claims left', async () => {
+    const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '5', MKVID_SHARED_DAILY_CLAIM_CAP: '5' })
+    for (const n of ['a', 'b']) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` })
+    expect((await post(env, '/mkvid/claim', { accounts: ['primary', 'shared'], preferAccount: 'bogus' })).status).toBe(400)
+    const claim = async (b: object) => ((await (await post(env, '/mkvid/claim', b)).json()) as { request: { account: string } }).request
+    expect(await claim({ accounts: ['primary', 'shared'], preferAccount: 'shared' })).toMatchObject({ account: 'shared' })
+    expect(await claim({ accounts: ['primary', 'shared'] })).toMatchObject({ account: 'primary' })
+  })
+
   it('the panel can reorder and ban queued sets', async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
     for (const [n, d] of [['a', '2026-09-13'], ['b', '2026-09-11'], ['c', '2026-09-05']] as Array<[string, string]>) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: d })

@@ -233,6 +233,10 @@ export const MkvidClaimBody = z
       description: 'The visual style mkvid renders tracked jobs with (TRACKED_STYLE). A delete-and-recreate request is only handed to an mkvid that says `scene`; others leave it pending.',
       example: 'scene',
     }),
+    preferAccount: z.enum(['primary', 'shared']).optional().openapi({
+      description: 'Upload through this account if it is one of `accounts` and has claims left today; otherwise the usual fill order. mkvid sends it with TRACKED_SPREAD_ACCOUNTS so sets that upload at the same time use different Google projects.',
+      example: 'shared',
+    }),
   })
   .openapi('MkvidClaimBody')
 
