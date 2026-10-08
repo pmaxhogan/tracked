@@ -116,6 +116,15 @@ describe('extractSetAudioSource', () => {
     expect(extractSetAudioSource(html)).toEqual({ kind: 'hearthis', url })
   })
 
+  it('takes the SoundCloud player that reaches the last cue, else the longest', () => {
+    const player = (id: string, d: number) => `new AudioPlayerSC("scWidget_${id}", { idPlayer: "${id}", type: "soundcloud", source: "x", duration: "${d}" });`
+    const html = `<iframe src="https://w.soundcloud.com/player/?url=https://api.soundcloud.com/tracks/2212813376"></iframe>${player('2212813376', 3431)}${player('2175021006', 5276)}${player('999', 9000)}`
+    expect(extractSetAudioSource(html, 5080)).toEqual({ kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/2175021006' })
+    expect(extractSetAudioSource(html, 3000)).toEqual({ kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/2212813376' })
+    expect(extractSetAudioSource(html, 10000)).toEqual({ kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/999' })
+    expect(extractSetAudioSource(html)).toEqual({ kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/2212813376' })
+  })
+
   it('ignores hearthis links that are not a track page', () => {
     expect(extractSetAudioSource('<a href="https://hearthis.at/user/someone/">profile</a> <a href="https://hearthis.at/search/x/">s</a>')).toBeNull()
     expect(extractSetAudioSource('<a href="https://hearthis.at/">home</a>')).toBeNull()
@@ -201,6 +210,27 @@ describe('queue lifecycle', () => {
     await env.DB.prepare('UPDATE mkvid_requests SET claimed_at = ?, attempts = ? WHERE id = ?').bind(NOW - 120, MKVID_MAX_ATTEMPTS, first.id).run()
     expect(await claimMkvidRequest(env, log)).toBeNull()
     expect((await getMkvidRequest(env, first.id))!).toMatchObject({ status: 'failed', error: 'too many attempts' })
+  })
+
+  it('an incomplete_recording failure is requeued when the page offers a different source, and only then', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    await failMkvidRequest(env, { id: req.id, error: 'incomplete_recording: source is 3431s but the last cue is at 5080s', permanent: true }, log)
+    expect(await enqueueRaw(env, input)).toBe('exists')
+    const full = { kind: 'soundcloud' as const, url: 'https://api.soundcloud.com/tracks/2175021006' }
+    expect(await enqueueRaw(env, { ...input, source: full })).toBe('requeued')
+    expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'pending', attempts: 0, error: null, sourceUrl: full.url })
+    expect(await enqueueRaw(env, { ...input, source: full })).toBe('exists')
+  })
+
+  it('a failure for another reason is not requeued by a new source', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    await failMkvidRequest(env, { id: req.id, error: 'probe: HTTP Error 404', permanent: true }, log)
+    expect(await enqueueRaw(env, { ...input, source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/5' } })).toBe('exists')
+    expect((await getMkvidRequest(env, req.id))!.status).toBe('failed')
   })
 
   it('fail: retryable goes back to pending with a backoff, permanent parks it, exhausted parks it', async () => {

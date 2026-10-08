@@ -136,7 +136,7 @@ export function extractSetFacts(slug: string, setUrl: string, html: string, vide
     trackCount++
     if (m[1] === 'true') idedCount++
   }
-  const source = extractSetAudioSource(html)
+  const source = extractSetAudioSource(html, cue)
   return {
     setUrl,
     slug,

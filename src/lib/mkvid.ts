@@ -196,7 +196,17 @@ const HEARTHIS_RESERVED = new Set([
  * or the hearthis embed URL (mkvid turns that into the track page yt-dlp
  * accepts) / track page.
  */
-export function extractSetAudioSource(html: string): MkvidSource | null {
+export function extractSetAudioSource(html: string, lastCue: number | null = null): MkvidSource | null {
+  const players = soundcloudPlayers(html)
+  if (players.length > 0) {
+    // A page can carry several SoundCloud players: a short cut plus the full set
+    // (Green Velvet & Layton Giordani @ Experts Only: 57 min first, 88 min
+    // second). Take the first one that reaches the last cue; failing that the
+    // longest. Not simply the longest — an unrelated longer mix can be embedded.
+    const pick = (lastCue !== null ? players.find((p) => p.seconds >= lastCue) : players[0]) ??
+      players.reduce((a, b) => (b.seconds > a.seconds ? b : a))
+    return { kind: 'soundcloud', url: `https://api.soundcloud.com/tracks/${pick.id}` }
+  }
   const sc = html.match(SOUNDCLOUD_RE)
   if (sc) return { kind: 'soundcloud', url: `https://api.soundcloud.com/tracks/${sc[1]}` }
   const embed = html.match(HEARTHIS_EMBED_RE)
@@ -209,6 +219,21 @@ export function extractSetAudioSource(html: string): MkvidSource | null {
     return { kind: 'hearthis', url: `https://hearthis.at/${m[1]}/${m[2]}/` }
   }
   return null
+}
+
+const SC_PLAYER_RE = /new\s+AudioPlayerSC\(\s*"[^"]*"\s*,\s*\{([^}]{0,400})\}/g
+
+/** The page's SoundCloud players in page order: track id (idPlayer) and duration. */
+function soundcloudPlayers(html: string): Array<{ id: string; seconds: number }> {
+  const out: Array<{ id: string; seconds: number }> = []
+  SC_PLAYER_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = SC_PLAYER_RE.exec(html))) {
+    const id = m[1]!.match(/idPlayer\s*:\s*"(\d+)"/)?.[1]
+    const seconds = Number(m[1]!.match(/duration\s*:\s*"?(\d+)"?/)?.[1] ?? 0)
+    if (id && seconds > 0 && !out.some((p) => p.id === id)) out.push({ id, seconds })
+  }
+  return out
 }
 
 /** The set page's `<title>`, entity-decoded, minus any site suffix. */
@@ -529,9 +554,10 @@ const LIVE_TWIN_STATUSES = "('pending', 'claimed', 'done', 'banned')"
  * Queue a set, unless it already has a request (any status — a `done` or
  * `failed` request is final for that set until someone retries it from the
  * panel), or a live one (LIVE_TWIN_STATUSES) under another URL of the same
- * tracklist id. Returns whether a row was created.
+ * tracklist id. Returns whether a row was created (or a failed one requeued
+ * with a new source).
  */
-export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promise<'queued' | 'exists'> {
+export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promise<'queued' | 'requeued' | 'exists'> {
   const now = nowSeconds()
   const r = await dbOf(env)
     .prepare(
@@ -559,7 +585,19 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
       tracklistIdOf(input.setUrl),
     )
     .run()
-  return (r.meta.changes ?? 0) > 0 ? 'queued' : 'exists'
+  if ((r.meta.changes ?? 0) > 0) return 'queued'
+  // A request refused because its recording ends before the tracklist does gets
+  // another go when the page now offers a different recording (a second, full
+  // player — see extractSetAudioSource). The panel's Retry keeps the old source.
+  const re = await dbOf(env)
+    .prepare(
+      `UPDATE mkvid_requests SET source = ?, source_url = ?, last_cue_seconds = ?, status = 'pending', attempts = 0, not_before = NULL,
+              claimed_at = NULL, error = NULL, updated_at = ?
+       WHERE set_url = ? AND status = 'failed' AND error LIKE 'incomplete_recording%' AND source_url IS NOT ?`,
+    )
+    .bind(input.source.kind, input.source.url, v(input.lastCueSeconds), now, input.setUrl, input.source.url)
+    .run()
+  return (re.meta.changes ?? 0) > 0 ? 'requeued' : 'exists'
 }
 
 export async function getMkvidRequest(env: Env, id: string): Promise<MkvidRequest | null> {

@@ -339,6 +339,13 @@ ${MKVID_STATE_JS}
   const ACTS = [['top', '⤒', 'Move to the top'], ['up', '↑', 'Move up one'], ['down', '↓', 'Move down one'], ['bottom', '⤓', 'Move to the bottom'], ['ban', '✕', 'Never upload this set via mkvid']];
   const ACT_TIPS = { top: 'Moves this set to the front of the queue, ahead of everything dated up to today.', up: 'Moves this set up one place.', down: 'Moves this set down one place.', bottom: 'Moves this set to the back of the queue.', ban: 'Bans this set: it is never rendered by mkvid and the sync cannot queue it again. Unban it from its details.' };
   const STATUS_TIPS = { pending: 'Waiting in the queue for its turn.', claimed: 'mkvid took this set and is rendering and uploading it.', done: 'Uploaded and added to the playlists.', failed: 'Rendering or uploading failed. Retry it from its details.', superseded: 'The set gained a real recording, or the video was replaced, so no render is needed.', banned: 'Never rendered. Unban it from its details.' };
+  // A refusal made before any render (the recording is gone, or ends before the tracklist does) will fail again on Retry.
+  function statusTip(r) {
+    if (r.status !== 'failed') return STATUS_TIPS[r.status];
+    if (/^incomplete_recording/.test(r.error || '')) return 'The recording ends before the tracklist does, so mkvid refused it. Retry fails the same way; a recheck that finds a longer recording on the page queues it again by itself.';
+    if (/^probe:/.test(r.error || '')) return 'mkvid could not open the recording (deleted or private), so nothing was rendered. Retry only helps if the recording comes back.';
+    return STATUS_TIPS.failed;
+  }
   function actsHtml(id) {
     return '<span class="mk-acts">' + ACTS.map((a) => '<button type="button" class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '" data-id="' + esc(id) + '"' + TK.tip(ACT_TIPS[a[0]]) + ' aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
   }
@@ -354,7 +361,7 @@ ${MKVID_STATE_JS}
     if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(r.error) + '</span>');
     const lead = withPos && r.position != null
       ? '<span class="mk-pos"' + TK.tip('Place in the whole queue: the newest set goes first, undated sets last.') + '>#' + esc(r.position) + '</span>'
-      : '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(STATUS_TIPS[r.status]) + '>' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>';
+      : '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(statusTip(r)) + '>' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>';
     return '<div class="mk-row' + (r.status === 'failed' ? ' err' : '') + '" data-id="' + esc(r.id) + '">' + lead +
       '<div class="mk-main"><button type="button" class="mk-title" data-open="' + esc(r.id) + '">' + esc(titleOf(r)) + '</button>' +
       '<div class="mk-meta">' + meta.join(' · ') + '</div></div>' +

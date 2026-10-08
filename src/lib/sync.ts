@@ -793,9 +793,10 @@ export async function syncOne(
   const maybeQueueForMkvid = async (setUrl: string, html: string, parsed: ScrapedTracklist | null): Promise<string | null> => {
     if (!mkvidEnabled) return null
     try {
-      const source = extractSetAudioSource(html)
-      if (!source || !parsed) return null
+      if (!parsed) return null
       const tracks = parsed.tracks
+      const source = extractSetAudioSource(html, lastCueSeconds(tracks))
+      if (!source) return null
       // Zero rows is the fingerprint of a captcha shell, not a set — never queue from it.
       if (tracks.length === 0) return null
       // Decoy names (see DecoySignal) do not matter for queueing: only the row
@@ -831,7 +832,7 @@ export async function syncOne(
         log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
       }
       log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount, idedCount, tracksSaved, verified: await isVerified(env, setUrl) })
-      return r === 'queued' ? `queued for mkvid (${source.kind})` : `mkvid request already exists (${source.kind})`
+      return r === 'queued' ? `queued for mkvid (${source.kind})` : r === 'requeued' ? `mkvid request requeued with a new source (${source.kind})` : `mkvid request already exists (${source.kind})`
     } catch (e) {
       log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
       return null
