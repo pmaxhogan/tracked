@@ -259,6 +259,31 @@ describe('authedFetch 401 retry', () => {
     }
   })
 
+  it('tries the fresh token again after a pause when it is refused too, and logs the attempts', async () => {
+    let n = 0
+    const fetcher = vi.fn(async () => new Response('{}', { status: ++n <= 3 ? 401 : 200 })) as unknown as typeof fetch
+    const warn = vi.fn()
+    setAccessTokenRefresher(async () => 'fresh', { log: { warn }, delaysMs: [0, 0] })
+    try {
+      expect((await authedFetch('https://x/a?k=1', 'stale', {}, fetcher)).status).toBe(200)
+      expect(fetcher).toHaveBeenCalledTimes(4)
+      expect(warn).toHaveBeenCalledWith('youtube.auth_401_persisted', { url: 'https://x/a', statuses: [401, 401, 401, 200], final: 200 })
+    } finally {
+      setAccessTokenRefresher(null)
+    }
+  })
+
+  it('gives up after the pauses and returns the last 401', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 401 })) as unknown as typeof fetch
+    setAccessTokenRefresher(async () => 'fresh', { delaysMs: [0, 0] })
+    try {
+      expect((await authedFetch('https://x/a', 'stale', {}, fetcher)).status).toBe(401)
+      expect(fetcher).toHaveBeenCalledTimes(4)
+    } finally {
+      setAccessTokenRefresher(null)
+    }
+  })
+
   it('returns the 401 when no fresh token can be had', async () => {
     const fetcher = vi.fn(async () => new Response('{}', { status: 401 })) as unknown as typeof fetch
     setAccessTokenRefresher(async () => null)

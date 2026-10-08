@@ -26,13 +26,16 @@ export type Playlist = { id: string; title: string }
 export type AccessTokenRefresher = (stale: string) => Promise<string | null>
 
 let refresher: AccessTokenRefresher | null = null
+type AuthRetryOpts = { log?: { warn: (e: string, f?: Record<string, unknown>) => void }; delaysMs?: number[] }
+let authRetry: Required<Pick<AuthRetryOpts, 'delaysMs'>> & AuthRetryOpts = { delaysMs: [1000, 3000] }
 /** stale token → its replacement, so later calls holding the stale string skip the 401. */
 const replaced = new Map<string, string>()
 /** One refresh per stale token, however many calls hit the 401 at once. */
 const inflight = new Map<string, Promise<string | null>>()
 
-export function setAccessTokenRefresher(r: AccessTokenRefresher | null): void {
+export function setAccessTokenRefresher(r: AccessTokenRefresher | null, opts: AuthRetryOpts = {}): void {
   refresher = r
+  authRetry = { delaysMs: opts.delaysMs ?? [1000, 3000], log: opts.log }
   replaced.clear()
   inflight.clear()
 }
@@ -52,7 +55,8 @@ function refreshOnce(stale: string): Promise<string | null> {
  * Since 2026-10-07 Google has intermittently answered 401 "Invalid Credentials"
  * for an access token well inside its lifetime (calls either side of the 401
  * succeed with the same token). A 401 means nothing was done, so the request is
- * retried once with a force-refreshed token.
+ * retried with a force-refreshed token, and — when that is refused too — up to
+ * twice more with it after a pause.
  */
 export async function authedFetch(
   url: string,
@@ -72,7 +76,18 @@ export async function authedFetch(
   const fresh = await refreshOnce(token)
   if (!fresh || fresh === token) return res
   replaced.set(accessToken, fresh)
-  return send(fresh)
+  // A brand-new token has been seen rejected too (2026-10-08 20:59, a playlistItems.insert):
+  // the 401 is Google's flake, not the token's, so the same request goes again after a pause.
+  let again = await send(fresh)
+  const statuses = [res.status, again.status]
+  for (const ms of authRetry.delaysMs) {
+    if (again.status !== 401) break
+    await new Promise((r) => setTimeout(r, ms))
+    again = await send(fresh)
+    statuses.push(again.status)
+  }
+  if (statuses.length > 2) authRetry.log?.warn('youtube.auth_401_persisted', { url: url.split('?')[0], statuses, final: again.status })
+  return again
 }
 
 /**

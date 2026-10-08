@@ -66,6 +66,7 @@ import {
   isQuotaError,
   PlaylistNotFoundError,
   removeVideoFromPlaylist,
+  YouTubeApiError,
 } from './youtube-playlists'
 import {
   cachePlaylistVideoIds,
@@ -1021,8 +1022,11 @@ export async function syncOne(
       // above), so a URL is only abandoned for failures that are actually
       // about that URL — a real 404, a page that parses to zero tracks, a
       // 5xx from the site itself.
-      const fc = (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
-      const abandon = fc >= ABANDON_AFTER_FAILURES
+      // A YouTube 401 is Google refusing a valid token now and then, never
+      // about the set: it is retried next run without counting toward abandoning.
+      const authFlake = e instanceof YouTubeApiError && e.status === 401
+      const fc = authFlake ? (failureCounts[setUrl] ?? 0) : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
+      const abandon = !authFlake && fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })
       auditSet(abandon ? 'abandoned' : 'failed', setUrl, {
         message: e instanceof Error ? e.message : String(e),
@@ -1185,8 +1189,9 @@ export async function syncOne(
       // video in the playlist is never abandoned for failing a *recheck* —
       // after ABANDON_AFTER_FAILURES it is simply deferred to the next
       // interval instead of being retried every tick.
-      const fc = (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
-      const defer = fc >= ABANDON_AFTER_FAILURES
+      const authFlake = e instanceof YouTubeApiError && e.status === 401
+      const fc = authFlake ? (failureCounts[setUrl] ?? 0) : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
+      const defer = !authFlake && fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.recheck_failed', { slug: sub.slug, setUrl, failureCount: fc, deferring: defer, ...errorFields(e) })
       auditSet('failed', setUrl, {
         videoId: prev?.videoId ?? null,

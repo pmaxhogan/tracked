@@ -48,7 +48,8 @@ const app = new OpenAPIHono<{ Bindings: Env }>({
 let tokenRefresherEnv: Env | null = null
 function ensureTokenRefresher(env: Env): void {
   if (tokenRefresherEnv === env) return
-  setAccessTokenRefresher(youtubeTokenRefresher(env, makeLogger({ task: 'youtube.auth' })))
+  const log = makeLogger({ task: 'youtube.auth' })
+  setAccessTokenRefresher(youtubeTokenRefresher(env, log), { log })
   tokenRefresherEnv = env
 }
 
