@@ -339,6 +339,10 @@ ${MKVID_STATE_JS}
   const ACTS = [['top', '⤒', 'Move to the top'], ['up', '↑', 'Move up one'], ['down', '↓', 'Move down one'], ['bottom', '⤓', 'Move to the bottom'], ['ban', '✕', 'Never upload this set via mkvid']];
   const ACT_TIPS = { top: 'Moves this set to the front of the queue, ahead of everything dated up to today.', up: 'Moves this set up one place.', down: 'Moves this set down one place.', bottom: 'Moves this set to the back of the queue.', ban: 'Bans this set: it is never rendered by mkvid and the sync cannot queue it again. Unban it from its details.' };
   const STATUS_TIPS = { pending: 'Waiting in the queue for its turn.', claimed: 'mkvid took this set and is rendering and uploading it.', done: 'Uploaded and added to the playlists.', failed: 'Rendering or uploading failed. Retry it from its details.', superseded: 'The set gained a real recording, or the video was replaced, so no render is needed.', banned: 'Never rendered. Unban it from its details.' };
+  // A waiting or running request keeps the error its last attempt ended with: say so, or it reads as the current state.
+  function errorLabel(r) {
+    return r.status === 'pending' || r.status === 'claimed' ? 'last attempt: ' + r.error : r.error;
+  }
   // A refusal made before any render (the recording is gone, or ends before the tracklist does) will fail again on Retry.
   function statusTip(r) {
     if (r.status !== 'failed') return STATUS_TIPS[r.status];
@@ -358,7 +362,7 @@ ${MKVID_STATE_JS}
     else if (r.status !== 'pending') meta.push(esc(rel(r.updatedAt)));
     if (r.replacesVideoId) meta.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
     if (r.status === 'done' && r.oldStyle) meta.push('<span' + TK.tip('Rendered in an older visual style than the current scene style. It can be recreated.') + '>old style</span>');
-    if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(r.error) + '</span>');
+    if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(errorLabel(r)) + '</span>');
     const lead = withPos && r.position != null
       ? '<span class="mk-pos"' + TK.tip('Place in the whole queue: the newest set goes first, undated sets last.') + '>#' + esc(r.position) + '</span>'
       : '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(statusTip(r)) + '>' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>';
@@ -558,7 +562,7 @@ ${MKVID_STATE_JS}
     ]));
     out.push('<div class="mk-dgrp">Upload</div>');
     out.push(dl([
-      ['status', '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(STATUS_TIPS[r.status]) + '>' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(r.error) + '</span>' : '')],
+      ['status', '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(STATUS_TIPS[r.status]) + '>' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(errorLabel(r)) + '</span>' : '')],
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '—'],
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy !== 'unlisted' ? ' <span class="warn">(unlisted was requested — an unverified OAuth app forces private)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + esc(rel(r.notBefore)) : '')],
