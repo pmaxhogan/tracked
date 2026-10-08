@@ -93,6 +93,7 @@ import { pickSetVideo, rejectionNote } from './playlist-hygiene'
 import { combinedRefuses, markInPlaylist, markOutOfPlaylist } from './playlist-blocklist'
 import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
+import { findRenamedTracklists, mergeRenamedState, retireRenamedTracklists } from './tracklist-renames'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
@@ -632,6 +633,15 @@ export async function syncOne(
       tracklistsKnownTotal: discovered.size,
       backfill: crawl.backfill ?? null,
     })
+  }
+
+  // 1b. A set 1001tracklists renamed is listed under its new URL while the old
+  // one (which only redirects) is still known: fold the old URL into the new
+  // one so the set is tracked once (lib/tracklist-renames.ts).
+  const renames = findRenamedTracklists([...discovered])
+  if (renames.length > 0) {
+    mergeRenamedState(state, tracklistVideos, discovered, renames)
+    await retireRenamedTracklists(env, sub.slug, renames, log)
   }
 
   // 2. Resolve / create the playlist. State first, then YT lookup, then create.
