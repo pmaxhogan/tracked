@@ -29,6 +29,8 @@ import { prunePoolEvents, retryFailedPoolPushes } from './lib/pool-events'
 import { pruneSchedulerTicks, recordSchedulerTick } from './lib/tick-history'
 import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
 import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
+import { youtubeTokenRefresher } from './lib/google-oauth'
+import { setAccessTokenRefresher } from './lib/youtube-playlists'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
 // which is not the `{ error, message }` shape every route documents. Normalise
@@ -39,6 +41,20 @@ const app = new OpenAPIHono<{ Bindings: Env }>({
     const issues = result.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`)
     return c.json({ error: 'invalid_request', message: issues.join('; ') }, 400)
   },
+})
+
+// A YouTube 401 retries once with a force-refreshed token (lib/youtube-playlists.ts
+// authedFetch). Set once per env (in production one env serves the whole isolate).
+let tokenRefresherEnv: Env | null = null
+function ensureTokenRefresher(env: Env): void {
+  if (tokenRefresherEnv === env) return
+  setAccessTokenRefresher(youtubeTokenRefresher(env, makeLogger({ task: 'youtube.auth' })))
+  tokenRefresherEnv = env
+}
+
+app.use('*', async (c, next) => {
+  ensureTokenRefresher(c.env)
+  await next()
 })
 
 // Stored pages (lib/page-store.ts) and search index writes (lib/search/index.ts) run in the background; hand them to waitUntil once the response is built.
@@ -159,6 +175,7 @@ app.doc('/openapi.json', {
  * `ctx.waitUntil` keeps the worker alive past `scheduled` returning.
  */
 async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  ensureTokenRefresher(env)
   const isDaily = event.cron === '0 6 * * *'
   const log = makeLogger({ task: isDaily ? 'cron.daily' : 'cron.tick', cron: event.cron, ts: event.scheduledTime })
   log.info('cron.start')

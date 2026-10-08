@@ -182,11 +182,18 @@ export async function clearTokens(env: Env): Promise<void> {
  * Returns a usable access token (refreshing if it's within 60s of expiring),
  * or null when no tokens are stored.
  */
-export async function getAccessToken(env: Env, fetcher: typeof fetch = fetch): Promise<{ accessToken: string; tokens: StoredTokens } | null> {
+export async function getAccessToken(
+  env: Env,
+  fetcher: typeof fetch = fetch,
+  opts: { rejected?: string } = {},
+): Promise<{ accessToken: string; tokens: StoredTokens } | null> {
   const t = await loadTokens(env)
   if (!t) return null
   const now = Math.floor(Date.now() / 1000)
-  if (t.expiresAt - 60 > now) return { accessToken: t.accessToken, tokens: t }
+  // `rejected`: YouTube just 401'd this token, so refresh even though it looks
+  // valid — unless the stored one is already a different (newer) token.
+  const forced = opts.rejected !== undefined && t.accessToken === opts.rejected
+  if (!forced && t.expiresAt - 60 > now) return { accessToken: t.accessToken, tokens: t }
   if (!env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET) {
     throw new Error('GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET not configured')
   }
@@ -217,6 +224,27 @@ export async function getAccessToken(env: Env, fetcher: typeof fetch = fetch): P
   }
   await saveTokens(env, next)
   return { accessToken: refreshed.accessToken, tokens: next }
+}
+
+/**
+ * The refresher authedFetch uses after a YouTube 401 (see setAccessTokenRefresher).
+ * Logs how long the rejected token had left, to tell early-dying tokens from
+ * Google-side flakiness. Never clears tokens on a 401; only an invalid_grant
+ * from the refresh itself does (inside getAccessToken).
+ */
+export function youtubeTokenRefresher(env: Env, log: { warn: (e: string, f?: Record<string, unknown>) => void }) {
+  return async (stale: string): Promise<string | null> => {
+    const before = await loadTokens(env)
+    const secondsLeft = before ? before.expiresAt - Math.floor(Date.now() / 1000) : null
+    try {
+      const r = await getAccessToken(env, fetch, { rejected: stale })
+      log.warn('youtube.auth_401_retry', { secondsLeft, storedWasStale: before?.accessToken === stale, refreshed: !!r && r.accessToken !== stale })
+      return r?.accessToken ?? null
+    } catch (e) {
+      log.warn('youtube.auth_401_refresh_failed', { secondsLeft, error: e instanceof Error ? e.message : String(e) })
+      return null
+    }
+  }
 }
 
 export function randomState(): string {

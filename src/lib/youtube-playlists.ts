@@ -18,16 +18,61 @@ const API = 'https://www.googleapis.com/youtube/v3'
 
 export type Playlist = { id: string; title: string }
 
+/**
+ * Mints a fresh access token after YouTube rejected `stale` with a 401 (null when
+ * none can be had). Registered once per worker entry (src/index.ts) so every
+ * call site that holds a token string gets the retry without threading env through.
+ */
+export type AccessTokenRefresher = (stale: string) => Promise<string | null>
+
+let refresher: AccessTokenRefresher | null = null
+/** stale token → its replacement, so later calls holding the stale string skip the 401. */
+const replaced = new Map<string, string>()
+/** One refresh per stale token, however many calls hit the 401 at once. */
+const inflight = new Map<string, Promise<string | null>>()
+
+export function setAccessTokenRefresher(r: AccessTokenRefresher | null): void {
+  refresher = r
+  replaced.clear()
+  inflight.clear()
+}
+
+function refreshOnce(stale: string): Promise<string | null> {
+  let p = inflight.get(stale)
+  if (!p) {
+    p = refresher!(stale)
+      .catch(() => null)
+      .finally(() => inflight.delete(stale))
+    inflight.set(stale, p)
+  }
+  return p
+}
+
+/**
+ * Since 2026-10-07 Google has intermittently answered 401 "Invalid Credentials"
+ * for an access token well inside its lifetime (calls either side of the 401
+ * succeed with the same token). A 401 means nothing was done, so the request is
+ * retried once with a force-refreshed token.
+ */
 export async function authedFetch(
   url: string,
   accessToken: string,
   init: RequestInit = {},
   fetcher: typeof fetch = fetch,
 ): Promise<Response> {
-  const headers = new Headers(init.headers ?? {})
-  headers.set('Authorization', `Bearer ${accessToken}`)
-  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  return fetcher(url, { ...init, headers })
+  const send = (token: string) => {
+    const headers = new Headers(init.headers ?? {})
+    headers.set('Authorization', `Bearer ${token}`)
+    if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+    return fetcher(url, { ...init, headers })
+  }
+  const token = replaced.get(accessToken) ?? accessToken
+  const res = await send(token)
+  if (res.status !== 401 || !refresher) return res
+  const fresh = await refreshOnce(token)
+  if (!fresh || fresh === token) return res
+  replaced.set(accessToken, fresh)
+  return send(fresh)
 }
 
 /**

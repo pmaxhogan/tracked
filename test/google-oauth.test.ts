@@ -93,6 +93,22 @@ describe('getAccessToken', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
+  it('refreshes a still-valid token that YouTube rejected, but not one already replaced', async () => {
+    const env = {
+      SUBS: fakeKV({ 'oauth:google': JSON.stringify(baseTokens) }),
+      GOOGLE_OAUTH_CLIENT_ID: 'cid',
+      GOOGLE_OAUTH_CLIENT_SECRET: 'csec',
+    } as unknown as Env
+    const fakeFetch = vi.fn(async () =>
+      new Response(JSON.stringify({ access_token: 'new-access', expires_in: 3600, scope: YOUTUBE_SCOPES.join(' ') }), { status: 200 }),
+    ) as unknown as typeof fetch
+    expect((await getAccessToken(env, fakeFetch, { rejected: 'old-access' }))?.accessToken).toBe('new-access')
+    expect(fakeFetch).toHaveBeenCalledTimes(1)
+    // The stored token is now 'new-access'; a late 401 on 'old-access' must not refresh again.
+    expect((await getAccessToken(env, fakeFetch, { rejected: 'old-access' }))?.accessToken).toBe('new-access')
+    expect(fakeFetch).toHaveBeenCalledTimes(1)
+  })
+
   it('refreshes when access token is within 60s of expiry, persists new value', async () => {
     const expiring: StoredTokens = { ...baseTokens, expiresAt: Math.floor(Date.now() / 1000) + 30 }
     const kv = fakeKV({ 'oauth:google': JSON.stringify(expiring) })

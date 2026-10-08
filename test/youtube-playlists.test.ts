@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   addVideoToPlaylist,
+  authedFetch,
+  setAccessTokenRefresher,
   createPlaylist,
   deletePlaylistItem,
   findPlaylistByTitle,
@@ -234,5 +236,37 @@ describe('removeVideoFromPlaylist', () => {
     const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch
     expect(await removeVideoFromPlaylist('PL', 'vidA1234567', 'tok', fetcher)).toBe(0)
     expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('authedFetch 401 retry', () => {
+  it('retries once with a refreshed token and reuses it for later calls holding the stale one', async () => {
+    const seen: string[] = []
+    const fetcher = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get('Authorization')!
+      seen.push(auth)
+      return new Response('{}', { status: auth === 'Bearer stale' ? 401 : 200 })
+    }) as unknown as typeof fetch
+    const refresh = vi.fn(async () => 'fresh')
+    setAccessTokenRefresher(refresh)
+    try {
+      expect((await authedFetch('https://x/a', 'stale', {}, fetcher)).status).toBe(200)
+      expect((await authedFetch('https://x/b', 'stale', {}, fetcher)).status).toBe(200)
+      expect(seen).toEqual(['Bearer stale', 'Bearer fresh', 'Bearer fresh'])
+      expect(refresh).toHaveBeenCalledTimes(1)
+    } finally {
+      setAccessTokenRefresher(null)
+    }
+  })
+
+  it('returns the 401 when no fresh token can be had', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 401 })) as unknown as typeof fetch
+    setAccessTokenRefresher(async () => null)
+    try {
+      expect((await authedFetch('https://x/a', 'stale', {}, fetcher)).status).toBe(401)
+      expect(fetcher).toHaveBeenCalledTimes(1)
+    } finally {
+      setAccessTokenRefresher(null)
+    }
   })
 })
