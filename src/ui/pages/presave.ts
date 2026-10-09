@@ -86,7 +86,7 @@ ${PRESAVE_UI_JS}
     return '<div class="pv-wait">' + esc(what) + ' ' + next + '</div>';
   }
 
-  function hero(p) {
+  function hero(p, up) {
     const ctx = [];
     if (p.setUrl) ctx.push((p.cueSeconds != null ? 'At ' + esc(fmtCue(p.cueSeconds)) + ' in ' : 'From ') + '<a href="' + esc(setHref(p.setUrl)) + '">' + esc(TK.fmt.setLabel(p.setUrl)) + '</a>');
     if (p.djSlug) ctx.push('DJ <a href="' + esc(djHref(p.djSlug)) + '">' + esc(p.djSlug) + '</a>');
@@ -95,6 +95,10 @@ ${PRESAVE_UI_JS}
     const acts = [];
     if (p.stage === 'identify' || p.stage === 'links') acts.push('<button type="button" class="btn" data-do="recheck"' + TK.tip('Look it up on 1001tracklists now (one pool fetch).') + '>Recheck now</button>');
     else if (p.stage !== 'dismissed') acts.push('<button type="button" class="btn" data-do="recheck"' + TK.tip('Look it up again now (one pool fetch).') + '>Recheck</button>');
+    // Rip now: waiting for a YouTube link and no upload queued, running or done (a failed one may go again).
+    if (p.stage === 'links' && !(up && (up.status === 'pending' || up.status === 'claimed' || up.status === 'done'))) {
+      acts.push('<button type="button" class="btn primary" data-do="ripnow"' + TK.tip('Have mkvid rip it from another site and upload it to YouTube now, without waiting for the watch period.') + '>Rip and upload now</button>');
+    }
     if (p.stage === 'dismissed') acts.push('<button type="button" class="btn" data-do="restore"' + TK.tip('Watch it again.') + '>Restore</button>');
     else if (p.stage === 'identify' || p.stage === 'links') acts.push('<button type="button" class="btn ghost" data-do="dismiss"' + TK.tip('Stop watching it.') + '>Dismiss</button>');
     acts.push('<button type="button" class="btn danger" data-do="delete"' + TK.tip('Forget it and its check history.') + '>Delete</button>');
@@ -165,7 +169,7 @@ ${PRESAVE_UI_JS}
   function render(p, up) {
     cur = { p, up };
     if (!$root) return;
-    $root.innerHTML = hero(p) + '<div class="tk-grid two pv-grid">' + linksCard(p, up) + timeline(p, up) + '</div>' + uploadCard(up);
+    $root.innerHTML = hero(p, up) + '<div class="tk-grid two pv-grid">' + linksCard(p, up) + timeline(p, up) + '</div>' + uploadCard(up);
   }
 
   async function load() {
@@ -214,6 +218,16 @@ ${PRESAVE_UI_JS}
         const res = await TK.api.del('/ui/api/presaves/' + p.id);
         if (res.ok) { TK.toast('Deleted.'); go('/ui/presaves'); }
         else TK.toast(TK.errText(res, 'Delete failed (' + res.status + ')'), 'bad');
+      });
+    }
+    if (what === 'ripnow') {
+      if (!(await TK.ask('Rip this track from another site and upload it to YouTube now? mkvid picks it up on its next poll (it counts toward the daily track upload cap).', { yes: 'Rip and upload' }))) return;
+      return TK.busy(btn, 'Queueing…', async () => {
+        const res = await TK.api.post('/ui/api/track-uploads/rip-now', { presaveId: p.id });
+        const d = res.data || {};
+        if (res.ok) TK.toast(d.queued ? 'Queued for mkvid: ripping from ' + siteName(d.sourceName) + '. You get a push when it is uploaded.' : 'Already queued for mkvid.', 'ok');
+        else TK.toast(TK.errText(res, 'Could not queue it (' + res.status + ')'), 'bad');
+        await load();
       });
     }
     if (what === 'banlink' && up) {

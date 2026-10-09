@@ -27,6 +27,7 @@ import {
   banTrackUploadLink,
   countTrackUploads,
   getStoredTrackPlaylist,
+  maybeQueueTrackUpload,
   retryTrackUpload,
   sourceOfUrl,
   TRACK_UPLOAD_COLUMNS,
@@ -126,6 +127,27 @@ trackUploadsUiApp.get('/api/track-uploads/playlist', async (c) => {
   const playlistId = stored && stored.title === title ? stored.playlistId : null
   return c.json({ playlistId, title, url: playlistId ? `https://www.youtube.com/playlist?list=${playlistId}` : null })
 })
+
+// "Rip and upload now" on a pre-saved track's page: queue it for mkvid without waiting out minWatchDays.
+// Registered before /:id/... so "rip-now" is never read as an id.
+trackUploadsUiApp.post('/api/track-uploads/rip-now', async (c) => {
+  const b = await json(c, z.object({ presaveId: z.number().int().positive() }))
+  if (!b) return c.json({ error: 'invalid_request', message: 'presaveId is required' }, 400)
+  const r = await maybeQueueTrackUpload(c.env, b.presaveId, log(c, 'track_uploads.rip_now'), { force: true })
+  if (r.queued || r.reason === 'already_live') return c.json({ ok: true, ...r })
+  const status = r.reason === 'not_found' ? 404 : r.reason === 'error' ? 500 : 409
+  return c.json({ error: r.reason, message: RIP_NOW_REFUSAL[r.reason] ?? r.reason, ...r }, status)
+})
+
+const RIP_NOW_REFUSAL: Partial<Record<string, string>> = {
+  disabled: 'Track uploads are turned off in settings.',
+  not_found: 'No such pre-save.',
+  stage: 'Only a pre-save that is waiting for a YouTube link can be ripped (not one still waiting for an ID, found, uploaded or dismissed).',
+  already_uploaded: 'mkvid already uploaded it.',
+  has_youtube: '1001tracklists has a YouTube link for it now; recheck it.',
+  no_source: 'No link on a site mkvid can rip (allowed sources in settings), or every one was banned or already failed.',
+  error: 'Queueing failed; see the logs.',
+}
 
 trackUploadsUiApp.post('/api/track-uploads/:id/retry', async (c) => {
   const id = idParam(c.req.param('id'))

@@ -242,6 +242,25 @@ describe('/mkvid/track routes', () => {
     expect((await claimTrackUpload(env, log)).outcome).toBe('paused')
   })
 
+  it('"Rip and upload now" queues a pre-save inside its watch period; refuses one with nothing to rip, and an unknown one', async () => {
+    const env = makeEnv()
+    const id = await seedPresave(env, { ageDays: 0 })
+    expect((await maybeQueueTrackUpload(env, id)).reason).toBe('too_new')
+    const r = await ui(env, '/ui/api/track-uploads/rip-now', { presaveId: id })
+    expect(r.status).toBe(200)
+    const d = (await r.json()) as { ok: boolean; queued: boolean; uploadId: number; sourceName: string }
+    expect(d).toMatchObject({ ok: true, queued: true, sourceName: 'soundcloud' })
+    expect((await row(env, d.uploadId))!.status).toBe('pending')
+    // Pressed again: already queued, still ok.
+    expect(await (await ui(env, '/ui/api/track-uploads/rip-now', { presaveId: id })).json()).toMatchObject({ ok: true, queued: false, reason: 'already_live' })
+    const none = await seedPresave(env, { ageDays: 0, links: [{ source: '36', name: 'spotify', url: 'https://open.spotify.com/track/x', playerId: 'x', duration: 200 }] })
+    const n = await ui(env, '/ui/api/track-uploads/rip-now', { presaveId: none })
+    expect(n.status).toBe(409)
+    expect(await n.json()).toMatchObject({ error: 'no_source' })
+    expect((await ui(env, '/ui/api/track-uploads/rip-now', { presaveId: 99999 })).status).toBe(404)
+    expect((await ui(env, '/ui/api/track-uploads/rip-now', {})).status).toBe(400)
+  })
+
   it('a claim past the TTL is handed out again; /job renews it', async () => {
     const env = makeEnv()
     const q = await maybeQueueTrackUpload(env, await seedPresave(env))

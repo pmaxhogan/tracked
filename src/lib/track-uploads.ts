@@ -273,7 +273,8 @@ export type QueueResult = { queued: boolean; reason: QueueReason; uploadId?: num
  * and whose `url` is neither banned nor already failed/banned for this presave.
  * Never throws.
  */
-export async function maybeQueueTrackUpload(env: Env, presave: number | { id: number | string }, log?: Logger): Promise<QueueResult> {
+/** `force`: the owner's "Rip and upload now" (POST /ui/api/track-uploads/rip-now) — no minWatchDays wait. */
+export async function maybeQueueTrackUpload(env: Env, presave: number | { id: number | string }, log?: Logger, opts: { force?: boolean } = {}): Promise<QueueResult> {
   const presaveId = typeof presave === 'number' ? presave : Number(presave.id)
   try {
     const app = (await getAppSettings(env)).trackUploads
@@ -281,7 +282,7 @@ export async function maybeQueueTrackUpload(env: Env, presave: number | { id: nu
     const p = await getPresaveLite(env, presaveId)
     if (!p) return { queued: false, reason: 'not_found' }
     if (p.stage !== 'links') return { queued: false, reason: 'stage' }
-    if (Date.now() - Number(p.created_at) < app.minWatchDays * DAY_MS) return { queued: false, reason: 'too_new' }
+    if (!opts.force && Date.now() - Number(p.created_at) < app.minWatchDays * DAY_MS) return { queued: false, reason: 'too_new' }
     const db = dbOf(env)
     const live = await db.prepare("SELECT id FROM track_uploads WHERE presave_id = ? AND status IN ('pending', 'claimed') LIMIT 1").bind(p.id).first<{ id: number }>()
     if (live) return { queued: false, reason: 'already_live', uploadId: Number(live.id) }
@@ -333,7 +334,7 @@ export async function maybeQueueTrackUpload(env: Env, presave: number | { id: nu
       throw e
     }
     const uploadId = Number(res.meta.last_row_id)
-    log?.info('track_upload.queued', { uploadId, presaveId: p.id, trackId: p.track_id, artist: p.artist, title: p.title, sourceName: pick.name, sourceUrl: pick.url, expectedDurationSeconds: expected })
+    log?.info('track_upload.queued', { uploadId, presaveId: p.id, forced: !!opts.force, trackId: p.track_id, artist: p.artist, title: p.title, sourceName: pick.name, sourceUrl: pick.url, expectedDurationSeconds: expected })
     return { queued: true, reason: 'queued', uploadId, sourceName: pick.name, sourceUrl: pick.url }
   } catch (e) {
     log?.warn('track_upload.queue_threw', { presaveId, ...errorFields(e) })
