@@ -70,6 +70,8 @@ import { getBanStatus, manualClear, simulateBan } from '../lib/ban-state'
 import { poolSettingsApp } from './pool-api'
 import { appSettingsApp } from './app-settings'
 import { presaveUiApp } from './presave'
+import { STATS_PAGE } from '../ui/pages/stats'
+import { getStats } from '../lib/stats'
 import {
   deletePushSubscription,
   isPushSubscription,
@@ -131,6 +133,15 @@ subscriptionsApp.get('/djs', (c) => servePage(c, DJS_PAGE.html))
 subscriptionsApp.get('/playlists', (c) => servePage(c, PLAYLISTS_PAGE.html))
 subscriptionsApp.get('/settings', (c) => servePage(c, SETTINGS_PAGE.html))
 subscriptionsApp.get('/tools', (c) => servePage(c, TOOLS_PAGE.html))
+// Stats: cards and charts over every count the app keeps (ui/pages/stats.ts, lib/stats.ts).
+subscriptionsApp.get(STATS_PAGE.path, (c) => servePage(c, STATS_PAGE.html))
+subscriptionsApp.get('/api/stats', async (c) => {
+  try {
+    return c.json(await getStats(c.env, { fresh: c.req.query('fresh') === '1', log: makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'stats' }) }))
+  } catch (e) {
+    return c.json({ error: 'stats_failed', ...errorFields(e) }, 500)
+  }
+})
 // The mkvid queue: status line, caps, filters, tabs and a detail drawer (ui/pages/mkvid.ts).
 subscriptionsApp.get('/mkvid', (c) => servePage(c, MKVID_PAGE_HTML))
 // Pre-saves (list, one track) and mkvid's track uploads (ui/pages/presaves.ts, presave.ts, track-uploads.ts).

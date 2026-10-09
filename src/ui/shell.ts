@@ -16,7 +16,7 @@ import { TIP_CSS, TIP_JS, tipAttr } from './tip'
 import { DATA_TABLE_CSS, DATA_TABLE_JS } from './data-table'
 import { BAN_BANNER_HTML, BAN_JS } from '../routes/ban-ui'
 
-export type NavKey = 'home' | 'djs' | 'search' | 'presaves' | 'playlists' | 'removed' | 'mkvid' | 'track-uploads' | 'activity'
+export type NavKey = 'home' | 'stats' | 'djs' | 'search' | 'presaves' | 'playlists' | 'removed' | 'mkvid' | 'track-uploads' | 'activity'
   | 'pool' | 'captcha' | 'pool-settings' | 'scheduler' | 'settings' | 'tools'
 
 export interface NavItem {
@@ -37,6 +37,7 @@ export const SEARCH_HREF = '/ui/search'
 
 export const NAV: NavItem[] = [
   { key: 'home', label: 'Home', href: '/ui/', icon: 'home', group: null, tab: 'Home' },
+  { key: 'stats', label: 'Stats', href: '/ui/stats', icon: 'chart', group: null },
   { key: 'djs', label: 'DJs', href: '/ui/djs', icon: 'djs', group: 'Library', tab: 'DJs' },
   { key: 'search', label: 'Search', href: SEARCH_HREF, icon: 'search', group: 'Library', tab: 'Search' },
   { key: 'presaves', label: 'Pre-saves', href: '/ui/presaves', icon: 'bookmark', group: 'Library' },

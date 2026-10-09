@@ -32,6 +32,7 @@ import { pruneSchedulerTicks, recordSchedulerTick } from './lib/tick-history'
 import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
 import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
 import { youtubeTokenRefresher } from './lib/google-oauth'
+import { maybeSnapshotStats } from './lib/stats'
 import { setAccessTokenRefresher } from './lib/youtube-playlists'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
@@ -231,6 +232,8 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           log.error('cron.threw', errorFields(e))
         }
       }
+      // The Stats page's hourly snapshot (lib/stats.ts; never throws, at most once an hour).
+      if (!isDaily && (await maybeSnapshotStats(env, log))) log.info('cron.stats_snapshot')
       try {
         await retryFailedPoolPushes(env, { log })
       } catch (e) {
