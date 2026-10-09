@@ -139,6 +139,32 @@ describe('Pre-saves page', () => {
     expect(posts(calls).map((c) => c.url)).toEqual(['/ui/api/presaves/7/recheck', '/ui/api/presaves/7/dismiss'])
   })
 
+  it('?view=candidates loads the candidates (most Spotify pre-saves first, not pre-saved yet); Pre-save posts the track, an ID row by set and row', async () => {
+    const cand = (over: Record<string, unknown>) => ({ key: 'track:877907', trackId: '877907', trackUrl: 'https://www.1001tracklists.com/track/x/y/index.html', artist: 'BLR', title: 'Lipstick (Matroda Remix)', artworkUrl: null, label: 'Spinnin', isId: false, presaveCount: 108, setUrl: 'https://www.1001tracklists.com/tracklist/2mx9k/some-set.html', rowIndex: 3, cueSeconds: 600, djSlug: 'matroda', firstSeenAt: NOW - 1000, updatedAt: NOW, presaveId: null, presaveStage: null, ...over })
+    const rows = [cand({}), cand({ key: 'row:555', trackId: null, trackUrl: null, artist: null, title: null, isId: true, presaveCount: 7, rowIndex: 9, cueSeconds: 1200 })]
+    const { get, calls } = page(PRESAVES_PAGE.html, '?view=candidates', (url, method) => {
+      if (url.startsWith('/ui/api/presaves/candidates')) return table(rows)
+      if (method === 'POST') return { ok: true, created: true, presave: { id: 12 }, message: 'Pre-saved' }
+      return answer(url, method)
+    })
+    await settle()
+    expect(gets(calls).filter((u) => u.startsWith('/ui/api/presaves/candidates'))).toEqual(['/ui/api/presaves/candidates?page=1&size=50&sort=-presaveCount&f.presaved=eq:0'])
+    expect(get('ps-cand').hidden).toBe(false)
+    expect(get('ps-table').hidden).toBe(true)
+    const body = get('pc-body').innerHTML
+    expect(body).toContain('BLR – Lipstick (Matroda Remix)')
+    expect(body).toMatch(/108<span class="u">people/)
+    expect(body).toContain('data-act="presave"')
+    await get('ps-cand').on.click(actOn('presave', 0))
+    await settle()
+    await get('ps-cand').on.click(actOn('presave', 1))
+    await settle()
+    expect(posts(calls).map((c) => [c.url, c.body])).toEqual([
+      ['/ui/api/presaves', expect.objectContaining({ trackId: '877907', artist: 'BLR', title: 'Lipstick (Matroda Remix)', setUrl: rows[0]!.setUrl, djSlug: 'matroda' })],
+      ['/ui/api/presaves', expect.objectContaining({ tracklistUrl: rows[0]!.setUrl, rowIndex: 9, cueSeconds: 1200 })],
+    ])
+  })
+
   it('a row click opens the track page', async () => {
     const { get, location } = page(PRESAVES_PAGE.html, '', answer)
     await settle()

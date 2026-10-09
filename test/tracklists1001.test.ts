@@ -825,7 +825,7 @@ describe("parseTracklist: 'w/' (layered) rows", () => {
     // Real pages here have no anonymous rows: rows and tracks agree.
     for (const name of ['tracklist-matroda.html', 'tracklist-maxstyler.html', 'tracklist-habstrakt.html']) {
       const r = p(name)
-      expect(r.rows.map(({ anonymous, label: _l, mediaId: _m, ...t }) => (expect(anonymous).toBe(false), t)), name).toEqual(r.tracks)
+      expect(r.rows.map(({ anonymous, label: _l, mediaId: _m, presaveCount: _ps, hasYoutube: _yt, hasSpotify: _sp, ...t }) => (expect(anonymous).toBe(false), t)), name).toEqual(r.tracks)
     }
   })
 

@@ -65,6 +65,7 @@ import { fetchOptsFromEnv, isStopTheBatchError } from './upstream1001'
 import { deferVerification, dueVerifications, noteSetFetch, type VerificationResult } from './verification'
 import { syncOne, type SyncOneResult } from './sync'
 import { INDEX_FORMAT_SINCE, queueSearchIndex } from './search/index'
+import { updatePresaveCandidates } from './presave-candidates'
 import { getAppSettings } from './app-settings'
 import { DISCOVERED_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 import { duePresaves, presaveOnSetParsed, runScheduledPresave } from './presave'
@@ -287,6 +288,8 @@ export async function recordSetFetch(
   // Pre-saved ID rows of this set look for their row on the page (lib/presave.ts;
   // one indexed query when there are none, never throws, skips decoy pages).
   if (out.parsed && out.parsed.rows.length > 0) await presaveOnSetParsed(env, f.setUrl, out.parsed, f.log)
+  // Pre-save candidates (lib/presave-candidates.ts): the rows' Spotify pre-save counts, from a verified list only; never throws.
+  if (out.parsed && out.parsed.rows.length > 0) await updatePresaveCandidates(env, f.setUrl, out.parsed, f.log)
   return out
 }
 

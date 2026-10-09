@@ -24,6 +24,7 @@ import { errorFields, makeLogger } from '../lib/log'
 import { getAppSettings, type AppSettings } from '../lib/app-settings'
 import { tableResponse, type TableDef } from '../lib/table-query'
 import { getTrackUploadForPresave } from '../lib/track-uploads'
+import { CANDIDATE_PRESAVE_SQL, candidateOut, type PresaveCandidateOut, type PresaveCandidateRow } from '../lib/presave-candidates'
 import {
   addPresave,
   deletePresave,
@@ -286,6 +287,31 @@ presaveUiApp.post('/presaves', async (c) => {
   const r = await save(c.env, body, 'ui', log)
   return r.status === 200 ? c.json(r.body, 200) : c.json(r.body, 400)
 })
+
+// Pre-save candidates (lib/presave-candidates.ts): most pre-saved on Spotify first.
+// Registered before /presaves/:id so "candidates" is never read as an id.
+const CANDIDATES_TABLE: TableDef<PresaveCandidateRow & { presave_id: number | null; presave_stage: string | null }, PresaveCandidateOut> = {
+  from: 'presave_candidates c',
+  select: `c.*, ${CANDIDATE_PRESAVE_SQL} AS presave_id, (SELECT p.stage FROM presaves p WHERE p.id = ${CANDIDATE_PRESAVE_SQL}) AS presave_stage`,
+  primaryKey: 'key',
+  defaultSort: '-presaveCount',
+  columns: {
+    key: { sql: 'c.key', type: 'text' },
+    artist: { sql: 'c.artist', type: 'text', searchable: true },
+    title: { sql: 'c.title', type: 'text', searchable: true },
+    presaveCount: { sql: 'c.presave_count', type: 'number' },
+    isId: { sql: 'c.is_id', type: 'bool' },
+    presaved: { sql: `(${CANDIDATE_PRESAVE_SQL} IS NOT NULL)`, type: 'bool' },
+    label: { sql: 'c.label', type: 'text', searchable: true },
+    djSlug: { sql: 'c.dj_slug', type: 'text', searchable: true },
+    setUrl: { sql: 'c.set_url', type: 'text', searchable: true },
+    firstSeenAt: { sql: 'c.first_seen_at', type: 'datetime', storage: 'ms' },
+    updatedAt: { sql: 'c.updated_at', type: 'datetime', storage: 'ms' },
+  },
+  mapRow: (r) => candidateOut(r),
+}
+
+presaveUiApp.get('/presaves/candidates', async (c) => tableResponse(c, CANDIDATES_TABLE, c.env.DB))
 
 // Registered before /presaves/:id so "lookup" is never read as an id.
 presaveUiApp.post('/presaves/lookup', async (c) => {

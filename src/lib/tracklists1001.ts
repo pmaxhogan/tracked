@@ -387,7 +387,45 @@ export function normalizeTracklistUrl(input: string): string | null {
  * none: then `trackId` is the row's `data-id`, a page position (a named row with no media links).
  * Absent on parsed lists cached before it existed.
  */
-export type PageRow = ParsedTrack & { anonymous: boolean; label: string | null; mediaId?: string | null }
+export type PageRow = ParsedTrack & {
+  anonymous: boolean
+  label: string | null
+  mediaId?: string | null
+  /**
+   * The row's Spotify "Pre-Save N" badge (people who pre-saved the Spotify
+   * release, shown while it is not out), null when the row has none. On an ID
+   * row the badge is keyed to the row (`idTLP`), on a track to its medialink id.
+   */
+  presaveCount?: number | null
+  /** The row's media icons: an active YouTube / Spotify player icon (lit = 1001tracklists has that link). */
+  hasYoutube?: boolean
+  hasSpotify?: boolean
+}
+
+/** "Pre-Save 15" on the row's Spotify badge; null without one. */
+export function rowPresaveCount(row: HTMLElement): number | null {
+  const badge = row.querySelector('span.badgeSpotify')
+  if (!badge) return null
+  const m = /Pre-Save\s*(\d+)/i.exec(badge.text)
+  return m ? Number(m[1]) : null
+}
+
+/**
+ * Which players the row's media icons offer. A lit icon is
+ * `<i class="mAction fa colorized fa-24 fa-video-camera" title="open YouTube player">`;
+ * a site with no link shows `<i class="fa fa-24 fa-spotify mIcon" title="Spotify players">`.
+ */
+export function rowMediaLinks(mediaRow: HTMLElement | null): { hasYoutube: boolean; hasSpotify: boolean } {
+  let hasYoutube = false
+  let hasSpotify = false
+  for (const i of mediaRow?.querySelectorAll('i') ?? []) {
+    const cls = ` ${i.getAttribute('class') ?? ''} `
+    if (!cls.includes(' colorized ')) continue
+    if (cls.includes(' fa-video-camera ') || cls.includes(' fa-youtube ')) hasYoutube = true
+    if (cls.includes(' fa-spotify ')) hasSpotify = true
+  }
+  return { hasYoutube, hasSpotify }
+}
 
 export type ScrapedTracklist = {
   slug: string
@@ -585,7 +623,7 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
       prevTrack = false
       continue
     }
-    const { anonymous: _, label: _label, mediaId: _mediaId, ...track } = r
+    const { anonymous: _, label: _label, mediaId: _mediaId, presaveCount: _ps, hasYoutube: _yt, hasSpotify: _sp, ...track } = r
     const t = unlinkedUnless(track, prevTrack && tracks.length > 0)
     prevTrack = true
     tracks.push(t)
@@ -901,6 +939,9 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
       anonymous: true,
       label: null,
       mediaId: null,
+      presaveCount: rowPresaveCount(row),
+      hasYoutube: false,
+      hasSpotify: false,
     }
   }
 
@@ -959,6 +1000,8 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
     anonymous: false,
     label: parseRowLabel(row),
     mediaId: mediaTrackId,
+    presaveCount: rowPresaveCount(row),
+    ...rowMediaLinks(mediaRow),
   }
 }
 

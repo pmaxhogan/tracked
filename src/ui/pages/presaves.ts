@@ -190,7 +190,12 @@ const BODY = /* html */ `
     </div>
     <p id="ps-add-msg" class="ps-add-msg" role="status"></p>
   </form>
+  <div id="ps-views" class="chips ps-views" role="group" aria-label="List">
+    <button type="button" class="chip on" data-view="saved" aria-pressed="true"${tipAttr('Tracks you pre-saved: watched until YouTube has them.')}>Pre-saved</button>
+    <button type="button" class="chip" data-view="candidates" aria-pressed="false"${tipAttr('Tracks people pre-saved on Spotify that have no YouTube or Spotify link yet, read off your verified sets every time one is rechecked.')}>Candidates</button>
+  </div>
   <div id="ps-table"></div>
+  <div id="ps-cand" hidden></div>
 `
 
 const CSS = /* css */ `
@@ -204,6 +209,9 @@ const CSS = /* css */ `
   .ps-add-cue { flex: 0 0 7.5rem; }
   .ps-add-msg { margin: var(--sp-2) 0 0; font-size: var(--fs-sm); color: var(--muted); }
   .ps-add-msg:empty { display: none; }
+  .ps-views { margin-bottom: var(--sp-3); }
+  .ps-count { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--fg); white-space: nowrap; }
+  .ps-count .u { font-weight: 500; color: var(--muted); font-size: var(--fs-xs); margin-left: 3px; }
   .ps-add-msg.bad { color: var(--danger); }
   .ps-add-msg a { color: var(--accent); }
   @media (max-width: 699px) { .ps-add-cue { flex: 1 1 6rem; } .ps-add-row .btn { flex: 1 1 8rem; } }
@@ -264,6 +272,64 @@ ${PRESAVE_UI_JS}
       });
     },
   });
+
+  // ── candidates: tracks people pre-saved on Spotify, no YouTube or Spotify link yet ──
+  // Made the first time the tab is shown: the default view costs no extra request.
+  let candTable = null;
+  const candOpts = {
+    id: 'pc',
+    source: { url: '/ui/api/presaves/candidates' },
+    columns: [
+      { key: 'title', label: 'Track', type: 'text', render: (c) => trackCell(c, { href: c.presaveId ? '/ui/presave?id=' + c.presaveId : (TK.safeHref(c.trackUrl) || null), setLink: true }) },
+      { key: 'presaveCount', label: 'Spotify pre-saves', type: 'number', render: (c) => '<span class="ps-count">' + esc(String(c.presaveCount)) + '<span class="u">' + (c.presaveCount === 1 ? 'person' : 'people') + '</span></span>', tip: 'People who pre-saved the Spotify release on 1001tracklists, as of the last time the set was fetched.' },
+      { key: 'presaved', label: 'Stage', type: 'bool', render: (c) => (c.presaveId ? stageBadge(c.presaveStage) : '<span class="badge neutral"' + TK.tip('Not pre-saved yet.') + '>Candidate</span>') },
+      { key: 'isId', label: 'Kind', type: 'bool', hideOn: 'phone', render: (c) => (c.isId ? '<span class="badge warn"' + TK.tip('Not identified yet: pre-saving it watches the row until it is.') + '>ID</span>' : 'Track') },
+      { key: 'djSlug', label: 'DJ', type: 'text', hideOn: 'phone', render: (c) => (c.djSlug ? '<a class="ps-dj" href="' + esc(djHref(c.djSlug)) + '">' + esc(c.djSlug) + '</a>' : '<span class="tkt-nil">–</span>') },
+      { key: 'firstSeenAt', label: 'First seen', type: 'datetime', hideOn: 'phone', render: (c) => whenCell(c.firstSeenAt) },
+      { key: 'updatedAt', label: 'Count from', type: 'datetime', render: (c) => whenCell(c.updatedAt), tip: 'When the set this count was read from was last fetched.' },
+    ],
+    defaultSort: '-presaveCount',
+    search: 'Search artist, title, label, DJ or set',
+    chips: [
+      { id: 'new', label: 'Not pre-saved', group: 'p', on: true, filters: [{ col: 'presaved', op: 'eq', value: '0' }] },
+      { id: 'saved', label: 'Pre-saved', group: 'p', filters: [{ col: 'presaved', op: 'eq', value: '1' }] },
+      { id: 'all', label: 'All', group: 'p' },
+      { id: 'named', label: 'Identified only', filters: [{ col: 'isId', op: 'eq', value: '0' }] },
+    ],
+    rowKey: 'key',
+    empty: 'No candidates yet. They are read off verified set pages, so the list fills as sets are rechecked.',
+    actions: (c) => (c.presaveId
+      ? '<a class="btn" href="/ui/presave?id=' + esc(String(c.presaveId)) + '">Open</a>'
+      : '<button type="button" class="btn primary" data-act="presave"' + TK.tip('Pre-save it: watched until YouTube has it.') + '>Pre-save</button>'),
+    onAction: (act, c, btn) => {
+      if (act !== 'presave') return;
+      const body = c.trackId
+        ? { trackId: c.trackId, trackUrl: c.trackUrl, artist: c.artist, title: c.title, artworkUrl: c.artworkUrl, setUrl: c.setUrl, label: c.label, djSlug: c.djSlug }
+        : { tracklistUrl: c.setUrl, rowIndex: c.rowIndex, cueSeconds: c.cueSeconds, artist: c.artist, title: c.title, artworkUrl: c.artworkUrl, setUrl: c.setUrl, label: c.label, djSlug: c.djSlug };
+      return TK.busy(btn, 'Saving…', async () => {
+        const res = await TK.api.post('/ui/api/presaves', body);
+        const d = res.data && typeof res.data === 'object' ? res.data : {};
+        if (res.ok && d.presave) TK.toast(d.message || 'Pre-saved.', 'ok', null, { href: '/ui/presave?id=' + d.presave.id, text: 'Open it' });
+        else TK.toast(TK.errText(res, 'Could not pre-save it (' + res.status + ').'), 'bad');
+        if (candTable) candTable.reload();
+        table.reload();
+      });
+    },
+  };
+
+  // ── which list: ?view=candidates ──
+  const $views = $('ps-views');
+  function setView(v) {
+    const cand = v === 'candidates';
+    const t = $('ps-table'), k = $('ps-cand');
+    if (t) t.hidden = cand;
+    if (k) k.hidden = !cand;
+    if (cand && !candTable) candTable = TKTable.create(k, candOpts);
+    if ($views) for (const b of $views.querySelectorAll('[data-view]')) { const on = b.dataset.view === (cand ? 'candidates' : 'saved'); b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); }
+    TKTable.qs.merge({ view: cand ? 'candidates' : '' });
+  }
+  if ($views && typeof $views.addEventListener === 'function') $views.addEventListener('click', (e) => { const b = e.target && e.target.closest ? e.target.closest('[data-view]') : null; if (b) setView(b.dataset.view); });
+  setView(TK.qs.get('view') === 'candidates' ? 'candidates' : 'saved');
 
   // ── add from the web ──
   const $form = $('ps-add'), $url = $('ps-add-url'), $cue = $('ps-add-cue'), $go = $('ps-add-go'), $msg = $('ps-add-msg');
