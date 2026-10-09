@@ -200,3 +200,30 @@ describe('mkvid page tables', () => {
     expect(old.get('mk-p-queue').hidden).toBe(true)
   })
 })
+
+describe('mkvid page: a filter that empties one tab', () => {
+  it('says how many sets match in the other tab and opens it with the same filters and search', async () => {
+    const pre2020 = { ...DONE, id: 'r7', setTitle: 'FISHER @ neonGARDEN', setDate: '2019-05-17' }
+    const { get, calls } = page((url) => {
+      if (url.startsWith('/ui/api/mkvid/queue?') && url.includes('f.setDate')) return Response.json(tableOf([]))
+      if (url.startsWith('/ui/api/mkvid/finished?') && url.includes('f.setDate')) return Response.json(tableOf([pre2020]))
+      return answers(url)
+    }, '?q.f.setDate=before%3A2020-01-01')
+    await settle()
+    expect(gets(calls)).toContain('/ui/api/mkvid/finished?size=10&f.setDate=before:2020-01-01')
+    expect(get('q-empty').innerHTML).toContain('1 finished set matches in the Finished tab.')
+    const btn = { getAttribute: (k: string) => (k === 'data-mk-cross' ? 'queue' : null) }
+    get('mk-p-queue').on.click({ preventDefault() {}, target: { closest: (sel: string) => (sel === '[data-mk-cross]' ? btn : null) } })
+    await settle()
+    expect(get('mk-p-settled').hidden).toBe(false)
+    expect(gets(calls).at(-1)).toBe('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.setDate=before:2020-01-01')
+    expect(get('fin-body').innerHTML).toContain('FISHER @ neonGARDEN')
+  })
+
+  it('no hint without a filter or search', async () => {
+    const { get, calls } = page((url) => (url.startsWith('/ui/api/mkvid/queue?') ? Response.json(tableOf([])) : answers(url)))
+    await settle()
+    expect(gets(calls).some((u) => u.includes('size=10'))).toBe(false)
+    expect(get('q-empty').innerHTML).not.toContain('mk-cross')
+  })
+})

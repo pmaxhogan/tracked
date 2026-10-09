@@ -83,6 +83,8 @@ const CSS = /* css */ `
   .mk-row:hover { background: var(--elev); }
   .mk-row.err { box-shadow: inset 3px 0 0 var(--danger); }
   .mk-row.old { cursor: default; }
+  .mk-cross { margin: var(--sp-2) 0 0; color: var(--muted); }
+  .mk-cross .btn { margin-left: 6px; }
   .mk-pos { font-family: var(--mono); font-size: var(--fs-sm); color: var(--subtle); min-width: 3.2em; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
   .mk-main { flex: 1; min-width: 0; }
   .mk-title { display: block; font: inherit; font-weight: 600; color: var(--fg); background: none; border: 0; padding: 0; text-align: left; cursor: pointer; overflow-wrap: anywhere; max-width: 100%; }
@@ -370,9 +372,44 @@ ${MKVID_STATE_JS}
     return s.length === 1 && s[0].col === 'position' && s[0].dir === 'asc';
   };
   let queueTable = null, finTable = null, oldTable = null;
+  // A filter or search that empties one list may match sets in the other (a set
+  // that already finished is not in the queue): the empty message says how many
+  // and offers to open the other tab with the same filters and search.
+  const CROSS = { queue: { other: 'settled', url: '/ui/api/mkvid/finished', words: ['finished set', 'finished sets'] }, settled: { other: 'queue', url: '/ui/api/mkvid/queue', words: ['queued set', 'queued sets'] } };
+  const crossSeq = { queue: 0, settled: 0 };
+  async function crossHint(from, resp) {
+    const t = from === 'queue' ? queueTable : finTable;
+    if (!t || !resp || resp.total !== 0) return;
+    const st = t.state();
+    const filters = st.filters.filter((f) => f.col !== 'position' && f.col !== 'status');
+    if (!filters.length && !st.q) return;
+    const c = CROSS[from], seq = ++crossSeq[from];
+    let url = c.url + '?size=10' + filters.map((f) => '&f.' + encodeURIComponent(f.col) + '=' + encodeURIComponent(f.op + ':' + f.value)).join('') + (st.q ? '&q=' + encodeURIComponent(st.q) : '');
+    const res = await TK.api.get(url);
+    const n = res && res.ok && res.data ? Number(res.data.total) || 0 : 0;
+    const em = $(t.id + '-empty');
+    if (!n || !em || seq !== crossSeq[from]) return;
+    em.innerHTML += '<p class="mk-cross">' + esc(n + ' ' + c.words[n === 1 ? 0 : 1]) + (n === 1 ? ' matches' : ' match') + ' in the ' + (c.other === 'settled' ? 'Finished' : 'Queue') + ' tab. ' +
+      '<button type="button" class="btn" data-mk-cross="' + from + '">Show ' + (n === 1 ? 'it' : 'them') + '</button></p>';
+  }
+  function crossGo(from) {
+    const t = from === 'queue' ? queueTable : finTable, o = from === 'queue' ? finTable : queueTable;
+    if (!t || !o) return;
+    const st = t.state();
+    selectTab(CROSS[from].other, false);
+    o.apply({ filters: st.filters.filter((f) => f.col !== 'position' && f.col !== 'status'), q: st.q });
+  }
+  // On the tab panels, not the table hosts: the tables own their hosts' click handling.
+  for (const host of [$panels.queue, $panels.settled]) {
+    if (host && typeof host.addEventListener === 'function') host.addEventListener('click', (e) => {
+      const b = e.target && e.target.closest ? e.target.closest('[data-mk-cross]') : null;
+      if (b) { e.preventDefault(); crossGo(b.getAttribute('data-mk-cross')); }
+    });
+  }
   queueTable = TKTable.create($('mk-queue'), {
     id: 'q',
     source: { url: '/ui/api/mkvid/queue' },
+    onData: (resp) => { crossHint('queue', resp); },
     defaultSort: 'position',
     pageSize: 25,
     pageSizes: [10, 25, 50, 100, 200],
@@ -413,6 +450,7 @@ ${MKVID_STATE_JS}
   finTable = TKTable.create($('mk-settled'), {
     id: 'fin',
     source: { url: '/ui/api/mkvid/finished' },
+    onData: (resp) => { crossHint('settled', resp); },
     defaultSort: '-updatedAt',
     pageSize: 25,
     search: 'Search set, DJ, URL or error',

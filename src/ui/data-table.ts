@@ -76,6 +76,7 @@
 //   reload()                    refetch (server) or recompute (local), keeping page/sort/filters
 //   setFilter(col, op, value)   replace col's filters with one (op null = remove them); back to page 1
 //   clearFilters()              drop every user filter and the search, chips back to their defaults
+//   apply({ filters, q })       replace the user filters (unknown columns dropped) and the search; back to page 1
 //   setRows(rows)               local mode: new rows
 //   setSort('-a,b'), setPage(n), state(), rows(), response()
 //
@@ -1036,6 +1037,16 @@ var TKTable = (() => {
       reload: () => load(),
       setFilter,
       clearFilters,
+      apply(o) {
+        o = o || {};
+        st.filters = (o.filters || []).filter((f) => f && cols[f.col]).map((f) => ({ col: String(f.col), op: String(f.op), value: f.value == null ? '' : String(f.value) }));
+        if (searchOn) {
+          st.q = String(o.q || '').trim();
+          const qi = document.getElementById(id + '-q');
+          if (qi) qi.value = st.q;
+        }
+        return changed(true);
+      },
       setSort(s) { st.sort = parseSort(s, cols).filter((x) => cols[x.col].sortable); return changed(true); },
       setPage(n) { st.page = Math.max(1, Math.floor(Number(n) || 1)); return changed(false); },
       setRows(rows) { if (local) { cfg.source.rows = rows; return load(); } },
