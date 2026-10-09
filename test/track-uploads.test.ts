@@ -292,6 +292,28 @@ describe('/mkvid/track routes', () => {
     expect((await mk(env, '/mkvid/track/complete', { id: 'not-a-number', videoId: 'vid12345678' })).status).toBe(400)
   })
 
+  it("complete fills a nameless pre-save (saved by id alone) with mkvid's names and artwork, never overwrites, and refuses nothing", async () => {
+    const env = makeEnv()
+    const id = await seedPresave(env)
+    await env.DB.prepare('UPDATE presaves SET artist = NULL, title = NULL, artwork_url = NULL WHERE id = ?').bind(id).run()
+    const q = await maybeQueueTrackUpload(env, id)
+    await env.DB.prepare('UPDATE track_uploads SET artist = NULL, title = NULL, artwork_url = NULL WHERE id = ?').bind(q.uploadId!).run()
+    await claimTrackUpload(env, log)
+    const res = await mk(env, '/mkvid/track/complete', { id: q.uploadId, videoId: 'vid12345678', artist: ' Beltran ', title: "Smack Yo' (Danny Avila Remix)", artworkUrl: 'https://i1.sndcdn.com/a-original.png' })
+    expect(res.status).toBe(200)
+    expect(await env.DB.prepare('SELECT artist, title, artwork_url FROM presaves WHERE id = ?').bind(id).first()).toEqual({ artist: 'Beltran', title: "Smack Yo' (Danny Avila Remix)", artwork_url: 'https://i1.sndcdn.com/a-original.png' })
+    expect(await row(env, q.uploadId!)).toMatchObject({ artist: 'Beltran', title: "Smack Yo' (Danny Avila Remix)", artwork_url: 'https://i1.sndcdn.com/a-original.png' })
+    expect(fn(sendPushToAll).mock.calls[0]![1]).toMatchObject({ body: expect.stringContaining("Beltran – Smack Yo' (Danny Avila Remix)") })
+
+    // A named pre-save keeps its names; a bad artwork URL is dropped, not a 400.
+    const id2 = await seedPresave(env)
+    const q2 = await maybeQueueTrackUpload(env, id2)
+    await claimTrackUpload(env, log)
+    const r2 = await mk(env, '/mkvid/track/complete', { id: q2.uploadId, videoId: 'vid22345678', artist: 'Other', title: 'Name', artworkUrl: 'javascript:alert(1)' })
+    expect(r2.status).toBe(200)
+    expect(await env.DB.prepare('SELECT artist, title, artwork_url FROM presaves WHERE id = ?').bind(id2).first()).toEqual({ artist: 'Matroda', title: 'Tune', artwork_url: 'https://img/a.jpg' })
+  })
+
   it('complete recreates a playlist deleted on YouTube, and no push when notifyUploaded is off', async () => {
     const env = makeEnv()
     await updateAppSettings(env, { trackUploads: { notifyUploaded: false } })

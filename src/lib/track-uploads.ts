@@ -585,7 +585,17 @@ async function insertSafely(env: Env, uploadId: number, videoId: string, accessT
 
 // ─── complete / fail ────────────────────────────────────────────────────────
 
-export type TrackCompleteInput = { id: number; videoId: string; videoUrl?: string | null; privacy?: string | null; jobId?: string | null }
+export type TrackCompleteInput = {
+  id: number
+  videoId: string
+  videoUrl?: string | null
+  privacy?: string | null
+  jobId?: string | null
+  /** The names mkvid made the video with, and the source's artwork: fill whatever the request and its pre-save lack. */
+  artist?: string | null
+  title?: string | null
+  artworkUrl?: string | null
+}
 
 export type TrackCompleteResult =
   | { status: 'done'; videoId: string; presaveId: number; playlistId: string | null; playlistStatus: TrackPlaylistStatus; notified: boolean }
@@ -603,6 +613,28 @@ export type TrackCompleteResult =
  * insert that fails (quota, …) leaves `playlist_status = 'failed'` and the
  * rest still happens: the video exists, so mkvid must not upload it again.
  */
+/**
+ * A pre-save saved by id alone has no names or artwork; mkvid reports the ones
+ * it made the video with (from the source). They fill the request and the
+ * pre-save, never overwrite: a pre-save's artist and title only as a pair,
+ * when it has no title. `row` is updated in place (the push uses it).
+ */
+async function fillNames(env: Env, row: TrackUploadRow, input: TrackCompleteInput): Promise<void> {
+  const artist = input.artist ?? null
+  const title = input.title ?? null
+  const art = input.artworkUrl ?? null
+  if (!title && !art) return
+  const db = dbOf(env)
+  await db.batch([
+    db.prepare('UPDATE track_uploads SET artist = COALESCE(artist, ?), title = COALESCE(title, ?), artwork_url = COALESCE(artwork_url, ?) WHERE id = ?').bind(artist, title, art, row.id),
+    db.prepare('UPDATE presaves SET artist = ?, title = ?, updated_at = ? WHERE id = ? AND title IS NULL AND ? IS NOT NULL').bind(artist, title, Date.now(), row.presave_id, title),
+    db.prepare('UPDATE presaves SET artwork_url = ? WHERE id = ? AND artwork_url IS NULL AND ? IS NOT NULL').bind(art, row.presave_id, art),
+  ])
+  row.artist ??= artist
+  row.title ??= title
+  row.artwork_url ??= art
+}
+
 export async function completeTrackUpload(env: Env, input: TrackCompleteInput, accessToken: string, log: Logger, fetchImpl: typeof fetch = fetch): Promise<TrackCompleteResult> {
   const db = dbOf(env)
   const row = await getTrackUploadRow(env, input.id)
@@ -614,6 +646,7 @@ export async function completeTrackUpload(env: Env, input: TrackCompleteInput, a
     return { status: 'invalid_state', current: row.status }
   }
   const now = nowSeconds()
+  await fillNames(env, row, input)
   if (row.status === 'banned') {
     await db
       .prepare('UPDATE track_uploads SET video_id = ?, privacy = COALESCE(?, privacy), job_id = COALESCE(?, job_id), completed_at = ?, updated_at = ? WHERE id = ?')

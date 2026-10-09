@@ -62,6 +62,19 @@ export const MkvidTrackClaimResponse = z
   .object({ request: MkvidTrackRequest.nullable().openapi({ description: 'null when nothing is claimable (queue empty, track cap or project caps reached, paused, no account offered).' }) })
   .openapi('MkvidTrackClaimResponse')
 
+function optName(x: unknown): string | null {
+  return typeof x === 'string' && x.trim() ? x.trim().slice(0, 300) : null
+}
+function optHttpUrl(x: unknown): string | null {
+  if (typeof x !== 'string' || x.length > 1000) return null
+  try {
+    const u = new URL(x)
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.toString() : null
+  } catch {
+    return null
+  }
+}
+
 const JobBody = z.object({ id: Id, jobId: z.string().min(1).max(100) })
 const CompleteBody = z.object({
   id: Id,
@@ -69,6 +82,11 @@ const CompleteBody = z.object({
   videoUrl: z.string().url().max(300).optional().nullable(),
   privacy: z.enum(['private', 'unlisted', 'public']).optional().nullable(),
   jobId: z.string().min(1).max(100).optional().nullable(),
+  // The names the video was made with and the source's artwork (mkvid >= the names fix): they fill
+  // a pre-save saved by id alone. Bad values become null, never a 400 (mkvid would resend forever).
+  artist: z.unknown().optional().transform(optName),
+  title: z.unknown().optional().transform(optName),
+  artworkUrl: z.unknown().optional().transform(optHttpUrl),
 })
 const FailBody = z.object({
   id: Id,
@@ -85,7 +103,7 @@ function logger(c: { req: { raw: Request } }, route: string) {
   return makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route })
 }
 
-async function body<T>(c: { req: { json(): Promise<unknown> } }, schema: z.ZodType<T>): Promise<T | null> {
+async function body<T>(c: { req: { json(): Promise<unknown> } }, schema: z.ZodType<T, z.ZodTypeDef, unknown>): Promise<T | null> {
   const parsed = schema.safeParse(await c.req.json().catch(() => null))
   return parsed.success ? parsed.data : null
 }
