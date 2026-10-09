@@ -219,7 +219,8 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           const at = Math.floor(Date.now() / 1000)
           const t0 = Date.now()
           try {
-            const r = await runSchedulerTick(env, { log })
+            // A real timer: the tick spreads its fetches over tick.spreadSeconds (waiting costs no CPU).
+            const r = await runSchedulerTick(env, { log, sleep: (ms) => new Promise<void>((res) => setTimeout(res, ms)) })
             log.info('cron.done', { skipped: r.skipped ?? null, drawn: r.drawn, ran: r.items.length, stoppedBy: r.stoppedBy ?? null })
             await recordSchedulerTick(env, at, Date.now() - t0, r)
           } catch (e) {

@@ -103,6 +103,42 @@ export const RENDER_FEED_MAX_FAILURES = DEFAULT_POOL_SETTINGS.renderFeed.maxFail
 /** CACHE KV: the feeder found no candidate; the query is not run again before this (unix seconds). */
 export const RENDER_FEED_EMPTY_KEY = 'scheduler:render_feed_empty_until'
 const RENDER_FEED_EMPTY_SECONDS = 30 * 60
+/**
+ * CACHE KV: a low pool priority (recheck, backfill) whose share of the
+ * accounts' budget tlpool reported spent (budget_exhausted): until this
+ * (unix s) the tick picks nothing of that priority or lower, and everything
+ * above it runs as usual. Formerly the whole tick stood down, verify included.
+ */
+export const budgetHoldKey = (priority: 'recheck' | 'backfill') => `scheduler:budget_hold:${priority}`
+/** CACHE KV: URLs a running tick picked but has not fetched yet (its items are spread over minutes); an overlapping tick leaves them. */
+export const INFLIGHT_KEY = 'scheduler:inflight'
+const PRIORITY_RANK: Record<PoolPriority, number> = { phone: 0, new: 1, verify: 2, recheck: 3, backfill: 4 }
+
+/** The pool priority an item's fetch goes out at. */
+export function itemPoolPriority(item: TickItem): PoolPriority {
+  switch (item.kind) {
+    case 'verify':
+    case 'render_feed':
+      return 'verify'
+    case 'recheck':
+      return 'recheck'
+    case 'index_catchup':
+    case 'dj_backfill':
+      return 'backfill'
+    case 'discovery':
+      return 'new'
+    default:
+      return PRIORITY_OF[item.cls]
+  }
+}
+
+/** The held priorities (budgetHoldKey) still in force at nowSec. */
+export async function budgetHolds(env: Env, nowSec: number): Promise<Set<'recheck' | 'backfill'>> {
+  const out = new Set<'recheck' | 'backfill'>()
+  for (const p of ['recheck', 'backfill'] as const) if ((Number(await env.CACHE.get(budgetHoldKey(p))) || 0) > nowSec) out.add(p)
+  return out
+}
+
 /** CACHE KV: the index catch-up found no candidate; not looked for again before this (unix seconds). */
 export const INDEX_CATCHUP_EMPTY_KEY = 'scheduler:index_catchup_empty_until'
 const INDEX_CATCHUP_EMPTY_SECONDS = 60 * 60
@@ -656,7 +692,8 @@ export async function pickTickItems(
     .filter((r) => slugs.has(r.slug))
     .map((r) => ({ ...r, age: setAgeDays(setDateFromUrl(r.url), nowSec) }))
     .sort((a, b) => (a.age ?? -1) - (b.age ?? -1))
-  const seenUrl = new Set<string>()
+  // URLs an overlapping tick picked and has not fetched yet.
+  const seenUrl = new Set<string>(parseJsonArray(await env.CACHE.get(INFLIGHT_KEY)))
   for (const r of pend) {
     if (seenUrl.has(r.url)) continue
     seenUrl.add(r.url)
@@ -709,6 +746,10 @@ export async function pickTickItems(
   }
 
   for (const r of dueBackfill) buckets.backfill.push({ cls: 'backfill', kind: 'dj_backfill', slug: r.slug })
+  // A held priority's budget is spent (budgetHoldKey): leave it and everything below it for now.
+  const held = await budgetHolds(env, nowSec)
+  if (held.has('recheck')) buckets.recheck = []
+  if (held.has('recheck') || held.has('backfill')) buckets.backfill = []
 
   if (dueOut) for (const cls of Object.keys(buckets) as ScheduledClass[]) dueOut[cls] = buckets[cls].length
   const out: TickItem[] = []
@@ -730,7 +771,7 @@ export async function pickTickItems(
     }
   }
   // The search index catch-up, on top of the n drawn items.
-  const catchUp = catchUpAllowance ?? (await indexCatchUpAllowance(env, settings, nowSec))
+  const catchUp = held.size > 0 ? 0 : (catchUpAllowance ?? (await indexCatchUpAllowance(env, settings, nowSec)))
   const catchUpEmptyUntil = catchUp > 0 ? Number((await env.CACHE.get(INDEX_CATCHUP_EMPTY_KEY)) ?? 0) || 0 : 0
   if (catchUp > 0 && catchUpEmptyUntil <= nowSec) {
     const picked = new Set(out.flatMap((i) => ('url' in i ? [i.url] : [])))
@@ -769,7 +810,16 @@ const PRIORITY_OF: Record<ScheduledClass, PoolPriority> = { new: 'new', verify: 
  * moves on to the next item, ITEM_SCOPED_POOL_CODES). `random` / `now` are
  * injectable for tests.
  */
-export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: () => number; now?: number } = {}): Promise<TickResult> {
+export async function runSchedulerTick(
+  env: Env,
+  opts: {
+    log?: Logger
+    random?: () => number
+    now?: number
+    /** Waits between items (tick.spreadSeconds). Absent = no waiting (tests); the cron passes a real timer. */
+    sleep?: (ms: number) => Promise<void>
+  } = {},
+): Promise<TickResult> {
   const log = opts.log ?? makeLogger({ task: 'scheduler.tick' })
   const random = opts.random ?? Math.random
   const nowSec = opts.now ?? nowSeconds()
@@ -834,13 +884,27 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
   const head = { ...(skipped ? { skipped } : {}), drawn: drawn <= 0 ? 0 : drawn, ...(due ? { due } : {}) }
   if (presaveItems.length === 0 && skipped) return { ...head, items: [] }
   items = [...items, ...presaveItems]
+  // Spread over the window: item 0 now, the rest at sorted random offsets.
+  const spreadMs = opts.sleep ? Math.max(0, settings.tick.spreadSeconds) * 1000 : 0
+  const offsets = items.map((_, i) => (i === 0 ? 0 : Math.floor(random() * spreadMs))).sort((a, b) => a - b)
+  const inflight = items.flatMap((i) => ('url' in i && i.url ? [i.url] : []))
+  if (spreadMs > 0 && inflight.length > 0) await env.CACHE.put(INFLIGHT_KEY, JSON.stringify(inflight), { expirationTtl: Math.max(60, Math.ceil(spreadMs / 1000) + 180) })
+  const tickStart = Date.now()
+  /** A low priority held this tick (budget_exhausted): items at or below it are left for later. */
+  let heldRank = Infinity
 
   log.info('scheduler.tick_start', { drawn, picked: items.map((i) => `${i.kind}:${i.cls}`) })
   const results: TickItemResult[] = []
   let stoppedBy: string | undefined
   /** Item-scoped refusals this tick: the last one's reason and the shortest retry hint. */
   let scoped = null as { count: number; reason: string; retryAfter: number | null } | null
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
+    if (PRIORITY_RANK[itemPoolPriority(item)] >= heldRank) {
+      log.info('scheduler.item_held', { kind: item.kind, priority: itemPoolPriority(item) })
+      continue
+    }
+    const wait = tickStart + offsets[index]! - Date.now()
+    if (opts.sleep && wait > 0) await opts.sleep(wait)
     if (item.kind === 'presave') {
       // Claimed and checked in lib/presave.ts; a refusal stops the tick like any item.
       let r: TickItemResult
@@ -993,6 +1057,16 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
       log.info('scheduler.item_refused', { kind: item.kind, poolCode, retryAfterSeconds: retryAfter, left: items.length - results.length })
       continue
     }
+    const pri = itemPoolPriority(item)
+    if (r.outcome === 'stopped' && poolCode === 'budget_exhausted' && (pri === 'recheck' || pri === 'backfill')) {
+      // Only this priority's share is spent (tlpool caps the low ones first): hold it and
+      // what is below it, keep the tick (and the next ones) for everything above.
+      const until = nowSec + Math.min(settings.retry.poolBackoffMaxHours * HOUR, Math.max(60, Math.ceil(retryAfter ?? 600)))
+      await env.CACHE.put(budgetHoldKey(pri), String(until), { expirationTtl: Math.max(60, until - nowSec + 60) })
+      heldRank = Math.min(heldRank, PRIORITY_RANK[pri])
+      log.info('scheduler.budget_hold', { priority: pri, kind: item.kind, until: new Date(until * 1000).toISOString() })
+      continue
+    }
     if (r.outcome === 'stopped') {
       stoppedBy = r.stopReason
       if (retryAfter !== null && retryAfter > 0) {
@@ -1011,6 +1085,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     await env.CACHE.put(TICK_BACKOFF_KEY, String(until), { expirationTtl: Math.max(60, until - nowSec + 60) })
     log.info('scheduler.tick_stopped', { reason: stoppedBy, retryAfterSeconds: until - nowSec, done: results.length, left: 0 })
   }
+  if (spreadMs > 0 && inflight.length > 0) await env.CACHE.delete(INFLIGHT_KEY)
   log.info('scheduler.tick_done', { drawn, ran: results.length, outcomes: results.map((x) => `${x.item.kind}:${x.outcome}`), stoppedBy: stoppedBy ?? null })
   return { ...head, items: results, ...(stoppedBy ? { stoppedBy } : {}) }
 }
@@ -1023,6 +1098,16 @@ async function pickPresaveItems(env: Env, nowMs: number, log: Logger): Promise<T
     return rows.map((p) => ({ cls: settings.presave.priority, kind: 'presave' as const, slug: p.dj_slug ?? '', url: p.set_url ?? p.track_url ?? '', presaveId: p.id }))
   } catch (e) {
     log.warn('scheduler.presave_pick_failed', errorFields(e))
+    return []
+  }
+}
+
+function parseJsonArray(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const v = JSON.parse(raw)
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  } catch {
     return []
   }
 }

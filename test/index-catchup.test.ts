@@ -6,7 +6,8 @@ import { fakeD1 } from './helpers/fake-d1'
 import { fakeKV } from './helpers/fake-kv'
 import type { Env } from '../src/types'
 import { DEFAULT_POOL_SETTINGS, updatePoolSettings } from '../src/lib/pool-settings'
-import { ENSURE_STAMP_KEY, indexCatchUpAllowance, indexCatchUpCandidates, INDEX_CATCHUP_EMPTY_KEY, pickTickItems, runSchedulerTick } from '../src/lib/fetch-scheduler'
+import { budgetHoldKey, ENSURE_STAMP_KEY, INFLIGHT_KEY, indexCatchUpAllowance, indexCatchUpCandidates, INDEX_CATCHUP_EMPTY_KEY, pickTickItems, runSchedulerTick, TICK_BACKOFF_KEY } from '../src/lib/fetch-scheduler'
+import { PoolPausedError } from '../src/lib/pool'
 import { INDEX_FORMAT_SINCE } from '../src/lib/search/index'
 import { saveSubState, loadSubState } from '../src/lib/sync-store'
 import { getVerification } from '../src/lib/verification'
@@ -173,5 +174,50 @@ describe('search index catch-up: in the tick', () => {
     expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([['index_catchup', 'failed']])
     expect(await cands(env, NOON + 6 * H)).toEqual([])
     expect(await cands(env, NOON + S.indexCatchUp.cooldownHours * H + 60)).toEqual([u])
+  })
+})
+
+describe('a spent low-priority budget, and spreading a tick', () => {
+  it('budget_exhausted on a catch-up holds backfill only: the tick carries on, the next one still runs its recheck and picks no catch-up', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'dj')
+    const due = await syncedSet(env, 'due', { dueAt: NOON - 60, fetchedAt: NOON - 10 * D })
+    const old = await syncedSet(env, 'old')
+    mocked(fetch1001Html).mockImplementation(async (url: string) => {
+      if (url === old) throw new PoolPausedError('budget_exhausted', 1800)
+      return { html: MATRODA, via: 'pool', state: { cookie: '' }, accountId: 'acct-1', fetchedAt: new Date(NOON * 1000).toISOString() }
+    })
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOON })
+    expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([['recheck', 'ok'], ['index_catchup', 'stopped']])
+    expect(r.stoppedBy).toBeUndefined()
+    expect(await env.CACHE.get(TICK_BACKOFF_KEY)).toBeNull()
+    expect(Number(await env.CACHE.get(budgetHoldKey('backfill')))).toBe(NOON + 1800)
+    const due2 = await syncedSet(env, 'due2', { dueAt: NOON, fetchedAt: NOON - 10 * D })
+    const r2 = await runSchedulerTick(env, { random: always(0.99), now: NOON + 300 })
+    expect(r2.skipped).toBeUndefined()
+    expect(r2.items.map((i) => [i.item.kind, 'url' in i.item && i.item.url])).toEqual([['recheck', due2]])
+    expect(due).not.toBe(due2)
+    // Once the hold runs out, catch-up is back.
+    expect((await pickTickItems(env, S, 3, new Set(['dj']), NOON + 1900, 0)).some((i) => i.kind === 'index_catchup')).toBe(true)
+  })
+
+  it("spreads a tick's items over tick.spreadSeconds when given a timer, and an overlapping tick leaves the URLs still to come", async () => {
+    const env = makeEnv()
+    await subscribe(env, 'dj')
+    await syncedSet(env, 'due', { dueAt: NOON - 60, fetchedAt: NOON - 10 * D })
+    const later = await syncedSet(env, 'later', { dueAt: NOON - 30, fetchedAt: NOON - 10 * D })
+    const waits: number[] = []
+    let seenDuringWait: string[] = []
+    const sleep = async (ms: number) => {
+      waits.push(ms)
+      seenDuringWait = (await pickTickItems(env, S, 3, new Set(['dj']), NOON, 0, undefined, 0)).flatMap((i) => ('url' in i ? [i.url] : []))
+    }
+    const r = await runSchedulerTick(env, { random: always(0.5), now: NOON, sleep })
+    expect(r.items).toHaveLength(2)
+    expect(waits).toHaveLength(1)
+    expect(waits[0]).toBeGreaterThan(70_000)
+    expect(waits[0]).toBeLessThanOrEqual(75_000)
+    expect(seenDuringWait).not.toContain(later)
+    expect(await env.CACHE.get(INFLIGHT_KEY)).toBeNull()
   })
 })

@@ -14,6 +14,7 @@ const SCHED_GROUPS: FormGroup[] = [
     fields: [
       { path: 'tick.minItems', label: 'Fetches per tick, at least', help: 'Each 5-minute tick submits a random number in this range. Default 0.', min: 0, max: 20, step: 1 },
       { path: 'tick.maxItems', label: 'Fetches per tick, at most', help: 'Default 3.', min: 0, max: 20, step: 1 },
+      { path: 'tick.spreadSeconds', label: "Spread a tick's fetches over", help: 'Each fetch starts at a random moment in this window instead of all at once. Default 150; 0 = back to back.', unit: 's', min: 0, max: 240, step: 1 },
       { path: 'priorities.newSetMaxAgeDays', label: 'A first fetch counts as new up to', help: 'Older never-fetched sets are backfill. Default 14.', unit: 'days', min: 0, max: 3650, step: 1 },
       { path: 'recheck.unknownAgeIntervalHours', label: 'Recheck a set of unknown date every', help: 'Default 120 (5 days).', unit: 'h', min: 1, max: 87600, step: 1 },
       { path: 'recheck.jitterFraction', label: 'Recheck jitter', help: 'Every interval × (1 ± this), so due times never cluster. Default 0.15.', min: 0, max: 0.5, step: 0.01 },

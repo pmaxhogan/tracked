@@ -75,7 +75,7 @@ describe('stored settings', () => {
     const s = await getPoolSettings(e)
     expect(s).toEqual(DEFAULT_POOL_SETTINGS)
     expect(s.priorities.order).toEqual(['new', 'verify', 'recheck', 'backfill'])
-    expect(s.tick).toEqual({ minItems: 0, maxItems: 3 })
+    expect(s.tick).toEqual({ minItems: 0, maxItems: 3, spreadSeconds: 150 })
   })
 
   it('a partial update deep-merges over the current settings and is stored', async () => {
@@ -83,7 +83,7 @@ describe('stored settings', () => {
     const r = await updatePoolSettings(e, { tick: { maxItems: 5 }, recheck: { beyondIntervalHours: 365 * 24 } })
     expect(r.ok).toBe(true)
     const s = await getPoolSettings(e)
-    expect(s.tick).toEqual({ minItems: 0, maxItems: 5 })
+    expect(s.tick).toEqual({ minItems: 0, maxItems: 5, spreadSeconds: 150 })
     expect(s.recheck.beyondIntervalHours).toBe(365 * 24)
     expect(s.recheck.bands).toEqual(DEFAULT_POOL_SETTINGS.recheck.bands)
     // Bands are replaced whole and kept sorted.

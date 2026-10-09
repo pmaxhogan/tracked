@@ -146,14 +146,14 @@ describe('GET/PUT /ui/api/pool/settings (behind Cloudflare Access)', () => {
   it('reads defaults, applies a partial update, and rejects an invalid one', async () => {
     const env = await makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
     const got = (await (await call(env, 'GET')).json()) as { settings: { tick: unknown }; defaults: unknown }
-    expect(got.settings.tick).toEqual({ minItems: 0, maxItems: 3 })
+    expect(got.settings.tick).toEqual({ minItems: 0, maxItems: 3, spreadSeconds: 150 })
     expect(got.defaults).toEqual(got.settings)
     const put = await call(env, 'PUT', { tick: { maxItems: 6 }, recheck: { beyondIntervalHours: 8760 } })
     expect(put.status).toBe(200)
-    expect(((await put.json()) as { settings: { tick: unknown } }).settings.tick).toEqual({ minItems: 0, maxItems: 6 })
+    expect(((await put.json()) as { settings: { tick: unknown } }).settings.tick).toEqual({ minItems: 0, maxItems: 6, spreadSeconds: 150 })
     const bad = await call(env, 'PUT', { tick: { maxItems: 99 } })
     expect(bad.status).toBe(400)
     expect(await bad.json()).toMatchObject({ error: 'invalid_settings' })
-    expect(((await (await call(env, 'GET')).json()) as { settings: { tick: unknown } }).settings.tick).toEqual({ minItems: 0, maxItems: 6 })
+    expect(((await (await call(env, 'GET')).json()) as { settings: { tick: unknown } }).settings.tick).toEqual({ minItems: 0, maxItems: 6, spreadSeconds: 150 })
   })
 })

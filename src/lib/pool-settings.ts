@@ -55,6 +55,12 @@ export const PoolSettingsSchema = z.object({
       /** Each 5-minute cron tick submits a random number of items in [minItems, maxItems]. */
       minItems: z.number().int().min(0).max(20),
       maxItems: z.number().int().min(0).max(20),
+      /**
+       * A tick's items start at random moments spread over its first this-many
+       * seconds (default 150; 0 = back to back), so the pool's fetches do not
+       * all land in the minute after each cron. Kept under the 5-minute tick.
+       */
+      spreadSeconds: z.number().int().min(0).max(240),
     })
     .refine((t) => t.maxItems >= t.minItems, 'maxItems must be >= minItems'),
   verify: z.object({
@@ -176,7 +182,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
     mkvidWaitingSpreadHours: 48,
   },
   priorities: { order: ['new', 'verify', 'recheck', 'backfill'], newSetMaxAgeDays: 14 },
-  tick: { minItems: 0, maxItems: 3 },
+  tick: { minItems: 0, maxItems: 3, spreadSeconds: 150 },
   verify: { minGapHours: 2, jitterHours: 2 },
   discovery: { intervalHours: 24, jitterHours: 4 },
   backfill: { stepIntervalHours: 24, jitterHours: 6, overdueSlotHours: 12 },
