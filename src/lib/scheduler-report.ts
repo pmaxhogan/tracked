@@ -16,7 +16,7 @@ import { listSchedulerTicks, type TickHistoryRow } from './tick-history'
 import type { TableDef } from './table-query'
 
 export const SCHEDULER_CLASSES = ['new', 'verify', 'recheck', 'backfill'] as const
-export const SCHEDULER_KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'dj_backfill', 'presave'] as const
+export const SCHEDULER_KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'index_catchup', 'dj_backfill', 'presave'] as const
 const DAY = 86400
 /** Ticks scanned back (newest first) for "last ran" beyond the 24 h window: 14 days of 5-minute ticks. */
 const LAST_RUN_SCAN = 4100

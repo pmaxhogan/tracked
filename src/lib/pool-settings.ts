@@ -144,6 +144,19 @@ export const PoolSettingsSchema = z.object({
     /** After this many failed feed fetches in a row the set is given up (default 3). */
     maxFailures: z.number().int().min(1).max(20),
   }),
+  /**
+   * The search index catch-up (lib/fetch-scheduler.ts indexCatchUpCandidates):
+   * sets last fetched before the search index's format date, or never
+   * verified, are fetched again so they get verified and indexed (search only
+   * takes verified lists). On top of the drawn items: at most `perTick`
+   * (default 1) a tick and `perDay` (default 200; 0 = off) a UTC day, newest
+   * set first; a set fetched within `cooldownHours` (default 72) waits.
+   */
+  indexCatchUp: z.object({
+    perDay: z.number().int().min(0).max(2000),
+    perTick: z.number().int().min(0).max(10),
+    cooldownHours: z.number().positive().max(24 * 60),
+  }),
 })
 
 export type PoolSettings = z.infer<typeof PoolSettingsSchema>
@@ -183,6 +196,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
     itemScopedBackoffMinutes: 10,
   },
   renderFeed: { maxPerTick: 1, cooldownHours: 48, maxCooldownDays: 14, maxFailures: 3 },
+  indexCatchUp: { perDay: 200, perTick: 1, cooldownHours: 72 },
 }
 
 type Plain = Record<string, unknown>

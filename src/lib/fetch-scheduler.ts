@@ -24,6 +24,11 @@
  *                  (pace by set age, lib/pool-settings.ts `recheckIntervalSeconds`)
  *   - backfill     never-fetched older sets, and one "older sets" step of a DJ
  *                  whose history is incomplete (the paced DJ backfill)
+ *   - index catch-up (on top of the draw, `indexCatchUp`): a set last
+ *                  fetched before the search index's format date, or never
+ *                  verified, fetched again so it is verified and indexed;
+ *                  ~1,500 sets synced before verification (2026-09-30) and
+ *                  search (2026-10-01) were otherwise months from a recheck
  *
  * Set pages still go through `syncOne` (lib/sync.ts) — playlist inserts,
  * swaps, mkvid queueing all stay there — with an explicit selection instead
@@ -59,7 +64,7 @@ import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { fetchOptsFromEnv, isStopTheBatchError } from './upstream1001'
 import { deferVerification, dueVerifications, noteSetFetch, type VerificationResult } from './verification'
 import { syncOne, type SyncOneResult } from './sync'
-import { queueSearchIndex } from './search/index'
+import { INDEX_FORMAT_SINCE, queueSearchIndex } from './search/index'
 import { getAppSettings } from './app-settings'
 import { DISCOVERED_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
 import { duePresaves, presaveOnSetParsed, runScheduledPresave } from './presave'
@@ -97,6 +102,11 @@ export const RENDER_FEED_MAX_FAILURES = DEFAULT_POOL_SETTINGS.renderFeed.maxFail
 /** CACHE KV: the feeder found no candidate; the query is not run again before this (unix seconds). */
 export const RENDER_FEED_EMPTY_KEY = 'scheduler:render_feed_empty_until'
 const RENDER_FEED_EMPTY_SECONDS = 30 * 60
+/** CACHE KV: the index catch-up found no candidate; not looked for again before this (unix seconds). */
+export const INDEX_CATCHUP_EMPTY_KEY = 'scheduler:index_catchup_empty_until'
+const INDEX_CATCHUP_EMPTY_SECONDS = 60 * 60
+/** CACHE KV: index catch-up fetches run on a UTC day (approximate, like the page store's cap). */
+const indexCatchUpCountKey = (day: string) => `scheduler:index_catchup:${day}`
 
 // ─── set schedules ──────────────────────────────────────────────────────────
 
@@ -539,6 +549,50 @@ async function settleRenderFeed(env: Env, url: string, ok: boolean, nowSec: numb
   else log.info('scheduler.render_feed_failed', { setUrl: url, failures, nextFeedAt: nowSec + cooldown })
 }
 
+// ─── search index catch-up ──────────────────────────────────────────────────
+
+/**
+ * Sets the search index is missing, newest set first: processed, subscribed,
+ * last fetched before INDEX_FORMAT_SINCE or with no verification row (a fetch
+ * that ended as a decoy or with no rows), not fetched within the cooldown,
+ * not already due as a recheck, not one the render feeder is cooling down
+ * or gave up on, and with fetch attempts left today (a failed catch-up fetch
+ * holds the set off for the cooldown through `retry_at`). A fetch that
+ * starts a verification takes the set out (the verify class finishes it, and
+ * the verified list is indexed then).
+ */
+export async function indexCatchUpCandidates(env: Env, settings: PoolSettings, nowSec: number, limit: number): Promise<Array<{ url: string; slug: string }>> {
+  const res = await dbOf(env)
+    .prepare(
+      `SELECT t.url AS url, MIN(t.slug) AS slug, MAX(s.set_date) AS set_date
+         FROM tracklists t JOIN set_schedule s ON s.url = t.url LEFT JOIN set_verification v ON v.url = t.url
+        WHERE t.processed = 1 AND t.abandoned = 0 AND COALESCE(t.checked_at, 1) <> 0 AND t.slug IN (SELECT slug FROM subscriptions)
+          AND (v.url IS NULL OR s.last_fetched_at IS NULL OR s.last_fetched_at < ?)
+          AND (s.last_fetched_at IS NULL OR s.last_fetched_at <= ?)
+          AND (s.next_due_at IS NULL OR s.next_due_at > ?)
+          AND NOT EXISTS (SELECT 1 FROM render_feed rf WHERE rf.url = t.url AND (rf.gave_up = 1 OR rf.next_feed_at > ?))
+          AND ${attemptOkSql(settings.retry.maxSetAttemptsPerDay)}
+        GROUP BY t.url ORDER BY set_date IS NULL, set_date DESC, t.url LIMIT ?`,
+    )
+    .bind(INDEX_FORMAT_SINCE, nowSec - settings.indexCatchUp.cooldownHours * HOUR, nowSec, nowSec, nowSec, utcDay(nowSec), limit)
+    .all<{ url: string; slug: string }>()
+  return res.results.map((r) => ({ url: r.url, slug: r.slug }))
+}
+
+/** Index catch-up items allowed this tick: perTick, and what is left of perDay. */
+export async function indexCatchUpAllowance(env: Env, settings: PoolSettings, nowSec: number): Promise<number> {
+  const { perDay, perTick } = settings.indexCatchUp
+  if (perDay <= 0 || perTick <= 0) return 0
+  const used = Number((await env.CACHE.get(indexCatchUpCountKey(utcDay(nowSec)))) ?? 0) || 0
+  return Math.max(0, Math.min(perTick, perDay - used))
+}
+
+async function countIndexCatchUp(env: Env, nowSec: number): Promise<void> {
+  const key = indexCatchUpCountKey(utcDay(nowSec))
+  const used = Number((await env.CACHE.get(key)) ?? 0) || 0
+  await env.CACHE.put(key, String(used + 1), { expirationTtl: 2 * 86400 })
+}
+
 // ─── picking a tick ─────────────────────────────────────────────────────────
 
 export type TickItem =
@@ -546,6 +600,8 @@ export type TickItem =
   | { cls: 'verify'; kind: 'verify'; slug: string; url: string; excludeAccounts: string[] }
   | { cls: 'verify'; kind: 'render_feed'; slug: string; url: string }
   | { cls: 'recheck'; kind: 'recheck'; slug: string; url: string }
+  /** The search index catch-up (indexCatchUpCandidates), on top of the drawn items. */
+  | { cls: 'recheck'; kind: 'index_catchup'; slug: string; url: string }
   | { cls: 'new'; kind: 'discovery'; slug: string }
   | { cls: 'backfill'; kind: 'dj_backfill'; slug: string }
   /** A pre-saved track's scheduled check (lib/presave.ts), on top of the drawn items. `slug` = its DJ or ''. */
@@ -565,6 +621,8 @@ export async function pickTickItems(
   feedAllowance?: number,
   /** Filled with how many items were due per class (before `n` cut them): tick history. */
   dueOut?: Record<ScheduledClass, number>,
+  /** Index catch-up items allowed this tick (default: indexCatchUpAllowance). */
+  catchUpAllowance?: number,
 ): Promise<TickItem[]> {
   if (n <= 0) return []
   const db = dbOf(env)
@@ -662,10 +720,25 @@ export async function pickTickItems(
       if (i >= 0) out.push(...buckets.backfill.splice(i, 1))
     }
   }
-  for (const cls of settings.priorities.order) {
+  fill: for (const cls of settings.priorities.order) {
     for (const item of buckets[cls]) {
-      if (out.length >= n) return out
+      if (out.length >= n) break fill
       out.push(item)
+    }
+  }
+  // The search index catch-up, on top of the n drawn items.
+  const catchUp = catchUpAllowance ?? (await indexCatchUpAllowance(env, settings, nowSec))
+  const catchUpEmptyUntil = catchUp > 0 ? Number((await env.CACHE.get(INDEX_CATCHUP_EMPTY_KEY)) ?? 0) || 0 : 0
+  if (catchUp > 0 && catchUpEmptyUntil <= nowSec) {
+    const picked = new Set(out.flatMap((i) => ('url' in i ? [i.url] : [])))
+    const cands = await indexCatchUpCandidates(env, settings, nowSec, catchUp + 10)
+    if (cands.length === 0) await env.CACHE.put(INDEX_CATCHUP_EMPTY_KEY, String(nowSec + INDEX_CATCHUP_EMPTY_SECONDS), { expirationTtl: 2 * INDEX_CATCHUP_EMPTY_SECONDS })
+    let added = 0
+    for (const c of cands) {
+      if (added >= catchUp) break
+      if (!slugs.has(c.slug) || picked.has(c.url) || seenUrl.has(c.url)) continue
+      out.push({ cls: 'recheck', kind: 'index_catchup', slug: c.slug, url: c.url })
+      added++
     }
   }
   return out
@@ -832,6 +905,19 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           await deferSetSchedule(env, item.url, nowSec + settings.retry.claimRecheckHours * HOUR)
           await claimSetAttempt(env, item.url, nowSec, settings)
           res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
+        } else if (item.kind === 'index_catchup') {
+          // At the lowest pool priority; counted toward the day's cap unless the pool refused it.
+          await claimSetAttempt(env, item.url, nowSec, settings)
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.index_catchup', skipDjCrawl: true, priority: 'backfill', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
+          if (!res.stoppedBy) {
+            await countIndexCatchUp(env, nowSec)
+            // A set that did not fetch (deleted, 5xx) waits the cooldown, not the attempt backoff.
+            if (!res.ok || res.stats.tracklistsRechecked < 1) {
+              res = { ...res, ok: false }
+              const until = nowSec + settings.indexCatchUp.cooldownHours * HOUR
+              await dbOf(env).prepare('UPDATE set_schedule SET retry_at = ? WHERE url = ? AND COALESCE(retry_at, 0) < ?').bind(until, item.url, until).run()
+            }
+          }
         } else if (item.kind === 'render_feed') {
           // Claimed in D1 first (the day's share, the hourly limit and the
           // set's cooldown, atomically): an overlapping tick that got there

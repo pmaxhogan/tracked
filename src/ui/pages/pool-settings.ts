@@ -53,6 +53,16 @@ const SCHED_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: 'sf-catchup',
+    title: 'Search index catch-up',
+    intro: 'Search only indexes verified lists, so sets synced before verification and search existed are fetched again, newest first, on top of each tick. Done when the Scheduler page shows no more catch-up items.',
+    fields: [
+      { path: 'indexCatchUp.perDay', label: 'Catch-up fetches per day', help: 'Each also needs a second fetch to verify. Default 200; 0 = off.', min: 0, max: 2000, step: 1 },
+      { path: 'indexCatchUp.perTick', label: 'Catch-up fetches per tick, at most', help: 'Default 1.', min: 0, max: 10, step: 1 },
+      { path: 'indexCatchUp.cooldownHours', label: 'Do not refetch a set fetched within', help: 'A fetch that did not start a verification waits this long. Default 72.', unit: 'h', min: 1, max: 1440 },
+    ],
+  },
+  {
     id: 'sf-manual',
     title: 'Manual fetches and reports',
     fields: [
