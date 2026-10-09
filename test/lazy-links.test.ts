@@ -96,7 +96,7 @@ describe('lazy per-track links', () => {
     for (const path of ['/ui/set', '/ui/dj/habstrakt']) {
       const page = await (await app.request(`http://x${path}`, {}, env)).text()
       expect(page).toContain('/ui/api/tracklist/links')
-      expect(page).toContain('/^\\d+$/.test(t.trackId)') // a template-literal escape slip would leave /^d+$/
+      expect(page).toContain('/^\\d+$/.test(String(r.trackId))') // a template-literal escape slip would leave /^d+$/
       expect(page).toContain('Load links')
       const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
       for (const js of scripts) expect(() => new Function(js)).not.toThrow()

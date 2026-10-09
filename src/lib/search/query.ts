@@ -41,7 +41,15 @@ export type SearchResponse = { q: string; corrected: Array<{ from: string; to: s
 const KINDS: readonly SearchKind[] = ['all', 'sets', 'tracks', 'djs']
 const MAX_Q = 200
 const MAX_TOKENS = 8
-const MAX_LIMIT = 20
+/** Default results per kind (the "All" list). */
+const DEFAULT_LIMIT = 20
+/**
+ * Most results per kind. The Search page's Tracks / Sets / DJs tabs ask for
+ * this many and sort, filter and page them in the browser (TKTable local
+ * mode): relevance ranking needs the whole candidate set, and recall is
+ * capped at RECALL_LIMIT rows per kind anyway.
+ */
+const MAX_LIMIT = 200
 /** Fewer AND-recall rows than this and the words are ORed too. */
 const MIN_AND_ROWS = 10
 const RECALL_LIMIT = 200
@@ -62,7 +70,7 @@ export function parseSearchQuery(p: URLSearchParams): SearchQuery | { error: str
   if (kindRaw !== null && !KINDS.includes(kindRaw as SearchKind)) return { error: `kind must be one of ${KINDS.join(', ')}` }
   const kind = (kindRaw ?? 'all') as SearchKind
   const limitRaw = p.get('limit')
-  let limit = MAX_LIMIT
+  let limit = DEFAULT_LIMIT
   if (limitRaw !== null) {
     if (!/^\d{1,3}$/.test(limitRaw) || Number(limitRaw) < 1 || Number(limitRaw) > MAX_LIMIT) return { error: `limit must be an integer from 1 to ${MAX_LIMIT}` }
     limit = Number(limitRaw)

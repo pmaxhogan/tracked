@@ -463,7 +463,7 @@ export type MkvidRequest = {
   replacesVideoId: string | null
 }
 
-type Row = {
+export type MkvidRow = {
   id: string
   slug: string
   set_url: string
@@ -493,7 +493,7 @@ type Row = {
   replaces_video_id?: string | null
 }
 
-function rowToRequest(r: Row): MkvidRequest {
+export function rowToRequest(r: MkvidRow): MkvidRequest {
   return {
     id: r.id,
     slug: r.slug,
@@ -601,12 +601,12 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
 }
 
 export async function getMkvidRequest(env: Env, id: string): Promise<MkvidRequest | null> {
-  const row = await dbOf(env).prepare('SELECT * FROM mkvid_requests WHERE id = ?').bind(id).first<Row>()
+  const row = await dbOf(env).prepare('SELECT * FROM mkvid_requests WHERE id = ?').bind(id).first<MkvidRow>()
   return row ? rowToRequest(row) : null
 }
 
 export async function getMkvidRequestForSet(env: Env, setUrl: string): Promise<MkvidRequest | null> {
-  const row = await dbOf(env).prepare('SELECT * FROM mkvid_requests WHERE set_url = ?').bind(setUrl).first<Row>()
+  const row = await dbOf(env).prepare('SELECT * FROM mkvid_requests WHERE set_url = ?').bind(setUrl).first<MkvidRow>()
   return row ? rowToRequest(row) : null
 }
 
@@ -615,7 +615,7 @@ export async function listMkvidRequests(env: Env, limit = 100): Promise<MkvidReq
   const res = await dbOf(env)
     .prepare('SELECT * FROM mkvid_requests ORDER BY updated_at DESC, created_at DESC LIMIT ?')
     .bind(Math.min(Math.max(limit, 1), 500))
-    .all<Row>()
+    .all<MkvidRow>()
   return res.results.map(rowToRequest)
 }
 
@@ -742,7 +742,7 @@ export async function listMkvidQueuePage(env: Env, opts: MkvidListOptions = {}):
           WHERE ${where.sql}${keyset} ${QUEUE_PAGE_ORDER} LIMIT ?`,
       )
       .bind(...where.binds, ...keysetBinds, limit + 1)
-      .all<Row & { rid: number; position: number }>(),
+      .all<MkvidRow & { rid: number; position: number }>(),
     countMatching(env, where),
   ])
   const page = res.results.slice(0, limit)
@@ -776,7 +776,7 @@ export async function listMkvidSettledPage(env: Env, opts: MkvidListOptions = {}
     dbOf(env)
       .prepare(`SELECT *, rowid AS rid FROM mkvid_requests WHERE ${where.sql}${keyset} ${SETTLED_ORDER} LIMIT ?`)
       .bind(...where.binds, ...keysetBinds, limit + 1)
-      .all<Row & { rid: number }>(),
+      .all<MkvidRow & { rid: number }>(),
     countMatching(env, where),
   ])
   const page = res.results.slice(0, limit)
@@ -919,7 +919,7 @@ export async function nextMkvidRequests(env: Env, limit = 5): Promise<MkvidReque
         WHERE (${CLAIMABLE_WHERE_R}) AND ${CLAIM_READY_SQL} ${QUEUE_ORDER_R} LIMIT ?`,
     )
     .bind(now, now - claimTtl(env, await getAppSettings(env)), now - ID_WAIT_SECONDS, Math.min(Math.max(limit, 1), 50))
-    .all<Row>()
+    .all<MkvidRow>()
   return res.results.map(rowToRequest)
 }
 
@@ -1002,7 +1002,7 @@ async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[
           ${QUEUE_ORDER_R} LIMIT 25`,
       )
       .bind(now, stale, now - ID_WAIT_SECONDS, ...skip)
-      .all<Row>()
+      .all<MkvidRow>()
     const fresh = batch.results.filter((row) => !seen.has(row.id))
     if (!fresh.length) return { request: null, outcome: 'empty' }
     for (const row of fresh) {
@@ -1018,7 +1018,7 @@ async function claimNext(env: Env, log: Logger, accounts: readonly MkvidAccount[
 async function tryClaimRow(
   env: Env,
   log: Logger,
-  row: Row,
+  row: MkvidRow,
   a: { account: MkvidAccount; used: number; cap: number; now: number; preferAccount?: MkvidAccount | null },
 ): Promise<MkvidRequest | null> {
   const db = dbOf(env)

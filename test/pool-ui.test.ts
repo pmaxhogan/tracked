@@ -568,13 +568,13 @@ describe('pool pages: HTML smoke', () => {
     })
     const appl = mount(fetcher)
     const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, appl, makeEnv())
-    const accts = els.get('accts')!.innerHTML
+    const accts = els.get('pa-body')!.innerHTML
     expect(accts).toContain('acct-1')
     expect(accts).toContain('own-2')
     expect(accts).toContain('passive')
     expect(accts).toContain('flagged')
     expect(accts).toContain('data-act="retire"')
-    expect(els.get('chals')!.innerHTML).toContain('/ui/captcha/ch-7')
+    expect(els.get('pc-body')!.innerHTML).toContain('/ui/captcha/ch-7')
     expect(els.get('stats')!.innerHTML).toContain('41')
     const all = [...els.values()].map((e) => e.innerHTML + e.textContent).join('\n')
     expectNoCredentials(all)
@@ -650,9 +650,9 @@ describe('pool pages: HTML smoke', () => {
     })
     const appl = mount(fetcher)
     const list = await runPage(POOL_PAGES.CAPTCHA_LIST_HTML, appl, makeEnv())
-    expect(list.get('list')!.innerHTML).toContain('/ui/captcha/ch-7')
-    expect(list.get('list')!.innerHTML).toContain('acct-3')
-    expect(list.get('list')!.innerHTML).toMatch(/min left/)
+    expect(list.get('cl-body')!.innerHTML).toContain('/ui/captcha/ch-7')
+    expect(list.get('cl-body')!.innerHTML).toContain('acct-3')
+    expect(list.get('cl-body')!.innerHTML).toMatch(/min left/)
     const one = await runPage(POOL_PAGES.captchaPageHtml('ch-7'), appl, makeEnv())
     expect(one.get('head')!.innerHTML).toContain('acct-3')
     expect(one.get('head')!.innerHTML).toContain('While fetching a page')
@@ -1014,7 +1014,7 @@ describe('pool page: reopening the signup progress of an account still being cre
       'GET /challenges': () => json({ challenges: [] }),
     })
     const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
-    const accts = els.get('accts')!.innerHTML
+    const accts = els.get('pa-body')!.innerHTML
     expect(badgeButtons(accts)).toEqual([{ cid: 'ch_n1', acct: 'acct-1', text: 'new' }])
     expect(accts).toMatch(/<button type="button" class="badge badge-btn warn" data-signup="ch_n1"[^>]*aria-label="acct-1 is new: show its signup progress"/)
     // Every other badge opens the state details instead (never the signup dialog).
@@ -1131,7 +1131,7 @@ describe('pool page: state details for every other account state', () => {
   it('every state badge is a real button: "new" with a signup challenge keeps the signup dialog, every other one opens the details', async () => {
     const { fetcher } = fakePool({ 'GET /status': statusWith(ALL), 'GET /challenges': () => json({ challenges: [] }) })
     const els = await runPage(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
-    const accts = els.get('accts')!.innerHTML
+    const accts = els.get('pa-body')!.innerHTML
     const btns = stateButtons(accts)
     expect(btns.map((b) => [b.acct, b.text])).toEqual([
       ['acct-1', 'new'], ['acct-2', 'warming'], ['acct-3', 'active'], ['acct-4', 'passive'], ['acct-5', 'resting'],
@@ -1466,7 +1466,7 @@ describe('pool page: queued rows and several creations at once', () => {
       'GET /challenges': () => json([]),
     })
     const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
-    const accts = pg.els.get('accts')!.innerHTML
+    const accts = pg.els.get('pa-body')!.innerHTML
     // Real accounts first, then queued by time (queued-1 is due before queued-2).
     expect(accts.indexOf('acct-1')).toBeLessThan(accts.indexOf('queued-1'))
     expect(accts.indexOf('queued-1')).toBeLessThan(accts.indexOf('queued-2'))
@@ -1490,7 +1490,7 @@ describe('pool page: queued rows and several creations at once', () => {
     expect(pa.els.get('stats')!.innerHTML).not.toContain('queued accounts')
     const b = fakePool({ 'GET /status': statusOf([queuedEntry(1)]), 'GET /challenges': () => json([]) })
     const pb = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(b.fetcher), makeEnv())
-    expect(pb.els.get('accts')!.innerHTML).toContain('queued-1')
+    expect(pb.els.get('pa-body')!.innerHTML).toContain('queued-1')
     expect(pb.els.get('stats')!.innerHTML).toMatch(/<div class="v">0 \/ 0<\/div>/)
   })
 
@@ -1616,5 +1616,85 @@ describe('pool page: queued rows and several creations at once', () => {
     await handler(pg, 'add-retry')()
     expect(pg.els.get('add-form')!.hidden).toBe(false)
     expect(pg.els.get('add-active')!.hidden).toBe(true)
+  })
+})
+
+describe('pool page: accounts and challenges as data tables', () => {
+  /** A click inside a TKTable: closest() answers the selectors the table asks for. */
+  const tkt = (attrs: Record<string, string>) => {
+    const t: any = { getAttribute: (k: string) => (k in attrs ? attrs[k] : null), closest: (sel: string) => (sel === '[data-tkt]' ? t : null) }
+    return { target: t }
+  }
+  const tableClick = (pg: { els: Map<string, StubEl> }, id: string, attrs: Record<string, string>) => ((pg.els.get(id)!.handlers as Record<string, (ev: unknown) => void>).click!)(tkt(attrs))
+  let accounts: unknown[] = []
+  const status = () => json({ accounts, queueDepth: 0, totals: { requests_today: 5 } })
+  const rowIds = (html: string) => [...html.matchAll(/<b class="mono">([^<]*)<\/b>/g)].map((m) => m[1])
+
+  it('state chips with counts filter the accounts; headers sort; a poll keeps both, with one tlpool status call per poll', async () => {
+    accounts = [
+      upstreamAccount('acct-1', { used_today: 5 }), upstreamAccount('acct-2', { state: 'resting', used_today: 0 }),
+      upstreamAccount('acct-10', { flagged: true, used_today: 20 }), upstreamAccount('acct-3', { state: 'retired' }), queuedEntry(1),
+    ]
+    const { fetcher, calls } = fakePool({ 'GET /status': status, 'GET /challenges': () => json([upstreamChallenge('ch-1', { expiresAt: new Date(Date.now() + 3600_000).toISOString() })]) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    // Default order: accounts by number (acct-10 after acct-3), then the queued ones.
+    expect(rowIds(pg.els.get('pa-body')!.innerHTML)).toEqual(['acct-1', 'acct-2', 'acct-3', 'acct-10', 'queued-1'])
+    const chips = pg.els.get('pa-chips')!.innerHTML
+    expect(chips).toMatch(/data-chip="all"[^>]*>All<span class="tkt-count">5</)
+    expect(chips).toMatch(/data-chip="fetching"[^>]*>Fetching<span class="tkt-count">1</)
+    expect(chips).toMatch(/data-chip="flagged"[^>]*>Flagged<span class="tkt-count">1</)
+    expect(chips).toMatch(/data-chip="queued"[^>]*>Queued<span class="tkt-count">1</)
+    tableClick(pg, 'pa', { 'data-tkt': 'chip', 'data-chip': 'flagged' })
+    expect(rowIds(pg.els.get('pa-body')!.innerHTML)).toEqual(['acct-10'])
+    tableClick(pg, 'pa', { 'data-tkt': 'chip', 'data-chip': 'all' })
+    tableClick(pg, 'pa', { 'data-tkt': 'sort', 'data-col': 'usedToday' })
+    tableClick(pg, 'pa', { 'data-tkt': 'sort', 'data-col': 'usedToday' })
+    // Descending, the rows without a count (queued) last.
+    expect(rowIds(pg.els.get('pa-body')!.innerHTML)).toEqual(['acct-10', 'acct-3', 'acct-1', 'acct-2', 'queued-1'])
+    // The challenge table: one row, a solve link, the time left.
+    const ch = pg.els.get('pc-body')!.innerHTML
+    expect(ch).toContain('href="/ui/captcha/ch-1"')
+    expect(ch).toMatch(/min left/)
+    // A poll repaints with the new numbers and keeps the sort.
+    accounts = [upstreamAccount('acct-1', { used_today: 50 }), upstreamAccount('acct-10', { flagged: true, used_today: 20 })]
+    const before = calls.filter((c) => c.url.endsWith('/status')).length
+    await pg.fire(20000)
+    expect(calls.filter((c) => c.url.endsWith('/status')).length).toBe(before + 1)
+    expect(rowIds(pg.els.get('pa-body')!.innerHTML)).toEqual(['acct-1', 'acct-10'])
+    expect(pg.els.get('pa-body')!.innerHTML).toContain('50 / 30')
+  })
+
+  it('a poll does not redraw the accounts while a confirm is open; "No" puts the row buttons back', async () => {
+    accounts = [upstreamAccount('acct-1', { used_today: 5 })]
+    const { fetcher } = fakePool({ 'GET /status': status, 'GET /challenges': () => json([]) })
+    const pg = await runPageTimed(POOL_PAGES.POOL_PAGE_HTML, mount(fetcher), makeEnv())
+    const box = stubEl(); box.dataset = { acts: 'acct-1' }
+    const click = (dataset: Record<string, string>) => ({ target: { closest: (sel: string) => (sel === 'button' ? { dataset, closest: () => box, disabled: false } : null) } })
+    await (pg.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!(click({ act: 'rest', id: 'acct-1' }))
+    expect(box.innerHTML).toContain('Rest it for 72 hours?')
+    const drawn = pg.els.get('pa-body')!.innerHTML
+    accounts = [upstreamAccount('acct-1', { used_today: 9 })]
+    ;(pg.document as { querySelector: (s: string) => unknown }).querySelector = (sel: string) => (sel === '#accts .confirm' ? {} : null)
+    await pg.fire(20000)
+    expect(pg.els.get('pa-body')!.innerHTML).toBe(drawn)
+    await (pg.els.get('accts')!.handlers as Record<string, (ev: unknown) => Promise<void>>).click!(click({ no: '1' }))
+    expect(box.innerHTML).toContain('data-act="rest" data-id="acct-1"')
+    expect(box.innerHTML).toContain('data-act="retire"')
+    ;(pg.document as { querySelector: (s: string) => unknown }).querySelector = () => null
+    await pg.fire(20000)
+    expect(pg.els.get('pa-body')!.innerHTML).toContain('9 / 30')
+  })
+
+  it('the captcha list is a table, soonest expiry first, with a Solve link per row', async () => {
+    const soon = new Date(Date.now() + 5 * 60_000).toISOString(), later = new Date(Date.now() + 3600_000).toISOString()
+    const { fetcher } = fakePool({ 'GET /challenges': () => json([upstreamChallenge('ch-late', { expiresAt: later }), upstreamChallenge('ch-soon', { expiresAt: soon, type: 'checkbox' }), upstreamChallenge('ch-done', { state: 'solved' })]) })
+    const els = await runPage(POOL_PAGES.CAPTCHA_LIST_HTML, mount(fetcher), makeEnv())
+    const body = els.get('cl-body')!.innerHTML
+    expect(body.indexOf('ch-soon')).toBeGreaterThan(-1)
+    expect(body.indexOf('ch-soon')).toBeLessThan(body.indexOf('ch-late'))
+    expect(body).not.toContain('ch-done')
+    expect(body).toContain('checkbox (live view)')
+    expect(body).toMatch(/<span class="left soon">/)
+    expect(body).toContain('>Solve →</a>')
   })
 })

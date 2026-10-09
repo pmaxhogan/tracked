@@ -97,6 +97,7 @@ export const tracklistHandler: RouteHandler<typeof tracklistRoute, { Bindings: E
     linksResolved: resolveLinks,
     trackCount: tracks.length,
     tracks,
+    rows: full.rows,
   }
   log.info('tracklist.done', {
     tracklistUrl,

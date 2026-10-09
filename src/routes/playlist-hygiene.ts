@@ -3,7 +3,8 @@
  * /ui sub-app, so Cloudflare Access gates every one of them:
  *
  *   GET  /ui/removed                     what was (or in a dry run would be) removed, and why
- *   GET  /ui/api/removals                the rows behind it, settings, holds
+ *   GET  /ui/api/removals                the rows behind it (a data-table endpoint, lib/table-query.ts:
+ *                                        page/size/sort/q/f.<col>), plus counts, DJs, settings, holds
  *   POST /ui/api/removals/:id/undo       re-add (or, for a dry-run row, keep) one video
  *   POST /ui/api/removals/holds/:playlistId/approve   apply a held comparison once
  *   POST /ui/api/hygiene/run?what=compare|sweep       run one step now
@@ -18,7 +19,8 @@ import { makeLogger } from '../lib/log'
 import {
   approveHold,
   listHolds,
-  listRemovals,
+  REMOVALS_TABLE,
+  removalDjs,
   removalCounts,
   REASON_LABELS,
   removeAndReplace,
@@ -28,6 +30,7 @@ import {
   undoRemoval,
 } from '../lib/playlist-hygiene'
 import { parseDjSlug } from '../lib/subscriptions'
+import { tableResponse } from '../lib/table-query'
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { servePage } from '../ui/pages'
 import { REMOVED_PAGE_HTML } from '../ui/pages/removed'
@@ -39,18 +42,22 @@ const reqLog = (c: { req: { raw: Request }; get: (k: 'cfAccessEmail') => string 
 
 hygieneApp.get('/removed', (c) => servePage(c, REMOVED_PAGE_HTML))
 
-hygieneApp.get('/api/removals', async (c) => {
-  const before = Number(c.req.query('before'))
-  const page = await listRemovals(c.env, { limit: Number(c.req.query('limit')) || 200, before: Number.isFinite(before) && before > 0 ? before : null })
-  return c.json({
-    ...page,
-    counts: await removalCounts(c.env),
-    settings: sweepSettings(c.env, await getAppSettings(c.env)),
-    deletesUsedToday: await sweepDeletesUsed(c.env),
-    holds: await listHolds(c.env),
-    reasonLabels: REASON_LABELS,
-  })
-})
+// Home and Playlists read only the extras (holds, settings, deletes today); they
+// still send their old `?limit=1`, which the table contract ignores.
+hygieneApp.get('/api/removals', async (c) =>
+  tableResponse(c, REMOVALS_TABLE, c.env.DB, {
+    extra: async () => {
+      const [counts, settings, deletesUsedToday, holds, djs] = await Promise.all([
+        removalCounts(c.env),
+        getAppSettings(c.env).then((app) => sweepSettings(c.env, app)),
+        sweepDeletesUsed(c.env),
+        listHolds(c.env),
+        removalDjs(c.env),
+      ])
+      return { counts, settings, deletesUsedToday, holds, djs, reasonLabels: REASON_LABELS }
+    },
+  }),
+)
 
 hygieneApp.post('/api/removals/:id/undo', async (c) => {
   const log = reqLog(c, 'subs.hygiene.undo')

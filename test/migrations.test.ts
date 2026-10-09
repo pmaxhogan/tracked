@@ -48,6 +48,33 @@ describe('migrations on a copy of the pre-pool schema with data', () => {
     expect(rows(db, 'SELECT at, drawn, ran, items FROM scheduler_ticks')).toEqual([{ at: 1, drawn: 2, ran: 0, items: null }])
   })
 
+  it('0016 creates presaves and presave_checks: one row per track id, one per anonymous set row', () => {
+    const db = openRawDb()
+    for (const f of files) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    db.exec("INSERT INTO presaves (track_id, created_at, updated_at) VALUES ('909720', 1, 1)")
+    expect(() => db.exec("INSERT INTO presaves (track_id, created_at, updated_at) VALUES ('909720', 2, 2)")).toThrow()
+    db.exec("INSERT INTO presaves (set_url, row_index, stage, created_at, updated_at) VALUES ('s', 3, 'identify', 1, 1)")
+    expect(() => db.exec("INSERT INTO presaves (set_url, row_index, stage, created_at, updated_at) VALUES ('s', 3, 'identify', 2, 2)")).toThrow()
+    // Once identified (track id set) the row no longer holds its set row.
+    db.exec("UPDATE presaves SET track_id = '1' WHERE set_url = 's'")
+    db.exec("INSERT INTO presaves (set_url, row_index, stage, created_at, updated_at) VALUES ('s', 3, 'identify', 3, 3)")
+    db.exec("INSERT INTO presave_checks (presave_id, at, trigger, result) VALUES (1, 5, 'add', 'added')")
+    expect(rows(db, 'SELECT stage, link_count, check_count, fail_count, source FROM presaves WHERE id = 1')).toEqual([{ stage: 'links', link_count: 0, check_count: 0, fail_count: 0, source: 'ui' }])
+    expect(rows(db, 'SELECT presave_id, result FROM presave_checks')).toEqual([{ presave_id: 1, result: 'added' }])
+  })
+
+  it('0017 creates track_uploads (one live request per presave) and track_upload_bans', () => {
+    const db = openRawDb()
+    for (const f of files) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    db.exec("INSERT INTO track_uploads (presave_id, source_name, source_url, created_at, updated_at) VALUES (1, 'soundcloud', 'u', 1, 1)")
+    expect(() => db.exec("INSERT INTO track_uploads (presave_id, source_name, source_url, created_at, updated_at) VALUES (1, 'soundcloud', 'u2', 1, 1)")).toThrow()
+    db.exec("UPDATE track_uploads SET status = 'failed'")
+    db.exec("INSERT INTO track_uploads (presave_id, source_name, source_url, created_at, updated_at) VALUES (1, 'soundcloud', 'u2', 1, 1)")
+    db.exec("INSERT INTO track_upload_bans (url, banned_at) VALUES ('u', 1)")
+    expect(rows(db, 'SELECT status, attempts FROM track_uploads ORDER BY id')).toEqual([{ status: 'failed', attempts: 0 }, { status: 'pending', attempts: 0 }])
+    expect(rows(db, 'SELECT url FROM track_upload_bans')).toEqual([{ url: 'u' }])
+  })
+
   it('are numbered without gaps or duplicates', () => {
     const nums = files.map((f) => Number(f.slice(0, 4)))
     expect(nums).toEqual(nums.map((_, i) => i + 1))

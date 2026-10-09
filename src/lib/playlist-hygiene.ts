@@ -29,6 +29,7 @@ import type { Env } from '../types'
 import { dbOf, batchChunked } from './db'
 import { errorFields, type Logger } from './log'
 import { decideFullRecording, hasNoFullRecordingNotice, maxAudioSeconds, REJECT_REASON_LABELS, type RejectReason } from './full-recording'
+import type { TableDef } from './table-query'
 import { getVideoMeta, readCachedVideoMeta, type VideoMeta } from './video-meta'
 import {
   blockedIds,
@@ -401,14 +402,34 @@ async function logRemoval(
     .run()
 }
 
-export async function listRemovals(env: Env, opts: { limit?: number; before?: number | null } = {}): Promise<{ rows: RemovalRow[]; next: number | null }> {
-  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500)
-  const stmt = opts.before
-    ? dbOf(env).prepare('SELECT * FROM playlist_removals WHERE id < ? ORDER BY id DESC LIMIT ?').bind(opts.before, limit + 1)
-    : dbOf(env).prepare('SELECT * FROM playlist_removals ORDER BY id DESC LIMIT ?').bind(limit + 1)
-  const rows = (await stmt.all<RemovalRow>()).results
-  const page = rows.slice(0, limit)
-  return { rows: page, next: rows.length > limit ? page[page.length - 1]!.id : null }
+/**
+ * The Removed videos table (GET /ui/api/removals, the data-table contract in
+ * lib/table-query.ts): every row of `playlist_removals`, newest first by default.
+ * `at` is stored in unix seconds; filters on it take unix ms like every datetime.
+ */
+export const REMOVALS_TABLE: TableDef<RemovalRow> = {
+  from: 'playlist_removals',
+  primaryKey: 'id',
+  defaultSort: '-at',
+  columns: {
+    id: { type: 'number', filterable: false },
+    at: { type: 'datetime', storage: 's' },
+    source: { type: 'enum', options: ['sweep', 'owner', 'dead', 'button'] },
+    status: { type: 'enum', options: ['would_remove', 'removed', 'recorded', 'failed', 'undone'] },
+    slug: { type: 'text', searchable: true },
+    set_url: { type: 'text', searchable: true },
+    video_id: { type: 'text', searchable: true },
+    playlist_kind: { type: 'enum', options: ['artist', 'combined'] },
+    playlist_id: { type: 'text', sortable: false },
+    reason: { type: 'enum' },
+    detail: { type: 'text', sortable: false, searchable: true },
+  },
+}
+
+/** DJs that have at least one removal (the DJ filter's options), by slug. */
+export async function removalDjs(env: Env): Promise<string[]> {
+  const res = await dbOf(env).prepare('SELECT DISTINCT slug FROM playlist_removals WHERE slug IS NOT NULL ORDER BY slug LIMIT 500').all<{ slug: string }>()
+  return res.results.map((r) => r.slug)
 }
 
 export async function removalCounts(env: Env): Promise<Record<string, number>> {

@@ -56,6 +56,18 @@ describe('fetchMkvidRenderProgress', () => {
     // A waiting stage mkvid does not list is dropped, not passed on.
     expect(normalizeRenderProgress(running({ waiting: 'nope' }))!.waiting).toBeNull()
   })
+  it('a track upload job (kind track, requestId null) is named from track_uploads, never matched to a set', async () => {
+    const track = running({ jobId: 'j3', kind: 'track', requestId: null, trackRequestId: 12, title: 'raw', stage: 'upload' })
+    expect(normalizeRenderProgress(track)).toMatchObject({ kind: 'track', requestId: null, trackRequestId: 12 })
+    expect(normalizeRenderProgress(running({ kind: 'track', requestId: REQ, trackRequestId: 'track:5' }))).toMatchObject({ requestId: null, trackRequestId: 5 })
+    expect(normalizeRenderProgress(running())).toMatchObject({ kind: null, trackRequestId: null, requestId: REQ })
+    const sqls: string[] = []
+    const db = { prepare: (sql: string) => (sqls.push(sql), { bind: () => ({ first: async () => (sql.includes('track_uploads') ? { artist: 'Mau P', title: 'Metro' } : null) }) }) }
+    const f = vi.fn(async () => Response.json({ running: running({ kind: 'set' }), jobs: [running({ kind: 'set' }), track] }))
+    const r = await fetchMkvidRenderProgress(env({ DB: db } as unknown as Partial<Env>), f as unknown as typeof fetch)
+    expect(r.ok && r.jobs.map((j) => [j.kind, j.title, j.setUrl])).toEqual([['set', 'Odd Mob @ X', null], ['track', 'Mau P - Metro', null]])
+    expect(sqls.filter((s) => s.includes('mkvid_requests'))).toHaveLength(1)
+  })
   it('reports mkvid errors and missing config', async () => {
     expect(await fetchMkvidRenderProgress(env({ MKVID_URL: undefined } as Partial<Env>), vi.fn() as unknown as typeof fetch)).toMatchObject({ ok: false })
     expect(await fetchMkvidRenderProgress(env(), (async () => new Response('', { status: 302 })) as unknown as typeof fetch)).toEqual({ ok: false, error: 'mkvid answered 302' })
@@ -117,6 +129,16 @@ describe('mkvid page: the running render', () => {
     expect(html).toContain('Up next')
     expect(html).toContain('Waiting for the other set to finish rendering')
     expect(html.split('Second set')[1]).not.toContain('min left in the render')
+  })
+
+  it('a track upload job shows as Track: artist - title, linking to Track uploads', async () => {
+    const set = { ...normalizeRenderProgress(running({ kind: 'set' }))!, setUrl: 'https://www.1001tracklists.com/tracklist/x/odd-mob.html', slug: 'oddmob' }
+    const track = { ...normalizeRenderProgress(running({ kind: 'track', requestId: null, trackRequestId: 3, title: 'Mau P - <i>Metro</i>', stage: 'upload' }))!, setUrl: null, slug: null }
+    const get = page({ running: set, jobs: [set, track] })
+    await settle()
+    const html: string = get('mk-run').innerHTML
+    expect(html).toContain('href="/ui/track-uploads">Track: Mau P - &lt;i&gt;Metro&lt;/i&gt;</a>')
+    expect(html).toContain('href="/ui/set?url=https%3A%2F%2Fwww.1001tracklists.com%2Ftracklist%2Fx%2Fodd-mob.html"')
   })
 
   it('stays hidden when mkvid is idle or unreachable', async () => {

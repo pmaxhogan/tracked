@@ -1,8 +1,8 @@
-// DJs: every subscribed 1001tracklists DJ with its sync state. Add, remove, sync
-// one or all (serially), Invalidate & resync one or all (all is ONE request),
-// and the "fix titles" dialog. Data: GET /ui/api/list, then one
-// GET /ui/api/state/:slug per row, four at a time.
-import { skelHtml } from '../skeleton'
+// DJs: every subscribed 1001tracklists DJ with its sync state, as a data table
+// (TKTable) served by GET /ui/api/djs (lib/dj-table.ts: one D1 query, sorted,
+// filtered, searched and paged on the server). Add, remove, sync one or all
+// (serially), Invalidate & resync one or all (all is ONE request), and the
+// "fix titles" dialog.
 import { shell } from '../shell'
 import type { UiPage } from './index'
 import { tipAttr } from '../tip'
@@ -18,215 +18,170 @@ const ACTIONS = /* html */ `
 <button id="fix-titles" type="button" class="btn"${tipAttr(FIX_TITLES_TITLE)}>Fix titles</button>`
 
 const BODY = /* html */ `
-<div id="filters" class="dj-filters" hidden>
-  <div class="field"><label for="f-text">Filter</label><input id="f-text" type="search" placeholder="Filter DJs by name" /></div>
-  <div class="field check"><input id="f-err" type="checkbox" /><label for="f-err"${tipAttr('Only DJs whose last sync ended in an error.')}>with errors</label></div>
-  <span id="f-count" class="muted sub"></span>
-</div>
-<div id="error" class="err-state" role="alert" hidden></div>
-<div id="wrap" class="tk-card tk-table-wrap" hidden>
-  <table class="tk-table">
-    <thead><tr><th>DJ</th><th><span class="tip-term"${tipAttr('Sets processed (given a video) out of every set found on the DJ page.')}>Sets</span></th><th><span class="tip-term"${tipAttr('When the sync last ran for this DJ.')}>Last sync</span></th><th>Playlist</th><th>Actions</th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table>
-</div>
-<div id="djs-skel">${skelHtml(8, 'row')}</div>
-<div id="empty" class="empty" hidden></div>
+<div id="djs"></div>
 ${FIX_DIALOG_HTML}
 `
 
 const CSS = /* css */ `
   .dj-add { display: flex; gap: var(--sp-2); flex: 1 1 22rem; min-width: 0; }
   .dj-add input { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); padding: 8px 10px; }
-  .dj-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-3); margin-bottom: var(--sp-3); }
-  .dj-filters .field input[type=search] { min-width: 14rem; }
-  .dj-filters .field.check { align-self: flex-end; padding-bottom: 8px; }
+  .dj-who { display: block; min-width: 11rem; }
   .dj-name { font-weight: 600; }
   .dj-sub { display: block; color: var(--muted); font-size: var(--fs-xs); }
-  .dj-actions { display: flex; flex-wrap: wrap; gap: var(--sp-1); justify-content: flex-end; }
-  .dj-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); justify-content: flex-end; }
-  .skel.w { width: 5rem; display: inline-block; }
-  .tk-table td.num { white-space: nowrap; }
-  #error { margin-bottom: var(--sp-3); }
+  .dj-actions { display: inline-flex; gap: var(--sp-1); justify-content: flex-end; }
+  .dj-pl { white-space: nowrap; }
+  .dj-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); justify-content: flex-end; }
+  .tkt-table td .badge { text-transform: none; }
 ${DJ_ACTIONS_CSS}`
 
 const JS = /* js */ `
 (() => {
 ${DJ_ACTIONS_JS}
   const $ = TK.$, esc = TK.esc;
-  const $rows = $('rows'), $wrap = $('wrap'), $empty = $('empty'), $error = $('error'), $filters = $('filters');
-  const $text = $('f-text'), $errOnly = $('f-err'), $count = $('f-count');
   const $syncAll = $('sync-all'), $resyncAll = $('resync-all'), $fix = $('fix-titles');
   const $form = $('add-form'), $url = $('url'), $addBtn = $('add-btn');
 
-  // One entry per subscription: { slug, sourceUrl, addedAt, state, busy, confirming }.
-  // state: undefined = loading (skeleton), null = no sync state yet, object = loaded; failed = state call failed.
-  let rows = [];
+  // Per-row UI state the server does not know: busy ('sync' | 'resync' | 'remove') and the remove confirm.
+  const busy = new Map(), confirming = new Set();
   let bulk = null; // 'sync' | 'resync' while a bulk action runs
-  let focused = false;
-  $text.value = TK.qs.get('q') || '';
-  $errOnly.checked = TK.qs.get('errors') === '1';
+  let total = 0, focused = false;
 
-  function hasError(r) { return !!(r.state && r.state.lastError); }
-  function visible() {
-    const q = ($text.value || '').trim().toLowerCase();
-    return rows.filter((r) => {
-      if ($errOnly.checked && !hasError(r)) return false;
-      if (!q) return true;
-      return r.slug.toLowerCase().includes(q) || String((r.state && r.state.artistName) || '').toLowerCase().includes(q);
-    });
-  }
-
-  const SKEL = '<span class="skel w"></span>';
-  function rowHtml(r) {
-    const slug = esc(r.slug), enc = esc(encodeURIComponent(r.slug));
-    const st = r.state, sum = DJA.summarize(st);
-    const name = esc((st && st.artistName) || r.slug);
+  const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+  function nameHtml(r) {
+    const enc = esc(encodeURIComponent(r.slug));
     const open = TK.safeHref(r.sourceUrl);
-    const added = TK.fmt.date(r.addedAt);
-    const who = '<a class="dj-name" href="/ui/dj/' + enc + '">' + name + '</a>' +
-      '<span class="dj-sub">' + (name !== slug ? slug + ' · ' : '') + (open ? '<a href="' + esc(open) + '" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a>' : '') + (added ? ' · added ' + esc(added) : '') + '</span>';
-    let sets, last, playlist;
-    if (r.state === undefined) { sets = last = playlist = SKEL; }
-    else if (r.failed) { sets = last = playlist = '<span class="muted">state unavailable</span>'; }
-    else if (!st) { sets = '—'; last = '<span class="muted">never synced</span>'; playlist = '—'; }
-    else {
-      sets = esc(sum.processed + ' of ' + sum.known) + (sum.pending ? ' <span class="badge info"' + TK.tip(sum.pending + ' set' + (sum.pending === 1 ? ' is' : 's are') + ' found on the DJ page but not processed yet. The scheduler works through them a few at a time.') + '>' + sum.pending + ' pending</span>' : '');
-      const when = DJA.lastRun(st);
-      last = (when ? esc(when) : '<span class="muted">never</span>') + (st.lastError ? ' <span class="badge bad"' + TK.tip('The last sync failed: ' + st.lastError + ' (retried on a later scheduler tick)') + '>error</span>' : '');
-      const href = DJA.playlistHref(st);
-      playlist = href ? '<a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener">Playlist ↗</a> <span class="muted">' + sum.videos + ' video' + (sum.videos === 1 ? '' : 's') + '</span>' : '—';
+    return '<span class="dj-who"><a class="dj-name" href="/ui/dj/' + enc + '">' + esc(r.name) + '</a>' +
+      '<span class="dj-sub">' + (r.name !== r.slug ? esc(r.slug) + ' · ' : '') + (open ? '<a href="' + esc(open) + '" target="_blank" rel="noreferrer noopener"' + TK.tip('This DJ on 1001tracklists') + '>1001tl ↗</a>' : '') + '</span></span>';
+  }
+  function setsHtml(r) {
+    if (!r.sets) return '<span class="tkt-nil">–</span>';
+    return esc(r.processed + ' of ' + r.sets);
+  }
+  function pendingHtml(r) {
+    if (!r.pending) return '<span class="tkt-nil">0</span>';
+    return '<span class="badge info"' + TK.tip(plural(r.pending, 'set') + (r.pending === 1 ? ' is' : ' are') + ' found on the DJ page but not processed yet. The scheduler works through them a few at a time.') + '>' + r.pending + ' pending</span>';
+  }
+  function lastHtml(r) {
+    const when = r.lastRunAt ? '<span class="tkt-when">' + esc(TK.fmt.rel(new Date(r.lastRunAt).toISOString())) + '</span>' : '<span class="muted">never synced</span>';
+    return when + (r.hasError ? ' <span class="badge bad"' + TK.tip('The last sync failed: ' + r.lastError + ' (retried on a later scheduler tick)') + '>error</span>' : '');
+  }
+  function playlistHtml(r) {
+    const href = TK.safeHref(r.playlistUrl);
+    if (!href) return '<span class="tkt-nil">–</span>';
+    return '<span class="dj-pl"><a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener">Playlist ↗</a> <span class="muted">' + esc(plural(r.videos, 'video')) + '</span></span>';
+  }
+  function actionsHtml(r) {
+    const slug = esc(r.slug);
+    if (confirming.has(r.slug)) {
+      return '<span class="dj-confirm"><span>Remove ' + slug + '?</span>' +
+        '<button type="button" class="btn small danger" data-act="remove-yes">Yes, remove</button>' +
+        '<button type="button" class="btn small" data-act="remove-no">Cancel</button></span>';
     }
-    let actions;
-    if (r.confirming) {
-      actions = '<span class="dj-confirm"><span>Remove ' + slug + '?</span>' +
-        '<button type="button" class="btn small danger" data-act="remove-yes" data-slug="' + slug + '">Yes, remove</button>' +
-        '<button type="button" class="btn small" data-act="remove-no" data-slug="' + slug + '">Cancel</button></span>';
-    } else {
-      const dis = r.busy || bulk ? ' disabled' : '';
-      actions = '<span class="dj-actions">' +
-        '<button type="button" class="btn small" data-act="sync" data-slug="' + slug + '"' + dis + TK.tip('Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.') + '>' + (r.busy === 'sync' ? 'Syncing…' : 'Sync') + '</button>' +
-        '<button type="button" class="btn small" data-act="resync" data-slug="' + slug + '"' + dis + TK.tip('Marks every processed set of this DJ as due for a re-check and re-reads its playlists from YouTube, so swapped recordings are replaced. Costs up to 10 fetches per press; the scheduler does the rest over later ticks.') + '>' + (r.busy === 'resync' ? 'Resyncing…' : 'Invalidate &amp; resync') + '</button>' +
-        '<button type="button" class="btn small danger" data-act="remove" data-slug="' + slug + '"' + dis + TK.tip('Unsubscribes from this DJ. Their YouTube playlist and videos stay as they are.') + '>Remove</button></span>';
-    }
-    return '<tr><td data-label="DJ">' + who + '</td><td data-label="Sets" class="num">' + sets + '</td><td data-label="Last sync">' + last +
-      '</td><td data-label="Playlist">' + playlist + '</td><td data-label="Actions">' + actions + '</td></tr>';
+    const b = busy.get(r.slug);
+    const dis = b || bulk ? ' disabled' : '';
+    return '<span class="dj-actions">' +
+      '<button type="button" class="btn small" data-act="sync"' + dis + TK.tip('Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.') + '>' + (b === 'sync' ? 'Syncing…' : 'Sync') + '</button>' +
+      '<button type="button" class="btn small" data-act="resync"' + dis + TK.tip('Invalidate & resync: marks every processed set of this DJ as due for a re-check and re-reads its playlists from YouTube, so swapped recordings are replaced. Costs up to 10 fetches per press; the scheduler does the rest over later ticks.') + ' aria-label="Invalidate and resync ' + slug + '">' + (b === 'resync' ? 'Resyncing…' : 'Resync') + '</button>' +
+      '<button type="button" class="btn small danger" data-act="remove"' + dis + TK.tip('Unsubscribes from this DJ. Their YouTube playlist and videos stay as they are.') + '>Remove</button></span>';
   }
 
-  function render() {
-    const list = visible();
-    $filters.hidden = !rows.length;
-    $syncAll.hidden = !rows.length;
-    $resyncAll.hidden = !rows.length;
+  const table = TKTable.create($('djs'), {
+    id: 'djs',
+    source: { url: '/ui/api/djs' },
+    swr: true,
+    columns: [
+      { key: 'name', label: 'DJ', type: 'text', render: nameHtml },
+      { key: 'sets', label: 'Sets', type: 'number', render: setsHtml, tip: 'Sets processed (given a video, or found to have none) out of every set found on the DJ page.' },
+      { key: 'pending', label: 'Pending', type: 'number', render: pendingHtml, tip: 'Sets found on the DJ page that the sync has not processed yet.' },
+      { key: 'lastRunAt', label: 'Last sync', type: 'datetime', render: lastHtml, tip: 'When the sync last ran for this DJ, and whether it ended in an error (the Errors chip lists those).' },
+      { key: 'videos', label: 'Playlist', type: 'number', render: playlistHtml, tip: 'The DJ playlist on YouTube and how many sets have a video in it.' },
+      { key: 'mkvid', label: 'mkvid', type: 'number', hideOn: 'phone', tip: 'Videos mkvid rendered from a set audio because the set had no recording.' },
+      { key: 'addedAt', label: 'Added', type: 'datetime', hideOn: 'phone', render: (r) => '<span class="tkt-when">' + esc(TK.fmt.date(r.addedAt / 1000)) + '</span>', tip: 'When you subscribed.' },
+    ],
+    defaultSort: 'name',
+    search: 'Search DJs, slugs, errors',
+    chips: [
+      { id: 'all', label: 'All', group: 'f', on: true, count: (d) => d.counts && d.counts.total },
+      { id: 'errors', label: 'Errors', group: 'f', filters: [{ col: 'hasError', op: 'eq', value: '1' }], count: (d) => d.counts && d.counts.errors, tip: 'DJs whose last sync ended in an error.' },
+      { id: 'pending', label: 'Pending sets', group: 'f', filters: [{ col: 'pending', op: 'gt', value: '0' }], sort: '-pending', count: (d) => d.counts && d.counts.pending, tip: 'DJs with sets found but not processed yet.' },
+      { id: 'never', label: 'Never synced', group: 'f', filters: [{ col: 'lastRunAt', op: 'empty', value: '' }], count: (d) => d.counts && d.counts.neverSynced, tip: 'DJs the sync has not run for yet.' },
+    ],
+    rowKey: 'slug',
+    actions: actionsHtml,
+    onAction: (act, r) => {
+      if (busy.get(r.slug) || bulk) return;
+      if (act === 'sync' || act === 'resync') syncRow(r.slug, act === 'resync');
+      else if (act === 'remove') { confirming.add(r.slug); table.reload(); }
+      else if (act === 'remove-no') { confirming.delete(r.slug); table.reload(); }
+      else if (act === 'remove-yes') removeRow(r.slug);
+    },
+    onData: (d) => {
+      total = d && d.counts ? d.counts.total : (d && d.total) || 0;
+      paintBulk();
+      // ?focus=filter: the search box is only worth focusing once there are DJs.
+      if (!focused && total && TK.qs.get('focus') === 'filter') { focused = true; const q = $('djs-q'); if (q && q.focus) q.focus(); }
+    },
+    empty: 'No subscriptions yet.',
+  });
+
+  function paintBulk() {
+    $syncAll.hidden = !total;
+    $resyncAll.hidden = !total;
     // One bulk action at a time: the other bulk button waits (the pressed one is TK.busy's).
     if (bulk !== 'sync') $syncAll.disabled = !!bulk;
     if (bulk !== 'resync') $resyncAll.disabled = !!bulk;
     $fix.disabled = !!bulk;
-    $wrap.hidden = !list.length;
-    $rows.innerHTML = list.map(rowHtml).join('');
-    if (!rows.length) { $empty.textContent = 'No subscriptions yet.'; $empty.hidden = false; }
-    else if (!list.length) { $empty.textContent = 'No DJs match the filter.'; $empty.hidden = false; }
-    else $empty.hidden = true;
-    $count.textContent = rows.length ? (list.length === rows.length ? rows.length + ' DJ' + (rows.length === 1 ? '' : 's') : list.length + ' of ' + rows.length + ' DJs') : '';
   }
 
-  function showError(msg) {
-    $error.textContent = '';
-    if (!msg) { $error.hidden = true; return; }
-    $error.innerHTML = '<span class="grow">' + esc(msg) + '</span><button type="button" class="btn small" id="retry">Retry</button>';
-    $error.hidden = false;
-    $('retry').addEventListener('click', () => load());
-  }
-
-  async function loadRowState(r) {
-    const s = await DJA.loadState(r.slug);
-    if (s.failed) { r.state = null; r.failed = true; }
-    else { r.state = s.state; r.failed = false; }
-    r.live = true;
-    render();
-  }
-
-  async function load() {
-    showError('');
-    // The list (and each row's state) this browser stored at the last view paints at once; the live list replaces it.
-    await TK.api.swr('/ui/api/list', async (res) => {
-      $('djs-skel').hidden = true;
-      if (!res.ok) {
-        if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
-        showError(TK.errText(res, 'failed to load (' + res.status + ')'));
-        return;
-      }
-      showError('');
-      const prev = new Map(rows.map((r) => [r.slug, r]));
-      rows = ((res.data && res.data.subscriptions) || []).map((s) => {
-        const old = prev.get(s.slug);
-        const state = old ? old.state : res.stale ? DJA.storedState(s.slug) : undefined;
-        return { slug: s.slug, sourceUrl: s.sourceUrl, addedAt: s.addedAt, state, failed: old ? old.failed : false, busy: old ? old.busy : null, confirming: false, live: old ? old.live : false };
-      });
-      render();
-      // ?focus=filter: the filter row is only shown once there are rows to filter.
-      if (!focused && rows.length && TK.qs.get('focus') === 'filter') { focused = true; $text.focus(); }
-      if (res.stale) return;
-      // At most four state calls at a time; rows painted from a stored state are refreshed too.
-      await DJA.pool(rows.filter((r) => !r.live), 4, loadRowState);
-    });
-  }
-
-  const find = (slug) => rows.find((r) => r.slug === slug);
-
-  async function syncRow(r, resync) {
-    r.busy = resync ? 'resync' : 'sync';
-    render();
-    const out = await DJA.syncSlug(r.slug, null, { resync });
-    r.busy = null;
-    await loadRowState(r);
+  async function syncRow(slug, resync) {
+    busy.set(slug, resync ? 'resync' : 'sync');
+    table.reload();
+    let out = null;
+    try { out = await DJA.syncSlug(slug, null, { resync }); }
+    finally { busy.delete(slug); await table.reload(); }
     return out;
   }
 
-  async function removeRow(r) {
-    r.busy = 'remove'; r.confirming = false; render();
-    const res = await TK.api.post('/ui/api/remove', { slug: r.slug });
-    r.busy = null;
-    if (!res.ok) { TK.toast(TK.errText(res, 'remove failed (' + res.status + ')'), 'bad'); render(); return; }
-    rows = rows.filter((x) => x !== r);
-    render();
+  async function removeRow(slug) {
+    confirming.delete(slug);
+    busy.set(slug, 'remove');
+    table.reload();
+    const res = await TK.api.post('/ui/api/remove', { slug });
+    busy.delete(slug);
+    if (!res.ok) TK.toast(TK.errText(res, 'remove failed (' + res.status + ')'), 'bad');
+    await table.reload();
   }
 
-  $rows.addEventListener('click', (ev) => {
-    const b = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
-    if (!b) return;
-    const r = find(b.dataset.slug);
-    if (!r || r.busy || bulk) return;
-    const act = b.dataset.act;
-    if (act === 'sync' || act === 'resync') syncRow(r, act === 'resync');
-    else if (act === 'remove') { r.confirming = true; render(); }
-    else if (act === 'remove-no') { r.confirming = false; render(); }
-    else if (act === 'remove-yes') removeRow(r);
-  });
+  // Every subscribed slug (not just this page of the table), in the order they were added.
+  async function allSlugs() {
+    const res = await TK.api.get('/ui/api/list');
+    if (!res.ok) { TK.toast(TK.errText(res, 'could not list the DJs (' + res.status + ')'), 'bad'); return []; }
+    return ((res.data && res.data.subscriptions) || []).map((s) => s.slug);
+  }
 
   // Serial, never parallel: it keeps us under YouTube quota and the 1001tracklists rate limits.
   $syncAll.addEventListener('click', () => {
     if (bulk) return;
     bulk = 'sync';
-    render();
+    paintBulk();
+    table.reload();
     return TK.busy($syncAll, 'Syncing all…', async () => {
       try {
-        for (const r of rows.slice()) {
-          if (r.busy) continue;
-          const out = await syncRow(r, false);
+        for (const slug of await allSlugs()) {
+          if (busy.get(slug)) continue;
+          const out = await syncRow(slug, false);
           if (out && out.reauth) break;
         }
-      } finally { bulk = null; render(); }
+      } finally { bulk = null; paintBulk(); table.reload(); }
     });
   });
 
   $resyncAll.addEventListener('click', async () => {
     if (bulk) return;
     bulk = 'resync';
-    render();
-    let out = null;
-    try { out = await DJA.resyncAll($resyncAll, rows.length); } finally { bulk = null; render(); }
-    if (out && out.ok) { for (const r of rows) r.state = undefined; render(); await DJA.pool(rows, 4, loadRowState); }
+    paintBulk();
+    table.reload();
+    try { await DJA.resyncAll($resyncAll, total); } finally { bulk = null; paintBulk(); table.reload(); }
   });
 
   $fix.addEventListener('click', () => DJA.fixTitles($fix));
@@ -242,15 +197,9 @@ ${DJ_ACTIONS_JS}
       const slug = d.subscription && d.subscription.slug ? d.subscription.slug : '';
       TK.toast(d.added === false ? (slug || 'that DJ') + ' is already subscribed' : 'added ' + slug, 'ok');
       $url.value = '';
-      await load();
+      await table.reload();
     });
   });
-
-  function mirror() { TK.qs.set({ q: ($text.value || '').trim(), errors: $errOnly.checked ? '1' : '' }); render(); }
-  $text.addEventListener('input', mirror);
-  $errOnly.addEventListener('change', mirror);
-
-  load();
 })();
 `
 

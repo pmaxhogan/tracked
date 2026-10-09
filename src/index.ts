@@ -3,6 +3,7 @@ import { nowPlayingRoute, nowPlayingHandler } from './routes/now-playing'
 import { tracklistRoute, tracklistHandler } from './routes/tracklist'
 import { tracklistPurgeRoute, tracklistPurgeHandler } from './routes/tracklist-purge'
 import { likesRoute, likesHandler } from './routes/likes'
+import { presaveRoute, presaveHandler, presaveStatusRoute, presaveStatusHandler } from './routes/presave'
 import { likedSongsRoute, likedSongsHandler } from './routes/liked-songs'
 import { HOME_HTML, subscriptionsApp } from './routes/subscriptions'
 import { servePage } from './ui/pages'
@@ -10,6 +11,7 @@ import { legacyApp } from './routes/legacy'
 import { cfAccess } from './middleware/cf-access'
 import { noFraming, sameOriginJson } from './middleware/same-origin'
 import { mkvidApp } from './routes/mkvid'
+import { mkvidTrackApp, MkvidTrackClaimBody, MkvidTrackClaimResponse } from './routes/mkvid-track'
 import { poolUiApp } from './routes/pool-ui'
 import { MkvidClaimBody, MkvidClaimResponse } from './schemas'
 import { bearerAuth } from './middleware/auth'
@@ -72,6 +74,9 @@ app.openapi(nowPlayingRoute, nowPlayingHandler)
 app.openapi(tracklistRoute, tracklistHandler)
 app.openapi(tracklistPurgeRoute, tracklistPurgeHandler)
 app.openapi(likesRoute, likesHandler)
+// Pre-save a track (routes/presave.ts), same Tasker bearer.
+app.openapi(presaveRoute, presaveHandler)
+app.openapi(presaveStatusRoute, presaveStatusHandler)
 // Gated by its own LIKED_SONGS_TOKEN. Must stay above the API_TOKEN wildcard
 // gate below — a route registered first, with route-level middleware, answers
 // before that gate ever runs.
@@ -107,6 +112,7 @@ app.route('/subscriptions', legacyApp)
 // Work queue for mkvid (the NAS render/upload service). Gated by its own
 // MKVID_TOKEN inside the sub-app, so like /ui it must be skipped by
 // the API_TOKEN wildcard gate below.
+app.route('/mkvid/track', mkvidTrackApp) // mkvid's track-upload queue (routes/mkvid-track.ts), same MKVID_TOKEN; ahead of /mkvid
 app.route('/mkvid', mkvidApp)
 
 // tlpool's webhook (POST /pool/events), gated by TLPOOL_TOKEN inside the
@@ -129,6 +135,15 @@ app.openAPIRegistry.registerPath({
   },
   responses: {
     200: { description: 'The claimed request with its track list, or null.', content: { 'application/json': { schema: MkvidClaimResponse } } },
+  },
+})
+app.openAPIRegistry.registerPath({
+  method: 'post',
+  path: '/mkvid/track/claim',
+  summary: 'Claim the next pre-saved track for mkvid to rip, render and upload (bearer MKVID_TOKEN; job/complete/fail in routes/mkvid-track.ts)',
+  request: { body: { required: false, content: { 'application/json': { schema: MkvidTrackClaimBody } } } },
+  responses: {
+    200: { description: 'The claimed track request, or null.', content: { 'application/json': { schema: MkvidTrackClaimResponse } } },
   },
 })
 

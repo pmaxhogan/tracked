@@ -332,7 +332,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   // track before it. An anonymous row without a cue cannot bound anything and
   // is left out, as all of them were before (and as they are on cache entries
   // written before `rows` existed).
-  let selectable: Array<ParsedTrack & { anonymous?: boolean }>
+  let selectable: Array<ParsedTrack & { anonymous?: boolean; rowIndex?: number; mediaId?: string | null }>
   let setAppleLink: string | null = null
   // Age of the cached list the answer comes from (`refresh: true` refetches first;
   // when that fails a kept list still answers, stale: true with refreshError).
@@ -364,8 +364,9 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       cache = { fetchedAt: scraped.fetchedAt ?? null, ageSeconds: cacheAgeSeconds(scraped), ttlSeconds: scraped.ttlSeconds ?? null, refreshed: false }
     }
     parsedTracks = scraped.tracks
+    // Each row keeps its page index (rowIndex in the answer: what POST /presave names an ID row by).
     selectable = scraped.rows
-      ? keepRows(scraped.rows, (r) => !r.anonymous || (!r.isMashupLinked && r.startSeconds !== null))
+      ? keepRows(scraped.rows.map((r, rowIndex) => ({ ...r, rowIndex })), (r) => !r.anonymous || (!r.isMashupLinked && r.startSeconds !== null))
       : parsedTracks
     setAppleLink = scraped.setAppleLink
   } catch (err) {
@@ -442,7 +443,10 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     sel.picked.map(async (t) => {
       const parsed = selectable.find((p) => p.title === t.title && p.startSeconds === t.startSeconds)
       const links = await resolveLinks(env, parsed, t, log)
-      return { ...t, ...links } satisfies ResponseTrack
+      // trackId / rowIndex: what POST /presave takes (an anonymous row's data-id is a page position, not a track id).
+      // mediaId undefined = a list cached before the field: its trackId may be a page position, so no id (the save goes by row).
+      const ids = { trackId: parsed && !parsed.anonymous ? (parsed.mediaId ?? null) : null, rowIndex: parsed?.rowIndex ?? null }
+      return { ...t, ...links, ...ids } satisfies ResponseTrack & typeof ids
     }),
   )
 

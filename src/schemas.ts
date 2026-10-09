@@ -70,6 +70,8 @@ export const ResponseTrackSchema = z
       description:
         'Whether the connected YouTube account (see /ui) has liked the youtubeLink video — i.e. it is in YouTube Music "Liked songs". null when no YouTube account is connected, the track has no youtubeLink, or the rating lookup failed. Toggle with POST /likes.',
     }),
+    trackId: z.string().nullable().openapi({ example: '909720', description: 'Internal 1001tracklists track id (the medialink id POST /presave takes). null on an anonymous "ID - ID" row.' }),
+    rowIndex: z.number().int().nullable().openapi({ example: 12, description: "0-based page row in the set (anonymous rows counted): with tracklistUrl it names an ID row for POST /presave. null on a cache entry older than the rows." }),
   })
   .openapi('ResponseTrack')
 
@@ -142,8 +144,26 @@ export const TracklistTrackSchema = z
     idStatus: z.string().nullable().openapi({ example: 'ID Remix', description: 'Non-null when this row is a partial-ID variant of a known base track ("ID Remix", "ID Edit", ...). The artist/title/links describe the BASE track; the playing version may differ.' }),
     isMashupLinked: z.boolean().openapi({ description: 'True when this row is a "w/" mashup sibling of the previous row (shares its cue position). False on the first row, and when the row it was played with is an anonymous "ID - ID" row (those are not listed).' }),
     youtubeLiked: z.boolean().nullable().openapi({ description: 'Whether the connected YouTube account has liked the youtubeLink video. null when not connected, no youtubeLink, or the lookup failed.' }),
+    rowIndex: z.number().int().nullable().openapi({ description: "This track's index in `rows`. null on a cache entry older than the rows." }),
   })
   .openapi('TracklistTrack')
+
+export const TracklistRowSchema = z
+  .object({
+    rowIndex: z.number().int().openapi({ description: '0-based page row.' }),
+    cueSeconds: z.number().int().nullable().openapi({ description: 'The own cue of the row: a "w/" row has its printed time, else the cue it shares.' }),
+    startTime: z.string(),
+    artist: z.string().openapi({ description: '"ID" on an anonymous row.' }),
+    title: z.string(),
+    trackId: z.string().nullable().openapi({ description: 'Medialink id; null on an anonymous row.' }),
+    trackUrl: z.string().nullable(),
+    artworkUrl: z.string().nullable(),
+    isUnidentified: z.boolean(),
+    idStatus: z.string().nullable(),
+    isMashupLinked: z.boolean(),
+    anonymous: z.boolean().openapi({ description: 'A fully anonymous "ID - ID" row (not in `tracks`).' }),
+  })
+  .openapi('TracklistRow')
 
 export const TracklistResponse = z
   .object({
@@ -155,6 +175,7 @@ export const TracklistResponse = z
     linksResolved: z.boolean().openapi({ description: 'Whether per-track Apple/YouTube links were resolved (echoes the request’s resolveLinks).' }),
     trackCount: z.number().int(),
     tracks: z.array(TracklistTrackSchema),
+    rows: z.array(TracklistRowSchema).openapi({ description: 'Every page row, anonymous "ID - ID" rows included (`tracks` leaves those out). Empty on a cache entry older than the rows.' }),
   })
   .openapi('TracklistResponse')
 

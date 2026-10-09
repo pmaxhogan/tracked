@@ -1,75 +1,45 @@
-// Unified activity log (spec "Activity (phase 2)"): one SELECT per source,
-// merged in the Worker. Rows sort by `ts` DESC, then by source rank ASC (index
-// in `ACTIVITY_SOURCES`), then by key DESC. Keys of `audit`, `addition`,
-// `removal`, `claim`, `pool` are integer row ids compared numerically; keys of
-// `mkvid` (request uuid), `sync` (slug) and `ban` (KV key) compare as strings.
-// A row is "after" cursor `(cts, csrc, ckey)` when `ts < cts`, or `ts = cts`
-// and (its rank > rank(csrc), or same source and key < ckey). Each source
-// turns that into SQL: rank(S) > rank(csrc) → `T <= cts`; S = csrc →
-// `(T < cts OR (T = cts AND K < ckey))`; rank(S) < rank(csrc) → `T < cts`,
-// where `T` is the source's ms expression and `K` its key column. Each source
-// SELECTs `limit + 1` rows ordered `T DESC, K DESC`; the Worker concatenates,
-// sorts with the same comparator, keeps `limit`, and returns a cursor of the
-// last kept row when more than `limit` rows came back in total.
+// Unified activity log (spec "Activity (phase 2)"), served as a data table
+// (src/lib/table-query.ts): GET /ui/api/activity speaks the table contract
+// (page, size, sort, q, f.<col>) with a real total.
+//
+// Every source is one arm of a single UNION ALL subquery that projects the
+// same columns (`id`, `ts` in unix ms, `src`, `key`, `kind`, `status`,
+// `problem` 0/1, `dj`, `set_url`, `video_id`, `search`, `j`), so SQLite does
+// the merge: one COUNT(*) and one sorted, paged SELECT over all sources, with
+// every filter pushed into each arm. `j` carries the raw fields a row's title
+// and detail are built from (in `mapRow`, in the Worker). The D1 sources are
+// now_playing_audit, playlist_additions, playlist_removals, mkvid_requests
+// (settled ones), mkvid_claims (with its request or track upload),
+// pool_events and sub_sync. IP-block episodes live in KV (`ban:ep:*`): the
+// newest BAN_SCAN keys are listed, their bodies read in parallel (at most
+// BAN_SCAN KV reads per request, skipped when the filters rule ban rows out
+// or the time filter ends before a key), and they join the union as one
+// JSON bind read through json_each.
+//
+// Limits: sortable columns are the stored ones (time, kind, source, status,
+// problem, DJ); the title is built in the Worker, so it is neither sortable
+// nor filterable. `q` matches the raw stored text a row's title and detail
+// come from (the request summary JSON, set URL, slug, set title, error,
+// removal reason code, pool event type, sync error), not the rendered label.
+// The primary key `<src>:<zero-padded key>` breaks ties.
 // Read-only: nothing here writes D1 or KV.
 import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import { REASON_LABELS } from './playlist-hygiene'
+import { buildTableSql, parseTableQuery, type TableDef, type TableQuery, type TableResult, type TableParams } from './table-query'
 
 export const ACTIVITY_KINDS = ['request', 'playlist', 'hygiene', 'mkvid', 'pool', 'sync', 'ban'] as const
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number]
 export const ACTIVITY_SOURCES = ['audit', 'addition', 'removal', 'mkvid', 'claim', 'pool', 'sync', 'ban'] as const
 export type ActivitySource = (typeof ACTIVITY_SOURCES)[number]
-export type ActivityRow = { ts: number; kind: ActivityKind; status: string; problem: boolean; title: string; detail: string | null; dj: string | null; setUrl: string | null; videoId: string | null; ref: { kind: ActivitySource; key: string } }
-export type ActivityCursor = { ts: number; src: ActivitySource; key: string }
-export type ActivityQuery = { kinds: ActivityKind[]; problems: boolean; dj: string | null; since: number | null; cursor: ActivityCursor | null; limit: number }
+export type ActivityRow = { id: string; ts: number; kind: ActivityKind; status: string; problem: boolean; title: string; detail: string | null; dj: string | null; setUrl: string | null; videoId: string | null; ref: { kind: ActivitySource; key: string } }
 
-const NUMERIC_KEYS: ReadonlySet<ActivitySource> = new Set(['audit', 'addition', 'removal', 'claim', 'pool'])
-const rank = (s: ActivitySource) => ACTIVITY_SOURCES.indexOf(s)
-const DEFAULT_LIMIT = 50
-const MAX_LIMIT = 100
-const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/i
 const ACCT_RE = /^acct-\d+$/
 const DETAIL_MAX = 200
 /** Ban episode keys are `ban:ep:<invertedTs(ms)>` (lib/cache.ts invertedTs). */
 const BAN_PREFIX = 'ban:ep:'
 const BAN_SCAN = 100
 const INVERT_BASE = 10_000_000_000_000
-
-export function encodeActivityCursor(c: ActivityCursor): string {
-  return `${c.ts}|${c.src}|${c.key}`
-}
-
-export function decodeActivityCursor(s: string): ActivityCursor | null {
-  const m = /^(\d{1,15})\|([a-z]+)\|(.{1,200})$/.exec(s)
-  if (!m) return null
-  const src = m[2] as ActivitySource
-  if (!ACTIVITY_SOURCES.includes(src)) return null
-  if (NUMERIC_KEYS.has(src) && !/^\d+$/.test(m[3]!)) return null
-  return { ts: Number(m[1]), src, key: m[3]! }
-}
-
-export function parseActivityQuery(p: URLSearchParams): ActivityQuery | { error: string } {
-  const kindsRaw = (p.get('kind') || '').split(',').map((k) => k.trim()).filter(Boolean)
-  for (const k of kindsRaw) if (!ACTIVITY_KINDS.includes(k as ActivityKind)) return { error: `unknown kind: ${k}` }
-  const dj = p.get('dj') || null
-  if (dj && !SLUG_RE.test(dj)) return { error: 'bad dj' }
-  const sinceRaw = p.get('since')
-  if (sinceRaw && !/^\d{1,15}$/.test(sinceRaw)) return { error: 'bad since' }
-  const limitRaw = p.get('limit')
-  if (limitRaw && !/^\d{1,6}$/.test(limitRaw)) return { error: 'bad limit' }
-  const cursorRaw = p.get('cursor')
-  const cursor = cursorRaw ? decodeActivityCursor(cursorRaw) : null
-  if (cursorRaw && !cursor) return { error: 'bad cursor' }
-  return {
-    kinds: kindsRaw.length ? (kindsRaw as ActivityKind[]) : [...ACTIVITY_KINDS],
-    problems: p.get('problems') === '1',
-    dj,
-    since: sinceRaw ? Number(sinceRaw) : null,
-    cursor,
-    limit: Math.min(Math.max(limitRaw ? Number(limitRaw) : DEFAULT_LIMIT, 1), MAX_LIMIT),
-  }
-}
 
 /** Server twin of setLabel in src/ui/runtime.ts. */
 export function labelFromSetUrl(u: string | null): string {
@@ -81,33 +51,6 @@ export function labelFromSetUrl(u: string | null): string {
   } catch {
     return u
   }
-}
-
-/** The keyset WHERE for one source, given its ms expression and key column. */
-function keyset(src: ActivitySource, T: string, K: string, c: ActivityCursor | null): { sql: string; binds: (string | number)[] } {
-  if (!c) return { sql: '1 = 1', binds: [] }
-  const key: string | number = NUMERIC_KEYS.has(src) ? Number(c.key) : c.key
-  if (rank(src) > rank(c.src)) return { sql: `${T} <= ?`, binds: [c.ts] }
-  if (rank(src) < rank(c.src)) return { sql: `${T} < ?`, binds: [c.ts] }
-  return { sql: `(${T} < ? OR (${T} = ? AND ${K} < ?))`, binds: [c.ts, c.ts, key] }
-}
-
-function compare(a: ActivityRow, b: ActivityRow): number {
-  if (a.ts !== b.ts) return b.ts - a.ts
-  const r = rank(a.ref.kind) - rank(b.ref.kind)
-  if (r !== 0) return r
-  if (NUMERIC_KEYS.has(a.ref.kind)) return Number(b.ref.key) - Number(a.ref.key)
-  return a.ref.key < b.ref.key ? 1 : a.ref.key > b.ref.key ? -1 : 0
-}
-
-type Where = { parts: string[]; binds: (string | number)[] }
-function where(q: ActivityQuery, src: ActivitySource, T: string, K: string, problemSql: string | null, djCol: string | null): Where {
-  const ks = keyset(src, T, K, q.cursor)
-  const w: Where = { parts: [ks.sql], binds: [...ks.binds] }
-  if (q.since != null) { w.parts.push(`${T} >= ?`); w.binds.push(q.since) }
-  if (q.problems && problemSql) w.parts.push(`(${problemSql})`)
-  if (q.dj && djCol) { w.parts.push(`${djCol} = ?`); w.binds.push(q.dj) }
-  return w
 }
 
 // ── formatting helpers ──
@@ -137,9 +80,97 @@ const joinParts = (parts: Array<string | null | undefined | false>): string | nu
 }
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
 
-// ── sources ──
+// ── the union ──
 
-const AUDIT_PROBLEM_STATUSES = ['no_video', 'no_tracklist', 'upstream_error']
+/** Zero-padded integer key, so the text primary key orders like the number. */
+const pk = (src: string, idSql: string) => `'${src}:' || printf('%012d', ${idSql})`
+/** Concatenated search text, NULLs as ''. */
+const cat = (...parts: string[]) => parts.map((p) => `COALESCE(${p}, '')`).join(` || ' ' || `)
+
+const ARMS: string[] = [
+  `SELECT ${pk('audit', 'id')} AS id, ts AS ts, 'audit' AS src, CAST(id AS TEXT) AS key, 'request' AS kind, status AS status,
+     (CASE WHEN status IN ('no_video','no_tracklist','upstream_error') OR json_extract(summary, '$.impossible') = 1 THEN 1 ELSE 0 END) AS problem,
+     NULL AS dj, NULL AS set_url, NULL AS video_id, summary AS search, summary AS j
+   FROM now_playing_audit`,
+  `SELECT ${pk('addition', 'id')}, ts, 'addition', CAST(id AS TEXT), 'playlist', status,
+     (CASE WHEN status IN ('failed','abandoned') THEN 1 ELSE 0 END),
+     slug, set_url, video_id, ${cat('slug', 'set_url', 'summary')}, summary
+   FROM playlist_additions`,
+  `SELECT ${pk('removal', 'id')}, at * 1000, 'removal', CAST(id AS TEXT), 'hygiene', status,
+     (CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+     slug, set_url, video_id, ${cat('source', 'reason', 'detail', 'playlist_kind', 'slug', 'set_url')},
+     json_object('source', source, 'reason', reason, 'detail', detail, 'playlist_kind', playlist_kind)
+   FROM playlist_removals`,
+  `SELECT 'mkvid:' || id, updated_at * 1000, 'mkvid', id, 'mkvid', status,
+     (CASE WHEN status IN ('failed','banned') THEN 1 ELSE 0 END),
+     slug, set_url, video_id, ${cat('set_title', 'slug', 'set_url', 'error')},
+     json_object('set_title', set_title, 'error', error)
+   FROM mkvid_requests WHERE status IN ('done','failed','banned','superseded')`,
+  // A track upload's claim (request_id 'track:<id>', lib/track-uploads.ts) has no mkvid_requests row: name the track instead.
+  `SELECT ${pk('claim', 'c.id')}, c.claimed_at * 1000, 'claim', CAST(c.id AS TEXT), 'mkvid',
+     (CASE WHEN c.refunded_at IS NOT NULL THEN 'refunded' ELSE 'claimed' END), 0,
+     r.slug, r.set_url, COALESCE(r.video_id, tu.video_id), ${cat('r.set_title', 'r.slug', 'r.set_url', 'c.account', 'tu.artist', 'tu.title')},
+     json_object('account', c.account, 'recreate', c.recreate, 'refunded', c.refunded_at IS NOT NULL, 'set_title', r.set_title, 'tu_id', tu.id, 'tu_artist', tu.artist, 'tu_title', tu.title)
+   FROM mkvid_claims c LEFT JOIN mkvid_requests r ON r.id = c.request_id
+   LEFT JOIN track_uploads tu ON c.request_id LIKE 'track:%' AND tu.id = CAST(SUBSTR(c.request_id, 7) AS INTEGER)`,
+  // Pool account ids are acct-N only; anything else (a username, an email) is neither searched nor shown.
+  `SELECT ${pk('pool', 'id')}, received_at * 1000, 'pool', CAST(id AS TEXT), 'pool', type,
+     (CASE WHEN type IN ('account.flagged','account.retired','challenge.expired') OR push_status = 'failed' THEN 1 ELSE 0 END),
+     NULL, NULL, NULL, ${cat('type', "CASE WHEN account_id GLOB 'acct-[0-9]*' THEN account_id END", 'challenge_id')},
+     json_object('type', type, 'challenge_id', challenge_id, 'account_id', account_id, 'payload', payload, 'push_status', push_status)
+   FROM pool_events`,
+  `SELECT 'sync:' || slug, last_run_at * 1000, 'sync', slug, 'sync',
+     (CASE WHEN last_error IS NOT NULL AND last_error != '' THEN 'error' ELSE 'ok' END),
+     (CASE WHEN last_error IS NOT NULL AND last_error != '' THEN 1 ELSE 0 END),
+     slug, NULL, NULL, ${cat('artist_name', 'slug', 'last_error')},
+     json_object('artist_name', artist_name, 'last_error', last_error)
+   FROM sub_sync WHERE last_run_at IS NOT NULL`,
+  // IP-block episodes from KV, prepared in the Worker (banRows) and bound as one JSON array.
+  `SELECT 'ban:' || json_extract(value, '$.key'), json_extract(value, '$.ts'), 'ban', json_extract(value, '$.key'), 'ban',
+     json_extract(value, '$.status'), json_extract(value, '$.problem'),
+     NULL, NULL, NULL, json_extract(value, '$.search'), value
+   FROM json_each(?)`,
+]
+/**
+ * D1 refuses a compound SELECT with more than a handful of terms ("too many
+ * terms in compound SELECT"; plain SQLite allows 500), so the arms are nested:
+ * groups of COMPOUND_MAX arms, each its own subquery, joined by one more
+ * UNION ALL. Filters still push down into every arm.
+ */
+export const COMPOUND_MAX = 4
+const groups: string[][] = []
+for (let i = 0; i < ARMS.length; i += COMPOUND_MAX) groups.push(ARMS.slice(i, i + COMPOUND_MAX))
+export const UNION_FROM = `(${groups.map((g) => `SELECT * FROM (${g.join('\nUNION ALL\n')})`).join('\nUNION ALL\n')}) AS a`
+
+type RawRow = { id: string; ts: number; src: ActivitySource; key: string; kind: ActivityKind; status: string; problem: number; dj: string | null; set_url: string | null; video_id: string | null; j: string | null }
+
+export const ACTIVITY_TABLE: TableDef<RawRow, ActivityRow> = {
+  from: UNION_FROM,
+  select: 'id, ts, src, key, kind, status, problem, dj, set_url, video_id, j',
+  primaryKey: 'id',
+  defaultSort: '-ts',
+  defaultSize: 50,
+  columns: {
+    id: { type: 'text', filterable: false },
+    ts: { type: 'datetime', storage: 'ms' },
+    kind: { type: 'enum', options: ACTIVITY_KINDS },
+    src: { type: 'enum', options: ACTIVITY_SOURCES },
+    status: { type: 'enum' },
+    problem: { type: 'bool' },
+    dj: { type: 'text' },
+    setUrl: { sql: 'set_url', type: 'text', sortable: false },
+    videoId: { sql: 'video_id', type: 'text', sortable: false },
+    search: { type: 'text', searchable: true, sortable: false, filterable: false },
+  },
+  mapRow: toActivityRow,
+}
+
+/** Parses the table query (throws TableQueryError on a bad one). */
+export function parseActivityQuery(params: TableParams): TableQuery {
+  return parseTableQuery(params, ACTIVITY_TABLE)
+}
+
+// ── rows ──
 
 function auditDetail(s: Record<string, unknown>): string | null {
   const skew = typeof s.skew === 'number' ? s.skew : null
@@ -151,65 +182,7 @@ function auditDetail(s: Record<string, unknown>): string | null {
   ])
 }
 
-async function auditSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  if (q.dj) return []
-  const problemSql = "status IN ('no_video','no_tracklist','upstream_error') OR json_extract(summary, '$.impossible') = 1"
-  const w = where(q, 'audit', 'ts', 'id', problemSql, null)
-  const res = await dbOf(env)
-    .prepare(`SELECT id, ts, status, summary FROM now_playing_audit WHERE ${w.parts.join(' AND ')} ORDER BY ts DESC, id DESC LIMIT ?`)
-    .bind(...w.binds, q.limit + 1)
-    .all<{ id: number; ts: number; status: string; summary: string }>()
-  return res.results.map((r) => {
-    const s = parseJson<Record<string, unknown>>(r.summary, {})
-    const impossible = s.impossible === true
-    return {
-      ts: Number(r.ts), kind: 'request', status: r.status,
-      problem: AUDIT_PROBLEM_STATUSES.includes(r.status) || impossible,
-      title: str(s.title) ?? '(no title)',
-      detail: auditDetail(s), dj: null, setUrl: null, videoId: null,
-      ref: { kind: 'audit', key: String(r.id) },
-    }
-  })
-}
-
-async function additionSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  const w = where(q, 'addition', 'ts', 'id', "status IN ('failed','abandoned')", 'slug')
-  const res = await dbOf(env)
-    .prepare(`SELECT id, ts, status, slug, set_url, video_id, summary FROM playlist_additions WHERE ${w.parts.join(' AND ')} ORDER BY ts DESC, id DESC LIMIT ?`)
-    .bind(...w.binds, q.limit + 1)
-    .all<{ id: number; ts: number; status: string; slug: string; set_url: string; video_id: string | null; summary: string }>()
-  return res.results.map((r) => {
-    const s = parseJson<Record<string, unknown>>(r.summary, {})
-    const cmb = s.cmb === 'failed' || s.cmb === 'unavailable' ? `combined ${s.cmb}` : null
-    return {
-      ts: Number(r.ts), kind: 'playlist', status: r.status,
-      problem: r.status === 'failed' || r.status === 'abandoned',
-      title: labelFromSetUrl(r.set_url),
-      detail: joinParts([str(s.msg) ?? (r.video_id ? `video ${r.video_id}` : null), cmb]),
-      dj: r.slug, setUrl: r.set_url, videoId: r.video_id,
-      ref: { kind: 'addition', key: String(r.id) },
-    }
-  })
-}
-
 const REMOVAL_SOURCE_LABEL: Record<string, string> = { sweep: 'Sweep', owner: 'Removed by owner', dead: 'Video died', button: 'Remove and replace' }
-
-async function removalSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  const T = 'at * 1000'
-  const w = where(q, 'removal', T, 'id', "status = 'failed'", 'slug')
-  const res = await dbOf(env)
-    .prepare(`SELECT id, ${T} AS ms, source, status, slug, set_url, video_id, playlist_kind, reason, detail FROM playlist_removals WHERE ${w.parts.join(' AND ')} ORDER BY ${T} DESC, id DESC LIMIT ?`)
-    .bind(...w.binds, q.limit + 1)
-    .all<{ id: number; ms: number; source: string; status: string; slug: string | null; set_url: string | null; video_id: string; playlist_kind: string; reason: string; detail: string | null }>()
-  return res.results.map((r) => ({
-    ts: Number(r.ms), kind: 'hygiene', status: r.status,
-    problem: r.status === 'failed',
-    title: `${REMOVAL_SOURCE_LABEL[r.source] ?? r.source}: ${REASON_LABELS[r.reason] ?? r.reason}`,
-    detail: joinParts([clip(r.detail), `${r.playlist_kind} playlist`]),
-    dj: r.slug, setUrl: r.set_url, videoId: r.video_id,
-    ref: { kind: 'removal', key: String(r.id) },
-  }))
-}
 
 /**
  * Why an mkvid request was superseded, from the error text stored when it was.
@@ -240,45 +213,6 @@ function mkvidDetail(r: { status: string; video_id: string | null; error: string
   }
 }
 
-async function mkvidSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  const T = 'updated_at * 1000'
-  const w = where(q, 'mkvid', T, 'id', "status IN ('failed','banned')", 'slug')
-  w.parts.push("status IN ('done','failed','banned','superseded')")
-  const res = await dbOf(env)
-    .prepare(`SELECT id, ${T} AS ms, status, slug, set_url, set_title, video_id, error FROM mkvid_requests WHERE ${w.parts.join(' AND ')} ORDER BY ${T} DESC, id DESC LIMIT ?`)
-    .bind(...w.binds, q.limit + 1)
-    .all<{ id: string; ms: number; status: string; slug: string; set_url: string; set_title: string | null; video_id: string | null; error: string | null }>()
-  return res.results.map((r) => ({
-    ts: Number(r.ms), kind: 'mkvid', status: r.status,
-    problem: r.status === 'failed' || r.status === 'banned',
-    title: r.set_title || labelFromSetUrl(r.set_url),
-    detail: mkvidDetail(r),
-    dj: r.slug, setUrl: r.set_url, videoId: r.video_id,
-    ref: { kind: 'mkvid', key: r.id },
-  }))
-}
-
-async function claimSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  if (q.problems) return [] // a claim is never a problem
-  const T = 'c.claimed_at * 1000'
-  const w = where(q, 'claim', T, 'c.id', null, 'r.slug')
-  const res = await dbOf(env)
-    .prepare(`SELECT c.id, ${T} AS ms, c.account, c.recreate, c.refunded_at, r.slug, r.set_url, r.set_title, r.video_id FROM mkvid_claims c LEFT JOIN mkvid_requests r ON r.id = c.request_id WHERE ${w.parts.join(' AND ')} ORDER BY ${T} DESC, c.id DESC LIMIT ?`)
-    .bind(...w.binds, q.limit + 1)
-    .all<{ id: number; ms: number; account: string; recreate: number; refunded_at: number | null; slug: string | null; set_url: string | null; set_title: string | null; video_id: string | null }>()
-  return res.results.map((r) => {
-    const refunded = r.refunded_at != null
-    return {
-      ts: Number(r.ms), kind: 'mkvid', status: refunded ? 'refunded' : 'claimed',
-      problem: false,
-      title: (Number(r.recreate) ? 'Recreate claimed: ' : 'Claimed for render: ') + (r.set_title || labelFromSetUrl(r.set_url)),
-      detail: `${r.account} account` + (refunded ? ' · given back (failed before upload)' : ''),
-      dj: r.slug, setUrl: r.set_url, videoId: r.video_id,
-      ref: { kind: 'claim', key: String(r.id) },
-    }
-  })
-}
-
 const POOL_TITLES: Record<string, string> = {
   'challenge.created': 'Challenge opened',
   'challenge.solved': 'Challenge solved',
@@ -292,128 +226,132 @@ const POOL_TITLES: Record<string, string> = {
 const POOL_REASON_MAX = 120
 const poolReason = (v: unknown): string | null =>
   typeof v === 'string' && v !== '' && !v.includes('@') && v.length <= POOL_REASON_MAX ? v : null
-const POOL_PROBLEM_TYPES = ['account.flagged', 'account.retired', 'challenge.expired']
 
-async function poolSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  if (q.dj) return []
-  const T = 'received_at * 1000'
-  const problemSql = "type IN ('account.flagged','account.retired','challenge.expired') OR push_status = 'failed'"
-  const w = where(q, 'pool', T, 'id', problemSql, null)
-  const res = await dbOf(env)
-    .prepare(`SELECT id, ${T} AS ms, type, challenge_id, account_id, payload, push_status FROM pool_events WHERE ${w.parts.join(' AND ')} ORDER BY ${T} DESC, id DESC LIMIT ?`)
-    .bind(...w.binds, q.limit + 1)
-    .all<{ id: number; ms: number; type: string; challenge_id: string | null; account_id: string | null; payload: string; push_status: string }>()
-  return res.results.map((r) => {
-    const payload = parseJson<Record<string, unknown>>(r.payload, {})
-    // Pool account ids are acct-N only; anything else (a username, an email) never leaves the Worker.
-    const account = r.account_id && ACCT_RE.test(r.account_id) ? r.account_id : null
-    return {
-      ts: Number(r.ms), kind: 'pool', status: r.type,
-      problem: POOL_PROBLEM_TYPES.includes(r.type) || r.push_status === 'failed',
-      title: POOL_TITLES[r.type] ?? r.type,
-      detail: joinParts([
-        account,
-        r.challenge_id && `challenge ${r.challenge_id}`,
-        poolReason(payload.reason),
-        (r.push_status === 'failed' || r.push_status === 'not_configured') && `push ${r.push_status}`,
-      ]),
-      dj: null, setUrl: null, videoId: null,
-      ref: { kind: 'pool', key: String(r.id) },
+/** The title and detail of one union row, from its stored fields (`j`). */
+function describe(r: RawRow): { title: string; detail: string | null } {
+  const j = parseJson<Record<string, unknown>>(r.j ?? '', {})
+  switch (r.src) {
+    case 'audit':
+      return { title: str(j.title) ?? '(no title)', detail: auditDetail(j) }
+    case 'addition': {
+      const cmb = j.cmb === 'failed' || j.cmb === 'unavailable' ? `combined ${j.cmb}` : null
+      return { title: labelFromSetUrl(r.set_url), detail: joinParts([str(j.msg) ?? (r.video_id ? `video ${r.video_id}` : null), cmb]) }
     }
-  })
+    case 'removal': {
+      const source = String(j.source ?? ''), reason = String(j.reason ?? '')
+      return { title: `${REMOVAL_SOURCE_LABEL[source] ?? source}: ${REASON_LABELS[reason] ?? reason}`, detail: joinParts([clip(str(j.detail)), `${String(j.playlist_kind ?? '')} playlist`]) }
+    }
+    case 'mkvid':
+      return { title: str(j.set_title) || labelFromSetUrl(r.set_url), detail: mkvidDetail({ status: r.status, video_id: r.video_id, error: str(j.error) }) }
+    case 'claim': {
+      const tuId = j.tu_id == null ? null : Number(j.tu_id)
+      const track = tuId != null ? [str(j.tu_artist), str(j.tu_title)].filter(Boolean).join(' – ') || `track upload ${tuId}` : null
+      const refunded = j.refunded === 1 || j.refunded === true
+      return {
+        title: track ? `Track upload claimed: ${track}` : (Number(j.recreate) ? 'Recreate claimed: ' : 'Claimed for render: ') + (str(j.set_title) || labelFromSetUrl(r.set_url)),
+        detail: `${String(j.account ?? '?')} account` + (refunded ? ' · given back (failed before upload)' : ''),
+      }
+    }
+    case 'pool': {
+      const type = String(j.type ?? r.status)
+      const payload = parseJson<Record<string, unknown>>(typeof j.payload === 'string' ? j.payload : '', {})
+      const account = typeof j.account_id === 'string' && ACCT_RE.test(j.account_id) ? j.account_id : null
+      const push = str(j.push_status)
+      return {
+        title: POOL_TITLES[type] ?? type,
+        detail: joinParts([account, str(j.challenge_id) && `challenge ${j.challenge_id}`, poolReason(payload.reason), (push === 'failed' || push === 'not_configured') && `push ${push}`]),
+      }
+    }
+    case 'sync':
+      return { title: `Sync: ${str(j.artist_name) || r.key}`, detail: clip(str(j.last_error)) }
+    case 'ban':
+      return { title: str(j.title) ?? 'IP block', detail: str(j.detail) }
+  }
+  return { title: r.status, detail: null }
 }
 
-async function syncSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  const T = 'last_run_at * 1000'
-  const w = where(q, 'sync', T, 'slug', "last_error IS NOT NULL AND last_error != ''", 'slug')
-  w.parts.push('last_run_at IS NOT NULL')
-  const res = await dbOf(env)
-    .prepare(`SELECT slug, ${T} AS ms, artist_name, last_error FROM sub_sync WHERE ${w.parts.join(' AND ')} ORDER BY ${T} DESC, slug DESC LIMIT ?`)
-    .bind(...w.binds, q.limit + 1)
-    .all<{ slug: string; ms: number; artist_name: string | null; last_error: string | null }>()
-  return res.results.map((r) => {
-    const failed = typeof r.last_error === 'string' && r.last_error !== ''
-    return {
-      ts: Number(r.ms), kind: 'sync', status: failed ? 'error' : 'ok',
-      problem: failed,
-      title: `Sync: ${r.artist_name || r.slug}`,
-      detail: clip(r.last_error),
-      dj: r.slug, setUrl: null, videoId: null,
-      ref: { kind: 'sync', key: r.slug },
-    }
-  })
+function toActivityRow(r: RawRow): ActivityRow {
+  const { title, detail } = describe(r)
+  return {
+    id: r.id, ts: Number(r.ts), kind: r.kind, status: r.status, problem: Number(r.problem) === 1, title, detail,
+    dj: r.dj ?? null, setUrl: r.set_url ?? null, videoId: r.video_id ?? null,
+    ref: { kind: r.src, key: r.key },
+  }
 }
+
+// ── ban episodes (KV) ──
 
 type BanEpisodeView = { endedAt?: string | null; blockedForMs?: number | null; simulated?: boolean; clearedBy?: string | null }
+type BanJson = { key: string; ts: number; status: string; problem: 0 | 1; title: string; detail: string | null; search: string }
 
-async function banSource(env: Env, q: ActivityQuery): Promise<ActivityRow[]> {
-  if (q.dj) return []
+function banJson(key: string, ts: number, ep: BanEpisodeView): BanJson {
+  const simulated = ep.simulated === true
+  const open = ep.endedAt == null
+  const title = simulated ? 'Simulated IP block' : 'IP block'
+  const detail = joinParts([
+    typeof ep.blockedForMs === 'number' && ep.blockedForMs > 0 && `blocked ${duration(ep.blockedForMs)}`,
+    str(ep.clearedBy) && `cleared by ${ep.clearedBy}`,
+    open && 'ongoing',
+  ])
+  return { key, ts, status: open ? 'open' : 'ended', problem: simulated ? 0 : 1, title, detail, search: `${title} ${detail ?? ''}` }
+}
+
+/** Whether a filter set can still let ban rows through (they have kind/src `ban` and no DJ). */
+function banPossible(q: TableQuery): boolean {
+  for (const f of q.filters) {
+    const list = f.value.split('|').map((s) => s.trim())
+    if ((f.col === 'kind' || f.col === 'src') && ((f.op === 'in' && !list.includes('ban')) || (f.op === 'nin' && list.includes('ban')) || f.op === 'empty')) return false
+    if ((f.col === 'dj' || f.col === 'setUrl' || f.col === 'videoId') && ['eq', 'has', 'sw', 'ew', 'nempty'].includes(f.op)) return false
+  }
+  return true
+}
+
+/** The earliest ts the filters allow (a cheap bound used to skip KV reads), or null. */
+function tsLowerBound(q: TableQuery): number | null {
+  let lo: number | null = null
+  for (const f of q.filters) {
+    if (f.col !== 'ts') continue
+    let v: number | null = null
+    if (f.op === 'gt' || f.op === 'gte' || f.op === 'eq') v = Number(f.value)
+    else if (f.op === 'between') { const a = f.value.split('..')[0]?.trim(); v = a ? Number(a) : null }
+    if (v != null && Number.isFinite(v)) lo = lo == null ? v : Math.max(lo, v)
+  }
+  return lo
+}
+
+async function banRows(env: Env, q: TableQuery): Promise<BanJson[]> {
+  if (!banPossible(q)) return []
   const page = await env.CACHE.list({ prefix: BAN_PREFIX, limit: BAN_SCAN })
-  const c = q.cursor
-  const banRank = rank('ban')
-  const survivors: Array<{ key: string; ts: number }> = []
+  const lo = tsLowerBound(q)
+  const keys: Array<{ key: string; ts: number }> = []
   for (const k of page.keys) {
     const inverted = Number(k.name.slice(BAN_PREFIX.length))
     if (!Number.isFinite(inverted)) continue
     const ts = INVERT_BASE - inverted
-    if (q.since != null && ts < q.since) continue
-    if (c) {
-      const after = ts < c.ts || (ts === c.ts && (banRank > rank(c.src) || (c.src === 'ban' && k.name < c.key)))
-      if (!after) continue
-    }
-    survivors.push({ key: k.name, ts })
+    if (lo != null && ts < lo) continue
+    keys.push({ key: k.name, ts })
   }
-  survivors.sort((a, b) => b.ts - a.ts || (a.key < b.key ? 1 : a.key > b.key ? -1 : 0))
-  // Fetch bodies in parallel chunks, in key order, until limit + 1 rows qualify
-  // (missing bodies and, under `problems`, simulated episodes do not count).
-  const want = q.limit + 1
-  const rows: ActivityRow[] = []
-  for (let i = 0; i < survivors.length && rows.length < want; ) {
-    const chunk = survivors.slice(i, i + (want - rows.length))
-    i += chunk.length
-    const eps = await Promise.all(chunk.map((s) => env.CACHE.get<BanEpisodeView>(s.key, 'json')))
-    chunk.forEach((s, j) => {
-      const ep = eps[j]
-      if (!ep || rows.length >= want) return
-      const row = banRow(s.key, s.ts, ep)
-      if (!q.problems || row.problem) rows.push(row)
-    })
-  }
-  return rows
+  const eps = await Promise.all(keys.map((k) => env.CACHE.get<BanEpisodeView>(k.key, 'json')))
+  const out: BanJson[] = []
+  keys.forEach((k, i) => { const ep = eps[i]; if (ep) out.push(banJson(k.key, k.ts, ep)) })
+  return out
 }
 
-function banRow(key: string, ts: number, ep: BanEpisodeView): ActivityRow {
-  const simulated = ep.simulated === true
-  const open = ep.endedAt == null
-  return {
-    ts, kind: 'ban', status: open ? 'open' : 'ended',
-    problem: !simulated,
-    title: simulated ? 'Simulated IP block' : 'IP block',
-    detail: joinParts([
-      typeof ep.blockedForMs === 'number' && ep.blockedForMs > 0 && `blocked ${duration(ep.blockedForMs)}`,
-      str(ep.clearedBy) && `cleared by ${ep.clearedBy}`,
-      open && 'ongoing',
-    ]),
-    dj: null, setUrl: null, videoId: null,
-    ref: { kind: 'ban', key },
+// ── the query ──
+
+/** One page of the merged log: a COUNT over the union and one sorted, paged SELECT. */
+export async function listActivity(env: Env, q: TableQuery): Promise<TableResult<ActivityRow>> {
+  const bans = JSON.stringify(await banRows(env, q))
+  const b = buildTableSql(ACTIVITY_TABLE, q)
+  const db = dbOf(env)
+  const count = await db.prepare(b.countSql).bind(bans, ...b.binds).first<{ n: number }>()
+  const total = Number(count?.n ?? 0)
+  const pageCount = Math.max(1, Math.ceil(total / q.size))
+  const page = Math.min(q.page, pageCount)
+  let rows: RawRow[] = []
+  if (total > 0) {
+    const p = b.pageSql(q.size, (page - 1) * q.size)
+    rows = (await db.prepare(p.sql).bind(bans, ...p.binds).all<RawRow>()).results ?? []
   }
-}
-
-const SOURCES: Array<{ src: ActivitySource; kind: ActivityKind; run: (env: Env, q: ActivityQuery) => Promise<ActivityRow[]> }> = [
-  { src: 'audit', kind: 'request', run: auditSource },
-  { src: 'addition', kind: 'playlist', run: additionSource },
-  { src: 'removal', kind: 'hygiene', run: removalSource },
-  { src: 'mkvid', kind: 'mkvid', run: mkvidSource },
-  { src: 'claim', kind: 'mkvid', run: claimSource },
-  { src: 'pool', kind: 'pool', run: poolSource },
-  { src: 'sync', kind: 'sync', run: syncSource },
-  { src: 'ban', kind: 'ban', run: banSource },
-]
-
-export async function listActivity(env: Env, q: ActivityQuery): Promise<{ rows: ActivityRow[]; cursor: string | null }> {
-  const parts = await Promise.all(SOURCES.filter((s) => q.kinds.includes(s.kind)).map((s) => s.run(env, q)))
-  const all = parts.flat().sort(compare)
-  const rows = all.slice(0, q.limit)
-  const last = rows[rows.length - 1]
-  return { rows, cursor: all.length > q.limit && last ? encodeActivityCursor({ ts: last.ts, src: last.ref.kind, key: last.ref.key }) : null }
+  return { rows: rows.map(toActivityRow), total, page, size: q.size, pageCount, sort: b.sort, filters: q.filters, q: q.q }
 }

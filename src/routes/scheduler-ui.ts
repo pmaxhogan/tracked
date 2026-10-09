@@ -4,10 +4,15 @@
 //
 //   GET /scheduler                      the page (ui/pages/scheduler.ts)
 //   GET /api/scheduler                  { summary, djs }: the last 24 h of ticks and the DJ due times
-//   GET /api/scheduler/ticks?before=&limit=   { ticks, nextBefore }: the tick list, newest first
+//   GET /api/scheduler/ticks            the tick list: a data-table endpoint (lib/table-query.ts:
+//                                       page, size, sort, q, f.<col>), newest first by default
+//
+// The DJ due times stay in /api/scheduler (one row per subscription, the overdue
+// math is done there) and the page shows them in a local TKTable.
 import { Hono } from 'hono'
 import type { Env } from '../types'
-import { djStarvation, schedulerSummary, schedulerTicksPage } from '../lib/scheduler-report'
+import { djStarvation, schedulerSummary, TICKS_TABLE } from '../lib/scheduler-report'
+import { tableResponse } from '../lib/table-query'
 import { servePage } from '../ui/pages'
 import { SCHEDULER_PAGE } from '../ui/pages/scheduler'
 
@@ -21,15 +26,4 @@ schedulerUiApp.get('/api/scheduler', async (c) => {
   return c.json({ summary, djs })
 })
 
-schedulerUiApp.get('/api/scheduler/ticks', async (c) => {
-  const num = (k: string) => {
-    const v = c.req.query(k)
-    if (v === undefined || v === '') return undefined
-    const n = Number(v)
-    return Number.isFinite(n) && n > 0 ? Math.floor(n) : NaN
-  }
-  const limit = num('limit')
-  const before = num('before')
-  if (Number.isNaN(limit) || Number.isNaN(before)) return c.json({ error: 'invalid_request', message: 'limit and before are positive integers' }, 400)
-  return c.json(await schedulerTicksPage(c.env, { limit, before: before ?? null }))
-})
+schedulerUiApp.get('/api/scheduler/ticks', (c) => tableResponse(c, TICKS_TABLE, c.env.DB))

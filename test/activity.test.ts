@@ -3,13 +3,13 @@ import { app } from '../src/index'
 import type { Env } from '../src/types'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
-import { ACTIVITY_KINDS, parseActivityQuery, encodeActivityCursor, decodeActivityCursor, labelFromSetUrl, supersededReason } from '../src/lib/activity'
+import { parseActivityQuery, labelFromSetUrl, supersededReason, UNION_FROM, COMPOUND_MAX } from '../src/lib/activity'
 
 function makeEnv(): Env {
   return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', DEV_BYPASS_CF_ACCESS: '1' } as Env
 }
 const get = (env: Env, path: string) => app.request(`http://x${path}`, { method: 'GET' }, env)
-type Page = { rows: Array<{ ts: number; kind: string; status: string; problem: boolean; title: string; detail: string | null; dj: string | null; setUrl: string | null; ref: { kind: string; key: string } }>; cursor: string | null }
+type Page = { total: number; page: number; size: number; pageCount: number; sort: unknown; filters: unknown; q: string; rows: Array<{ id: string; ts: number; kind: string; status: string; problem: boolean; title: string; detail: string | null; dj: string | null; setUrl: string | null; videoId?: string | null; ref: { kind: string; key: string } }> }
 const SET = 'https://www.1001tracklists.com/tracklist/abc123/dj-one-live-at-somewhere-2026-09-01.html'
 
 async function audit(env: Env, id: number, tsMs: number, status = 'ok', extra: Record<string, unknown> = {}) {
@@ -44,25 +44,32 @@ async function page(env: Env, qs: string): Promise<Page> {
   return (await r.json()) as Page
 }
 const refs = (p: Page) => p.rows.map((r) => `${r.ref.kind}:${r.ref.key}`)
+const enc = encodeURIComponent
 
-describe('activity feed', () => {
-  it('parses and rejects query parameters', async () => {
-    expect(parseActivityQuery(new URLSearchParams(''))).toEqual({ kinds: [...ACTIVITY_KINDS], problems: false, dj: null, since: null, cursor: null, limit: 50 })
-    const q = parseActivityQuery(new URLSearchParams('kind=request,ban&problems=1&limit=500'))
-    expect(q).toMatchObject({ kinds: ['request', 'ban'], problems: true, limit: 100 })
-    for (const bad of ['kind=nope', 'limit=abc', 'since=-5', 'since=1e9', 'cursor=garbage', 'dj=Bad Slug!']) {
-      expect(parseActivityQuery(new URLSearchParams(bad)), bad).toHaveProperty('error')
-    }
+describe('activity feed (data-table contract)', () => {
+  it('rejects a bad table query with 400 bad_table_query', async () => {
     const env = makeEnv()
-    const r = await get(env, '/ui/api/activity?kind=nope')
-    expect(r.status).toBe(400)
-    expect(((await r.json()) as { error: string }).error).toBe('invalid_request')
+    for (const bad of ['f.kind=in:nope', 'f.nope=eq:1', 'sort=title', 'f.ts=gt:abc', 'page=-1', 'f.search=has:x']) {
+      const r = await get(env, `/ui/api/activity?${bad}`)
+      expect(r.status, bad).toBe(400)
+      expect(((await r.json()) as { error: string }).error).toBe('bad_table_query')
+    }
+    expect(() => parseActivityQuery(new URLSearchParams('f.problem=eq:2'))).toThrow()
+    expect(parseActivityQuery(new URLSearchParams('f.kind=in:pool|ban&size=12')).filters).toEqual([{ col: 'kind', op: 'in', value: 'pool|ban' }])
   })
 
-  it('round-trips the cursor', () => {
-    expect(decodeActivityCursor(encodeActivityCursor({ ts: 5, src: 'sync', key: 'dj-one' }))).toEqual({ ts: 5, src: 'sync', key: 'dj-one' })
-    expect(decodeActivityCursor('5|audit|x')).toBeNull()
-    expect(decodeActivityCursor('5|nope|1')).toBeNull()
+  it('keeps every compound SELECT within the D1 term limit (plain SQLite allows 500)', () => {
+    // The UNION ALL count of each parenthesised level of the union.
+    const counts: number[] = []
+    const stack: number[] = [0]
+    for (const tok of UNION_FROM.match(/\(|\)|UNION ALL/g) ?? []) {
+      if (tok === '(') stack.push(0)
+      else if (tok === ')') counts.push(stack.pop()!)
+      else stack[stack.length - 1]!++
+    }
+    counts.push(stack.pop()!)
+    expect(Math.max(...counts) + 1).toBeLessThanOrEqual(COMPOUND_MAX)
+    expect(counts.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(7) // eight sources, still all there
   })
 
   it('labels a set URL like the client does', () => {
@@ -71,36 +78,43 @@ describe('activity feed', () => {
     expect(labelFromSetUrl('not a url')).toBe('not a url')
   })
 
-  it('orders seconds and milliseconds sources on one clock', async () => {
+  it('orders seconds and milliseconds sources on one clock, newest first, and answers the table shape', async () => {
     const env = makeEnv()
     await audit(env, 1, 999_999)
     await removal(env, 1, 1000)
     const p = await page(env, '')
     expect(p.rows.map((r) => r.ref.kind)).toEqual(['removal', 'audit'])
     expect(p.rows.map((r) => r.ts)).toEqual([1_000_000, 999_999])
+    expect(p).toMatchObject({ total: 2, page: 1, size: 50, pageCount: 1, sort: [{ col: 'ts', dir: 'desc' }], filters: [], q: '' })
+    const asc = await page(env, '?sort=ts')
+    expect(asc.rows.map((r) => r.ref.kind)).toEqual(['audit', 'removal'])
   })
 
-  it('pages a mixed feed with ts ties exactly once', async () => {
+  it('pages a mixed feed exactly once with a real total, ties included', async () => {
     const env = makeEnv()
-    await audit(env, 1, 2_000_000)
-    await audit(env, 2, 2_000_000)
-    await addition(env, 1, 2_000_000)
-    await addition(env, 2, 2_000_000)
-    await removal(env, 1, 2000)
+    for (let i = 1; i <= 8; i++) await audit(env, i, 2_000_000 + (i % 3) * 1000)
+    for (let i = 1; i <= 8; i++) await addition(env, i, 2_000_000 + (i % 2) * 1000)
+    for (let i = 1; i <= 6; i++) await removal(env, i, 2000 + (i % 2))
+    await banEpisode(env, 2_000_000)
     const seen: string[] = []
-    let cursor: string | null = null
-    let pages = 0
-    do {
-      const p: Page = await page(env, `?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
+    const first = await page(env, '?size=10')
+    expect(first.total).toBe(23)
+    expect(first.pageCount).toBe(3)
+    for (let pg = 1; pg <= 3; pg++) {
+      const p = await page(env, `?size=10&page=${pg}`)
+      expect(p.page).toBe(pg)
       seen.push(...refs(p))
-      cursor = p.cursor
-      pages++
-    } while (cursor && pages < 10)
-    expect(seen).toEqual(['audit:2', 'audit:1', 'addition:2', 'addition:1', 'removal:1'])
-    expect(pages).toBe(3)
+      for (let i = 1; i < p.rows.length; i++) expect(p.rows[i - 1]!.ts).toBeGreaterThanOrEqual(p.rows[i]!.ts)
+    }
+    expect(seen).toHaveLength(23)
+    expect(new Set(seen).size).toBe(23)
+    // A page past the end is clamped to the last one.
+    const past = await page(env, '?size=10&page=9')
+    expect(past.page).toBe(3)
+    expect(past.rows).toHaveLength(3)
   })
 
-  it('marks problems and filters to them', async () => {
+  it('marks problems and filters to them, with the total of the filtered rows', async () => {
     const env = makeEnv()
     await audit(env, 1, 5_000, 'ok')
     await audit(env, 2, 4_000, 'no_video')
@@ -109,21 +123,69 @@ describe('activity feed', () => {
     await addition(env, 2, 7_000, 'added')
     const all = await page(env, '')
     expect(all.rows.find((r) => r.ref.kind === 'audit' && r.ref.key === '1')!.problem).toBe(false)
-    const p = await page(env, '?problems=1')
+    const p = await page(env, '?f.problem=eq:1')
     expect(refs(p)).toEqual(['audit:3', 'audit:2', 'addition:1'])
+    expect(p.total).toBe(3)
     expect(p.rows.every((r) => r.problem)).toBe(true)
     expect(p.rows[0]!.detail).toContain('position past end of video')
+    expect(refs(await page(env, '?f.problem=eq:0'))).toEqual(['addition:2', 'audit:1'])
   })
 
-  it('dj filter drops the DJ-less sources', async () => {
+  it('filters by kind (one or several), status and source, and sorts by them', async () => {
+    const env = makeEnv()
+    await audit(env, 1, 1_000)
+    await addition(env, 1, 2_000)
+    await poolEvent(env, 1, 3, 'account.flagged', 'acct-1')
+    await banEpisode(env, 4_000)
+    expect(refs(await page(env, '?f.kind=in:pool'))).toEqual(['pool:1'])
+    expect(refs(await page(env, `?f.kind=${enc('in:pool|ban')}`))).toEqual([expect.stringMatching(/^ban:/), 'pool:1'])
+    expect(refs(await page(env, `?f.kind=${enc('nin:pool|ban')}`))).toEqual(['addition:1', 'audit:1'])
+    expect(refs(await page(env, '?f.status=in:added'))).toEqual(['addition:1'])
+    expect(refs(await page(env, '?f.src=in:audit'))).toEqual(['audit:1'])
+    const byKind = await page(env, '?sort=kind')
+    expect(byKind.rows.map((r) => r.kind)).toEqual(['ban', 'playlist', 'pool', 'request'])
+  })
+
+  it('a DJ filter drops the DJ-less sources (and never reads the ban episodes)', async () => {
     const env = makeEnv()
     await audit(env, 1, 1_000)
     await addition(env, 1, 2_000, 'added', 'dj-one')
     await addition(env, 2, 3_000, 'added', 'dj-two')
     await poolEvent(env, 1, 4, 'account.flagged', 'acct-1')
     await banEpisode(env, 5_000)
-    expect(refs(await page(env, '?dj=dj-one'))).toEqual(['addition:1'])
-    expect(refs(await page(env, '?dj=dj-one&problems=1'))).toEqual([])
+    const list = env.CACHE.list.bind(env.CACHE)
+    let listed = 0
+    env.CACHE.list = ((o: unknown) => { listed++; return list(o as never) }) as typeof env.CACHE.list
+    expect(refs(await page(env, '?f.dj=eq:dj-one'))).toEqual(['addition:1'])
+    expect(refs(await page(env, '?f.dj=eq:dj-one&f.problem=eq:1'))).toEqual([])
+    expect(listed).toBe(0)
+    expect(refs(await page(env, '?f.dj=empty:'))).toEqual([expect.stringMatching(/^ban:/), 'pool:1', 'audit:1'])
+  })
+
+  it('a time range cuts every source, ban episodes included', async () => {
+    const env = makeEnv()
+    await audit(env, 1, 1_000)
+    await audit(env, 2, 5_000_000)
+    await removal(env, 1, 1)
+    await removal(env, 2, 5_000)
+    await banEpisode(env, 500)
+    await banEpisode(env, 6_000_000)
+    const p = await page(env, '?f.ts=gte:2000000')
+    expect(refs(p)).toEqual([expect.stringMatching(/^ban:/), 'removal:2', 'audit:2'])
+    expect(p.total).toBe(3)
+    const early = await page(env, `?f.ts=${enc('between:..1000')}`)
+    expect(early.rows.map((r) => r.ts).sort((a, b) => a - b)).toEqual([500, 1_000, 1_000])
+  })
+
+  it('q searches the stored text of every source', async () => {
+    const env = makeEnv()
+    await audit(env, 1, 1_000, 'ok', { title: 'Anyma live at Sphere' })
+    await addition(env, 1, 2_000, 'added', 'dj-one')
+    await env.DB.prepare("INSERT INTO sub_sync (slug, artist_name, last_run_at, last_error) VALUES ('dj-two', 'Anyma Fans', 7000, 'boom 100%')").run()
+    expect(refs(await page(env, '?q=anyma'))).toEqual(['sync:dj-two', 'audit:1'])
+    expect(refs(await page(env, '?q=somewhere'))).toEqual(['addition:1'])
+    expect(refs(await page(env, `?q=${enc('100%')}`))).toEqual(['sync:dj-two'])
+    expect((await page(env, '?q=zzz')).total).toBe(0)
   })
 
   it('reads every source', async () => {
@@ -143,11 +205,16 @@ describe('activity feed', () => {
     const p = await page(env, '')
     const by = (kind: string, key?: string) => p.rows.find((r) => r.ref.kind === kind && (key == null || r.ref.key === key))!
     expect(p.rows).toHaveLength(9)
+    expect(p.total).toBe(9)
     const kinds = Object.fromEntries(p.rows.map((r) => [r.ref.kind, r.kind]))
     expect(kinds).toEqual({ audit: 'request', addition: 'playlist', removal: 'hygiene', mkvid: 'mkvid', claim: 'mkvid', pool: 'pool', sync: 'sync', ban: 'ban' })
+    expect(new Set(p.rows.map((r) => r.id)).size).toBe(9)
 
+    expect(by('audit').title).toBe('req 1')
+    expect(by('audit').detail).toBe('1:01 / 1:00:00 · via search')
     expect(by('addition').setUrl).toBe(SET)
     expect(by('addition').dj).toBe('dj-one')
+    expect(by('addition').title).toBe('dj one live at somewhere 2026 09 01')
     expect(by('removal').title).toBe('Sweep: video is more than 5 min shorter than the last cue')
     expect(by('removal').ts).toBe(3_000_000)
     expect(by('mkvid').detail).toBe('uploaded vidmkvid001')
@@ -156,6 +223,7 @@ describe('activity feed', () => {
     const claim = by('claim')
     expect(claim.status).toBe('refunded')
     expect(claim.detail).toContain('shared account')
+    expect(claim.detail).toContain('given back')
     expect(claim.title).toBe('Claimed for render: DJ One @ Somewhere')
     expect(claim.dj).toBe('dj-one')
 
@@ -165,6 +233,7 @@ describe('activity feed', () => {
     expect(flagged.detail).toContain('acct-3')
     expect(flagged.detail).toContain('captcha loop')
     expect(by('pool', '2').detail ?? '').not.toContain('@')
+    expect((await page(env, '?q=someone')).total).toBe(0)
 
     const sync = by('sync')
     expect(sync.status).toBe('error')
@@ -180,34 +249,28 @@ describe('activity feed', () => {
     expect(ban.detail).toBe('ongoing')
   })
 
-  it('pages across ban episodes with the in-Worker keyset', async () => {
+  it('names a track upload claim by its track', async () => {
     const env = makeEnv()
-    await banEpisode(env, 3_000)
-    await banEpisode(env, 2_000, true)
-    await audit(env, 1, 2_000)
-    const p1 = await page(env, '?limit=2')
-    expect(refs(p1).map((r) => r.split(':')[0])).toEqual(['ban', 'audit'])
-    const p2 = await page(env, `?limit=2&cursor=${encodeURIComponent(p1.cursor!)}`)
-    expect(p2.rows.map((r) => [r.ref.kind, r.ts, r.problem, r.title])).toEqual([['ban', 2_000, false, 'Simulated IP block']])
-    expect(p2.cursor).toBeNull()
+    await env.DB.prepare("INSERT INTO track_uploads (id, presave_id, artist, title, source_name, source_url, status, video_id, created_at, updated_at) VALUES (4, 1, 'Mau P', 'Metro', 'soundcloud', 'https://soundcloud.com/a/b', 'done', 'vidtrack001', 1, 1)").run()
+    await env.DB.prepare("INSERT INTO mkvid_claims (id, request_id, account, claimed_at, recreate, refunded_at) VALUES (2, 'track:4', 'primary', 5000, 0, NULL)").run()
+    const p = await page(env, '?f.src=in:claim')
+    expect(p.rows.map((r) => [r.title, r.status, r.videoId])).toEqual([['Track upload claimed: Mau P – Metro', 'claimed', 'vidtrack001']])
   })
 
-  it('filters ban problems before the limit + 1 cut', async () => {
+  it('ban episodes: problems skip simulated ones, a key whose body is gone is skipped', async () => {
     const env = makeEnv()
     await banEpisode(env, 1_000) // the only real block, oldest
     await banEpisode(env, 2_000, true)
     await banEpisode(env, 3_000, true)
-    await banEpisode(env, 4_000, true)
-    const p = await page(env, '?kind=ban&problems=1&limit=2')
+    await audit(env, 1, 2_500)
+    const p = await page(env, '?f.kind=in:ban&f.problem=eq:1')
     expect(p.rows.map((r) => [r.ts, r.title])).toEqual([[1_000, 'IP block']])
-    expect(p.cursor).toBeNull()
-    // A key whose body is gone does not take a slot either.
-    await banEpisode(env, 500)
-    await banEpisode(env, 400)
-    await env.CACHE.delete('ban:ep:' + String(10_000_000_000_000 - 4_000).padStart(14, '0'))
-    const q = await page(env, '?kind=ban&limit=2')
-    expect(q.rows.map((r) => r.ts)).toEqual([3_000, 2_000])
-    expect(q.cursor).not.toBeNull()
+    expect(p.total).toBe(1)
+    const mixed = await page(env, '')
+    expect(mixed.rows.map((r) => [r.ref.kind, r.ts])).toEqual([['ban', 3_000], ['audit', 2_500], ['ban', 2_000], ['ban', 1_000]])
+    expect(mixed.rows[0]!.title).toBe('Simulated IP block')
+    await env.CACHE.delete('ban:ep:' + String(10_000_000_000_000 - 3_000).padStart(14, '0'))
+    expect((await page(env, '?f.kind=in:ban')).rows.map((r) => r.ts)).toEqual([2_000, 1_000])
   })
 
   it('names each superseded cause from the stored error', () => {
@@ -236,7 +299,7 @@ describe('activity feed', () => {
       await env.DB.prepare("INSERT INTO mkvid_requests (id, slug, set_url, set_title, source, source_url, status, error, created_at, updated_at) VALUES (?, 'dj-one', ?, 'DJ One @ Somewhere', 'soundcloud', 'https://soundcloud.com/x/y', 'superseded', ?, 1, ?)")
         .bind(`sup-${i}`, `${SET}?n=${i}`, error, 1000 + i).run()
     }
-    const p = await page(env, '?kind=mkvid')
+    const p = await page(env, '?f.kind=in:mkvid')
     const detail = Object.fromEntries(p.rows.filter((r) => r.ref.kind === 'mkvid').map((r) => [r.ref.key, r.detail]))
     expect(detail).toEqual({
       'sup-0': 'duplicate URL: kept under another URL',
@@ -251,9 +314,9 @@ describe('activity feed', () => {
   it('treats an empty sync error as ok', async () => {
     const env = makeEnv()
     await env.DB.prepare("INSERT INTO sub_sync (slug, artist_name, last_run_at, last_error) VALUES ('dj-one', 'DJ One', 7000, '')").run()
-    const p = await page(env, '?kind=sync')
+    const p = await page(env, '?f.kind=in:sync')
     expect(p.rows.map((r) => [r.status, r.problem])).toEqual([['ok', false]])
-    expect((await page(env, '?kind=sync&problems=1')).rows).toEqual([])
+    expect((await page(env, '?f.kind=in:sync&f.problem=eq:1')).rows).toEqual([])
   })
 
   it('drops pool reasons that could carry an address or are long', async () => {
@@ -261,21 +324,11 @@ describe('activity feed', () => {
     await poolEvent(env, 1, 10, 'account.flagged', 'acct-1', { reason: 'mail bounced for someone@example.com' })
     await poolEvent(env, 2, 20, 'account.flagged', 'acct-2', { reason: 'x'.repeat(121) })
     await poolEvent(env, 3, 30, 'account.flagged', 'acct-3', { reason: 'y'.repeat(120) })
-    const p = await page(env, '?kind=pool')
+    const p = await page(env, '?f.kind=in:pool')
     const detail = (key: string) => p.rows.find((r) => r.ref.key === key)!.detail
     expect(detail('1')).toBe('acct-1')
     expect(detail('2')).toBe('acct-2')
     expect(detail('3')).toBe(`acct-3 · ${'y'.repeat(120)}`)
-  })
-
-  it('since cuts every source', async () => {
-    const env = makeEnv()
-    await audit(env, 1, 1_000)
-    await audit(env, 2, 5_000_000)
-    await removal(env, 1, 1)
-    await removal(env, 2, 5_000)
-    // Same ms (5_000 s = 5_000_000 ms): ties break by source rank, audit before removal.
-    expect(refs(await page(env, '?since=2000000'))).toEqual(['audit:2', 'removal:2'])
   })
 
   it('never writes', async () => {

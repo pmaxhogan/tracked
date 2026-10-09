@@ -25,6 +25,7 @@ const BODY = /* html */ `
     <button type="button" id="load-links" class="btn small"${tipAttr('Looks up Apple Music and YouTube links for every identified track. Costs one 1001tracklists page view per track not already cached (cached for 30 days).')}>Load links</button>
     <span id="refresh-result" class="result muted" role="status"></span>
   </div>
+  <div id="tracks-skel" class="tk-card" hidden></div>
   <div id="tracks" class="tk-card" hidden></div>
   <div id="empty" class="empty" hidden></div>
   </div>
@@ -37,7 +38,6 @@ const CSS = /* css */ `
   .set-meta { font-size: var(--fs-sm); margin-bottom: var(--sp-3); }
   .cachebar { font-size: var(--fs-sm); margin-bottom: var(--sp-3); }
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
-  #tracks .trk:last-child { border-bottom: 0; }
 ${TRACK_ROW_CSS}
 ${SET_DIAG_CSS}`
 
@@ -48,8 +48,10 @@ ${SET_DIAG_JS}
   const $ = TK.$;
   const $form = $('load-form'), $url = $('url'), $btn = $('load-btn'), $error = $('error'), $setmeta = $('setmeta');
   const $tracks = $('tracks'), $empty = $('empty'), $cachebar = $('cachebar'), $cacheAge = $('cache-age');
-  const $refresh = $('refresh'), $loadLinks = $('load-links'), $result = $('refresh-result'), $diag = $('diag');
+  const $refresh = $('refresh'), $loadLinks = $('load-links'), $result = $('refresh-result'), $diag = $('diag'), $skel = $('tracks-skel');
   let currentUrl = null, seq = 0;
+  // The track table (track-row.ts): created on the first list, fed new lists after.
+  let tt = null;
 
   // One status line; a later success clears the failure colour.
   function setResult(msg, bad) { $result.className = 'result' + (bad ? ' bad' : ' muted'); $result.textContent = msg; }
@@ -65,10 +67,10 @@ ${SET_DIAG_JS}
   }
 
   function render(data) {
-    $tracks.textContent = '';
     $setmeta.textContent = '';
     const count = document.createElement('span');
-    count.textContent = (data.trackCount || 0) + ' track' + (data.trackCount === 1 ? '' : 's');
+    const extra = Array.isArray(data.rows) && data.rows.length > (data.trackCount || 0) ? ' · ' + (data.rows.length - (data.trackCount || 0)) + ' unnamed ID rows' : '';
+    count.textContent = (data.trackCount || 0) + ' track' + (data.trackCount === 1 ? '' : 's') + extra;
     $setmeta.appendChild(count);
     const src = pill(data.tracklistUrl, '1001tracklists page ↗', 'Opens this set on 1001tracklists.');
     if (src) $setmeta.appendChild(src);
@@ -77,8 +79,10 @@ ${SET_DIAG_JS}
     $setmeta.hidden = false;
     $cacheAge.textContent = fmtAge(data.cacheAgeSeconds);
     $cachebar.hidden = false;
-    for (const t of (data.tracks || [])) $tracks.appendChild(trackRow(t));
+    $skel.hidden = true; $skel.innerHTML = '';
     $tracks.hidden = false;
+    if (!tt) tt = TRK.create($tracks, { id: 'trk', setUrl: data.tracklistUrl || currentUrl, data });
+    else tt.setData(data, data.tracklistUrl || currentUrl);
     $empty.hidden = true;
   }
 
@@ -112,15 +116,16 @@ ${SET_DIAG_JS}
       $diag.hidden = false;
     });
     // Skeleton rows until the list arrives (an uncached set is a live 1001tracklists fetch).
-    $tracks.innerHTML = TK.skel(8, 'row');
-    $tracks.hidden = false;
+    $skel.innerHTML = TK.skel(8, 'row');
+    $skel.hidden = false;
+    $tracks.hidden = true;
     $setmeta.hidden = true;
     await TK.busy($btn, 'Loading…', async () => {
       const res = await TK.api.post('/ui/api/tracklist', { url });
       if (my !== seq) return;
       const data = res.data || {};
+      $skel.hidden = true; $skel.innerHTML = '';
       if (!res.ok) {
-        $tracks.textContent = '';
         $tracks.hidden = true;
         $setmeta.hidden = true;
         $cachebar.hidden = !currentUrl;
@@ -128,8 +133,7 @@ ${SET_DIAG_JS}
         $error.textContent = TK.errText(res, 'failed (' + res.status + ')');
         return;
       }
-      if (!data.tracks || data.tracks.length === 0) {
-        $tracks.textContent = '';
+      if ((!data.tracks || data.tracks.length === 0) && (!data.rows || data.rows.length === 0)) {
         $tracks.hidden = true;
         $setmeta.hidden = true;
         $empty.textContent = 'No tracks found.';
@@ -146,14 +150,14 @@ ${SET_DIAG_JS}
     if (!url) return;
     setResult('', false);
     // Reflect the loaded set in the address bar so it can be shared or bookmarked.
-    TK.qs.set({ url });
+    TKTable.qs.merge({ url });
     load(url);
   });
 
   $loadLinks.addEventListener('click', async () => {
     $loadLinks.disabled = true;
     setResult('', false);
-    try { await loadAllLinks($tracks, $result); }
+    try { if (tt) await tt.loadAllLinks($result); }
     catch (e) { setResult('Links failed: ' + (e && e.message ? e.message : e), true); }
     finally { $loadLinks.disabled = false; }
   });

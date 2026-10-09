@@ -6,6 +6,7 @@ export const ICON_NAMES = [
   'captcha', 'settings', 'tools', 'sliders', 'menu', 'close', 'sun', 'moon',
   'monitor', 'external', 'refresh', 'play', 'bell', 'shield', 'up', 'down',
   'top', 'bottom', 'ban', 'check', 'warn', 'copy', 'link', 'clock',
+  'bookmark', 'upload',
 ] as const
 
 export type IconName = (typeof ICON_NAMES)[number]
@@ -43,6 +44,8 @@ const BODY: Record<IconName, string> = {
   warn: '<path d="M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9.5v4.5"/><path d="M12 17.5h.01"/>',
   copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8.5a2 2 0 0 0 2 2h3.5"/>',
   link: '<path d="M10 13.5a4.5 4.5 0 0 0 6.4.4l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.7 1.7"/><path d="M14 10.5a4.5 4.5 0 0 0-6.4-.4l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.7-1.7"/>',
+  bookmark: '<path d="M6.5 3h11a1 1 0 0 1 1 1v17l-6.5-4.5L5.5 21V4a1 1 0 0 1 1-1z"/>',
+  upload: '<path d="M12 15V3.5"/><path d="m7 8.5 5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
 }
 
 function escAttr(s: string): string {

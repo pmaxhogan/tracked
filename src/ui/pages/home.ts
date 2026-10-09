@@ -5,13 +5,13 @@
 // Data: GET /ui/api/ban/status, /ui/api/pool/status, /ui/api/pool/challenges,
 // /ui/api/youtube/status, /ui/api/combined, /ui/api/mkvid?limit=1,
 // /ui/api/removals?limit=1, /ui/api/list + /ui/api/state/:slug (four at a
-// time) and /ui/api/activity?limit=12; the detail drawers (shared with the
+// time) and the Activity table endpoint (/ui/api/activity, the newest twelve
+// rows of the last 7 days, as a compact TKTable); the detail drawers (shared with the
 // Activity page) use /ui/api/audit-detail and /ui/api/playlist-addition-detail.
 //
 // Everything renders through innerHTML strings with delegated clicks (the
 // tests run this script in a stub DOM without appendChild), and every
 // upstream value goes through TK.esc.
-import { skelHtml } from '../skeleton'
 import { shell } from '../shell'
 import { tipAttr } from '../tip'
 import type { UiPage } from './index'
@@ -46,9 +46,7 @@ const BODY = /* html */ `
     <h2>Recent activity</h2>
     <span class="h-recent-links"><a href="/ui/activity"${tipAttr('The full log of syncs, additions and other events.')}>View all</a><a href="/ui/activity?problems=1"${tipAttr('Only the events that failed or were abandoned.')}>Problems</a></span>
   </div>
-  <div id="act-list" class="a-list" role="list"></div>
-  <div id="act-skel">${skelHtml(6, 'row')}</div>
-  <div id="act-empty" class="muted" hidden></div>
+  <div id="act-table" class="a-table h-act"></div>
 </div>
 `
 
@@ -72,7 +70,8 @@ const CSS = /* css */ `
   .h-recent-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
   .h-recent-links { display: flex; gap: var(--sp-3); font-size: var(--fs-sm); }
   .h-recent-links a { color: var(--accent); }
-  #act-empty .error { color: var(--danger); }
+  .h-act .tkt-table thead { display: none; }
+  .h-act .tkt-empty { margin-top: 0; }
 ${ACTIVITY_ROW_CSS}
 ${ACTIVITY_DETAIL_CSS}
 ${DJ_ACTIONS_CSS}`
@@ -263,25 +262,22 @@ ${ACTIVITY_DRAWER_JS}
     setAttn('djs', failedStates && !errs.length ? { error: failedStates + ' sync state' + (failedStates === 1 ? '' : 's') + ' unavailable' } : { items: errs });
   }
 
-  // ── recent activity: the newest twelve rows of the Activity log ──
+  // ── recent activity: the newest twelve rows of the Activity log (last 7 days) ──
   // Tiles, attention items and activity paint from the responses this browser
   // stored at the last view (TK.api.swr), then correct themselves from the live ones.
-  let actRows = [];
-  async function loadActivity() {
-    const $list = $('act-list'), $empty = $('act-empty');
-    await TK.api.swr('/ui/api/activity?limit=12', (res) => {
-      $('act-skel').hidden = true;
-      const rows = res.ok && res.data && Array.isArray(res.data.rows) ? res.data.rows : null;
-      if (!rows) { $empty.hidden = false; $empty.innerHTML = '<span class="error">' + esc(failText(res)) + '</span>'; return; }
-      actRows = rows.slice(0, 12);
-      $list.innerHTML = actRows.map((r, i) => activityRowHtml(r, i)).join('');
-      $empty.hidden = actRows.length > 0;
-      $empty.textContent = 'No activity recorded yet.';
-    });
-  }
-  $('act-list').addEventListener('click', (ev) => {
-    const b = ev.target && ev.target.closest ? ev.target.closest('[data-i]') : null;
-    if (b) openActivityRow(actRows[Number(b.dataset.i)]);
+  // The range start is rounded down to 10 minutes so that stored copy matches the next view's URL.
+  TKTable.create($('act-table'), {
+    id: 'act',
+    compact: true,
+    pageSize: 12,
+    source: { url: '/ui/api/activity', params: () => ({ 'f.ts': 'gte:' + Math.floor((Date.now() - 7 * 86400000) / 600000) * 600000 }) },
+    columns: activityColumns(true),
+    defaultSort: '-ts',
+    rowKey: 'id',
+    rowAttrs: activityRowAttrs,
+    onRowClick: (r) => openActivityRow(r),
+    swr: true,
+    empty: 'No activity in the last 7 days.',
   });
 
   // ── quick actions ──
@@ -339,7 +335,6 @@ ${ACTIVITY_DRAWER_JS}
   loadMkvid();
   loadHolds();
   loadDjs();
-  loadActivity();
 })();
 `
 

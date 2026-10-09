@@ -90,14 +90,15 @@ describe('parseSearchQuery', () => {
     expect(p('q=%20%20mau%20p%20')).toMatchObject({ q: 'mau p' })
     expect((p('q=' + 'a'.repeat(300)) as { q: string }).q).toHaveLength(200)
   })
-  it('accepts every kind, a limit of 1..20 and exact=1', () => {
+  it('accepts every kind, a limit of 1..200 and exact=1', () => {
     for (const kind of ['all', 'sets', 'tracks', 'djs']) expect(p(`kind=${kind}`)).toMatchObject({ kind })
     expect(p('limit=1')).toMatchObject({ limit: 1 })
     expect(p('limit=20')).toMatchObject({ limit: 20 })
+    expect(p('limit=200')).toMatchObject({ limit: 200 })
     expect(p('exact=1')).toMatchObject({ exact: true })
   })
   it('rejects bad parameters', () => {
-    for (const bad of ['kind=bogus', 'kind=', 'limit=0', 'limit=21', 'limit=abc', 'limit=1.5', 'limit=', 'exact=2', 'exact=']) {
+    for (const bad of ['kind=bogus', 'kind=', 'limit=0', 'limit=201', 'limit=abc', 'limit=1.5', 'limit=', 'exact=2', 'exact=']) {
       expect(p(bad), bad).toHaveProperty('error')
     }
   })

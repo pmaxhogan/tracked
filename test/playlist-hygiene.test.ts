@@ -529,6 +529,37 @@ describe('routes', () => {
     expect(await api.json()).toMatchObject({ rows: [], settings: { dryRun: true, dailyRemovals: 40 }, holds: [] })
   })
 
+  it('GET /ui/api/removals is a data table: sort, filters, search and pages over every row, extras kept', async () => {
+    const { app } = await import('../src/index')
+    const env = makeEnv()
+    const ins = env.DB.prepare('INSERT INTO playlist_removals (at, source, status, slug, set_url, video_id, playlist_id, playlist_kind, reason, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    const rows: unknown[][] = []
+    for (let i = 0; i < 30; i++) rows.push([1_790_000_000 + i, i % 3 === 0 ? 'owner' : 'sweep', i % 2 ? 'removed' : 'would_remove', i < 25 ? 'dj-a' : 'dj-b', `https://www.1001tracklists.com/tracklist/${i}/set-${i}.html`, `vid${String(i).padStart(8, '0')}`, 'PL1', 'artist', i % 3 === 0 ? 'owner' : 'short', i === 7 ? 'cut at 41 min' : null])
+    await env.DB.batch(rows.map((r) => ins.bind(...r)))
+    const get = async (qs: string) => {
+      const r = await app.request(`http://x/ui/api/removals${qs}`, {}, env)
+      expect(r.status, qs).toBe(200)
+      return (await r.json()) as { rows: Array<Record<string, any>>; total: number; page: number; pageCount: number; counts: Record<string, number>; djs: string[]; holds: unknown[]; settings: unknown; reasonLabels: Record<string, string> }
+    }
+    const d = await get('?size=10')
+    expect([d.total, d.pageCount, d.rows.length, d.rows[0]!.at]).toEqual([30, 3, 10, 1_790_000_029])
+    expect(d.counts).toEqual({ removed: 15, would_remove: 15 })
+    expect(d.djs).toEqual(['dj-a', 'dj-b'])
+    expect(d.holds).toEqual([])
+    expect(d.reasonLabels.owner).toBe('removed from the playlist by the owner')
+    expect((await get('?size=10&page=3')).rows.map((r) => r.at)[9]).toBe(1_790_000_000)
+    expect((await get('?sort=at&size=10')).rows[0]!.at).toBe(1_790_000_000)
+    // Filters work across every row, not just one page.
+    expect((await get('?f.source=in:owner')).total).toBe(10)
+    expect((await get('?f.slug=eq:dj-b')).total).toBe(5)
+    expect((await get('?f.status=in:removed&f.slug=eq:dj-b')).rows.map((r) => r.at)).toEqual([1_790_000_029, 1_790_000_027, 1_790_000_025])
+    expect((await get(`?f.at=lt:${(1_790_000_003) * 1000}`)).total).toBe(3)
+    expect((await get('?q=41 min')).rows.map((r) => r.video_id)).toEqual(['vid00000007'])
+    // Home and Playlists still send ?limit=1 and read only the extras.
+    expect((await get('?limit=1')).settings).toMatchObject({ dryRun: true })
+    expect((await app.request('http://x/ui/api/removals?f.status=in:nope', {}, env)).status).toBe(400)
+  })
+
   it('remove-replace validates input and reports a set without a video', async () => {
     const { app } = await import('../src/index')
     const env = makeEnv()

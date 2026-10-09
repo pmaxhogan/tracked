@@ -282,6 +282,7 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     await queue(env, 'ready', { setDate: '2026-01-01' })
     const p = await panel(env)
     expect(p).not.toHaveProperty('requireFullTracklist')
+    p.queue = ((await (await app.request('http://x/ui/api/mkvid/queue', {}, env)).json()) as { rows: unknown[] }).rows
     const why = Object.fromEntries(p.queue.map((q: any) => [q.setUrl.split('/').pop().replace('.html', ''), q.readiness.state]))
     expect(why).toEqual({ unverified: 'unverified', ids: 'waiting_ids', ready: 'ready' })
     const ids = p.queue.find((q: any) => q.setUrl.endsWith('ids.html'))

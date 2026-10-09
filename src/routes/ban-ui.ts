@@ -245,34 +245,77 @@ export const BAN_JS = /* js */ `
     $route.innerHTML = parts.join(' ');
   }
 
+  // Devices and episodes are data tables (TKTable, local mode: the status
+  // answer carries both lists whole). Each is created once and handed the new
+  // rows on every refresh, so its sort and filters survive the 15 s poll.
+  const hasTable = () => typeof TKTable !== 'undefined';
+  const uaShort = (ua) => { if (!ua) return 'unknown device'; const m = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : 'device'; const b = /Edg\\//.test(ua) ? 'Edge' : /Chrome\\//.test(ua) ? 'Chrome' : /Firefox\\//.test(ua) ? 'Firefox' : /Safari\\//.test(ua) ? 'Safari' : ''; return (b ? b + ' on ' : '') + m; };
+  const tipOf = (t) => ' data-tip="' + esc(t) + '"';
+  let devTable = null, devRows = [], epTable = null, epRows = [];
   function renderDevices(s) {
     if (!$devices) return;
     const subs = s.pushSubscriptions || [];
-    if (!s.pushConfigured) { $devices.hidden = false; $devices.innerHTML = '<span class="bad">Web Push not configured</span> — set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT (node scripts/gen-vapid-keys.mjs).'; return; }
-    if (!subs.length) { $devices.hidden = false; $devices.innerHTML = 'Push devices: <span class="muted">none yet — enable notifications on your phone and desktop.</span>'; return; }
-    const uaShort = (ua) => { if (!ua) return 'unknown device'; const m = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : 'device'; const b = /Edg\\//.test(ua) ? 'Edge' : /Chrome\\//.test(ua) ? 'Chrome' : /Firefox\\//.test(ua) ? 'Firefox' : /Safari\\//.test(ua) ? 'Safari' : ''; return (b ? b + ' on ' : '') + m; };
+    const msg = (html) => { devTable = null; $devices.hidden = false; $devices.innerHTML = html; };
+    if (!s.pushConfigured) { msg('<span class="bad">Web Push not configured</span>: set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT (node scripts/gen-vapid-keys.mjs).'); return; }
+    if (!subs.length) { msg('Push devices: <span class="muted">none yet. Enable notifications on your phone and desktop.</span>'); return; }
+    devRows = subs.map((d, i) => ({ i, device: uaShort(d.ua), ua: d.ua || '', state: d.lastError ? 'failing' : d.lastOkAt ? 'ok' : 'untested', lastOkAt: d.lastOkAt || null, lastError: d.lastError || null, createdAt: d.createdAt || null }));
     $devices.hidden = false;
-    $devices.innerHTML = 'Push devices (' + subs.length + '): ' + subs.map((d) => '<span data-tip="' + esc(d.ua || 'Unknown browser') + '">' + esc(uaShort(d.ua)) + '</span>' + (d.lastError ? ' <span class="bad" data-tip="' + esc('Last delivery failed: ' + d.lastError) + '">⚠</span>' : d.lastOkAt ? ' <span class="ok" data-tip="' + esc('Last delivered ' + fmtTime(d.lastOkAt)) + '">✓</span>' : '')).join(' · ');
+    if (devTable && $('ban-dev-n')) { $('ban-dev-n').textContent = String(devRows.length); devTable.setRows(devRows); return; }
+    $devices.innerHTML = '<div class="ban-dev-h" style="margin-bottom:6px">Push devices (<span id="ban-dev-n">' + devRows.length + '</span>)</div><div id="ban-dev-t"></div>';
+    if (!hasTable()) return;
+    devTable = TKTable.create($('ban-dev-t'), {
+      id: 'bdev', compact: true, urlState: false, pageSize: 200,
+      source: { rows: () => devRows },
+      rowKey: 'i',
+      columns: [
+        { key: 'device', label: 'Device', type: 'text', render: (d) => '<span' + tipOf(d.ua || 'Unknown browser') + '>' + esc(d.device) + '</span>' },
+        { key: 'state', label: 'Delivery', type: 'enum', options: ['ok', 'failing', 'untested'],
+          render: (d) => d.state === 'failing' ? '<span class="bad"' + tipOf('Last delivery failed: ' + d.lastError) + '>⚠ failing</span>' : d.state === 'ok' ? '<span class="ok">✓ ok</span>' : '<span class="muted">not tested yet</span>' },
+        { key: 'lastOkAt', label: 'Last delivered', type: 'datetime', storage: 'iso', render: (d) => esc(d.lastOkAt ? fmtTime(d.lastOkAt) : '—') },
+        { key: 'createdAt', label: 'Added', type: 'datetime', storage: 'iso', hideOn: 'phone', render: (d) => esc(d.createdAt ? fmtTime(d.createdAt) : '—') },
+      ],
+    });
   }
 
   function renderEpisodes(s) {
     if (!$eps) return;
-    const eps = s.episodes || [];
-    if (!eps.length) { $eps.innerHTML = '<div class="empty">No ban episodes recorded.</div>'; return; }
-    const rows = eps.map((e) => {
+    epRows = (s.episodes || []).map((e, i) => {
       const open = !e.endedAt;
-      const dur = open ? fmtDur(Date.now() - Date.parse(e.startedAt)) + '…' : fmtDur(e.blockedForMs);
-      const push = (e.pushStart ? e.pushStart.sent + '/' + e.pushStart.total : '—') + (e.pushClear ? ' · ' + e.pushClear.sent + '/' + e.pushClear.total : '');
-      return '<tr>' +
-        '<td data-label="Started"' + (open ? ' class="open"' : '') + '>' + esc(fmtTime(e.startedAt)) + (open ? ' <b>(open)</b>' : '') + (e.simulated ? ' <span class="muted">sim</span>' : '') + '</td>' +
-        '<td data-label="Lasted">' + esc(dur) + '</td>' +
-        '<td data-label="IP" class="mono">' + esc(e.ip || '—') + '</td>' +
-        '<td data-label="Seen by / cleared">' + esc(e.source) + (e.clearedBy ? ' → ' + esc(e.clearedBy) : '') + '</td>' +
-        '<td data-label="Pool / BrightData req">' + e.poolRequests + ' / ' + e.brightdataRequests + (e.allBlockedHits ? ' <span class="bad" data-tip="Times every route was blocked during this episode.">' + e.allBlockedHits + '⛔</span>' : '') + '</td>' +
-        '<td data-label="Push start · clear" class="muted">' + esc(push) + '</td>' +
-        '</tr>';
-    }).join('');
-    $eps.innerHTML = '<table class="ban-eps"><thead><tr><th>Started</th><th>Lasted</th><th><span class="tip-term" data-tip="The address 1001tracklists blocked, when it was known.">IP</span></th><th><span class="tip-term" data-tip="What noticed the block, and what cleared it.">Seen by / cleared</span></th><th><span class="tip-term" data-tip="Requests sent through the browser pool and through BrightData during the episode.">Pool / BrightData req</span></th><th><span class="tip-term" data-tip="Push notifications delivered when the ban started, and when it ended (sent out of devices).">Push start · clear</span></th></tr></thead><tbody>' + rows + '</tbody></table>';
+      return Object.assign({}, e, {
+        i, open, kind: e.simulated ? 'simulated' : 'real',
+        lasted: open ? Date.now() - Date.parse(e.startedAt) : e.blockedForMs ?? null,
+        requests: (Number(e.poolRequests) || 0) + (Number(e.brightdataRequests) || 0),
+      });
+    });
+    if (!hasTable()) { $eps.innerHTML = epRows.length ? '' : '<div class="empty">No ban episodes recorded.</div>'; return; }
+    if (epTable) { epTable.setRows(epRows); return; }
+    epTable = TKTable.create($eps, {
+      id: 'beps', urlState: false, pageSize: 10, pageSizes: [10, 25, 50, 100],
+      source: { rows: () => epRows },
+      rowKey: 'i',
+      search: false,
+      defaultSort: '-startedAt',
+      chips: [
+        { id: 'all', label: 'All', group: 'k', on: true },
+        { id: 'open', label: 'Open', group: 'k', filters: [{ col: 'open', op: 'eq', value: '1' }] },
+        { id: 'real', label: 'Real', group: 'k', tip: 'Blocks 1001tracklists really made, without the simulated ones.', filters: [{ col: 'kind', op: 'in', value: 'real' }] },
+        { id: 'sim', label: 'Simulated', group: 'k', filters: [{ col: 'kind', op: 'in', value: 'simulated' }] },
+      ],
+      columns: [
+        { key: 'startedAt', label: 'Started', type: 'datetime', storage: 'iso',
+          render: (e) => esc(fmtTime(e.startedAt)) + (e.open ? ' <b>(open)</b>' : '') + (e.simulated ? ' <span class="muted">sim</span>' : '') },
+        { key: 'lasted', label: 'Lasted', type: 'number', render: (e) => esc(e.open ? fmtDur(e.lasted) + '…' : fmtDur(e.lasted)) },
+        { key: 'open', label: 'Open', type: 'bool', hideOn: 'phone', render: (e) => (e.open ? '<span class="bad">yes</span>' : '<span class="muted">no</span>') },
+        { key: 'kind', label: 'Kind', type: 'enum', options: ['real', 'simulated'], hideOn: 'phone' },
+        { key: 'ip', label: 'IP', type: 'text', tip: 'The address 1001tracklists blocked, when it was known.', render: (e) => '<span class="mono">' + esc(e.ip || '—') + '</span>' },
+        { key: 'source', label: 'Seen by / cleared', type: 'text', tip: 'What noticed the block, and what cleared it.', render: (e) => esc(e.source) + (e.clearedBy ? ' → ' + esc(e.clearedBy) : '') },
+        { key: 'requests', label: 'Pool / BrightData req', type: 'number', tip: 'Requests sent through the browser pool and through BrightData during the episode.',
+          render: (e) => esc(e.poolRequests) + ' / ' + esc(e.brightdataRequests) + (e.allBlockedHits ? ' <span class="bad"' + tipOf('Times every route was blocked during this episode.') + '>' + esc(e.allBlockedHits) + '⛔</span>' : '') },
+        { key: 'push', label: 'Push start · clear', sortable: false, filterable: false, tip: 'Push notifications delivered when the ban started, and when it ended (sent out of devices).',
+          render: (e) => '<span class="muted">' + esc((e.pushStart ? e.pushStart.sent + '/' + e.pushStart.total : '—') + (e.pushClear ? ' · ' + e.pushClear.sent + '/' + e.pushClear.total : '')) + '</span>' },
+      ],
+      empty: 'No ban episodes recorded.',
+    });
   }
 
   if ($refresh) $refresh.addEventListener('click', () => refresh(true));

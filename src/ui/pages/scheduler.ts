@@ -5,8 +5,11 @@
 //     when each class and kind last ran and last went well;
 //   - what is waiting (.summary.latestDue and .djs): the newest due count per
 //     class, and every subscribed DJ's next discovery and backfill, most
-//     overdue first;
-//   - the tick list (GET /ui/api/scheduler/ticks, "Load older" via ?before=).
+//     overdue first, in a local TKTable (one row per subscription; the
+//     overdue math is done by the Worker, so the list rides with the summary);
+//   - the tick list: a server-side TKTable over GET /ui/api/scheduler/ticks
+//     (sort, filter, search and page over every recorded tick); a row opens a
+//     drawer with everything that tick picked.
 // Every value from the API goes through esc; rows are rendered through
 // innerHTML and clicks are delegated (the tests run this in a stub DOM).
 import { skelHtml } from '../skeleton'
@@ -28,16 +31,12 @@ const BODY = /* html */ `
 
 <section class="tk-card" aria-labelledby="sc-h-djs">
   <div class="sc-head"><h2 id="sc-h-djs"><span class="tip-term"${tipAttr('Discovery reads each DJ\'s listing page about once a day; backfill takes one "older sets" step at a time. Overdue means the time passed and no tick has picked it up yet.')}>DJ due times</span></h2><span id="sc-djs-count" class="muted sc-asof"></span></div>
-  <div class="tk-table-wrap"><table class="tk-table sc-t"><thead><tr><th>DJ</th><th>Discovery</th><th>Backfill</th></tr></thead><tbody id="sc-djs"><tr><td colspan="3">${skelHtml(3, 'row')}</td></tr></tbody></table></div>
-  <p class="sc-foot"><button id="sc-djs-all" type="button" class="btn" hidden${tipAttr('Lists every subscribed DJ, not just the most overdue ones.')}>Show all DJs</button></p>
+  <div id="sc-djs"></div>
 </section>
 
 <section class="tk-card" aria-labelledby="sc-h-ticks">
-  <div class="sc-head"><h2 id="sc-h-ticks"><span class="tip-term"${tipAttr('One row per scheduler wake-up: how many items it drew, what was due, what it picked and how it ended.')}>Ticks</span></h2><span class="muted sc-asof">newest first</span></div>
-  <div id="sc-ticks-err" class="error"></div>
-  <div class="tk-table-wrap"><table class="tk-table sc-t sc-ticks"><thead><tr><th>Time</th><th class="num">Took</th><th class="num"><span class="tip-term"${tipAttr('How many items this tick drew at random from what was due (the tick size is a setting).')}>Drawn</span></th><th><span class="tip-term"${tipAttr('Items due at the time of the tick: new / verify / recheck / backfill.')}>Due n/v/r/b</span></th><th>Picked</th><th>Result</th></tr></thead><tbody id="sc-ticks"><tr><td colspan="6">${skelHtml(4, 'row')}</td></tr></tbody></table></div>
-  <div id="sc-ticks-empty" class="empty" hidden>No ticks recorded yet.</div>
-  <p class="sc-foot"><button id="sc-more" type="button" class="btn" hidden${tipAttr('Loads 50 older ticks.')}>Load older</button></p>
+  <div class="sc-head"><h2 id="sc-h-ticks"><span class="tip-term"${tipAttr('One row per scheduler wake-up: how many items it drew, what was due, what it picked and how it ended.')}>Ticks</span></h2><span class="muted sc-asof">click a row for what it picked</span></div>
+  <div id="sc-ticks"></div>
 </section>
 `
 
@@ -62,18 +61,20 @@ const CSS = /* css */ `
   .sc-items .kind { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
   .sc-items .lbl { overflow-wrap: anywhere; min-width: 0; }
   .sc-items .why { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
-  .sc-ticks td.res { overflow-wrap: anywhere; }
-  .sc-ticks td.res .error { display: block; }
-  .sc-foot { margin: var(--sp-3) 0 0; }
-  .sc-foot .btn { width: 100%; }
-  .sc-foot:has(.btn[hidden]) { display: none; }
+  .sc-res { overflow-wrap: anywhere; }
+  .sc-res .error { display: block; }
+  .sc-pick { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+  .sc-pick .lbl { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+  .tkt-table .sub { display: block; color: var(--muted); font-size: var(--fs-xs); }
+  .sc-when { display: inline-flex; flex-direction: column; }
+  @media (max-width: 699px) { .sc-when { align-items: flex-end; } }
+  .tkt-table tr.late > td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+  .tkt-table tr.starve > td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
   .badge.sm { font-size: var(--fs-xs); }
   @media (max-width: 699px) {
-    .sc-ticks td.items, .sc-ticks td.res { display: block; text-align: left; }
-    .sc-ticks td.items::before, .sc-ticks td.res::before { display: block; margin-bottom: 2px; }
-    .sc-t tr.starve, .sc-t tr.late { box-shadow: inset 3px 0 0 var(--warn); }
-    .sc-t tr.late { box-shadow: inset 3px 0 0 var(--danger); }
-    .sc-t tr.starve td:first-child, .sc-t tr.late td:first-child { box-shadow: none; }
+    .sc-t tr.starve, .sc-t tr.late, .tkt-table tr.starve { box-shadow: inset 3px 0 0 var(--warn); }
+    .sc-t tr.late, .tkt-table tr.late { box-shadow: inset 3px 0 0 var(--danger); }
+    .sc-t tr.starve td:first-child, .sc-t tr.late td:first-child, .tkt-table tr.starve > td:first-child, .tkt-table tr.late > td:first-child { box-shadow: none; }
   }
 `
 
@@ -81,12 +82,11 @@ const JS = /* js */ `
 (() => {
   const $ = TK.$, esc = TK.esc;
   const CLASSES = ['new', 'verify', 'recheck', 'backfill'];
-  const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'dj_backfill'];
-  const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', dj_backfill: 'DJ backfill' };
+  const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'dj_backfill', 'presave'];
+  const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', dj_backfill: 'DJ backfill', presave: 'Pre-save recheck' };
   const SKIP_WORDS = { paused: 'Paused (IP block)', backoff: 'Pool backoff', pool_not_configured: 'Pool not configured', youtube_not_connected: 'YouTube not connected', nothing_due: 'Nothing due', zero_draw: 'Drew zero' };
   const GOOD = new Set(['ok', 'stepped', 'done', 'no_cursor']);
   const OVERDUE_BAD = 6 * 3600;
-  const DJ_ROWS = 25;
 
   // ── formatting ──
   const iso = (sec) => { try { return new Date(sec * 1000).toISOString(); } catch (e) { return ''; } };
@@ -173,25 +173,39 @@ const JS = /* js */ `
     $('sc-reasons').innerHTML = list('Skipped ticks', s.skipped, SKIP_WORDS) + list('Stop reasons', s.stopReasons) + list('Outcomes', s.outcomes);
   }
 
-  // ── DJ due times ──
-  let djs = [], djsAll = false;
+  // ── DJ due times (a local table over the summary's list) ──
   function dueCell(at, over) {
     if (at == null || over == null) return '<span class="muted">not scheduled</span>';
     if (over > 0) return badge(over > OVERDUE_BAD ? 'bad' : 'warn', span(over) + ' overdue', 'Was due ' + iso(at) + ' and no tick has picked it up yet.');
     return '<span' + TK.tip(iso(at)) + '>in ' + esc(span(-over)) + '</span>';
   }
+  const worstOf = (d) => (d.discoveryOverdue == null && d.backfillOverdue == null ? null : Math.max(d.discoveryOverdue == null ? -Infinity : d.discoveryOverdue, d.backfillOverdue == null ? -Infinity : d.backfillOverdue));
+  let djs = [];
+  const djTable = TKTable.create($('sc-djs'), {
+    id: 'djs',
+    source: { rows: () => djs },
+    rowKey: 'slug',
+    defaultSort: '-worst',
+    pageSize: 25,
+    search: 'Search DJs',
+    empty: 'No subscribed DJs.',
+    columns: [
+      { key: 'dj', label: 'DJ', type: 'text', value: (d) => d.name || d.slug, render: (d) => djLink(d.slug, d.name) },
+      { key: 'discoveryOverdue', label: 'Discovery', type: 'number', align: 'left', tip: 'When the DJ page is read next (or how long it is overdue). Sorts by how overdue it is; the filter takes seconds overdue.', render: (d) => dueCell(d.nextDiscoveryAt, d.discoveryOverdue) },
+      { key: 'backfillOverdue', label: 'Backfill', type: 'number', align: 'left', tip: 'When the next older-sets step is due (or how long it is overdue); the filter takes seconds overdue.', render: (d) => dueCell(d.nextBackfillAt, d.backfillOverdue) },
+      { key: 'worst', label: 'Most overdue', type: 'number', hideOn: 'phone', tip: 'The later of the two: how long this DJ has waited past a due time (the filter takes seconds).', render: (d) => d.worst == null ? '<span class="muted">not scheduled</span>' : d.worst > 0 ? esc(span(d.worst)) : '<span class="muted">on time</span>' },
+    ],
+    chips: [
+      { id: 'all', label: 'All', group: 'due', on: true },
+      { id: 'over', label: 'Overdue', group: 'due', filters: [{ col: 'worst', op: 'gt', value: '0' }], tip: 'A discovery or backfill time has passed and no tick has picked it up yet.' },
+      { id: 'late', label: 'Over 6 h', group: 'due', filters: [{ col: 'worst', op: 'gt', value: String(OVERDUE_BAD) }], tip: 'Overdue by more than six hours.' },
+    ],
+    rowAttrs: (d) => (d.worst > OVERDUE_BAD ? { class: 'late' } : d.worst > 0 ? { class: 'starve' } : null),
+  });
   function renderDjs() {
-    const late = djs.filter((d) => n(d.discoveryOverdue) > 0 || n(d.backfillOverdue) > 0).length;
+    const late = djs.filter((d) => n(d.worst) > 0).length;
     $('sc-djs-count').textContent = djs.length ? late + ' of ' + djs.length + ' overdue' : '';
-    const shown = djsAll ? djs : djs.slice(0, DJ_ROWS);
-    $('sc-djs').innerHTML = shown.length ? shown.map((d) => {
-      const worst = Math.max(n(d.discoveryOverdue), n(d.backfillOverdue));
-      const cls = worst > OVERDUE_BAD ? ' class="late"' : worst > 0 ? ' class="starve"' : '';
-      return '<tr' + cls + '><td data-label="DJ">' + djLink(d.slug, d.name) + '</td>' +
-        '<td data-label="Discovery">' + dueCell(d.nextDiscoveryAt, d.discoveryOverdue) + '</td>' +
-        '<td data-label="Backfill">' + dueCell(d.nextBackfillAt, d.backfillOverdue) + '</td></tr>';
-    }).join('') : '<tr><td colspan="3" class="muted" data-label="">No subscribed DJs.</td></tr>';
-    $('sc-djs-all').hidden = djsAll || djs.length <= DJ_ROWS;
+    djTable.setRows(djs);
   }
 
   async function loadSummary() {
@@ -200,66 +214,83 @@ const JS = /* js */ `
       if (!d) { $('sc-err').textContent = TK.errText(res, 'Could not load the scheduler summary (' + ((res && res.status) || 'offline') + ')'); return; }
       $('sc-err').textContent = '';
       renderSummary(d.summary);
-      djs = Array.isArray(d.djs) ? d.djs : [];
+      djs = (Array.isArray(d.djs) ? d.djs : []).map((x) => Object.assign({}, x, { worst: worstOf(x) }));
       renderDjs();
     });
   }
 
-  // ── the tick list ──
-  let ticks = [], nextBefore = null, seq = 0;
+  // ── the tick list (server-side table) ──
   function itemHtml(x) {
     const what = x.label
       ? '<a class="lbl" href="/ui/set?url=' + encodeURIComponent(x.url || '') + '">' + esc(x.label) + '</a>'
       : '<span class="lbl">' + djLink(x.slug, x.slug) + '</span>';
-    return '<li>' + badge(outCls(x.outcome), x.outcome || '?', OUT_TIPS[x.outcome]) + '<span class="kind">' + esc(x.kind) + '</span>' +
+    return '<li>' + badge(outCls(x.outcome), x.outcome || '?', OUT_TIPS[x.outcome] || 'How this item ended.') + '<span class="kind">' + esc(KIND_WORDS[x.kind] || x.kind) + '</span>' +
       (x.label && x.slug ? '<span class="muted">' + djLink(x.slug, x.slug) + '</span>' : '') + what +
       (x.stopReason ? '<span class="why">' + esc(x.stopReason) + '</span>' : '') + '</li>';
   }
-  function tickHtml(t) {
-    const due = t.due ? CLASSES.map((c) => esc(n(t.due[c]))).join('/') : '—';
+  const dueOf = (t) => (t.due ? CLASSES.map((c) => esc(n(t.due[c]))).join('/') : '—');
+  function resultHtml(t) {
     const items = Array.isArray(t.items) ? t.items : [];
     let res = '';
-    if (t.skipped) res += badge('neutral', SKIP_WORDS[t.skipped] || t.skipped, SKIP_TIPS[t.skipped]);
+    if (t.skipped) res += badge('neutral', SKIP_WORDS[t.skipped] || t.skipped, SKIP_TIPS[t.skipped] || 'The tick did not run.');
     if (t.stoppedBy) res += badge('warn', 'stopped', 'The tick ended early because of this refusal; the items left are drawn again later.') + ' <span>' + esc(t.stoppedBy) + '</span>';
     if (t.error) res += '<span class="error">' + esc(t.error) + '</span>';
     if (!res) res = items.length ? badge('ok', 'done', 'Every drawn item ran.') : '<span class="muted">—</span>';
-    return '<tr' + (t.error ? ' class="late"' : t.stoppedBy ? ' class="starve"' : '') + '>' +
-      '<td data-label="Time"><span' + TK.tip(iso(t.at)) + '>' + esc(TK.fmt.time(iso(t.at))) + '</span><span class="sub">' + esc(TK.fmt.rel(iso(t.at))) + '</span></td>' +
-      '<td data-label="Took" class="num">' + esc(took(t.ms)) + '</td>' +
-      '<td data-label="Drawn" class="num">' + esc(n(t.drawn)) + '</td>' +
-      '<td data-label="Due n/v/r/b" class="mono">' + due + '</td>' +
-      '<td data-label="Picked" class="items">' + (items.length ? '<ul class="sc-items">' + items.map(itemHtml).join('') + '</ul>' : '<span class="muted">nothing</span>') + '</td>' +
-      '<td data-label="Result" class="res">' + res + '</td></tr>';
+    return '<span class="sc-res">' + res + '</span>';
   }
-  function renderTicks() {
-    $('sc-ticks').innerHTML = ticks.map(tickHtml).join('');
-    $('sc-ticks-empty').hidden = ticks.length > 0;
-    $('sc-more').hidden = !nextBefore;
+  // The Picked column: outcome counts and the first item; the drawer has them all.
+  function pickedHtml(t) {
+    const items = Array.isArray(t.items) ? t.items : [];
+    if (!items.length) return '<span class="muted">nothing</span>';
+    const by = {};
+    for (const x of items) by[x.outcome || '?'] = (by[x.outcome || '?'] || 0) + 1;
+    const first = items[0];
+    return '<span class="sc-pick">' + Object.keys(by).map((o) => badge(outCls(o), o + ' ' + by[o], OUT_TIPS[o] || 'How these items ended.')).join('') +
+      '<span class="lbl">' + esc(first.label || first.slug || first.kind) + (items.length > 1 ? ' +' + (items.length - 1) : '') + '</span></span>';
   }
-  async function loadTicks(more) {
-    if (more && !nextBefore) return;
-    const my = ++seq;
-    const apply = (res) => {
-      if (my !== seq) return;
-      const d = res && res.ok && res.data && Array.isArray(res.data.ticks) ? res.data : null;
-      if (!d) { $('sc-ticks-err').textContent = TK.errText(res, 'Could not load ticks (' + ((res && res.status) || 'offline') + ')'); if (!more && !ticks.length) $('sc-ticks').innerHTML = ''; return; }
-      $('sc-ticks-err').textContent = '';
-      ticks = more ? ticks.concat(d.ticks) : d.ticks.slice();
-      // A stored first page pages on only once the live one is in.
-      nextBefore = res.stale ? null : (d.nextBefore || null);
-      renderTicks();
-    };
-    if (more) apply(await TK.api.get('/ui/api/scheduler/ticks?limit=50&before=' + encodeURIComponent(nextBefore)));
-    else await TK.api.swr('/ui/api/scheduler/ticks?limit=50', apply);
+  function tickBody(t) {
+    const items = Array.isArray(t.items) ? t.items : [];
+    return '<p class="muted">' + esc(TK.fmt.time(iso(t.at))) + ' · took ' + esc(took(t.ms)) + ' · drew ' + esc(n(t.drawn)) + ' · due n/v/r/b ' + dueOf(t) + '</p>' +
+      '<p>' + resultHtml(t) + '</p>' +
+      (items.length ? '<ul class="sc-items">' + items.map(itemHtml).join('') + '</ul>' : '<p class="muted">This tick picked nothing.</p>');
   }
+  const SKIPS = Object.keys(SKIP_WORDS).map((k) => ({ value: k, label: SKIP_WORDS[k] }));
+  const dueCol = (key, cls, label, tip) => ({ key, label, type: 'number', hideOn: 'phone', tip, value: (t) => (t.due ? t.due[cls] : null), render: (t) => esc(t.due ? n(t.due[cls]) : '—') });
+  const ticks = TKTable.create($('sc-ticks'), {
+    id: 'ticks',
+    source: { url: '/ui/api/scheduler/ticks' },
+    swr: true,
+    defaultSort: '-at',
+    search: 'Search picked items (DJ, set URL)',
+    empty: 'No ticks recorded yet.',
+    columns: [
+      { key: 'at', label: 'Time', type: 'datetime', storage: 's', render: (t) => '<span class="sc-when"><span' + TK.tip(iso(t.at)) + '>' + esc(TK.fmt.time(iso(t.at))) + '</span><span class="sub">' + esc(TK.fmt.rel(iso(t.at))) + '</span></span>' },
+      { key: 'ms', label: 'Took', type: 'number', tip: 'How long the tick ran (the filter takes milliseconds).', render: (t) => esc(took(t.ms)) },
+      { key: 'drawn', label: 'Drawn', type: 'number', tip: 'How many items this tick drew at random from what was due (the tick size is a setting).' },
+      { key: 'ran', label: 'Ran', type: 'number', hideOn: 'phone', tip: 'How many items it actually ran.' },
+      dueCol('dueNew', 'new', 'Due n', 'New sets due at the time of the tick (a floor: each class query has its own limit).'),
+      dueCol('dueVerify', 'verify', 'v', 'Verify fetches due at the time of the tick.'),
+      dueCol('dueRecheck', 'recheck', 'r', 'Rechecks due at the time of the tick.'),
+      dueCol('dueBackfill', 'backfill', 'b', 'Backfill steps due at the time of the tick.'),
+      { key: 'picked', label: 'Picked', sortable: false, filterable: false, render: pickedHtml },
+      { key: 'skipped', label: 'Result', type: 'enum', options: SKIPS, sortable: false, tip: 'Skipped, stopped early, an error, or done. The filter picks skip reasons.', render: resultHtml },
+    ],
+    chips: [
+      { id: 'all', label: 'All', group: 'kind', on: true },
+      { id: 'ran', label: 'Ran items', group: 'kind', filters: [{ col: 'ran', op: 'gt', value: '0' }], tip: 'Ticks that ran at least one item.' },
+      { id: 'errors', label: 'Errors', group: 'kind', filters: [{ col: 'error', op: 'nempty', value: '' }], tip: 'Ticks that threw.' },
+      { id: 'skipped', label: 'Skipped', group: 'kind', filters: [{ col: 'skipped', op: 'nempty', value: '' }], tip: 'Ticks that did not run: paused, backoff, nothing due.' },
+      { id: 'stopped', label: 'Stopped by pool', group: 'kind', filters: [{ col: 'stoppedBy', op: 'nempty', value: '' }], tip: 'Ticks cut short by a refusal: no healthy account, captcha, budget or timeout.' },
+      { id: 'failed', label: 'Failed items', group: 'kind', filters: [{ col: 'failedItems', op: 'eq', value: '1' }], tip: 'Ticks where at least one item failed or threw.' },
+    ],
+    rowAttrs: (t) => (t.error ? { class: 'late' } : t.stoppedBy ? { class: 'starve' } : null),
+    onRowClick: (t) => TK.drawer.open('Tick ' + (TK.fmt.time(iso(t.at)) || ''), tickBody(t)),
+  });
 
-  $('sc-more').addEventListener('click', () => TK.busy($('sc-more'), 'Loading…', () => loadTicks(true)));
-  $('sc-djs-all').addEventListener('click', () => { djsAll = true; renderDjs(); });
   const $refresh = $('sc-refresh');
-  if ($refresh) $refresh.addEventListener('click', () => TK.busy($refresh, 'Refreshing…', () => Promise.all([loadSummary(), loadTicks(false)])));
+  if ($refresh) $refresh.addEventListener('click', () => TK.busy($refresh, 'Refreshing…', () => Promise.all([loadSummary(), ticks.reload()])));
 
   loadSummary().catch(() => {});
-  loadTicks(false).catch(() => {});
 })();
 `
 

@@ -1,6 +1,6 @@
 # Tasker setup
 
-End-to-end flow on the phone: a Tasker task reads the YouTube media notification, asks the Worker what's currently playing, and pops a small list with one tap to open the track on Apple Music or YouTube.
+End-to-end flow on the phone: a Tasker task reads the YouTube media notification, asks the Worker what's currently playing, and shows a card list of the previous / current / next tracks with one tap to open, like or pre-save each one.
 
 ## Prerequisites
 
@@ -67,22 +67,30 @@ The task runs on demand (e.g. via a home-screen widget or a notification action)
    | `no_tracklist`   | `Flash` toast: "No tracklist on 1001tracklists for this set". `%http_data.message` says whether a YouTube video was matched and which searches ran. |
    | `upstream_error` | `Flash` toast with `%http_data.message`. The message is structured: `1001 search: ip_blocked (<ip>)` or `1001 scrape: ip_blocked (<ip>)` means the upstream rate-limited us — usually transient, retry in a few minutes. Other messages indicate a real failure. |
 
-6. **Scene: tracklist popup**
-   - Header (when present): if `%http_data.setAppleLink` is non-null, show a small "▶ Open whole set in Apple Music" pinned row at the top.
-   - Use a `ListView` element bound to `%http_data.tracks(:)`.
-   - Per-row layout (custom item layout):
-     - **Artwork** (left thumbnail): `%http_data.tracks(:).artworkUrl` — server already normalises to 300×300. If null, render your own no-art placeholder.
-     - **Title**: `%http_data.tracks(:).title`. If `idStatus` is non-null, append a subtle " · ID Remix" / " · ID Edit" / etc. badge.
-     - **Subtitle**: `%http_data.tracks(:).artist`.
-     - **Time line**: `%http_data.tracks(:).startTime` + " · " + `%http_data.tracks(:).durationTime` (skip the second part when empty). Mashup-linked siblings share the same `durationTime`.
-     - **Right-side icon**: 🍎 (Apple) if `appleLink` is set, else ▶ (YouTube) if `youtubeLink` is set, else 🔗 (1001tracklists) if `trackUrl` is set, else nothing.
-     - **Visual state**: rows with `isCurrent: true` highlight (background tint or bold). Rows with `isUnidentified: true` greyed out and not tappable.
-   - **Item tap precedence**: `Browse URL` to the first non-null of `appleLink`, then `youtubeLink`, then `trackUrl`. Skip if all three are null.
+6. **Scene: tracklist cards** (Scene V2, task `Tracked.RenderCards`)
+   - The parse step stores the response in globals (`%NP_TRACKS`, `%TRACKLIST_URL`, `%SET_APPLE_URL`, `%LIKED`, …) and runs `Tracked.RenderCards`, which builds the whole card list as Scene V2 JSON in `%CARDS_JSON`. The scene's Variable element is live-bound to `%CARDS_JSON`, so every re-render (like, pre-save, paging) swaps in without reopening the scene.
+   - One **Card** per track: artwork (or a ♫ placeholder), title with an `idStatus` badge, artist, and `startTime · durationTime`. `isCurrent` cards are tinted `primaryContainer` and labelled NOW PLAYING (JUST PLAYED / UP NEXT around it). Tapping a card opens its `trackUrl` (task `Open Track URL`).
+   - **Buttons** on the right, at most two:
+     - with a `youtubeLink`: 👍 like toggle (`Tracked.ToggleLike` → `POST /likes`) and ▶ YouTube;
+     - without one: **Pre-save** (bookmark-plus icon, see below) and, when there is an `appleLink`, the Apple Music note. ID rows get the Pre-save button too.
+   - When `setAppleLink` is set, an "Open whole set on Apple Music" card sits on top. A ‹ › pager at the bottom (`Tracked.Page`) loads the whole set once via `POST /tracklist` (`%FULL_TRACKS`) and pages through it 5 at a time.
 
    The response always carries up to three groups (previous, current, next) so the user can disambiguate transitions and peek ahead. `isCurrent` is `true` only on the current group's members. Edge cases the response handles automatically: at the start of the set there's no previous; at the end there's no next; before any cued track the response is just `[firstCuedGroup]` with all `isCurrent: false` ("next up").
 
 7. **Network error** (the Off-error branch from step 4)
    - `Flash`: "Network error".
+
+## Pre-save (task `Tracked.PreSave`)
+
+A track 1001tracklists has identified but that has no YouTube video (only Spotify / Apple / other links, only a 1001tracklists track page, or just "ID") can be **pre-saved**: the Worker queues it, rechecks it twice a day, and pushes to all devices when a YouTube version appears (see the Pre-saves page in the web UI).
+
+- The card's bookmark button runs `Tracked.PreSave` with `%src` (`np` = the now-playing window, `full` = the paged whole set), `%idx` (index into `%NP_TRACKS` / `%FULL_TRACKS`) and `%pkey`.
+- Step 1 (JavaScriptlet) looks the track up and builds the body with `JSON.stringify` into `%presave_body` — `trackId`, `trackUrl`, `tracklistUrl` (from `%TRACKLIST_URL`), `rowIndex`, `cueSeconds` (= `startSeconds`), `artist`, `title`, `artworkUrl`, null fields left out. An ID row with no track id is pre-saved by `tracklistUrl` + `rowIndex` / `cueSeconds`; the Worker re-reads the set page until it is identified.
+- Step 2: **HTTP Request** `POST %TRACKED_URL/presave`, same `Authorization: Bearer %TRACKED_TOKEN` header as the other tasks, body `%presave_body`, "Continue Task After Error" on so a 400 reaches the next step.
+- Step 3 (JavaScriptlet) flashes the Worker's one-line `message` (`Pre-saved: Artist – Title (watching for a YouTube link)`, `Already pre-saved …`, `Already on YouTube: …`) or the error, records the track in `%PRESAVED` and re-renders. A pre-saved track shows a filled, tinted bookmark-check icon.
+- `%PRESAVED` (JSON `{ key: stage }`, key = `id:<trackId>`, else `url:<trackUrl>`, else `row:`/`cue:` + set URL) only covers what was pre-saved from this phone; it is kept across sets and is not refreshed from the server. `%PRESAVE_BUSY` guards against double taps.
+
+The tasks are generated: edit the `*.js` files in `tasker/build/` and run `node tasker/build/build.mjs`, which rewrites `tasker/Tracked.prj.xml` in place (import that project into Tasker).
 
 ## Tips
 

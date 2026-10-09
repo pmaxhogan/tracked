@@ -62,6 +62,7 @@ import { syncOne, type SyncOneResult } from './sync'
 import { queueSearchIndex } from './search/index'
 import { getAppSettings } from './app-settings'
 import { DISCOVERED_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
+import { duePresaves, presaveOnSetParsed, runScheduledPresave } from './presave'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 const HOUR = 3600
@@ -273,6 +274,9 @@ export async function recordSetFetch(
   } catch (e) {
     f.log?.warn('scheduler.record_fetch_failed', { setUrl: f.setUrl, ...errorFields(e) })
   }
+  // Pre-saved ID rows of this set look for their row on the page (lib/presave.ts;
+  // one indexed query when there are none, never throws, skips decoy pages).
+  if (out.parsed && out.parsed.rows.length > 0) await presaveOnSetParsed(env, f.setUrl, out.parsed, f.log)
   return out
 }
 
@@ -544,6 +548,8 @@ export type TickItem =
   | { cls: 'recheck'; kind: 'recheck'; slug: string; url: string }
   | { cls: 'new'; kind: 'discovery'; slug: string }
   | { cls: 'backfill'; kind: 'dj_backfill'; slug: string }
+  /** A pre-saved track's scheduled check (lib/presave.ts), on top of the drawn items. `slug` = its DJ or ''. */
+  | { cls: ScheduledClass; kind: 'presave'; slug: string; url: string; presaveId: number }
 
 /**
  * What is due now, `n` items at most, filled class by class in
@@ -719,23 +725,39 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     await env.CACHE.put(ENSURE_STAMP_KEY, String(created >= INIT_BATCH ? 0 : nowSec), { expirationTtl: 2 * HOUR })
   }
 
+  // Pre-saved tracks due for their check (presave.maxPerTick, oldest due
+  // first): on top of the draw, and run even when the draw is zero or nothing
+  // else is due. They need no YouTube token.
+  const nowMs = opts.now !== undefined ? opts.now * 1000 : Date.now()
+  const presaveItems = await pickPresaveItems(env, nowMs, log)
+
   const { minItems, maxItems } = settings.tick
   const drawn = minItems + Math.floor(random() * (maxItems - minItems + 1))
+  let skipped: TickResult['skipped']
+  let due: Record<ScheduledClass, number> | undefined
+  let items: TickItem[] = []
+  let tokenInfo: Awaited<ReturnType<typeof getAccessToken>> = null
   if (drawn <= 0) {
     log.info('scheduler.zero_draw')
-    return { skipped: 'zero_draw', drawn: 0, items: [] }
+    skipped = 'zero_draw'
+  } else {
+    due = { new: 0, verify: 0, recheck: 0, backfill: 0 } as Record<ScheduledClass, number>
+    items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec, undefined, due)
+    if (items.length === 0) {
+      log.info('scheduler.nothing_due', { drawn })
+      skipped = 'nothing_due'
+    } else {
+      tokenInfo = await getAccessToken(env)
+      if (!tokenInfo) {
+        log.warn('scheduler.youtube_not_connected', { due: items.length })
+        skipped = 'youtube_not_connected'
+        items = []
+      }
+    }
   }
-  const due = { new: 0, verify: 0, recheck: 0, backfill: 0 } as Record<ScheduledClass, number>
-  const items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec, undefined, due)
-  if (items.length === 0) {
-    log.info('scheduler.nothing_due', { drawn })
-    return { skipped: 'nothing_due', drawn, items: [], due }
-  }
-  const tokenInfo = await getAccessToken(env)
-  if (!tokenInfo) {
-    log.warn('scheduler.youtube_not_connected', { due: items.length })
-    return { skipped: 'youtube_not_connected', drawn, items: [], due }
-  }
+  const head = { ...(skipped ? { skipped } : {}), drawn: drawn <= 0 ? 0 : drawn, ...(due ? { due } : {}) }
+  if (presaveItems.length === 0 && skipped) return { ...head, items: [] }
+  items = [...items, ...presaveItems]
 
   log.info('scheduler.tick_start', { drawn, picked: items.map((i) => `${i.kind}:${i.cls}`) })
   const results: TickItemResult[] = []
@@ -743,6 +765,38 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
   /** Item-scoped refusals this tick: the last one's reason and the shortest retry hint. */
   let scoped = null as { count: number; reason: string; retryAfter: number | null } | null
   for (const item of items) {
+    if (item.kind === 'presave') {
+      // Claimed and checked in lib/presave.ts; a refusal stops the tick like any item.
+      let r: TickItemResult
+      let poolCode: PoolFaultCode | null = null
+      let retryAfter: number | null = null
+      try {
+        const o = await runScheduledPresave(env, item.presaveId, log, nowMs)
+        r = { item, outcome: o.outcome, ...(o.stopReason ? { stopReason: o.stopReason } : {}) }
+        poolCode = o.poolCode ?? null
+        retryAfter = o.retryAfterSeconds ?? null
+      } catch (e) {
+        log.error('scheduler.item_threw', { kind: item.kind, presaveId: item.presaveId, ...errorFields(e) })
+        r = { item, outcome: 'threw' }
+      }
+      results.push(r)
+      if (r.outcome === 'stopped' && poolCode && ITEM_SCOPED_POOL_CODES.has(poolCode)) {
+        const hint = retryAfter !== null && retryAfter > 0 ? retryAfter : null
+        scoped = { count: (scoped?.count ?? 0) + 1, reason: r.stopReason ?? poolCode, retryAfter: hint === null ? (scoped?.retryAfter ?? null) : Math.min(hint, scoped?.retryAfter ?? hint) }
+        log.info('scheduler.item_refused', { kind: item.kind, poolCode, retryAfterSeconds: retryAfter, left: items.length - results.length })
+        continue
+      }
+      if (r.outcome === 'stopped') {
+        stoppedBy = r.stopReason
+        if (retryAfter !== null && retryAfter > 0) {
+          const until = nowSec + Math.min(settings.retry.poolBackoffMaxHours * HOUR, Math.ceil(retryAfter))
+          await env.CACHE.put(TICK_BACKOFF_KEY, String(until), { expirationTtl: Math.max(60, until - nowSec + 60) })
+        }
+        log.info('scheduler.tick_stopped', { reason: stoppedBy, retryAfterSeconds: retryAfter, done: results.length, left: items.length - results.length })
+        break
+      }
+      continue
+    }
     const sub = bySlug.get(item.slug)!
     let r: TickItemResult
     let retryAfter: number | null = null
@@ -766,7 +820,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
         let res: SyncOneResult
         if (item.kind === 'discovery') {
           await setDjDue(env, 'next_discovery_at', item.slug, nowSec + settings.retry.djRetryMinutes * 60, nowSec)
-          res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.discovery', priority: 'new', selection: { newUrls: [], recheckUrls: [] }, settings })
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.discovery', priority: 'new', selection: { newUrls: [], recheckUrls: [] }, settings })
           if (res.crawlStopReason === 'fetch_failed' && !res.stoppedBy) {
             // The crawl swallows its fetch errors (a pool refusal included):
             // end the tick rather than ask again, and retry this DJ in an hour.
@@ -777,7 +831,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
         } else if (item.kind === 'recheck') {
           await deferSetSchedule(env, item.url, nowSec + settings.retry.claimRecheckHours * HOUR)
           await claimSetAttempt(env, item.url, nowSec, settings)
-          res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
         } else if (item.kind === 'render_feed') {
           // Claimed in D1 first (the day's share, the hourly limit and the
           // set's cooldown, atomically): an overlapping tick that got there
@@ -792,7 +846,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           // A first fetch, by any account: noteSetFetch records it as pending
           // and the verify class asks a different account >= 2 h later.
           await claimSetAttempt(env, item.url, nowSec, settings)
-          res = await syncOne(env, sub, tokenInfo.accessToken, {
+          res = await syncOne(env, sub, tokenInfo!.accessToken, {
             log,
             trigger: 'cron.render_feed',
             skipDjCrawl: true,
@@ -806,7 +860,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
         } else if (item.kind === 'verify') {
           await deferVerification(env, item.url, nowSec + settings.retry.claimVerifyHours * HOUR)
           await claimSetAttempt(env, item.url, nowSec, settings)
-          res = await syncOne(env, sub, tokenInfo.accessToken, {
+          res = await syncOne(env, sub, tokenInfo!.accessToken, {
             log,
             trigger: 'cron.verify',
             skipDjCrawl: true,
@@ -817,7 +871,7 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
           })
         } else {
           await claimSetAttempt(env, item.url, nowSec, settings)
-          res = await syncOne(env, sub, tokenInfo.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: PRIORITY_OF[item.cls], selection: { newUrls: [item.url], recheckUrls: [] }, settings })
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: PRIORITY_OF[item.cls], selection: { newUrls: [item.url], recheckUrls: [] }, settings })
         }
         r = { item, outcome: res.stoppedBy ? 'stopped' : res.ok ? 'ok' : 'failed', ...(res.stoppedBy ? { stopReason: res.stoppedBy.reason } : {}) }
         retryAfter = res.stoppedBy?.retryAfterSeconds ?? null
@@ -869,5 +923,17 @@ export async function runSchedulerTick(env: Env, opts: { log?: Logger; random?: 
     log.info('scheduler.tick_stopped', { reason: stoppedBy, retryAfterSeconds: until - nowSec, done: results.length, left: 0 })
   }
   log.info('scheduler.tick_done', { drawn, ran: results.length, outcomes: results.map((x) => `${x.item.kind}:${x.outcome}`), stoppedBy: stoppedBy ?? null })
-  return { drawn, items: results, due, ...(stoppedBy ? { stoppedBy } : {}) }
+  return { ...head, items: results, ...(stoppedBy ? { stoppedBy } : {}) }
+}
+
+/** The tick's pre-save items (lib/presave.ts duePresaves: off while presave.enabled is false). Never throws. */
+async function pickPresaveItems(env: Env, nowMs: number, log: Logger): Promise<TickItem[]> {
+  try {
+    const settings = await getAppSettings(env)
+    const rows = await duePresaves(env, nowMs, settings.presave.maxPerTick)
+    return rows.map((p) => ({ cls: settings.presave.priority, kind: 'presave' as const, slug: p.dj_slug ?? '', url: p.set_url ?? p.track_url ?? '', presaveId: p.id }))
+  } catch (e) {
+    log.warn('scheduler.presave_pick_failed', errorFields(e))
+    return []
+  }
 }

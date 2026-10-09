@@ -12,6 +12,9 @@ import { PLAYLISTS_PAGE } from '../ui/pages/playlists'
 import { SETTINGS_PAGE } from '../ui/pages/settings'
 import { TOOLS_PAGE } from '../ui/pages/tools'
 import { HOME_PAGE } from '../ui/pages/home'
+import { PRESAVES_PAGE } from '../ui/pages/presaves'
+import { PRESAVE_PAGE } from '../ui/pages/presave'
+import { TRACK_UPLOADS_PAGE } from '../ui/pages/track-uploads'
 import {
   addSubscription,
   djUrlFor,
@@ -21,6 +24,8 @@ import {
   removeSubscription,
 } from '../lib/subscriptions'
 import { getDjSets } from '../lib/dj-sets'
+import { DJS_TABLE, djCounts, djSetFacts } from '../lib/dj-table'
+import { parseTableQuery, runTableQuery, tableErrorBody, TableQueryError } from '../lib/table-query'
 import { fetchMkvidRenderProgress } from '../lib/mkvid-progress'
 import { extractVideoId, fetchVideoDetails, YouTubeApiError } from '../lib/youtube'
 import {
@@ -57,13 +62,14 @@ import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
 import { getNowPlayingAudit, listNowPlayingAudit } from '../lib/now-playing-audit'
 import { migrationStatus } from '../lib/kv-import'
-import { readinessFor, setSkipIdWait } from '../lib/mkvid-readiness'
-import { countOldStyleVideos, deleteOldVideo, listUndeletedOldVideos, recreateMkvidRequest, recreateOldStyleVideos, resetOldVideoDelete, unpublishMkvidRequest } from '../lib/mkvid-recreate'
-import { banMkvidRequest, countMkvidRequests, getMkvidLastPoll, listMkvidDjs, listMkvidQueuePage, listMkvidSettledPage, MKVID_ACCOUNTS, MKVID_MOVES, MKVID_SOURCES, MKVID_STATUSES, mkvidAccountUsage, moveMkvidRequest, quotaDayEnd, requestSummary, retryMkvidRequest, type MkvidAccount, type MkvidFilter, type MkvidMove, type MkvidSourceKind, type MkvidStatus } from '../lib/mkvid'
+import { setSkipIdWait } from '../lib/mkvid-readiness'
+import { countOldStyleVideos, deleteOldVideo, recreateMkvidRequest, recreateOldStyleVideos, resetOldVideoDelete, unpublishMkvidRequest } from '../lib/mkvid-recreate'
+import { banMkvidRequest, MKVID_MOVES, moveMkvidRequest, retryMkvidRequest, type MkvidMove } from '../lib/mkvid'
 import { requeueBanVictims } from '../lib/sync'
 import { getBanStatus, manualClear, simulateBan } from '../lib/ban-state'
 import { poolSettingsApp } from './pool-api'
 import { appSettingsApp } from './app-settings'
+import { presaveUiApp } from './presave'
 import {
   deletePushSubscription,
   isPushSubscription,
@@ -78,6 +84,8 @@ import { hygieneApp } from './playlist-hygiene'
 import { activityApp } from './activity'
 import { searchApp } from './search'
 import { schedulerUiApp } from './scheduler-ui'
+import { trackUploadsUiApp } from './track-uploads-ui'
+import { mkvidUiApp } from './mkvid-ui'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -114,6 +122,8 @@ subscriptionsApp.route('/', searchApp)
 
 // Scheduler tick history and DJ due times, read-only (routes/scheduler-ui.ts). Behind cfAccess above.
 subscriptionsApp.route('/', schedulerUiApp)
+subscriptionsApp.route('/', trackUploadsUiApp) // /ui/api/track-uploads* (routes/track-uploads-ui.ts), behind cfAccess above
+subscriptionsApp.route('/', mkvidUiApp) // GET /ui/api/mkvid, /mkvid/queue, /mkvid/finished (routes/mkvid-ui.ts), behind cfAccess above
 
 // Home: status tiles, needs attention, recent activity (ui/pages/home.ts).
 subscriptionsApp.get('/', (c) => servePage(c, HOME_PAGE.html))
@@ -123,6 +133,10 @@ subscriptionsApp.get('/settings', (c) => servePage(c, SETTINGS_PAGE.html))
 subscriptionsApp.get('/tools', (c) => servePage(c, TOOLS_PAGE.html))
 // The mkvid queue: status line, caps, filters, tabs and a detail drawer (ui/pages/mkvid.ts).
 subscriptionsApp.get('/mkvid', (c) => servePage(c, MKVID_PAGE_HTML))
+// Pre-saves (list, one track) and mkvid's track uploads (ui/pages/presaves.ts, presave.ts, track-uploads.ts).
+subscriptionsApp.get(PRESAVES_PAGE.path, (c) => servePage(c, PRESAVES_PAGE.html))
+subscriptionsApp.get(PRESAVE_PAGE.path, (c) => servePage(c, PRESAVE_PAGE.html))
+subscriptionsApp.get(TRACK_UPLOADS_PAGE.path, (c) => servePage(c, TRACK_UPLOADS_PAGE.html))
 
 // Standalone "tracklist viewer" page: paste a 1001tracklists URL, get a clean
 // per-song list with a YouTube icon-link and an Apple Music button when 1001tl
@@ -168,7 +182,15 @@ subscriptionsApp.get('/api/dj/:slug', async (c) => {
       log.warn('subs.dj_sets.empty', { slug, stopReason: sets.stopReason })
       return c.json({ error: 'upstream_error', message: `no sets found (crawl: ${sets.stopReason}) — unknown DJ, or 1001tracklists is blocking us; try again shortly` }, 502)
     }
-    return c.json({ ...sets, subscribed: subs.some((s) => s.slug === slug), sourceUrl: djUrlFor(slug) })
+    // What D1 knows about each set (video, track / ID counts from the last page fetch): the profile's chips use it.
+    let facts = new Map<string, unknown>()
+    try {
+      facts = await djSetFacts(c.env, slug)
+    } catch (e) {
+      log.warn('subs.dj_sets.facts_failed', errorFields(e))
+    }
+    const withFacts = sets.sets.map((s) => ({ ...s, facts: facts.get(s.url) ?? null }))
+    return c.json({ ...sets, sets: withFacts, subscribed: subs.some((s) => s.slug === slug), sourceUrl: djUrlFor(slug) })
   } catch (e) {
     if (e instanceof IPBlockedError) {
       log.error('subs.dj_sets.ip_blocked', { slug, clientIp: e.clientIp })
@@ -216,6 +238,7 @@ subscriptionsApp.post('/api/tracklist', async (c) => {
       setSoundcloudLink: full.setSoundcloudLink,
       trackCount: full.tracks.length,
       tracks: full.tracks,
+      rows: full.rows,
       fetchedAt: full.fetchedAt,
       cacheAgeSeconds: full.cacheAgeSeconds,
     })
@@ -309,6 +332,27 @@ subscriptionsApp.get('/api/youtube/video', async (c) => {
     log.error('subs.yt_video.throw', { videoId, ...errorFields(e) })
     return c.json({ error: 'upstream_error', videoId, message: (e as Error).message }, 502)
   }
+})
+
+/**
+ * The DJs and Playlists tables (lib/dj-table.ts): one row per subscription with
+ * its sync summary, server-sorted / filtered / paged (lib/table-query.ts), plus
+ * `counts` for the chips. An empty table imports the pre-D1 KV list once, as
+ * /api/list does.
+ */
+subscriptionsApp.get('/api/djs', async (c) => {
+  let query
+  try {
+    query = parseTableQuery(new URL(c.req.url).searchParams, DJS_TABLE)
+  } catch (e) {
+    if (e instanceof TableQueryError) return c.json(tableErrorBody(e), 400)
+    throw e
+  }
+  let result = await runTableQuery(c.env.DB, DJS_TABLE, query)
+  if (result.total === 0 && !query.q && query.filters.length === 0 && (await listSubscriptions(c.env)).length > 0) {
+    result = await runTableQuery(c.env.DB, DJS_TABLE, query)
+  }
+  return c.json({ ...result, counts: await djCounts(c.env) })
 })
 
 subscriptionsApp.get('/api/list', async (c) => {
@@ -566,6 +610,8 @@ subscriptionsApp.get('/api/state/:slug', async (c) => {
 subscriptionsApp.route('/api/pool', poolSettingsApp)
 // GET/PUT /ui/api/settings (app settings, lib/app-settings.ts), same gate.
 subscriptionsApp.route('/api', appSettingsApp)
+// /ui/api/presaves* (routes/presave.ts, lib/presave.ts), same gate.
+subscriptionsApp.route('/api', presaveUiApp)
 
 // ─── IP-ban state, Web Push, service worker ──────────────────────────────────
 
@@ -701,104 +747,8 @@ subscriptionsApp.get('/api/migration', async (c) => c.json(await migrationStatus
 
 // ─── mkvid uploads ──────────────────────────────────────────────────────────
 
-/** The two lists the panel pages independently; `all` is both (and the only one that carries the header). */
-const MKVID_SECTIONS = ['all', 'queue', 'settled'] as const
-type MkvidSection = (typeof MKVID_SECTIONS)[number]
-
-/**
- * `?status=failed,banned&source=hearthis&account=shared&dj=<slug>&q=palmer` —
- * every part optional. An unknown value is a 400 rather than a silently empty
- * list: a typo in a filter should not read as "nothing queued".
- */
-function mkvidQuery(url: URL): { filter: MkvidFilter; section: MkvidSection; limit: number; queueCursor: string | null; settledCursor: string | null } | { error: string } {
-  const p = url.searchParams
-  const statuses = (p.get('status') || '').split(',').map((x) => x.trim()).filter(Boolean)
-  for (const s of statuses) if (!MKVID_STATUSES.includes(s as MkvidStatus)) return { error: `unknown status: ${s}` }
-  const source = p.get('source') || null
-  if (source && !MKVID_SOURCES.includes(source as MkvidSourceKind)) return { error: `unknown source: ${source}` }
-  const account = p.get('account') || null
-  if (account && !MKVID_ACCOUNTS.includes(account as MkvidAccount)) return { error: `unknown account: ${account}` }
-  const section = (p.get('section') || 'all') as MkvidSection
-  if (!MKVID_SECTIONS.includes(section)) return { error: `unknown section: ${section}` }
-  const n = parseInt(p.get('limit') || '50', 10)
-  return {
-    filter: {
-      statuses: statuses as MkvidStatus[],
-      source: source as MkvidSourceKind | null,
-      account: account as MkvidAccount | null,
-      slug: p.get('dj') || null,
-      // Long enough for a set title, short enough that the LIKE stays cheap.
-      q: (p.get('q') || '').trim().slice(0, 120) || null,
-    },
-    section,
-    limit: Number.isFinite(n) ? n : 50,
-    queueCursor: p.get('queueCursor'),
-    settledCursor: p.get('settledCursor'),
-  }
-}
-
-const EMPTY_PAGE = { records: [], cursor: null, total: 0 }
-
-/**
- * The mkvid queue (lib/mkvid.ts): what has been rendered (or is rendering, or
- * failed), the waiting line in the order it will be served, and the three
- * things that decide whether anything moves — the daily claim cap, how much of
- * it is used, and when mkvid last polled.
- *
- * Both lists are filterable (see `mkvidQuery`) and paged by keyset cursor:
- * each response hands back `queueCursor` / `settledCursor`, which come back as
- * query params for the next page. `section=queue|settled` asks for one list's
- * next page alone — the header and the other list are then left out.
- */
-subscriptionsApp.get('/api/mkvid', async (c) => {
-  const parsed = mkvidQuery(new URL(c.req.url))
-  if ('error' in parsed) return c.json({ error: 'invalid_request', message: parsed.error }, 400)
-  const { filter, section, limit } = parsed
-  const [settled, queue, counts, accounts, lastPoll, djs, oldStyleCount, oldVideos] = await Promise.all([
-    section === 'queue' ? EMPTY_PAGE : listMkvidSettledPage(c.env, { ...filter, limit, cursor: parsed.settledCursor }),
-    section === 'settled' ? EMPTY_PAGE : listMkvidQueuePage(c.env, { ...filter, limit, cursor: parsed.queueCursor }),
-    countMkvidRequests(c.env),
-    mkvidAccountUsage(c.env),
-    getMkvidLastPoll(c.env),
-    listMkvidDjs(c.env),
-    countOldStyleVideos(c.env),
-    listUndeletedOldVideos(c.env),
-  ])
-  // Why each waiting set is (not) next: unverified, waiting for IDs until <t>, backoff, or ready (the panel adds "capped").
-  const readiness = await readinessFor(c.env, [...queue.records, ...settled.records.filter((r) => r.status === 'claimed' || r.status === 'failed')])
-  const withReadiness = (r: Parameters<typeof requestSummary>[0]) => ({ ...requestSummary(r), readiness: readiness.get(r.id) ?? null })
-  return c.json({
-    enabled: !!c.env.MKVID_TOKEN,
-    counts,
-    /** Done videos made with a style other than scene (unknown counts): what "Recreate all old-style videos" would queue. */
-    oldStyleCount,
-    /** Videos a recreation replaced that are not deleted from YouTube yet (pending retry, or refused by mkvid). */
-    oldVideos,
-    /** Per Google project (fill order): today's claims vs cap. The totals below are their sums. */
-    accounts,
-    dailyClaims: accounts.reduce((n, a) => n + a.used, 0),
-    dailyClaimCap: accounts.reduce((n, a) => n + a.cap, 0),
-    /** Unix seconds when the quota day rolls over (midnight Pacific). */
-    quotaResetsAt: quotaDayEnd(),
-    /** mkvid's last `/mkvid/claim` poll; `at` is refreshed at most every 10 min while the outcome is unchanged. */
-    lastPoll,
-    now: Math.floor(Date.now() / 1000),
-    /** Echoed back so the panel can tell which filter a response belongs to. */
-    filter: { status: filter.statuses, source: filter.source, account: filter.account, dj: filter.slug, q: filter.q },
-    section,
-    limit,
-    /** Every DJ the queue has ever held, most requests first — the `dj=` filter's options. */
-    djs,
-    settled: settled.records.map(withReadiness),
-    settledCursor: settled.cursor,
-    /** Rows matching the filter in each list, not just the ones on this page. */
-    settledTotal: settled.total,
-    /** Pending requests in claim order (newest set first), each with its `position` in the whole queue. */
-    queue: queue.records.map(withReadiness),
-    queueCursor: queue.cursor,
-    queueTotal: queue.total,
-  })
-})
+// GET /api/mkvid (the header) and the Queue / Finished table endpoints live in
+// routes/mkvid-ui.ts (mounted below); the actions stay here.
 
 /** Give a failed / superseded / stuck request a fresh start (mkvid picks it up on its next poll). */
 subscriptionsApp.post('/api/mkvid/retry/:id', async (c) => {

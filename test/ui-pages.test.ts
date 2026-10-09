@@ -28,6 +28,9 @@ export const PAGES: Array<[string, string]> = [
   ['/ui/search', 'Search'],
   ['/ui/settings', 'Settings'],
   ['/ui/tools', 'Tools'],
+  ['/ui/presaves', 'Pre-saves'],
+  ['/ui/presave?id=1', 'Pre-saved track'],
+  ['/ui/track-uploads', 'Track uploads'],
 ]
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
@@ -81,7 +84,16 @@ describe('shell()', () => {
   it('the Activity nav item sits in the Pipeline group and lights up on its page', () => {
     const h = shell({ nav: 'activity', title: 'Activity', body: '' })
     expect(h).toMatch(/<a [^>]*href="\/ui\/activity"[^>]*class="on"/)
-    expect(h).toMatch(/href="\/ui\/mkvid"[^>]*>(?:(?!<\/a>)[\s\S])*<\/a><a href="\/ui\/activity"/)
+    // mkvid, then Track uploads, then Activity.
+    expect(h).toMatch(/href="\/ui\/mkvid"[^>]*>(?:(?!<\/a>)[\s\S])*<\/a><a href="\/ui\/track-uploads"[^>]*>(?:(?!<\/a>)[\s\S])*<\/a><a href="\/ui\/activity"/)
+  })
+  it('Pre-saves sits in the Library group after Search, and neither new page is a phone tab', () => {
+    const h = shell({ nav: 'presaves', title: 'Pre-saves', body: '' })
+    expect(h).toMatch(/<a [^>]*href="\/ui\/presaves"[^>]*class="on"/)
+    expect(h).toMatch(/href="\/ui\/search"[^>]*>(?:(?!<\/a>)[\s\S])*<\/a><a href="\/ui\/presaves"/)
+    const tabBar = /<nav class="tk-tabs"[^>]*>([\s\S]*?)<\/nav>/.exec(h)![1]!
+    expect(tabBar).not.toContain('/ui/presaves')
+    expect(tabBar).not.toContain('/ui/track-uploads')
   })
 })
 
@@ -188,68 +200,80 @@ function richStub(fetchImpl: (u: string) => Promise<Response>, pathname: string)
 }
 
 describe('mkvid page script', () => {
-  it('renders the status line and the queue from one GET /ui/api/mkvid, with the server position', async () => {
+  it('renders the status line from GET /ui/api/mkvid and the queue table from /ui/api/mkvid/queue, with the server position', async () => {
     const now = Math.floor(Date.now() / 1000)
-    const fixture = {
+    const header = {
       enabled: true, dailyClaimCap: 30, dailyClaims: 3, now, quotaResetsAt: now + 3600,
       counts: { pending: 1, claimed: 0, done: 0, failed: 0, superseded: 0, banned: 0 },
       accounts: [{ account: 'primary', label: 'primary', cap: 24, used: 3 }],
       lastPoll: { at: now, outcome: 'ok', accounts: ['primary'] },
-      oldStyleCount: 0, oldVideos: [], djs: [{ slug: 'some-dj', label: 'Some DJ', count: 1 }],
-      queue: [{ id: 'r1', slug: 'some-dj', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', setTitle: 'Some Set', setDate: '2026-09-01', source: 'soundcloud', sourceLabel: 'SoundCloud',
-        sourceUrl: 'https://soundcloud.com/x/y', status: 'pending', account: 'primary', attempts: 0, notBefore: null, createdAt: now, updatedAt: now, skipIdWait: false, style: null, replacesVideoId: null,
-        position: 7, readiness: { state: 'waiting_ids', until: now + 86400 * 3, idRows: 2 } }],
-      queueCursor: null, queueTotal: 1, settled: [], settledCursor: null, settledTotal: 0,
+      oldStyleCount: 0, oldVideos: [], djs: [{ slug: 'some-dj', label: 'Some DJ', count: 1 }], rendering: [],
     }
+    const queue = { total: 1, page: 1, size: 25, pageCount: 1, rows: [{ id: 'r1', slug: 'some-dj', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', setTitle: 'Some Set', setDate: '2026-09-01', source: 'soundcloud', sourceLabel: 'SoundCloud',
+      sourceUrl: 'https://soundcloud.com/x/y', status: 'pending', account: 'primary', attempts: 0, notBefore: null, createdAt: now, updatedAt: now, skipIdWait: false, style: null, replacesVideoId: null,
+      position: 7, readiness: { state: 'waiting_ids', until: now + 86400 * 3, idRows: 2 } }] }
     const fetches: string[] = []
-    const { ctx, els } = richStub(async (u: string) => (fetches.push(u), u.startsWith('/ui/api/mkvid') ? Response.json(fixture) : new Response('{}', { status: 404 })), '/ui/mkvid')
+    const { ctx, els } = richStub(async (u: string) => (fetches.push(u), u === '/ui/api/mkvid' ? Response.json(header) : u.startsWith('/ui/api/mkvid/queue?') ? Response.json(queue)
+      : u.startsWith('/ui/api/mkvid/finished?') ? Response.json({ rows: [], total: 0, page: 1, size: 25, pageCount: 1 }) : new Response('{}', { status: 404 })), '/ui/mkvid')
     const r = await app.request('https://tracked.example/ui/mkvid', {}, env())
     for (const s of scriptsOf(await r.text())) vm.runInContext(s, ctx)
     for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
-    expect(fetches.some((u) => u.startsWith('/ui/api/mkvid?'))).toBe(true)
-    expect(fetches.filter((u) => u.startsWith('/ui/api/mkvid')).every((u) => !/account=(?!primary|shared)/.test(u))).toBe(true)
-    const queue = els.get('mk-queue').innerHTML as string
-    expect(queue).toContain('#7')
-    expect(queue).toContain('waiting for IDs until')
+    expect(fetches).toContain('/ui/api/mkvid')
+    expect(fetches.some((u) => u.startsWith('/ui/api/mkvid/queue?'))).toBe(true)
+    const queueHtml = els.get('q-body').innerHTML as string
+    expect(queueHtml).toContain('#7')
+    expect(queueHtml).toContain('waiting for IDs until')
     expect(els.get('mk-state').innerHTML).toContain('Ready — mkvid takes the next set on its next poll')
   })
 })
 
+/** One /ui/api/djs answer (lib/dj-table.ts DjTableRow shape). */
+const djRow = (n: number, extra: Record<string, unknown> = {}) => ({
+  slug: `dj-${n}`, name: `DJ ${n}`, artistName: `DJ ${n}`, sourceUrl: `https://www.1001tracklists.com/dj/dj-${n}/index.html`, addedAt: 1000,
+  sets: 2, processed: 1, pending: 1, abandoned: 0, videos: 1, mkvid: 0, playlistId: `PL${n}`, playlistUrl: `https://www.youtube.com/playlist?list=PL${n}`,
+  lastRunAt: Date.now() - 120_000, lastError: null, hasError: false, lastAdded: null, lastDiscoveredAt: null, ...extra,
+})
+const djsAnswer = (rows: unknown[]) => ({ rows, total: rows.length, page: 1, size: 50, pageCount: 1, sort: [{ col: 'name', dir: 'asc' }], filters: [], q: '', counts: { total: rows.length, errors: 1, pending: rows.length, neverSynced: 0, noPlaylist: 0, mkvid: 0 } })
+
 describe('DJs page script', () => {
-  it('renders one row per subscription from api/list and api/state, with profile links and the resync action', async () => {
+  it('renders the table from one GET /ui/api/djs (no per-DJ state calls), with profile links, counts and the row actions', async () => {
     const fetches: string[] = []
-    const state = (n: number) => ({ slug: `dj-${n}`, state: { playlistId: `PL${n}`, artistName: `DJ ${n}`, processedTracklistUrls: ['https://x/a'], discoveredTracklistUrls: ['https://x/a', 'https://x/b'], tracklistVideos: { 'https://x/a': { videoId: 'abcdefghijk', checkedAt: 1 } }, lastRunAt: Math.floor(Date.now() / 1000) - 120, lastError: n === 2 ? 'boom' : undefined } })
     const { ctx, els } = richStub(async (u: string) => {
       fetches.push(u)
-      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://www.1001tracklists.com/dj/dj-1/index.html', addedAt: 1 }, { slug: 'dj-2', sourceUrl: 'https://www.1001tracklists.com/dj/dj-2/index.html', addedAt: 2 }] })
-      const m = /^\/ui\/api\/state\/dj-(\d)$/.exec(u)
-      return m ? Response.json(state(Number(m[1]))) : new Response('{}', { status: 404 })
+      if (u.startsWith('/ui/api/djs?')) return Response.json(djsAnswer([djRow(1), djRow(2, { hasError: true, lastError: 'boom' })]))
+      return new Response('{}', { status: 404 })
     }, '/ui/djs')
     const r = await app.request('https://tracked.example/ui/djs', {}, env())
     const html = await r.text()
     expect(html).toContain('id="fix-titles"')
+    expect(html).toContain('<div id="djs"></div>')
     for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
     for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
-    expect(fetches).toContain('/ui/api/list')
-    expect(fetches).toContain('/ui/api/state/dj-1')
-    expect(fetches).toContain('/ui/api/state/dj-2')
-    const body = els.get('rows').innerHTML as string
+    expect(fetches.filter((u) => u.startsWith('/ui/api/djs?'))).toEqual(['/ui/api/djs?page=1&size=50&sort=name'])
+    expect(fetches.some((u) => u.startsWith('/ui/api/state/') || u === '/ui/api/list')).toBe(false)
+    const body = els.get('djs-body').innerHTML as string
     expect(body).toContain('/ui/dj/dj-1')
     expect(body).toContain('/ui/dj/dj-2')
-    expect(body).toMatch(/Invalidate (&|&amp;) resync/)
+    expect(body).toContain('aria-label="Invalidate and resync dj-1"')
+    expect(body).toContain('data-act="resync"')
+    expect(body).toContain('data-act="sync"')
+    expect(body).toContain('data-act="remove"')
     expect(body).toContain('1 of 2')
     expect(body).toContain('1 pending')
     expect(body).toContain('https://www.youtube.com/playlist?list=PL1')
     expect(body).toContain('badge bad')
-    expect(els.get('empty').hidden).toBe(true)
+    expect(els.get('djs-chips').innerHTML).toContain('Errors')
+    expect(els.get('sync-all').hidden).toBe(false)
   })
 })
 
 describe('DJs page ?focus=filter and bulk actions', () => {
-  it('focuses the filter only after it is shown, and locks row buttons while Sync all runs', async () => {
+  it('focuses the search once there are DJs, and locks row buttons while Sync all runs over every slug', async () => {
+    const fetches: string[] = []
     const { ctx, els } = richStub(async (u: string) => {
-      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }] })
-      if (u.startsWith('/ui/api/state/')) return Response.json({ state: null })
+      fetches.push(u)
+      if (u.startsWith('/ui/api/djs?')) return Response.json(djsAnswer([djRow(1)]))
+      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }, { slug: 'dj-2', sourceUrl: 'https://x', addedAt: 2 }] })
       if (u.startsWith('/ui/api/sync/')) { await new Promise((res) => setTimeout(res, 20)); return Response.json({ stats: {} }) }
       return new Response('{}', { status: 404 })
     }, '/ui/djs')
@@ -258,32 +282,35 @@ describe('DJs page ?focus=filter and bulk actions', () => {
     const mk = (): any => ({ innerHTML: '', textContent: '', className: '', children: [] as any[], appendChild(c: any) { this.children.push(c) }, setAttribute() {} })
     doc.createElement = mk
     doc.getElementById('tk-toasts').appendChild = () => {}
-    const seen: boolean[] = []
-    doc.getElementById('f-text').focus = () => seen.push(doc.getElementById('filters').hidden)
+    let focusedQ = 0
+    doc.getElementById('djs-q').focus = () => { focusedQ++ }
     const handlers: Record<string, () => void> = {}
     doc.getElementById('sync-all').addEventListener = (_t: string, fn: () => void) => { handlers.syncAll = fn }
     const html = await (await app.request('https://tracked.example/ui/djs', {}, env())).text()
     for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
     for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
-    expect(seen).toEqual([false])
+    expect(focusedQ).toBe(1)
     handlers.syncAll!()
     await new Promise((res) => setTimeout(res, 5))
     expect(els.get('resync-all').disabled).toBe(true)
-    expect(els.get('rows').innerHTML).toContain('disabled')
-    await new Promise((res) => setTimeout(res, 60))
+    expect(els.get('djs-body').innerHTML).toContain('disabled')
+    await new Promise((res) => setTimeout(res, 120))
+    expect(fetches).toContain('/ui/api/list')
+    expect(fetches.filter((u) => u.startsWith('/ui/api/sync/'))).toEqual(['/ui/api/sync/dj-1', '/ui/api/sync/dj-2'])
     expect(els.get('resync-all').disabled).toBe(false)
-    expect(els.get('rows').innerHTML).not.toContain('disabled')
+    expect(els.get('djs-body').innerHTML).not.toContain('disabled')
   })
 })
 
 describe('Playlists page script', () => {
-  it('fills the connection card, the combined card with its meter, the DJ playlists and the hygiene strip', async () => {
+  it('fills the connection card, the combined card with its meter, the DJ playlist table and the hygiene strip', async () => {
+    const fetches: string[] = []
     const { ctx, els } = richStub(async (u: string) => {
+      fetches.push(u)
       if (u === '/ui/api/youtube/status') return Response.json({ connected: true, channelTitle: 'My channel', scope: 'youtube' })
       if (u === '/ui/api/combined') return Response.json({ connected: true, title: 'All DJs', playlistId: 'PLc', playlistUrl: 'https://www.youtube.com/playlist?list=PLc', videoCount: 12, missingTotal: 3, sources: [{}], dailyInsertCap: 100, dailyInsertsUsed: 25 })
       if (u === '/ui/api/removals?limit=1') return Response.json({ settings: { dryRun: true, dailyRemovals: 20 }, deletesUsedToday: 2, holds: [{}] })
-      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }] })
-      if (u === '/ui/api/state/dj-1') return Response.json({ state: { playlistId: 'PL1', artistName: 'DJ 1', processedTracklistUrls: [], tracklistVideos: { a: { videoId: 'v', checkedAt: 1, source: 'mkvid' } } } })
+      if (u.startsWith('/ui/api/djs?')) return Response.json(djsAnswer([djRow(1, { mkvid: 1, lastAdded: 3 }), djRow(2, { playlistId: null, playlistUrl: null })]))
       return new Response('{}', { status: 404 })
     }, '/ui/playlists')
     const html = await (await app.request('https://tracked.example/ui/playlists', {}, env())).text()
@@ -295,10 +322,156 @@ describe('Playlists page script', () => {
     expect(els.get('cmb-body').innerHTML).toContain('3 still to add')
     expect(els.get('cmb-body').innerHTML).toContain('75/100 inserts left today')
     expect(els.get('cmb-fill').style.width).toBe('25%')
-    expect(els.get('rows').innerHTML).toContain('https://www.youtube.com/playlist?list=PL1')
-    expect(els.get('rows').innerHTML).toContain('DJ 1 (1001tklists)')
+    expect(fetches.some((u) => u.startsWith('/ui/api/state/'))).toBe(false)
+    const rows = els.get('pl-body').innerHTML as string
+    expect(rows).toContain('https://www.youtube.com/playlist?list=PL1')
+    expect(rows).toContain('DJ 1 (1001tklists)')
+    expect(rows).toContain('DJ 2 · not created yet')
+    expect(rows).toContain('+3')
     expect(els.get('hygiene').innerHTML).toContain('DRY RUN')
     expect(els.get('hygiene').innerHTML).toContain('1 held')
+  })
+})
+
+/** Gives the stub's elements appendChild (the Set and DJ pages build their link bars with DOM calls). */
+function withAppend(ctx: any) {
+  const doc = ctx.document
+  const add = (e: any) => { if (e && !e.appendChild) { e.children = []; e.appendChild = function (c: any) { this.children.push(c); return c } } return e }
+  const get = doc.getElementById
+  doc.getElementById = (id: string) => add(get(id))
+  const mk = doc.createElement
+  doc.createElement = () => add(mk())
+}
+/** A click on a button with data-act inside table row i (what TKTable's delegated handler reads). */
+const actClick = (act: string, i: number) => {
+  const tr = { getAttribute: (k: string) => (k === 'data-tkt-row' ? String(i) : null), closest: () => null }
+  const btn: any = { getAttribute: (k: string) => (k === 'data-act' ? act : null), closest: (sel: string) => (sel === '[data-act]' ? btn : sel === 'tr[data-tkt-row]' ? tr : null) }
+  return { target: btn }
+}
+const rowClick = (i: number) => {
+  const tr = { getAttribute: (k: string) => (k === 'data-tkt-row' ? String(i) : null) }
+  return { target: { getAttribute: () => null, closest: (sel: string) => (sel === 'tr[data-tkt-row]' ? tr : null) } }
+}
+const SET_URL = 'https://www.1001tracklists.com/tracklist/x/some-set.html'
+/** A /ui/api/tracklist answer: a named row, a "w/" row on it, an anonymous ID row and a partial ID. */
+const tracklistAnswer = () => ({
+  tracklistUrl: SET_URL, trackCount: 3, cacheAgeSeconds: 60,
+  tracks: [
+    { index: 0, rowIndex: 0, artist: 'Alpha', title: 'First', startTime: '00:00', startSeconds: 0, trackId: '111', trackUrl: 'https://www.1001tracklists.com/track/a/first/index.html', artworkUrl: 'https://img.example/a.jpg', appleLink: null, youtubeLink: 'https://www.youtube.com/watch?v=aaaaaaaaaaa', soundcloudLink: null, isUnidentified: false, idStatus: null, isMashupLinked: false },
+    { index: 1, rowIndex: 1, artist: 'Bravo', title: 'Second', startTime: '00:00', startSeconds: 0, trackId: '222', trackUrl: 'https://www.1001tracklists.com/track/b/second/index.html', artworkUrl: null, appleLink: null, youtubeLink: null, soundcloudLink: null, isUnidentified: false, idStatus: null, isMashupLinked: true },
+    { index: 2, rowIndex: 3, artist: 'Delta', title: 'Fourth (ID Remix)', startTime: '06:00', startSeconds: 360, trackId: '444', trackUrl: null, artworkUrl: null, appleLink: null, youtubeLink: null, soundcloudLink: null, isUnidentified: false, idStatus: 'ID Remix', isMashupLinked: false },
+  ],
+  rows: [
+    { rowIndex: 0, cueSeconds: 0, startTime: '00:00', artist: 'Alpha', title: 'First', trackId: '111', trackUrl: 'https://www.1001tracklists.com/track/a/first/index.html', artworkUrl: 'https://img.example/a.jpg', isUnidentified: false, idStatus: null, isMashupLinked: false, anonymous: false },
+    { rowIndex: 1, cueSeconds: 0, startTime: '00:00', artist: 'Bravo', title: 'Second', trackId: '222', trackUrl: 'https://www.1001tracklists.com/track/b/second/index.html', artworkUrl: null, isUnidentified: false, idStatus: null, isMashupLinked: true, anonymous: false },
+    { rowIndex: 2, cueSeconds: 180, startTime: '03:00', artist: 'ID', title: 'ID', trackId: null, trackUrl: null, artworkUrl: null, isUnidentified: true, idStatus: null, isMashupLinked: false, anonymous: true },
+    { rowIndex: 3, cueSeconds: 360, startTime: '06:00', artist: 'Delta', title: 'Fourth (ID Remix)', trackId: '444', trackUrl: null, artworkUrl: null, isUnidentified: false, idStatus: 'ID Remix', isMashupLinked: false, anonymous: false },
+  ],
+})
+
+describe('Set page track table', () => {
+  async function runTable() {
+    const calls: Array<{ u: string; body: any }> = []
+    const { ctx, els } = richStub(async (u: string, init?: RequestInit) => {
+      calls.push({ u, body: init?.body ? JSON.parse(String(init.body)) : null })
+      if (u === '/ui/api/tracklist') return Response.json(tracklistAnswer())
+      if (u === '/ui/api/presaves/lookup') return Response.json({ byTrackId: { 444: { id: 9, stage: 'links' } }, byRow: {} })
+      if (u === '/ui/api/presaves') return Response.json({ ok: true, created: true, presave: { id: 12, stage: 'identify' }, message: 'Pre-saved: ID row (watching)' })
+      if (u.startsWith('/ui/api/set?url=')) return Response.json({ error: 'x' }, { status: 400 })
+      return new Response('{}', { status: 404 })
+    }, '/ui/set')
+    withAppend(ctx)
+    ;(ctx as any).location.search = '?url=' + encodeURIComponent(SET_URL)
+    const doc = (ctx as any).document
+    doc.getElementById('tk-toasts').appendChild = () => {}
+    const handlers: Record<string, (e: unknown) => void> = {}
+    doc.getElementById('tracks').addEventListener = (t: string, fn: (e: unknown) => void) => { handlers[t] = fn }
+    const html = await (await app.request('https://tracked.example/ui/set', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0)) }
+    await tick()
+    return { calls, els, handlers, tick }
+  }
+  it('lists every page row (anonymous ID rows too) with cue, status, links and Pre-save, and marks saved rows', async () => {
+    const { calls, els } = await runTable()
+    const body = els.get('trk-body').innerHTML as string
+    expect(body.split('<tr ').length - 1).toBe(4)
+    expect(body).toContain('class="tkt-child"') // the w/ row hangs under its base
+    expect(body).toContain('>w/<')
+    expect(body).toContain('ID Remix')
+    expect(body).toContain('>ID<')
+    expect(body).toContain('03:00')
+    expect(body).toContain('https://www.youtube.com/watch?v=aaaaaaaaaaa')
+    expect(body).toContain('href="https://www.1001tracklists.com/track/b/second/index.html"')
+    expect(body).toContain('data-act="links"')
+    // Rows without a YouTube link get Pre-save; the row already saved (track 444) links to its pre-save.
+    expect(body.split('data-act="presave"').length - 1).toBe(2)
+    expect(body).toContain('href="/ui/presave?id=9"')
+    expect(body).toContain('Pre-saved ✓')
+    const lookup = calls.find((c) => c.u === '/ui/api/presaves/lookup')!
+    expect(lookup.body).toEqual({ trackIds: ['111', '222', '444'], setUrl: SET_URL })
+    expect(els.get('trk-chips').innerHTML).toContain('No YouTube')
+  })
+  it('Pre-save on an anonymous row posts the set and row, omits the ID placeholders, and turns into a link', async () => {
+    const { calls, els, handlers, tick } = await runTable()
+    handlers.click!(actClick('presave', 2))
+    await tick()
+    const post = calls.find((c) => c.u === '/ui/api/presaves')!
+    expect(post.body).toEqual({ tracklistUrl: SET_URL, rowIndex: 2, cueSeconds: 180 })
+    const body = els.get('trk-body').innerHTML as string
+    expect(body).toContain('href="/ui/presave?id=12"')
+    expect(body.split('data-act="presave"').length - 1).toBe(1)
+  })
+  it('a named row posts its track id, URL and names', async () => {
+    const { calls, handlers, tick } = await runTable()
+    handlers.click!(actClick('presave', 1))
+    await tick()
+    expect(calls.find((c) => c.u === '/ui/api/presaves')!.body).toEqual({ tracklistUrl: SET_URL, rowIndex: 1, trackId: '222', trackUrl: 'https://www.1001tracklists.com/track/b/second/index.html', cueSeconds: 0, artist: 'Bravo', title: 'Second' })
+  })
+})
+
+describe('DJ profile set table', () => {
+  it('lists the sets with what D1 knows, chips with counts, and expands a row into its track table', async () => {
+    const calls: Array<{ u: string; body: any }> = []
+    const sets = [
+      { url: 'https://www.1001tracklists.com/tracklist/a1/one-2026-01-01.html', tlSlug: 'a1', title: 'One', date: '2026-01-01', facts: { tracked: true, processed: true, abandoned: false, video: 'page', videoId: 'v1', trackCount: 20, idedCount: 18, factsAt: 1 } },
+      { url: 'https://www.1001tracklists.com/tracklist/a2/two-2026-02-01.html', tlSlug: 'a2', title: 'Two', date: '2026-02-01', facts: { tracked: true, processed: true, abandoned: false, video: 'none', videoId: null, trackCount: 10, idedCount: 10, factsAt: 1 } },
+      { url: SET_URL, tlSlug: 'x', title: 'Three', date: '2026-03-01', facts: null },
+    ]
+    const { ctx, els } = richStub(async (u: string, init?: RequestInit) => {
+      calls.push({ u, body: init?.body ? JSON.parse(String(init.body)) : null })
+      if (u === '/ui/api/dj/dj-1') return Response.json({ slug: 'dj-1', artistName: 'DJ One', sets, source: 'crawl', crawledAt: 1, subscribed: true, listingComplete: true })
+      if (u === '/ui/api/state/dj-1') return Response.json({ state: null })
+      if (u === '/ui/api/tracklist') return Response.json(tracklistAnswer())
+      if (u === '/ui/api/presaves/lookup') return Response.json({ byTrackId: {}, byRow: {} })
+      return new Response('{}', { status: 404 })
+    }, '/ui/dj/dj-1')
+    withAppend(ctx)
+    const doc = (ctx as any).document
+    const handlers: Record<string, (e: unknown) => void> = {}
+    doc.getElementById('sets').addEventListener = (t: string, fn: (e: unknown) => void) => { handlers[t] = fn }
+    const html = await (await app.request('https://tracked.example/ui/dj/dj-1', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0)) }
+    await tick()
+    const body = els.get('st-body').innerHTML as string
+    // Newest first; facts drive the video and ID columns.
+    expect(body.indexOf('Three')).toBeLessThan(body.indexOf('Two'))
+    expect(body).toContain('18/20')
+    expect(body).toContain('>partial<')
+    expect(body).toContain('>no video<')
+    expect(body).toContain('data-act="toggle"')
+    const chips = els.get('st-chips').innerHTML as string
+    expect(chips).toMatch(/With video<span class="tkt-count">1</)
+    expect(chips).toMatch(/Not read yet<span class="tkt-count">1</)
+    handlers.click!(rowClick(0))
+    await tick()
+    expect(calls.find((c) => c.u === '/ui/api/tracklist')!.body).toEqual({ url: SET_URL })
+    // The opened set now knows its list: 3 of 4 rows identified, partial.
+    expect(els.get('st-body').innerHTML).toContain('3/4')
+    expect(els.get('st-body').innerHTML).toContain('Hide')
+    expect(els.get('dt1-body').innerHTML).toContain('data-act="presave"')
+    expect(calls.some((c) => c.u === '/ui/api/presaves/lookup')).toBe(true)
   })
 })
 
@@ -310,7 +483,7 @@ describe('Home page', () => {
     expect(html).not.toMatch(/quiet/i)
     expect(html).toContain('href="/ui/activity"')
     expect(html).toContain('href="/ui/activity?problems=1"')
-    for (const id of ['h-sync-all', 'h-backfill', 'h-compare', 'attn', 'act-list', 'act-empty']) expect(html).toContain(`id="${id}"`)
+    for (const id of ['h-sync-all', 'h-backfill', 'h-compare', 'attn', 'act-table']) expect(html).toContain(`id="${id}"`)
   })
   it('loads every source in parallel and lists what needs attention, each row linking to its fix', async () => {
     const now = Math.floor(Date.now() / 1000)
@@ -325,24 +498,27 @@ describe('Home page', () => {
       if (u === '/ui/api/state/dj-1') return Response.json({ state: { lastRunAt: now - 60, lastError: 'boom <b>' } })
       if (u === '/ui/api/state/dj-2') return Response.json({ state: { lastRunAt: now - 60 } })
       if (u.startsWith('/ui/api/removals')) return Response.json({ holds: [{ kind: 'artist', slug: 'dj-1', playlistId: 'PL1', missing: 5, expected: 40, at: now - 3600 }] })
-      if (u.startsWith('/ui/api/activity?')) return Response.json({ rows: [
-        { ts: Date.now() - 1000, kind: 'request', status: 'no_video', problem: true, title: 'A <set>', detail: 'no match', dj: null, setUrl: null, videoId: null, ref: { kind: 'audit', key: '1' } },
-        { ts: Date.now() - 2000, kind: 'playlist', status: 'added', problem: false, title: 'some set', detail: 'added to PL1', dj: 'dj-1', setUrl: null, videoId: 'abcdefghijk', ref: { kind: 'addition', key: '2' } },
-        { ts: Date.now() - 3000, kind: 'pool', status: 'account.flagged', problem: true, title: 'acct-2 flagged <b>', detail: '', dj: null, setUrl: null, videoId: null, ref: { kind: 'pool', key: '7' } },
-      ], cursor: 'c' })
+      if (u.startsWith('/ui/api/activity?')) return Response.json({ total: 3, page: 1, size: 12, pageCount: 1, rows: [
+        { id: 'audit:1', ts: Date.now() - 1000, kind: 'request', status: 'no_video', problem: true, title: 'A <set>', detail: 'no match', dj: null, setUrl: null, videoId: null, ref: { kind: 'audit', key: '1' } },
+        { id: 'addition:2', ts: Date.now() - 2000, kind: 'playlist', status: 'added', problem: false, title: 'some set', detail: 'added to PL1', dj: 'dj-1', setUrl: null, videoId: 'abcdefghijk', ref: { kind: 'addition', key: '2' } },
+        { id: 'pool:7', ts: Date.now() - 3000, kind: 'pool', status: 'account.flagged', problem: true, title: 'acct-2 flagged <b>', detail: '', dj: null, setUrl: null, videoId: null, ref: { kind: 'pool', key: '7' } },
+      ] })
       if (u === '/ui/api/audit-detail?key=1') return Response.json({ record: { t: 'now', reqId: 'r1', status: 'ok', input: { videoTitle: 'A <set>' }, youtube: { videoId: 'abcdefghijk' }, search: { attempts: [] }, meta: {} } })
       if (u.startsWith('/ui/api/playlist-addition-detail')) return Response.json({ error: 'not_found' }, { status: 404 })
       return new Response('{}', { status: 404 })
     }, '/ui')
     ;(ctx as any).URL = URL // TK.fmt.setLabel parses the set URL
     const clicks: Record<string, (ev: unknown) => void> = {}
-    for (const id of ['act-list']) (ctx as any).document.getElementById(id).addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks[id] = fn }
+    for (const id of ['act-table']) (ctx as any).document.getElementById(id).addEventListener = (t: string, fn: (ev: unknown) => void) => { if (t === 'click') clicks[id] = fn }
     const html = await (await app.request('https://tracked.example/ui', {}, env())).text()
     for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
     for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0))
     for (const u of ['/ui/api/ban/status', '/ui/api/pool/status', '/ui/api/pool/challenges', '/ui/api/youtube/status', '/ui/api/combined', '/ui/api/list', '/ui/api/state/dj-1']) expect(fetches).toContain(u)
     expect(fetches).toContain('/ui/api/mkvid?limit=1')
-    expect(fetches).toContain('/ui/api/activity?limit=12')
+    // The compact activity table: the newest twelve rows of the last 7 days, one request.
+    const act0 = fetches.filter((u) => u.startsWith('/ui/api/activity?')).map(decodeURIComponent)
+    expect(act0).toHaveLength(1)
+    expect(act0[0]).toContain('page=1&size=12&sort=-ts&f.ts=gte:')
     expect(fetches.some((u) => u.startsWith('/ui/api/audit?') || u.startsWith('/ui/api/playlist-additions?'))).toBe(false)
     const attn = els.get('attn').innerHTML as string
     expect(attn).toContain('href="/ui/captcha/ch-1"')
@@ -361,14 +537,15 @@ describe('Home page', () => {
     expect(els.get('t-chal').innerHTML).toContain('1')
     expect(els.get('t-yt').innerHTML).toContain('25 / 100')
     expect(els.get('t-mk').innerHTML).toContain('primary 3 / 24')
-    const act = els.get('act-list').innerHTML as string
+    const act = els.get('act-body').innerHTML as string
     expect(act).toContain('A &lt;set&gt;')
     expect(act).not.toContain('<set>')
-    expect(act).toMatch(/class="a-row err" data-i="0"/)
-    expect(act).not.toMatch(/class="a-row err" data-i="1"/)
+    expect(act).toMatch(/<tr data-tkt-row="0"[^>]*data-problem="1"/)
+    expect(act).not.toMatch(/<tr data-tkt-row="1"[^>]*data-problem="1"/)
     expect(act).toContain('acct-2 flagged &lt;b&gt;')
+    expect(els.get('act-pager')).toBeUndefined() // compact: no pager
     const clickRow = async (i: string) => {
-      clicks['act-list']!({ target: { closest: () => ({ dataset: { i } }) } })
+      clicks['act-table']!(tableClick({ row: Number(i) }))
       for (let n = 0; n < 10; n++) await new Promise((res) => setTimeout(res, 0))
     }
     await clickRow('0')
@@ -381,14 +558,29 @@ describe('Home page', () => {
   })
 })
 
+/** A click target inside a TKTable: closest() answers the selectors the table asks for (data-table.ts onClick). */
+function tableClick(opts: { row?: number; tkt?: Record<string, string> }): any {
+  const attrs = opts.tkt ?? {}
+  const t: any = {
+    getAttribute: (k: string) => (k in attrs ? attrs[k] : null),
+    closest(sel: string) {
+      if (sel === '[data-tkt]') return opts.tkt ? t : null
+      if (sel === 'tr[data-tkt-row]') return opts.row == null ? null : { getAttribute: () => String(opts.row) }
+      return null
+    },
+  }
+  return { target: t }
+}
+
 describe('Activity page', () => {
   const rows = [
-    { ts: Date.now() - 60_000, kind: 'request', status: 'no_video', problem: true, title: 'Bad <img src=x onerror=1>', detail: 'no match', dj: null, setUrl: null, videoId: null, ref: { kind: 'audit', key: '11' } },
-    { ts: Date.now() - 120_000, kind: 'playlist', status: 'added', problem: false, title: 'Some set', detail: 'added to PL1', dj: 'dj-one', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', videoId: 'abcdefghijk', ref: { kind: 'addition', key: '12' } },
+    { id: 'audit:000000000011', ts: Date.now() - 60_000, kind: 'request', status: 'no_video', problem: true, title: 'Bad <img src=x onerror=1>', detail: 'no match', dj: null, setUrl: null, videoId: null, ref: { kind: 'audit', key: '11' } },
+    { id: 'addition:000000000012', ts: Date.now() - 120_000, kind: 'playlist', status: 'added', problem: false, title: 'Some set', detail: 'added to PL1', dj: 'dj-one', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', videoId: 'abcdefghijk', ref: { kind: 'addition', key: '12' } },
   ]
-  const poolRow = { ts: Date.now() - 30_000, kind: 'pool', status: 'account.flagged', problem: true, title: 'acct-3 flagged <b>', detail: 'too many', dj: null, setUrl: null, videoId: null, ref: { kind: 'pool', key: '7' } }
+  const poolRow = { id: 'pool:000000000007', ts: Date.now() - 30_000, kind: 'pool', status: 'account.flagged', problem: true, title: 'acct-3 flagged <b>', detail: 'too many', dj: null, setUrl: null, videoId: null, ref: { kind: 'pool', key: '7' } }
+  const answer = (list: unknown[]) => Response.json({ rows: list, total: list.length, page: 1, size: 50, pageCount: 1, sort: [{ col: 'ts', dir: 'desc' }], filters: [], q: '' })
   type Answer = (u: string) => Promise<Response> | Response
-  async function run(search: string, activity: Answer = () => Response.json({ rows, cursor: 'x' })) {
+  async function run(search: string, activity: Answer = () => answer(rows)) {
     const fetches: string[] = []
     const { ctx, els } = richStub(async (u: string) => {
       fetches.push(u)
@@ -398,41 +590,51 @@ describe('Activity page', () => {
       if (u === '/ui/api/playlist-addition-detail?key=12') return Response.json({ record: { t: 'now', status: 'added', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', slug: 'dj-one', videoId: 'abcdefghijk', playlistId: 'PL1', playlistTitle: 'PL <one>', combinedStatus: 'added', meta: { ms: 5 } } })
       return new Response('{}', { status: 404 })
     }, '/ui/activity')
-    ;(ctx as any).URL = URL
-    ;(ctx as any).location.search = search
-    const clicks: Record<string, (ev: unknown) => void> = {}
-    for (const [id, name] of [['a-list', 'list'], ['a-filters', 'filters'], ['a-more', 'more']] as const) (ctx as any).document.getElementById(id).addEventListener = (_t: string, fn: (ev: unknown) => void) => { clicks[name] = fn }
+    const c = ctx as any
+    c.URL = URL
+    c.location.search = search
+    // The table keeps its state in the query string: replaceState really changes it here.
+    c.history = { state: null, replaceState(_s: unknown, _t: string, u: string) { const i = u.indexOf('?'); c.location.search = i < 0 ? '' : u.slice(i) } }
+    const handlers: Record<string, (ev: unknown) => void> = {}
+    for (const [id, type] of [['a-table', 'click'], ['a-dj', 'change']] as const) c.document.getElementById(id).addEventListener = (t: string, fn: (ev: unknown) => void) => { if (t === type) handlers[id] = fn }
     const html = await (await app.request('https://tracked.example/ui/activity', {}, env())).text()
     for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
     for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
-    return { fetches, els, clicks, html }
+    const tableFetches = () => fetches.filter((u) => u.startsWith('/ui/api/activity?')).map(decodeURIComponent)
+    return { fetches, tableFetches, els, handlers, html, ctx: c }
   }
   const tick = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise((res) => setTimeout(res, 0)) }
-  it('renders the rows from one GET /ui/api/activity, escaped, with DJ and set links and Load older', async () => {
-    const { fetches, els, clicks, html } = await run('')
-    expect(html).toContain('id="a-filters"')
-    expect(html).toContain('data-kind="request"')
+  it('renders one page from the table endpoint, escaped, with DJ and set links, a pager, and row drawers', async () => {
+    const { fetches, tableFetches, els, handlers, html } = await run('')
+    expect(html).toContain('id="a-table"')
+    expect(html).toContain('id="a-dj"')
     // The page's own first fetch (BAN_JS reads the ban status on every page).
     const first = fetches.find((u) => !u.startsWith('/ui/api/ban/')) ?? ''
     expect(first.startsWith('/ui/api/activity?')).toBe(true)
-    expect(first).toContain('&since=')
-    expect(first).toContain('limit=50')
-    expect(first).not.toContain('kind=')
+    const u = tableFetches()[0]!
+    expect(u).toContain('page=1&size=50&sort=-ts')
+    // The 7d range chip is on by default; no kind filter.
+    const since = Number(/f\.ts=gte:(\d+)/.exec(u)![1])
+    expect(Math.abs(since - (Date.now() - 7 * 86_400_000))).toBeLessThan(600_000 + 1000)
+    expect(u).not.toContain('f.kind')
     expect(fetches).toContain('/ui/api/list')
-    const list = els.get('a-list').innerHTML as string
-    expect(list.split('class="a-row err"').length - 1).toBe(1)
-    expect(list).toContain('/ui/dj/dj-one')
-    expect(list).toContain('/ui/set?url=')
-    expect(list).toContain('&lt;img')
-    expect(list).not.toContain('<img')
-    expect(els.get('a-more').hidden).toBe(false)
+    const body = els.get('a-body').innerHTML as string
+    expect(body.split('data-problem="1"').length - 1).toBe(1)
+    expect(body).toContain('/ui/dj/dj-one')
+    expect(body).toContain('/ui/set?url=')
+    expect(body).toContain('&lt;img')
+    expect(body).not.toContain('<img')
+    expect(body).toContain('>Requests<')
+    expect(els.get('a-pager').innerHTML).toContain('1–2 of 2')
+    expect(els.get('a-chips').innerHTML).toContain('data-chip="problems"')
+    expect(els.get('a-chips').innerHTML).toMatch(/class="chip on" data-tkt="chip" data-chip="7d"/)
     expect(els.get('a-dj').innerHTML).toContain('value="dj-one"')
-    clicks.list!({ target: { closest: () => ({ dataset: { i: '0' } }) } })
-    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    handlers['a-table']!(tableClick({ row: 0 }))
+    await tick()
     expect(fetches).toContain('/ui/api/audit-detail?key=11')
     expect(els.get('tk-drawer-body').innerHTML).toContain('YouTube match')
-    clicks.list!({ target: { closest: () => ({ dataset: { i: '1' } }) } })
-    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
+    handlers['a-table']!(tableClick({ row: 1 }))
+    await tick()
     expect(fetches).toContain('/ui/api/playlist-addition-detail?key=12')
     const pl = els.get('tk-drawer-body').innerHTML as string
     expect(pl).toContain('Playlist') // plDetailHtml's group heading
@@ -440,49 +642,57 @@ describe('Activity page', () => {
     expect(pl).toContain('https://www.youtube.com/playlist?list=PL1')
   })
   it('a row with no detail endpoint opens its own fields without a fetch', async () => {
-    const { fetches, els, clicks } = await run('', () => Response.json({ rows: [poolRow], cursor: null }))
+    const { fetches, els, handlers } = await run('', () => answer([poolRow]))
     const before = fetches.length
-    clicks.list!({ target: { closest: () => ({ dataset: { i: '0' } }) } })
+    handlers['a-table']!(tableClick({ row: 0 }))
     await tick()
     expect(fetches.length).toBe(before)
     expect(els.get('tk-drawer-title').textContent).toBe('acct-3 flagged <b>')
     const body = els.get('tk-drawer-body').innerHTML as string
     expect(body).toContain('acct-3 flagged &lt;b&gt;')
     expect(body).toContain('account.flagged')
-    expect(els.get('a-more').hidden).toBe(true)
   })
-  it('Load older during a filter change does nothing: the list ends with only the new filter rows', async () => {
-    let release: (() => void) | null = null
-    const { fetches, els, clicks } = await run('', (u) => {
-      if (!u.includes('kind=')) return Response.json({ rows, cursor: 'x' })
-      return new Promise<Response>((res) => { release = () => res(Response.json({ rows: [poolRow], cursor: null })) })
-    })
-    expect(els.get('a-more').hidden).toBe(false)
-    clicks.filters!({ target: { closest: () => ({ dataset: { kind: 'pool' }, id: '' }) } })
-    await tick(3)
-    expect(els.get('a-more').hidden).toBe(true)
-    expect(els.get('a-list').className).toContain('busy')
-    clicks.more!({})
-    await tick(3)
-    expect(fetches.some((u) => u.includes('cursor='))).toBe(false)
-    release!()
+  it('the kind, problems and range chips and the DJ select become table filters', async () => {
+    const { tableFetches, handlers, els, ctx } = await run('')
+    handlers['a-table']!(tableClick({ tkt: { 'data-tkt': 'chip', 'data-chip': 'k-pool' } }))
     await tick()
-    const list = els.get('a-list').innerHTML as string
-    expect(list).toContain('acct-3 flagged')
-    expect(list).not.toContain('Some set')
-    expect(list.split('class="a-item"').length - 1).toBe(1)
-    expect(els.get('a-list').className).not.toContain('busy')
+    expect(tableFetches().at(-1)).toContain('f.kind=in:pool')
+    handlers['a-table']!(tableClick({ tkt: { 'data-tkt': 'chip', 'data-chip': 'problems' } }))
+    await tick()
+    expect(tableFetches().at(-1)).toContain('f.kind=in:pool')
+    expect(tableFetches().at(-1)).toContain('f.problem=eq:1')
+    handlers['a-table']!(tableClick({ tkt: { 'data-tkt': 'chip', 'data-chip': '24h' } }))
+    await tick()
+    const since = Number(/f\.ts=gte:(\d+)/.exec(tableFetches().at(-1)!)![1])
+    expect(Math.abs(since - (Date.now() - 86_400_000))).toBeLessThan(600_000 + 1000)
+    expect(tableFetches().at(-1)!.match(/f\.ts=/g)).toHaveLength(1)
+    els.get('a-dj').value = 'dj-one'
+    handlers['a-dj']!({})
+    await tick()
+    expect(tableFetches().at(-1)).toContain('f.dj=eq:dj-one')
+    expect(decodeURIComponent(ctx.location.search)).toContain('a.f.dj=eq:dj-one')
+    expect(decodeURIComponent(ctx.location.search)).toContain('a.chip=')
   })
-  it('reads kind, problems, DJ and range from the query string', async () => {
-    const { fetches, els } = await run('?kind=pool,ban,bogus&problems=1&range=24h&dj=dj-one')
-    const u = fetches.find((x) => x.startsWith('/ui/api/activity?')) ?? ''
-    expect(u).toMatch(/kind=pool(%2C|,)ban(&|$)/)
-    expect(u).toContain('problems=1')
-    expect(u).toContain('dj=dj-one')
-    const since = Number(/since=(\d+)/.exec(u)![1])
-    expect(Math.abs(since - (Date.now() - 86_400_000))).toBeLessThan(1000)
-    expect(els.get('a-kinds').innerHTML).toMatch(/class="chip on" data-kind="pool" aria-pressed="true"/)
-    expect(els.get('a-ranges').innerHTML).toMatch(/class="chip on" data-range="24h" aria-pressed="true"/)
+  it('turns the old ?kind=, ?problems=1, ?range= and ?dj= links into table state', async () => {
+    const { tableFetches, els, ctx } = await run('?kind=pool,ban,bogus&problems=1&range=24h&dj=dj-one')
+    const u = tableFetches()[0]!
+    expect(u).toContain('f.kind=in:pool|ban')
+    expect(u).toContain('f.problem=eq:1')
+    expect(u).toContain('f.dj=eq:dj-one')
+    const since = Number(/f\.ts=gte:(\d+)/.exec(u)![1])
+    expect(Math.abs(since - (Date.now() - 86_400_000))).toBeLessThan(600_000 + 1000)
+    expect(ctx.location.search).not.toMatch(/(^|[?&])(kind|problems|range|dj)=/)
+    expect(els.get('a-dj').value).toBe('dj-one')
+    expect(els.get('a-chips').innerHTML).toMatch(/class="chip on" data-tkt="chip" data-chip="24h"/)
+    const one = await run('?kind=sync')
+    expect(one.tableFetches()[0]).toContain('f.kind=in:sync')
+    expect(one.els.get('a-chips').innerHTML).toMatch(/class="chip on" data-tkt="chip" data-chip="k-sync"/)
+  })
+  it('a failed load shows the error with a retry', async () => {
+    const { els } = await run('', () => Response.json({ error: 'bad_table_query', message: 'unknown column: x' }, { status: 400 }))
+    expect(els.get('a-err').hidden).toBe(false)
+    expect(els.get('a-err').innerHTML).toContain('unknown column: x')
+    expect(els.get('a-err').innerHTML).toContain('data-tkt="retry"')
   })
   it('its page script runs in the minimal stub too', async () => {
     const html = await (await app.request('https://tracked.example/ui/activity', {}, env())).text()
@@ -490,40 +700,23 @@ describe('Activity page', () => {
     for (const s of scriptsOf(html)) expect(() => vm.runInContext(s, c)).not.toThrow()
     for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0))
   })
-  it('Home uses the shared detail renderers instead of its own copy', async () => {
+  it('Home uses the shared detail renderers and activity columns instead of its own copy', async () => {
     const { readFileSync } = await import('node:fs')
     expect(readFileSync('src/ui/pages/home.ts', 'utf8')).not.toContain('function auditDetailHtml')
     const { ACTIVITY_DETAIL_JS } = await import('../src/ui/pages/activity-detail')
+    const { ACTIVITY_ROW_JS } = await import('../src/ui/pages/activity')
     const { HOME_PAGE } = await import('../src/ui/pages/home')
     expect(HOME_PAGE.html).toContain(ACTIVITY_DETAIL_JS)
+    expect(HOME_PAGE.html).toContain(ACTIVITY_ROW_JS)
   })
-  // The phone block of a CSS string: everything inside `@media (max-width: 799px) { … }`.
-  const phoneBlock = (css: string) => /@media \(max-width: 799px\) \{([\s\S]*?)\n  \}/.exec(css)![1]!
-  const ruleOf = (css: string, sel: string) => {
-    const m = new RegExp('(?:^|\\n)\\s*' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' \\{([^}]*)\\}').exec(css)
-    return m ? m[1]! : ''
-  }
-  it('under 800px a row stacks: icon, badge and time, then title, detail and links, without breaking words', async () => {
+  it('on a phone a row is a card whose event takes the full width, without breaking words', async () => {
     const { ACTIVITY_ROW_CSS } = await import('../src/ui/pages/activity')
-    const phone = phoneBlock(ACTIVITY_ROW_CSS)
-    // The title/detail column takes a full line of its own under the icon/badge/time line.
-    expect(ruleOf(phone, '.a-main')).toContain('order: 1')
-    expect(ruleOf(phone, '.a-main')).toContain('flex-basis: 100%')
-    expect(ruleOf(phone, '.a-main')).toContain('flex-direction: column')
-    expect(ruleOf(phone, '.a-when')).toContain('margin-left: auto')
-    expect(ruleOf(phone, '.a-when')).not.toContain('flex-basis: 100%')
-    expect(ruleOf(phone, '.a-links')).toContain('flex-basis: 100%')
-    // Normal words never break mid-word; only a word too long for the line (an id, a URL) does.
-    expect(ruleOf(phone, '.a-title, .a-detail')).toContain('overflow-wrap: break-word')
-    expect(phone).not.toContain('overflow-wrap: anywhere')
-    expect(phone).not.toMatch(/word-break: break-all/)
-  })
-  it('under 800px the chip rows wrap instead of scrolling sideways', async () => {
-    const { ACTIVITY_PAGE_CSS } = await import('../src/ui/pages/activity')
-    const phone = phoneBlock(ACTIVITY_PAGE_CSS)
-    expect(ruleOf(phone, '.tk-filters .a-chips')).toContain('flex-wrap: wrap')
-    expect(phone).not.toContain('overflow-x')
-    expect(ACTIVITY_PAGE_CSS).not.toMatch(/\.a-chips[^}]*nowrap/)
+    const phone = /@media \(max-width: 699px\) \{([\s\S]*?)\n  \}/.exec(ACTIVITY_ROW_CSS)![1]!
+    expect(phone).toMatch(/td\[data-label="Event"\] \{[^}]*flex-direction: column[^}]*text-align: left/)
+    expect(phone).toMatch(/td\[data-label="Event"\]::before \{ content: none; \}/)
+    expect(ACTIVITY_ROW_CSS).toContain('overflow-wrap: break-word')
+    expect(ACTIVITY_ROW_CSS).not.toContain('overflow-wrap: anywhere')
+    expect(ACTIVITY_ROW_CSS).not.toMatch(/word-break: break-all/)
   })
 })
 
@@ -734,6 +927,36 @@ describe('Settings and Tools pages', () => {
     expect(els.get('int-pool').textContent).toBe('configured')
     expect(els.get('int-push').textContent).toBe('not configured')
     expect(els.get('int-mkvid').textContent).toBe('configured')
+  })
+  it('Settings lists the push devices and the ban episodes as tables (newest first, Open/Real/Simulated chips)', async () => {
+    const now = Date.now()
+    const ep = (i: number, extra: Record<string, unknown> = {}) => ({ key: 'ban:ep:' + i, startedAt: new Date(now - i * 3600_000).toISOString(), endedAt: new Date(now - i * 3600_000 + 600_000).toISOString(), blockedForMs: 600_000, ip: '10.0.0.' + i, source: 'home', simulated: false, poolRequests: i, brightdataRequests: 0, allBlockedHits: 0, clearedBy: 'captcha', pushStart: { sent: 1, total: 2 }, pushClear: null, ...extra })
+    const { ctx, els } = richStub(async (u: string) => {
+      if (u.startsWith('/ui/api/ban/status')) return Response.json({ poolConfigured: true, pushConfigured: true,
+        pushSubscriptions: [{ ua: 'Mozilla/5.0 (Linux; Android 14) Chrome/130.0', lastOkAt: new Date(now).toISOString(), lastError: null, createdAt: '2026-01-01T00:00:00Z' }, { ua: 'Mozilla/5.0 (Windows NT 10.0) Firefox/131.0', lastOkAt: null, lastError: '410 <gone>', createdAt: '2026-02-01T00:00:00Z' }],
+        episodes: [ep(3), ep(1, { endedAt: null, blockedForMs: null }), ep(2, { simulated: true, ip: '<b>x</b>' })] })
+      return new Response('{}', { status: 404 })
+    }, '/ui/settings')
+    ;(ctx as any).document.body = { dataset: { banPage: 'settings' } }
+    const clicks: Record<string, (ev: unknown) => void> = {}
+    ;(ctx as any).document.getElementById('ban-episodes').addEventListener = (t: string, fn: (ev: unknown) => void) => { if (t === 'click') clicks.eps = fn }
+    const html = await (await app.request('https://tracked.example/ui/settings', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    expect(els.get('ban-devices').innerHTML).toContain('Push devices (<span id="ban-dev-n">2</span>)')
+    const dev = els.get('bdev-body').innerHTML as string
+    expect(dev).toContain('Chrome on Android')
+    expect(dev).toContain('Firefox on Windows')
+    expect(dev).toContain('Last delivery failed: 410 &lt;gone&gt;')
+    const eps = els.get('beps-body').innerHTML as string
+    expect(eps.indexOf('10.0.0.1')).toBeLessThan(eps.indexOf('&lt;b&gt;x&lt;/b&gt;'))
+    expect(eps.indexOf('&lt;b&gt;x&lt;/b&gt;')).toBeLessThan(eps.indexOf('10.0.0.3'))
+    expect(eps).toContain('<b>(open)</b>')
+    expect(eps).not.toContain('<b>x</b>')
+    clicks.eps!(tableClick({ tkt: { 'data-tkt': 'chip', 'data-chip': 'sim' } }))
+    const sim = els.get('beps-body').innerHTML as string
+    expect(sim).toContain('&lt;b&gt;x&lt;/b&gt;')
+    expect(sim).not.toContain('10.0.0.1')
   })
   it('Tools carries the Search index card and its script runs in the minimal stub', async () => {
     const html = await (await app.request('https://tracked.example/ui/tools', {}, env())).text()

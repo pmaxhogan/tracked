@@ -5,6 +5,9 @@ import type { Logger } from './log'
 import { recordPageFacts } from './playlist-hygiene'
 import type { PoolPriority } from './pool'
 import { fetchOptsFromEnv } from './upstream1001'
+import { MEDIALINK_CACHE_VERSION, mediaLinksCacheKey } from './medialinks-all'
+import { presaveOnSetParsed } from './presave'
+import type { PageRow } from './tracklists1001'
 import {
   TRACKLIST_CACHE_VERSION,
   cacheAgeSeconds,
@@ -31,7 +34,7 @@ export type { CachedTracklist } from './tracklist-cache'
  */
 export const TRACKLIST_CV = {
   tracklist: TRACKLIST_CACHE_VERSION, // parsed tracklist page → CachedTracklist
-  medialink: 1, // per-track Apple/YouTube links
+  medialink: MEDIALINK_CACHE_VERSION, // per-track Apple/YouTube links (lib/medialinks-all.ts writes the same key)
 } as const
 
 /** Fetch priority (spec: phone, new, verify, recheck, backfill), handed to tlpool. */
@@ -74,7 +77,11 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   await recordPageFacts(env, tracklistUrl, html, log)
   // With the html, the set date also comes from the page (datePublished / title), as in the sync.
   const written = await cacheParsedTracklist(env, tracklistUrl, result, log, { source: 'resolve', html })
-  if (written.cached) return written.value
+  if (written.cached) {
+    // Pre-saved ID rows of this set look for their row on the fresh page (never throws).
+    await presaveOnSetParsed(env, tracklistUrl, result, log)
+    return written.value
+  }
   if (written.reason === 'decoy') {
     // Never cache and never serve: the names are randomized (see
     // DecoySignal). fetchTracklist already logged the details.
@@ -104,6 +111,53 @@ export type TracklistTrackOut = {
   isMashupLinked: boolean
   /** Whether the connected YouTube account has liked youtubeLink (filled by the routes, null here). */
   youtubeLiked: boolean | null
+  /** This track's index in `rows` (every page row); null for a cache entry older than the rows. */
+  rowIndex: number | null
+}
+
+/** One page row, anonymous "ID - ID" rows included: what a pre-save of an ID row names. */
+export type RowOut = {
+  rowIndex: number
+  /** The row's own cue (a "w/" row's printed time, else the cue it shares). */
+  cueSeconds: number | null
+  startTime: string
+  artist: string
+  title: string
+  /** The medialink id; null on an anonymous row or a named one with no media id (its data-id is a page position, not a track). */
+  trackId: string | null
+  trackUrl: string | null
+  artworkUrl: string | null
+  isUnidentified: boolean
+  idStatus: string | null
+  isMashupLinked: boolean
+  anonymous: boolean
+}
+
+export function rowsOut(rows: readonly PageRow[] | undefined): RowOut[] {
+  return (rows ?? []).map((r, rowIndex) => ({
+    rowIndex,
+    cueSeconds: r.ownStartSeconds ?? r.startSeconds ?? null,
+    startTime: r.startTime,
+    artist: r.artist,
+    title: r.title,
+    // mediaId undefined: a list cached before the field, whose trackId may be a page position (data-id), not a track. No id.
+    trackId: r.anonymous ? null : (r.mediaId ?? null),
+    trackUrl: r.trackUrl,
+    artworkUrl: r.artworkUrl,
+    isUnidentified: r.isUnidentified,
+    idStatus: r.idStatus,
+    isMashupLinked: r.isMashupLinked,
+    anonymous: r.anonymous,
+  }))
+}
+
+/** For each of `tracks` (the named rows, in order), its index in `rows`; nulls when the entry has no rows. */
+export function trackRowIndexes(trackCount: number, rows: readonly PageRow[] | undefined): Array<number | null> {
+  const named: number[] = []
+  rows?.forEach((r, i) => {
+    if (!r.anonymous) named.push(i)
+  })
+  return Array.from({ length: trackCount }, (_, k) => (rows && named.length === trackCount ? named[k]! : null))
 }
 
 export type FullTracklist = {
@@ -112,6 +166,8 @@ export type FullTracklist = {
   setYoutubeLink: string | null
   setSoundcloudLink: string | null
   tracks: TracklistTrackOut[]
+  /** Every page row, anonymous ones included ([] for a cache entry older than the rows). */
+  rows: RowOut[]
   /** When the list was fetched from 1001tracklists (ISO), null for an entry older than the stamp. */
   fetchedAt: string | null
   /** Seconds since fetchedAt, null when unknown. */
@@ -155,6 +211,7 @@ export async function resolveFullTracklist(
     }
   }
 
+  const rowIdx = trackRowIndexes(scraped.tracks.length, scraped.rows)
   const tracks: TracklistTrackOut[] = scraped.tracks.map((t, index) => {
     const ml = t.trackId ? links.get(t.trackId) : undefined
     return {
@@ -173,6 +230,7 @@ export async function resolveFullTracklist(
       idStatus: t.idStatus,
       isMashupLinked: t.isMashupLinked,
       youtubeLiked: null,
+      rowIndex: rowIdx[index] ?? null,
     }
   })
 
@@ -182,6 +240,7 @@ export async function resolveFullTracklist(
     setYoutubeLink: scraped.setYoutubeLink,
     setSoundcloudLink: scraped.setSoundcloudLink,
     tracks,
+    rows: rowsOut(scraped.rows),
     fetchedAt: scraped.fetchedAt ?? null,
     cacheAgeSeconds: cacheAgeSeconds(scraped),
   }
@@ -195,7 +254,7 @@ export async function resolveFullTracklist(
  * lazy per-row lookups (nobody on the road is waiting on those).
  */
 export async function resolveTrackMediaLinks(env: Env, trackId: string, log: Logger, priority: FetchPriority = 'phone'): Promise<MediaLinks> {
-  const key = `ml:v${TRACKLIST_CV.medialink}:${trackId}`
+  const key = mediaLinksCacheKey(trackId)
   const cached = await getJson<MediaLinks>(env.CACHE, key)
   if (cached) {
     log.counters.cacheHits++

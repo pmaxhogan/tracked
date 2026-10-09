@@ -382,7 +382,12 @@ export function normalizeTracklistUrl(input: string): string | null {
 
 /** A page row: a ParsedTrack, or a fully anonymous "ID - ID" row with no microdata. */
 /** `label` is the row's record label (null when none, "Not On Label", or anonymous); it lives on page rows only, never on `tracks`. */
-export type PageRow = ParsedTrack & { anonymous: boolean; label: string | null }
+/**
+ * `mediaId` is the row's medialink id (its `div.mediaRow[data-trackid]`), null when the row has
+ * none: then `trackId` is the row's `data-id`, a page position (a named row with no media links).
+ * Absent on parsed lists cached before it existed.
+ */
+export type PageRow = ParsedTrack & { anonymous: boolean; label: string | null; mediaId?: string | null }
 
 export type ScrapedTracklist = {
   slug: string
@@ -580,7 +585,7 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
       prevTrack = false
       continue
     }
-    const { anonymous: _, label: _label, ...track } = r
+    const { anonymous: _, label: _label, mediaId: _mediaId, ...track } = r
     const t = unlinkedUnless(track, prevTrack && tracks.length > 0)
     prevTrack = true
     tracks.push(t)
@@ -895,6 +900,7 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
       ownStartSeconds,
       anonymous: true,
       label: null,
+      mediaId: null,
     }
   }
 
@@ -952,6 +958,7 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
     ownStartSeconds,
     anonymous: false,
     label: parseRowLabel(row),
+    mediaId: mediaTrackId,
   }
 }
 
@@ -1005,7 +1012,7 @@ export type MediaLinks = {
 
 const NO_LINKS: MediaLinks = { appleLink: null, youtubeLink: null, soundcloudLink: null }
 
-type MedialinkResponse = {
+export type MedialinkResponse = {
   success: boolean
   data?: Array<{ source: string; playerId: string; player?: string }>
   more?: Array<{ source: string; idLink: string; type?: string }>
@@ -1098,7 +1105,7 @@ function buildSoundcloudLink(entry: { playerId?: string; player?: string }): str
   return `https://w.soundcloud.com/player/?url=${encodeURIComponent(apiUrl)}`
 }
 
-function buildAppleLink(entry: { playerId: string; player?: string }): string | null {
+export function buildAppleLink(entry: { playerId: string; player?: string }): string | null {
   const player = entry.player ?? ''
   // Player iframe src example:
   //   https://embed.music.apple.com/us/album/where-ya-at/1696220774?i=1696221102app=music&at=...

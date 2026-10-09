@@ -58,6 +58,50 @@ export const AppSettingsSchema = z.object({
     /** Combined-playlist inserts per run at most (default 20). */
     combinedMaxInsertsPerRun: z.number().int().min(0).max(100),
   }),
+  /** Pre-saved tracks (lib/presave.ts): watched until 1001tracklists has a YouTube link. */
+  presave: z.object({
+    /** The scheduled recheck runs at all (manual rechecks always work). */
+    enabled: z.boolean(),
+    /** A watched track is looked up again this often (default 12 h: twice a day). */
+    recheckIntervalHours: z.number().min(1).max(24 * 30),
+    /** Every interval × (1 ± this), so rechecks spread out (default 0.15). */
+    jitterFraction: z.number().min(0).max(0.5),
+    /** Rechecks one scheduler tick may run, on top of its other items (default 1). */
+    maxPerTick: z.number().int().min(0).max(10),
+    /** Pool priority of a scheduled recheck (manual ones go at phone priority). */
+    priority: z.enum(['new', 'verify', 'recheck', 'backfill']),
+    /** A failed check (pool refused, page error) is tried again after this (default 60 min). */
+    retryMinutes: z.number().int().min(5).max(24 * 60),
+    /** Push to every device when a pre-saved track gets a YouTube link. */
+    notifyFound: z.boolean(),
+    /** A set page fetched for any reason updates the pre-saved rows of that set (free). */
+    useSetFetches: z.boolean(),
+    /** Stop watching a track after this many days without a link (0 = never). */
+    giveUpDays: z.number().int().min(0).max(3650),
+  }),
+  /** mkvid track uploads (lib/track-uploads.ts): rip a watched track that only has a non-YouTube link. */
+  trackUploads: z.object({
+    /** Queue tracks for mkvid at all. */
+    enabled: z.boolean(),
+    /** A pre-saved track is queued only after it has been watched this long (default 5 days). */
+    minWatchDays: z.number().min(0).max(365),
+    /** Link sources mkvid may rip (yt-dlp extractors that give the full track), in order of preference. */
+    allowedSources: z.array(z.string().min(1).max(40)).max(20),
+    /** Track uploads handed out per quota day (they share mkvid's per-project caps; default 4). 0 pauses. */
+    dailyCap: z.number().int().min(0).max(100),
+    /** The YouTube playlist every track upload goes into (created when missing). */
+    playlistTitle: z.string().min(1).max(150),
+    /** Privacy mkvid uploads a track with. */
+    privacy: z.enum(['public', 'unlisted', 'private']),
+    /** Push to every device when a track was ripped and uploaded. */
+    notifyUploaded: z.boolean(),
+    /** Failed attempts before a request is parked as failed (default 3). */
+    maxAttempts: z.number().int().min(1).max(10),
+    /** A retryable failure waits this × attempts (default 6 h). */
+    retryBackoffHours: z.number().min(0.25).max(24 * 7),
+    /** mkvid refuses a rip shorter than this share of the expected length (a preview clip; default 0.85). */
+    minDurationRatio: z.number().min(0).max(1),
+  }),
   retention: z.object({
     /** Now-playing and playlist-addition audit rows are kept this many days (default 90). */
     auditDays: z.number().int().min(1).max(3650),
@@ -81,6 +125,29 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     runRemovalMax: 15,
     combinedDailyInsertCap: 80,
     combinedMaxInsertsPerRun: 20,
+  },
+  presave: {
+    enabled: true,
+    recheckIntervalHours: 12,
+    jitterFraction: 0.15,
+    maxPerTick: 1,
+    priority: 'recheck',
+    retryMinutes: 60,
+    notifyFound: true,
+    useSetFetches: true,
+    giveUpDays: 0,
+  },
+  trackUploads: {
+    enabled: true,
+    minWatchDays: 5,
+    allowedSources: ['soundcloud', 'bandcamp', 'hearthis', 'mixcloud'],
+    dailyCap: 4,
+    playlistTitle: 'Track uploads',
+    privacy: 'unlisted',
+    notifyUploaded: true,
+    maxAttempts: 3,
+    retryBackoffHours: 6,
+    minDurationRatio: 0.85,
   },
   retention: { auditDays: 90, tickHistoryDays: 14 },
 }

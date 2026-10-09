@@ -1,8 +1,7 @@
 // Playlists: the YouTube connection, the combined "all tracked artists" playlist
 // (with Backfill now), one playlist row per DJ, and the hygiene strip. Data:
-// GET /ui/api/youtube/status, /ui/api/combined, /ui/api/list + /ui/api/state/:slug
-// per row (four at a time) and one GET /ui/api/removals.
-import { skelHtml } from '../skeleton'
+// GET /ui/api/youtube/status, /ui/api/combined, the DJ table GET /ui/api/djs
+// (lib/dj-table.ts, server-sorted and paged; TKTable) and one GET /ui/api/removals.
 import { shell } from '../shell'
 import { tipAttr } from '../tip'
 import type { UiPage } from './index'
@@ -27,15 +26,7 @@ ${YOUTUBE_CARD_HTML}
 </div>
 <div class="tk-card">
   <div class="pl-head"><h2><span class="tip-term"${tipAttr('Each subscribed DJ has its own YouTube playlist, filled with one video per set.')}>DJ playlists</span></h2></div>
-  <div id="error" class="err-state" role="alert" hidden></div>
-  <div id="wrap" class="tk-table-wrap" hidden>
-    <table class="tk-table">
-      <thead><tr><th>Playlist</th><th>DJ</th><th class="num">Videos</th><th>Last run</th><th class="num"><span class="tip-term"${tipAttr('Videos in this playlist that mkvid rendered from a set\'s audio because the set had no recording.')}>mkvid videos</span></th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-  </div>
-  <div id="pl-skel">${skelHtml(6, 'row')}</div>
-  <div id="empty" class="empty" hidden></div>
+  <div id="pl"></div>
 </div>
 ${FIX_DIALOG_HTML}
 `
@@ -48,8 +39,6 @@ const CSS = /* css */ `
   #cmb-body .bits { color: var(--muted); font-size: var(--fs-sm); margin-top: 2px; }
   #cmb-body .warn { color: var(--danger); }
   #cmb-meter { margin-top: var(--sp-3); }
-  .skel.w { width: 5rem; display: inline-block; }
-  .tk-table td.num, .tk-table th.num { text-align: right; white-space: nowrap; }
   .pl-sub { display: block; color: var(--muted); font-size: var(--fs-xs); }
 ${YOUTUBE_CARD_CSS}
 ${DJ_ACTIONS_CSS}`
@@ -60,7 +49,7 @@ ${DJ_ACTIONS_JS}
 ${YOUTUBE_CARD_JS}
   const $ = TK.$, esc = TK.esc;
   const $cmbBody = $('cmb-body'), $cmbBackfill = $('cmb-backfill'), $cmbRefresh = $('cmb-refresh'), $cmbMeter = $('cmb-meter'), $cmbFill = $('cmb-fill');
-  const $rows = $('rows'), $wrap = $('wrap'), $empty = $('empty'), $error = $('error'), $hygiene = $('hygiene'), $fix = $('fix-titles');
+  const $hygiene = $('hygiene'), $fix = $('fix-titles');
 
   function link(href, text) {
     const h = TK.safeHref(href);
@@ -133,67 +122,29 @@ ${YOUTUBE_CARD_JS}
     await loadCombined();
   }));
 
-  // ── per-DJ playlists ──
-  let rows = [];
-  const SKEL = '<span class="skel w"></span>';
-  function rowHtml(r) {
-    const st = r.state, sum = DJA.summarize(st);
-    const name = esc((st && st.artistName) || r.slug);
-    const href = DJA.playlistHref(st);
-    const title = href ? link(href, ((st && st.artistName) || r.slug) + ' (1001tklists)') : '<span class="muted">' + name + ' · not created yet</span>';
-    const dj = '<a href="/ui/dj/' + esc(encodeURIComponent(r.slug)) + '">' + esc(r.slug) + '</a>';
-    let videos, last, mk;
-    if (r.state === undefined) { videos = last = mk = SKEL; }
-    else if (r.failed) { videos = last = mk = '<span class="muted">unavailable</span>'; }
-    else if (!st) { videos = '—'; last = '<span class="muted">never synced</span>'; mk = '—'; }
-    else {
-      videos = String(sum.videos);
-      const when = DJA.lastRun(st);
-      const added = st.lastRunStats ? st.lastRunStats.videoIdsAdded || 0 : 0;
-      last = when ? esc(when) + (added ? ' <span class="muted">· +' + added + '</span>' : '') : '<span class="muted">never</span>';
-      mk = sum.mkvid ? String(sum.mkvid) : '—';
-    }
-    return '<tr><td data-label="Playlist">' + title + '</td><td data-label="DJ">' + dj + '</td><td data-label="Videos" class="num">' + videos +
-      '</td><td data-label="Last run">' + last + '</td><td data-label="mkvid videos" class="num">' + mk + '</td></tr>';
-  }
-  function render() {
-    $wrap.hidden = !rows.length;
-    $rows.innerHTML = rows.map(rowHtml).join('');
-    $empty.textContent = 'No subscriptions yet.';
-    $empty.hidden = !!rows.length;
-  }
-  function showError(msg) {
-    $error.textContent = '';
-    if (!msg) { $error.hidden = true; return; }
-    $error.innerHTML = '<span class="grow">' + esc(msg) + '</span><button type="button" class="btn small" id="retry">Retry</button>';
-    $error.hidden = false;
-    $('retry').addEventListener('click', loadRows);
-  }
-  async function loadRows() {
-    showError('');
-    // The list and each row's state stored at the last view paint at once; the live ones replace them.
-    await TK.api.swr('/ui/api/list', async (res) => {
-      $('pl-skel').hidden = true;
-      if (!res.ok) {
-        showError(TK.errText(res, 'failed to load (' + res.status + ')'));
-        if (!rows.length) { $empty.textContent = 'Nothing to show.'; $empty.hidden = false; }
-        return;
-      }
-      showError('');
-      const prev = new Map(rows.map((r) => [r.slug, r]));
-      rows = ((res.data && res.data.subscriptions) || []).map((s) => {
-        const old = prev.get(s.slug);
-        return old || { slug: s.slug, state: res.stale ? DJA.storedState(s.slug) : undefined, failed: false };
-      });
-      render();
-      if (res.stale) return;
-      await DJA.pool(rows, 4, async (r) => {
-        const s = await DJA.loadState(r.slug);
-        if (s.failed) { r.state = null; r.failed = true; } else { r.state = s.state; r.failed = false; }
-        render();
-      });
-    });
-  }
+  // ── per-DJ playlists: one row per subscription from GET /ui/api/djs ──
+  TKTable.create($('pl'), {
+    id: 'pl',
+    source: { url: '/ui/api/djs' },
+    swr: true,
+    columns: [
+      { key: 'name', label: 'Playlist', type: 'text', render: (r) => r.playlistUrl ? link(r.playlistUrl, r.name + ' (1001tklists)') : '<span class="muted">' + esc(r.name) + ' · not created yet</span>' },
+      { key: 'slug', label: 'DJ', type: 'text', render: (r) => '<a href="/ui/dj/' + esc(encodeURIComponent(r.slug)) + '">' + esc(r.slug) + '</a>' },
+      { key: 'videos', label: 'Videos', type: 'number', tip: 'Sets with a video in this playlist.' },
+      { key: 'lastRunAt', label: 'Last run', type: 'datetime', render: (r) => r.lastRunAt ? esc(TK.fmt.rel(new Date(r.lastRunAt).toISOString())) + (r.lastAdded ? ' <span class="muted">· +' + esc(r.lastAdded) + '</span>' : '') : '<span class="muted">never</span>', tip: 'When the sync last ran for this DJ, and how many videos it added.' },
+      { key: 'mkvid', label: 'mkvid videos', type: 'number', tip: 'Videos in this playlist that mkvid rendered from a set audio because the set had no recording.' },
+    ],
+    defaultSort: 'name',
+    search: 'Search playlists',
+    chips: [
+      { id: 'all', label: 'All', group: 'f', on: true, count: (d) => d.counts && d.counts.total },
+      { id: 'made', label: 'Created', group: 'f', filters: [{ col: 'hasPlaylist', op: 'eq', value: '1' }], tip: 'DJs whose playlist exists on YouTube.' },
+      { id: 'none', label: 'Not created yet', group: 'f', filters: [{ col: 'hasPlaylist', op: 'eq', value: '0' }], count: (d) => d.counts && d.counts.noPlaylist, tip: 'DJs the sync has not made a playlist for yet.' },
+      { id: 'mkvid', label: 'With mkvid videos', group: 'f', filters: [{ col: 'mkvid', op: 'gt', value: '0' }], sort: '-mkvid', count: (d) => d.counts && d.counts.mkvid, tip: 'Playlists holding videos mkvid rendered.' },
+    ],
+    rowKey: 'slug',
+    empty: 'No subscriptions yet.',
+  });
 
   // ── hygiene strip ──
   async function loadHygiene() {
@@ -217,7 +168,6 @@ ${YOUTUBE_CARD_JS}
   YT.load();
   loadCombined(true);
   loadHygiene();
-  loadRows();
 })();
 `
 

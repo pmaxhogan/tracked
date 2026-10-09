@@ -1,7 +1,8 @@
 // The admin UI shell: one server-rendered document per page with the sidebar
 // (desktop), the icon rail (tablet), the top bar and bottom tabs (phone), the
 // shared dialogs, and the shared scripts in a fixed order: theme boot (head),
-// runtime (TK), SHELL_JS, BAN_JS, then the page's own script.
+// runtime (TK) with the tooltips and the data table (TKTable, src/ui/data-table.ts)
+// in the same <script>, SHELL_JS, BAN_JS, then the page's own script.
 //
 // The pool pages run these scripts in a stub DOM (see src/ui/runtime.ts), and
 // their tests scan the whole page: no shell <input>/<select> attribute may
@@ -12,9 +13,10 @@ import { BASE_CSS } from './base'
 import { icon, type IconName } from './icons'
 import { THEME_BOOT_JS, RUNTIME_JS } from './runtime'
 import { TIP_CSS, TIP_JS, tipAttr } from './tip'
+import { DATA_TABLE_CSS, DATA_TABLE_JS } from './data-table'
 import { BAN_BANNER_HTML, BAN_JS } from '../routes/ban-ui'
 
-export type NavKey = 'home' | 'djs' | 'search' | 'playlists' | 'removed' | 'mkvid' | 'activity'
+export type NavKey = 'home' | 'djs' | 'search' | 'presaves' | 'playlists' | 'removed' | 'mkvid' | 'track-uploads' | 'activity'
   | 'pool' | 'captcha' | 'pool-settings' | 'scheduler' | 'settings' | 'tools'
 
 export interface NavItem {
@@ -37,9 +39,11 @@ export const NAV: NavItem[] = [
   { key: 'home', label: 'Home', href: '/ui/', icon: 'home', group: null, tab: 'Home' },
   { key: 'djs', label: 'DJs', href: '/ui/djs', icon: 'djs', group: 'Library', tab: 'DJs' },
   { key: 'search', label: 'Search', href: SEARCH_HREF, icon: 'search', group: 'Library', tab: 'Search' },
+  { key: 'presaves', label: 'Pre-saves', href: '/ui/presaves', icon: 'bookmark', group: 'Library' },
   { key: 'playlists', label: 'Playlists', href: '/ui/playlists', icon: 'playlist', group: 'Library' },
   { key: 'removed', label: 'Removed videos', href: '/ui/removed', icon: 'removed', group: 'Library' },
   { key: 'mkvid', label: 'mkvid', href: '/ui/mkvid', icon: 'mkvid', group: 'Pipeline', tab: 'mkvid' },
+  { key: 'track-uploads', label: 'Track uploads', href: '/ui/track-uploads', icon: 'upload', group: 'Pipeline' },
   { key: 'activity', label: 'Activity', href: '/ui/activity', icon: 'activity', group: 'Pipeline' },
   { key: 'pool', label: 'Accounts', href: '/ui/pool', icon: 'pool', group: 'Pool', tab: 'Pool' },
   { key: 'captcha', label: 'Challenges', href: '/ui/captcha', icon: 'captcha', group: 'Pool', extra: '<span class="count" id="nav-count-captcha" data-tip="Captchas waiting for you to solve." hidden></span>' },
@@ -177,7 +181,7 @@ export function shell(o: ShellOptions): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light"><title>${title} · tracked</title>
-<style>${TOKENS_CSS}${BASE_CSS}${TIP_CSS}${o.css ?? ''}</style>
+<style>${TOKENS_CSS}${BASE_CSS}${TIP_CSS}${DATA_TABLE_CSS}${o.css ?? ''}</style>
 <script>${THEME_BOOT_JS}</script></head>
 <body data-ban-page="${o.banPage ?? 'other'}"${own}>
 <div class="tk-shell">
@@ -204,6 +208,7 @@ export function shell(o: ShellOptions): string {
 <dialog id="tk-drawer" class="tk-drawer"><div class="tk-drawer-head"><h2 id="tk-drawer-title"></h2><button type="button" id="tk-drawer-close" class="btn icon" aria-label="Close">${icon('close')}</button></div><div id="tk-drawer-body"></div></dialog>
 <div id="tk-toasts" class="tk-toasts" aria-live="polite"></div>
 <script>${RUNTIME_JS}
-${TIP_JS}</script><script>${SHELL_JS}</script><script>${BAN_JS}</script>${o.js ? `<script>${o.js}</script>` : ''}
+${TIP_JS}
+${DATA_TABLE_JS}</script><script>${SHELL_JS}</script><script>${BAN_JS}</script>${o.js ? `<script>${o.js}</script>` : ''}
 </body></html>`
 }

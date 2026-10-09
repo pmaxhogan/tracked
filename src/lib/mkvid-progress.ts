@@ -8,15 +8,25 @@
  * `waiting` for it. This whitelists what comes back and adds each set's URL
  * from D1. Read-only; nothing is stored. An mkvid from before two jobs sends
  * only `running`.
+ *
+ * A job is a set render (`kind: 'set'`, `requestId` = the mkvid request) or a
+ * track upload (`kind: 'track'`, `trackRequestId` = the track_uploads id,
+ * `requestId` null); a track job's title is `<artist> - <title>` from D1. An
+ * mkvid from before track jobs sends no kind (null: treated as a set).
  */
 
 import type { Env } from '../types'
+import { dbOf } from './db'
 import { getMkvidRequest } from './mkvid'
 import { mkvidCall } from './mkvid-recreate'
 
 export type RenderStage = { key: string; label: string; weight: number; state: 'done' | 'active' | 'pending'; progress: number | null }
 export type RenderProgressView = {
+  /** 'set' | 'track'; null from an mkvid that predates track jobs (a set). */
+  kind: 'set' | 'track' | null
   requestId: string | null
+  /** A track job's track_uploads id. */
+  trackRequestId: number | null
   setUrl: string | null
   slug: string | null
   title: string | null
@@ -65,8 +75,12 @@ export function normalizeRenderProgress(raw: unknown): Omit<RenderProgressView, 
   const done = fin(seg?.done), total = fin(seg?.total)
   const started = fin(raw.startedAt)
   const left = fin(raw.renderMinutesLeft)
+  const kind = raw.kind === 'track' ? 'track' : raw.kind === 'set' ? 'set' : null
+  const tr = typeof raw.trackRequestId === 'number' ? raw.trackRequestId : typeof raw.trackRequestId === 'string' ? Number(/^(?:track:)?(\d{1,12})$/.exec(raw.trackRequestId)?.[1] ?? NaN) : NaN
   return {
-    requestId: typeof raw.requestId === 'string' && UUID.test(raw.requestId) ? raw.requestId : null,
+    kind,
+    requestId: kind !== 'track' && typeof raw.requestId === 'string' && UUID.test(raw.requestId) ? raw.requestId : null,
+    trackRequestId: kind === 'track' && Number.isSafeInteger(tr) && tr > 0 ? tr : null,
     title: str(raw.title, 300),
     stage,
     waiting: typeof raw.waiting === 'string' && stages.some((s) => s.key === raw.waiting) ? raw.waiting : null,
@@ -95,8 +109,23 @@ export async function fetchMkvidRenderProgress(env: Env, fetcher: typeof fetch =
   const parsed = raw.map(normalizeRenderProgress)
   if (parsed.some((p) => !p)) return { ok: false, error: 'mkvid sent an unexpected answer' }
   const jobs = await Promise.all(parsed.map(async (p) => {
+    if (p!.kind === 'track') {
+      const t = p!.trackRequestId ? await trackTitle(env, p!.trackRequestId) : null
+      return { ...p!, title: t ?? p!.title, setUrl: null, slug: null }
+    }
     const req = p!.requestId ? await getMkvidRequest(env, p!.requestId).catch(() => null) : null
     return { ...p!, title: req?.setTitle ?? p!.title, setUrl: req?.setUrl ?? null, slug: req?.slug ?? null }
   }))
   return { ok: true, running: jobs[0] ?? null, jobs }
+}
+
+/** "<artist> - <title>" of a track upload, or null (unknown id, or no track_uploads table yet). */
+async function trackTitle(env: Env, id: number): Promise<string | null> {
+  try {
+    const r = await dbOf(env).prepare('SELECT artist, title FROM track_uploads WHERE id = ?').bind(id).first<{ artist: string | null; title: string | null }>()
+    const t = r ? [r.artist, r.title].filter(Boolean).join(' - ') : ''
+    return t || null
+  } catch {
+    return null
+  }
 }

@@ -10,12 +10,13 @@
  * 1001tracklists, no bearer or token value.
  */
 import type { Env } from '../types'
-import { dbOf } from './db'
+import { dbOf, parseJson } from './db'
 import { labelFromSetUrl } from './activity'
 import { listSchedulerTicks, type TickHistoryRow } from './tick-history'
+import type { TableDef } from './table-query'
 
 export const SCHEDULER_CLASSES = ['new', 'verify', 'recheck', 'backfill'] as const
-export const SCHEDULER_KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'dj_backfill'] as const
+export const SCHEDULER_KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'dj_backfill', 'presave'] as const
 const DAY = 86400
 /** Ticks scanned back (newest first) for "last ran" beyond the 24 h window: 14 days of 5-minute ticks. */
 const LAST_RUN_SCAN = 4100
@@ -91,11 +92,56 @@ function viewOf(t: TickHistoryRow): TickView {
   }
 }
 
-/** One page of ticks, newest first; `nextBefore` is the id to pass as `before` for the next page, null at the end. */
-export async function schedulerTicksPage(env: Env, opts: { limit?: number; before?: number | null } = {}): Promise<{ ticks: TickView[]; nextBefore: number | null }> {
-  const limit = Math.min(200, Math.max(1, Math.floor(opts.limit ?? 50)))
-  const rows = await listSchedulerTicks(env, { limit, before: opts.before ?? null })
-  return { ticks: rows.map(viewOf), nextBefore: rows.length === limit ? rows[rows.length - 1]!.id : null }
+/** A raw `scheduler_ticks` row, as the table query selects it. */
+type TickDbRow = { id: number; at: number; ms: number | null; skipped: string | null; drawn: number; ran: number; stopped_by: string | null; due: string | null; items: string | null; error: string | null }
+
+/** A tick row ready for a browser: parsed, labelled and redacted (viewOf). */
+export function tickViewFromDb(x: TickDbRow): TickView {
+  return viewOf({
+    id: x.id,
+    at: x.at,
+    ms: x.ms,
+    skipped: x.skipped,
+    drawn: x.drawn,
+    ran: x.ran,
+    stoppedBy: x.stopped_by,
+    due: parseJson<Record<string, number> | null>(x.due, null),
+    items: parseJson<TickHistoryRow['items']>(x.items, []),
+    error: x.error,
+  })
+}
+
+/** An outcome that means an item failed (counts against it, or threw). */
+const FAILED_ITEMS_SQL = "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) WHERE json_extract(value, '$.outcome') IN ('failed', 'threw'))"
+
+/**
+ * The tick list (GET /ui/api/scheduler/ticks), a data-table endpoint
+ * (lib/table-query.ts): newest first by default; the due count of each class
+ * is its own sortable column (`json_extract` over `due`). `q` searches the
+ * picked items (DJ slugs and set URLs), never the free-text error. Every row
+ * passes through viewOf, so the error and stop reasons are redacted.
+ */
+export const TICKS_TABLE: TableDef<TickDbRow, TickView> = {
+  from: 'scheduler_ticks',
+  primaryKey: 'id',
+  defaultSort: '-at',
+  columns: {
+    id: { type: 'number', filterable: false },
+    at: { type: 'datetime', storage: 's' },
+    ms: { type: 'number' },
+    drawn: { type: 'number' },
+    ran: { type: 'number' },
+    dueNew: { sql: "json_extract(due, '$.new')", type: 'number' },
+    dueVerify: { sql: "json_extract(due, '$.verify')", type: 'number' },
+    dueRecheck: { sql: "json_extract(due, '$.recheck')", type: 'number' },
+    dueBackfill: { sql: "json_extract(due, '$.backfill')", type: 'number' },
+    items: { type: 'text', sortable: false, filterable: false, searchable: true },
+    skipped: { type: 'enum' },
+    stoppedBy: { sql: 'stopped_by', type: 'text', sortable: false },
+    error: { type: 'text', sortable: false },
+    failedItems: { sql: FAILED_ITEMS_SQL, type: 'bool', sortable: false },
+  },
+  mapRow: tickViewFromDb,
 }
 
 type Counts = Record<string, number>

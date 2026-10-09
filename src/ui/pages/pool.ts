@@ -8,9 +8,9 @@ const BODY = /* html */ `
   <div id="stats" class="tk-tiles"></div>
   <div id="prio" class="tk-card" hidden></div>
   <h2 class="pool-h2"><span class="tip-term"${tipAttr('Captchas that a pool account ran into and that wait for a person. An unanswered one expires, and its account rests for 6 hours.')}>Pending challenges</span></h2>
-  <div id="chals"><div class="empty">loading…</div></div>
+  <div id="chals"><div id="chals-msg"><div class="empty">loading…</div></div><div id="pc"></div></div>
   <h2 class="pool-h2"><span class="tip-term"${tipAttr('The logged-in 1001tracklists accounts the pool fetches with. Each has its own exit IP and daily page budget.')}>Accounts</span></h2>
-  <div id="accts"><div class="empty">loading…</div></div>
+  <div id="accts"><div id="accts-msg"><div class="empty">loading…</div></div><div id="pa"></div></div>
   <p class="muted stat-note">Accounts are shown by their opaque id only. Usernames, emails and passwords stay on the NAS.</p>
 
 <dialog id="add-dlg" class="tk-dialog" aria-labelledby="add-title">
@@ -265,52 +265,112 @@ ${CAPTCHA_JS}
     $('prio').innerHTML = parts.join('');
   }
 
+  // ── the two tables (TKTable, local mode: tlpool's lists are small and come whole) ──
+  // Both are created on the first good status, inside #chals and #accts, so a
+  // pool that is down from the start leaves those empty. Every poll hands the
+  // tables the new rows (setRows), keeping their sort, filters and page.
+  const hasTable = () => typeof TKTable !== 'undefined';
+  const isQueued = (a) => !!(a.queued || a.state === 'queued');
+  const FETCHING = ['active', 'warming', 'ok', 'healthy', 'ramping'];
+  const STATE_OPTS = [
+    { value: 'new', label: 'new' }, { value: 'warming', label: 'warming' }, { value: 'active', label: 'active' }, { value: 'passive', label: 'passive' },
+    { value: 'resting', label: 'resting' }, { value: 'flagged', label: 'flagged' }, { value: 'signup_failed', label: 'signup failed' }, { value: 'retired', label: 'retired' }, { value: 'queued', label: 'queued' },
+  ];
+  let acctRows = [], chalRows = [], acctTable = null, chalTable = null;
+  const countOf = (pred) => () => acctRows.filter(pred).length;
+
+  function chalCells() {
+    return [
+      { key: 'type', label: 'Challenge', type: 'enum', options: [{ value: 'image', label: 'image captcha' }, { value: 'checkbox', label: 'checkbox (live view)' }],
+        render: (c) => '<a href="/ui/captcha/' + encodeURIComponent(c.id) + '"><b>Solve ' + esc(typeText(c.type)) + '</b></a>' },
+      { key: 'accountId', label: 'Account', type: 'text', render: (c) => '<span class="mono">' + esc(c.accountId || 'no account yet') + '</span>' },
+      { key: 'reason', label: 'Why', type: 'text', value: (c) => reasonText(c.reason), render: (c) => esc(reasonText(c.reason)), hideOn: 'phone' },
+      { key: 'createdAt', label: 'Since', type: 'datetime', storage: 'iso', render: (c) => esc(fmtTime(c.createdAt)), hideOn: 'phone' },
+      { key: 'expiresAt', label: 'Left', type: 'datetime', storage: 'iso', tip: 'Time left to answer it. An unanswered captcha expires, and its account rests for 6 hours.',
+        render: (c) => { const l = leftText(c.expiresAt); return '<span class="left' + (l.soon ? ' soon' : '') + '">' + esc(l.text) + '</span>'; } },
+    ];
+  }
   function renderChallenges(chals, errCode) {
-    if (errCode) { $('chals').innerHTML = '<div class="empty error">' + esc(errText({ error: errCode })) + '</div>'; return; }
-    const open = chals.filter((c) => c.state === 'pending' && c.ready !== false);
-    if (!open.length) { $('chals').innerHTML = '<div class="empty">None. Nothing is waiting for you.</div>'; return; }
-    $('chals').innerHTML = '<ul class="plain">' + open.map((c) => {
-      const l = leftText(c.expiresAt);
-      return '<li><div class="row"><a href="/ui/captcha/' + encodeURIComponent(c.id) + '"><b>Solve ' + esc(typeText(c.type)) + '</b></a><span class="spacer"></span><span class="left' + (l.soon ? ' soon' : '') + '">' + esc(l.text) + '</span></div>' +
-        '<div class="muted sub">' + esc(c.accountId || 'no account yet') + ' · ' + esc(reasonText(c.reason)) + ' · since ' + esc(fmtTime(c.createdAt)) + '</div></li>';
-    }).join('') + '</ul>';
+    $('chals-msg').hidden = !errCode;
+    $('chals-msg').innerHTML = errCode ? '<div class="empty error">' + esc(errText({ error: errCode })) + '</div>' : '';
+    chalRows = errCode ? [] : chals.filter((c) => c.state === 'pending' && c.ready !== false);
+    if (!hasTable()) return;
+    if (chalTable) { chalTable.setRows(chalRows); return; }
+    chalTable = TKTable.create($('pc'), {
+      id: 'pc', compact: true, urlState: false, pageSize: 50,
+      source: { rows: () => chalRows },
+      columns: chalCells(),
+      defaultSort: 'expiresAt',
+      empty: 'None. Nothing is waiting for you.',
+    });
   }
 
+  function acctCells() {
+    return [
+      { key: 'id', label: 'Account', type: 'text', value: (a) => a.id,
+        render: (a) => '<b class="mono">' + esc(a.id) + '</b> ' + (a.passive ? '<span class="badge info"' + tipA('A control account: logged in on its own exit but never used for fetching.') + '>passive</span>' : '') },
+      { key: 'state', label: 'State', type: 'enum', options: STATE_OPTS, value: (a) => (isQueued(a) ? 'queued' : String(a.state || 'unknown')),
+        tip: 'Where the account is in its life: new, warming, active, passive, resting or retired. Press a state badge for details.',
+        render: (a) => {
+          if (isQueued(a)) {
+            const left = Date.parse(a.scheduledAt) - Date.now();
+            const due = Number.isFinite(left) ? (left > 0 ? 'in ' + fmtDur(left) : 'due now') : '';
+            const tries = a.attempts ? '<div class="sub error">' + esc(a.attempts === 1 ? 'Tried once, failed' : 'Tried ' + a.attempts + ' times, failed') + (a.lastError ? ': ' + esc(a.lastError) : '') + '. Trying again every 30 min.</div>' : a.lastError ? '<div class="sub error">' + esc(a.lastError) + '</div>' : '';
+            return stateBadge(a) + '<div class="muted sub"' + tipA('Your local time') + '>creates ' + esc(fmtDateTime(a.scheduledAt)) + (due ? ' (' + esc(due) + ')' : '') + '</div>' + tries;
+          }
+          return stateBadge(a) + (a.restUntil ? ' <span class="muted">until ' + esc(fmtTime(a.restUntil)) + '</span>' : '');
+        } },
+      { key: 'exit', label: 'Exit', type: 'text', value: (a) => a.exitLabel || a.exitKind || null, tip: 'The IP address route this account is pinned to. Each account keeps one exit for good.',
+        render: (a) => isQueued(a)
+          ? (a.exitKind ? '<span class="badge neutral">' + esc(a.exitKind) + '</span>' : '<span class="muted">auto</span>')
+          : '<span class="mono">' + esc(a.exitLabel || '—') + '</span>' + (a.exitKind ? ' <span class="badge neutral"' + tipA('Where the traffic of this account leaves from: your own IP, Mullvad or AirVPN.') + '>' + esc(a.exitKind) + '</span>' : '') },
+      { key: 'usedToday', label: 'Today', type: 'number', value: (a) => (isQueued(a) ? null : a.usedToday), tip: 'Page views in the last 24 hours out of the account daily budget. Sorts by page views.',
+        render: (a) => (isQueued(a) ? '—' : esc(a.usedToday ?? '—') + ' / ' + esc(a.budget ?? '—')) },
+      { key: 'rampDay', label: 'Ramp', type: 'number', value: (a) => (isQueued(a) ? null : a.rampDay), tip: 'Which day of its ramp a new account is on. New accounts get a smaller budget for their first days.', hideOn: 'phone',
+        render: (a) => (isQueued(a) ? '—' : esc(a.rampDay ?? '—')) },
+      { key: 'lastOkAt', label: 'Last ok', type: 'datetime', storage: 'iso', tip: 'When this account last loaded a page successfully.', render: (a) => (isQueued(a) ? '—' : esc(ago(a.lastOkAt))) },
+      { key: 'lastChallengeAt', label: 'Last challenge', type: 'datetime', storage: 'iso', tip: 'When this account last hit a captcha.', hideOn: 'phone', render: (a) => (isQueued(a) ? '—' : esc(ago(a.lastChallengeAt))) },
+      { key: 'flagged', label: 'Flagged', type: 'bool', value: (a) => !!a.flagged, tip: 'Whether 1001tracklists flagged the account as suspicious.',
+        render: (a) => (a.flagged ? '<span class="badge bad"' + tipA('1001tracklists flagged this account (for instance it served decoy track names). It rests 72 hours, then gets one retest.') + '>flagged</span>' + (a.flagReason ? ' <span class="muted">' + esc(a.flagReason.replace(/_/g, ' ')) + '</span>' : '') : '<span class="muted">no</span>') },
+    ];
+  }
+  // A row's action buttons (also what "No" puts back).
+  function actsInner(a) {
+    if (isQueued(a)) return '<button type="button" class="btn small" data-act="cancel" data-id="' + esc(a.id) + '"' + tipA(ACT_TIPS.cancel) + '>Cancel</button>';
+    if (a.state === 'retired') return '<span class="muted">retired</span>';
+    return ['rest', 'retest', 'retire'].map((act) => '<button type="button" class="btn small" data-act="' + act + '" data-id="' + esc(a.id) + '"' + tipA(ACT_TIPS[act]) + '>' + act[0].toUpperCase() + act.slice(1) + '</button>').join('');
+  }
+  const acctNum = (id) => { const m = /(\\d+)$/.exec(String(id)); return m ? Number(m[1]) : 0; };
   function renderAccounts(accts) {
     accts = accts || [];
-    if (!accts.length) { $('accts').innerHTML = '<div class="empty">No accounts yet. Press + Add account.</div>'; return; }
-    // Real accounts first, then the scheduled creations (soonest first).
-    const queued = accts.filter((a) => a.queued || a.state === 'queued').sort((x, y) => String(x.scheduledAt || '').localeCompare(String(y.scheduledAt || '')));
-    accts = accts.filter((a) => !a.queued && a.state !== 'queued').concat(queued);
-    const rows = accts.map((a) => {
-      if (a.queued || a.state === 'queued') {
-        const left = Date.parse(a.scheduledAt) - Date.now();
-        const due = Number.isFinite(left) ? (left > 0 ? 'in ' + fmtDur(left) : 'due now') : '';
-        const tries = a.attempts ? '<div class="sub error">' + esc(a.attempts === 1 ? 'Tried once, failed' : 'Tried ' + a.attempts + ' times, failed') + (a.lastError ? ': ' + esc(a.lastError) : '') + '. Trying again every 30 min.</div>' : a.lastError ? '<div class="sub error">' + esc(a.lastError) + '</div>' : '';
-        return '<tr class="queued-row">' +
-          '<td data-label="Account"><b class="mono">' + esc(a.id) + '</b> ' + (a.passive ? '<span class="badge info">passive</span>' : '') + '</td>' +
-          '<td data-label="State">' + stateBadge(a) + '<div class="muted sub"' + tipA('Your local time') + '>creates ' + esc(fmtDateTime(a.scheduledAt)) + (due ? ' (' + esc(due) + ')' : '') + '</div>' + tries + '</td>' +
-          '<td data-label="Exit">' + (a.exitKind ? '<span class="badge neutral">' + esc(a.exitKind) + '</span>' : '<span class="muted">auto</span>') + '</td>' +
-          '<td data-label="Today" class="num">—</td><td data-label="Ramp day" class="num">—</td><td data-label="Last success">—</td><td data-label="Last challenge">—</td><td data-label="Flagged"><span class="muted">no</span></td>' +
-          '<td class="acts-cell"><div class="acts" data-acts="' + esc(a.id) + '"><button type="button" class="btn small" data-act="cancel" data-id="' + esc(a.id) + '"' + tipA(ACT_TIPS.cancel) + '>Cancel</button></div></td>' +
-          '</tr>';
-      }
-      const flag = a.flagged ? '<span class="badge bad"' + tipA('1001tracklists flagged this account (for instance it served decoy track names). It rests 72 hours, then gets one retest.') + '>flagged</span>' + (a.flagReason ? ' <span class="muted">' + esc(a.flagReason.replace(/_/g, ' ')) + '</span>' : '') : '<span class="muted">no</span>';
-      const acts = a.state === 'retired' ? '<span class="muted">retired</span>' :
-        ['rest', 'retest', 'retire'].map((act) => '<button type="button" class="btn small" data-act="' + act + '" data-id="' + esc(a.id) + '"' + tipA(ACT_TIPS[act]) + '>' + act[0].toUpperCase() + act.slice(1) + '</button>').join('');
-      return '<tr>' +
-        '<td data-label="Account"><b class="mono">' + esc(a.id) + '</b> ' + (a.passive ? '<span class="badge info"' + tipA('A control account: logged in on its own exit but never used for fetching.') + '>passive</span>' : '') + '</td>' +
-        '<td data-label="State">' + stateBadge(a) + (a.restUntil ? ' <span class="muted">until ' + esc(fmtTime(a.restUntil)) + '</span>' : '') + '</td>' +
-        '<td data-label="Exit"><span class="mono">' + esc(a.exitLabel || '—') + '</span>' + (a.exitKind ? ' <span class="badge neutral"' + tipA('Where the traffic of this account leaves from: your own IP, Mullvad or AirVPN.') + '>' + esc(a.exitKind) + '</span>' : '') + '</td>' +
-        '<td data-label="Today" class="num">' + esc(a.usedToday ?? '—') + ' / ' + esc(a.budget ?? '—') + '</td>' +
-        '<td data-label="Ramp day" class="num">' + esc(a.rampDay ?? '—') + '</td>' +
-        '<td data-label="Last success">' + esc(ago(a.lastOkAt)) + '</td>' +
-        '<td data-label="Last challenge">' + esc(ago(a.lastChallengeAt)) + '</td>' +
-        '<td data-label="Flagged">' + flag + '</td>' +
-        '<td class="acts-cell"><div class="acts" data-acts="' + esc(a.id) + '">' + acts + '</div></td>' +
-        '</tr>';
-    }).join('');
-    $('accts').innerHTML = '<div class="tk-table-wrap"><table class="tk-table"><thead><tr><th>Account</th><th><span class="tip-term"' + tipA('Where the account is in its life: new, warming, active, passive, resting or retired. Press a state badge for details.') + '>State</span></th><th><span class="tip-term"' + tipA('The IP address route this account is pinned to. Each account keeps one exit for good.') + '>Exit</span></th><th><span class="tip-term"' + tipA('Page views in the last 24 hours out of the account daily budget.') + '>Today</span></th><th><span class="tip-term"' + tipA('Which day of its ramp a new account is on. New accounts get a smaller budget for their first days.') + '>Ramp</span></th><th><span class="tip-term"' + tipA('When this account last loaded a page successfully.') + '>Last ok</span></th><th><span class="tip-term"' + tipA('When this account last hit a captcha.') + '>Last challenge</span></th><th><span class="tip-term"' + tipA('Whether 1001tracklists flagged the account as suspicious.') + '>Flagged</span></th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    // The default order: real accounts by number, then the scheduled creations (soonest first).
+    const queued = accts.filter(isQueued).sort((x, y) => String(x.scheduledAt || '').localeCompare(String(y.scheduledAt || '')));
+    const real = accts.filter((a) => !isQueued(a)).sort((x, y) => acctNum(x.id) - acctNum(y.id) || String(x.id).localeCompare(String(y.id)));
+    acctRows = real.concat(queued).map((a, i) => Object.assign({}, a, { _i: i }));
+    $('accts-msg').hidden = acctRows.length > 0;
+    $('accts-msg').innerHTML = acctRows.length ? '' : '<div class="empty">No accounts yet. Press + Add account.</div>';
+    if (!hasTable()) return;
+    if (acctTable) { acctTable.setRows(acctRows); return; }
+    acctTable = TKTable.create($('pa'), {
+      id: 'pa',
+      source: { rows: () => acctRows },
+      columns: acctCells(),
+      rowKey: '_i',
+      search: 'Search accounts and exits',
+      rowAttrs: (a) => (isQueued(a) ? { 'data-queued': '1' } : null),
+      chips: [
+        { id: 'all', label: 'All', group: 'state', on: true, count: countOf(() => true) },
+        { id: 'fetching', label: 'Fetching', group: 'state', tip: 'Active or warming accounts that are not passive or flagged.', filters: [{ col: 'state', op: 'in', value: FETCHING.join('|') }, { col: 'flagged', op: 'eq', value: '0' }], count: countOf((a) => !isQueued(a) && FETCHING.indexOf(a.state) >= 0 && !a.flagged && !a.passive) },
+        { id: 'new', label: 'New', group: 'state', filters: [{ col: 'state', op: 'in', value: 'new|creating|signup|pending' }], count: countOf((a) => !isQueued(a) && IN_CREATION.test(String(a.state))) },
+        { id: 'resting', label: 'Resting', group: 'state', filters: [{ col: 'state', op: 'in', value: 'resting' }], count: countOf((a) => a.state === 'resting') },
+        { id: 'flagged', label: 'Flagged', group: 'state', filters: [{ col: 'flagged', op: 'eq', value: '1' }], count: countOf((a) => !!a.flagged) },
+        { id: 'passive', label: 'Passive', group: 'state', filters: [{ col: 'state', op: 'in', value: 'passive' }], count: countOf((a) => a.state === 'passive') },
+        { id: 'retired', label: 'Retired', group: 'state', filters: [{ col: 'state', op: 'in', value: 'retired|signup_failed' }], count: countOf((a) => a.state === 'retired' || a.state === 'signup_failed') },
+        { id: 'queued', label: 'Queued', group: 'state', tip: 'Accounts scheduled to be created later.', filters: [{ col: 'state', op: 'in', value: 'queued' }], count: countOf(isQueued) },
+      ],
+      actions: (a) => '<div class="acts" data-acts="' + esc(a.id) + '">' + actsInner(a) + '</div>',
+      empty: 'No accounts yet. Press + Add account.',
+    });
   }
 
   // In-page confirmation (no confirm()): the buttons of that row turn into a question.
@@ -328,13 +388,14 @@ ${CAPTCHA_JS}
         '<button type="button" class="btn small" data-no="1">No</button></div>';
       return;
     }
-    if (b.dataset.no) { load(); return; }
+    if (b.dataset.no) { const a = acctRows.find((x) => x.id === id); if (a) box.innerHTML = actsInner(a); else load(); return; }
     if (b.dataset.yes) {
       const act = b.dataset.yes;
       b.disabled = true; b.textContent = 'Working…';
       const r = await api('/accounts/' + encodeURIComponent(id) + '/' + act, jsonInit('POST', {}));
       if (!r.ok && (r.status === 401 || r.status === 403)) { box.innerHTML = '<span class="error">' + esc(SIGN_IN_AGAIN) + '</span>'; return; }
       if (!r.ok) { box.innerHTML = '<span class="error">' + esc(errText(r.data, r.status)) + '</span> <button type="button" class="btn small" data-no="1">OK</button>'; return; }
+      box.innerHTML = '';
       load();
     }
   });
@@ -343,7 +404,7 @@ ${CAPTCHA_JS}
     const r = await api('/status');
     if (!r.ok) {
       $('err').hidden = false; $('err').textContent = r.status === 401 || r.status === 403 ? SIGN_IN_AGAIN : errText(r.data, r.status);
-      if (!lastStatus) { $('accts').innerHTML = ''; $('chals').innerHTML = ''; }
+      if (!lastStatus) { $('accts-msg').innerHTML = ''; $('chals-msg').innerHTML = ''; }
       return r;
     }
     $('err').hidden = true;
@@ -628,7 +689,10 @@ ${CAPTCHA_JS}
 /** The state details drawer (TK.drawer). */
 const DETAILS_CSS = /* css */ `
   .badge.queued { color: var(--accent); background: var(--elev); box-shadow: inset 0 0 0 1px var(--accent); }
-  .tk-table tr.queued-row td { background: color-mix(in srgb, var(--elev) 40%, transparent); }
+  .tk-table tr[data-queued] td { background: color-mix(in srgb, var(--elev) 40%, transparent); }
+  #chals-msg:empty, #accts-msg:empty { display: none; }
+  #pc .tkt-table thead th { white-space: nowrap; }
+  @media (min-width: 700px) { #pa .tkt-table td.tkt-acts .acts { flex-wrap: nowrap; justify-content: flex-end; } }
   #add-form input[type=datetime-local] { max-width: 100%; }
   .sd h3 { font-size: var(--fs-sm); margin: var(--sp-4) 0 var(--sp-2); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .sd p { margin: 0 0 var(--sp-2); }

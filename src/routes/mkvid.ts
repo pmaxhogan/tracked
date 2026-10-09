@@ -23,7 +23,7 @@
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used.
- *   GET  /mkvid/health    → { ok, verifiedLists, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
+ *   GET  /mkvid/health    → { ok, verifiedLists, trackUploads, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
  *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
  *                         is retryable; a scene-style mkvid claims nothing until it sees it
  *
@@ -55,7 +55,7 @@ const CompleteBody = z.object({
 })
 const FailBody = z.object({
   id: z.string().uuid(),
-  error: z.string().min(1).max(2000),
+  error: z.string().min(1).transform((s) => s.slice(0, 2000)), // cut, not refused: a 400 leaves mkvid re-sending forever
   permanent: z.boolean().optional(),
   jobId: z.string().min(1).max(100).optional().nullable(),
 })
@@ -78,6 +78,8 @@ mkvidApp.get('/health', async (c) => {
     ok: true,
     // This Worker hands out verified lists only and treats `unverified_tracklist` as retryable (mkvid's scene style waits for this).
     verifiedLists: true,
+    // This Worker serves the track-upload queue at /mkvid/track/* (routes/mkvid-track.ts).
+    trackUploads: true,
     // Recreations go only to an mkvid whose claim says this style.
     recreateStyle: RECREATE_STYLE,
     counts: await countMkvidRequests(c.env),

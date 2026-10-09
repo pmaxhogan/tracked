@@ -35,7 +35,7 @@ export type StoredPushSubscription = {
   failCount: number
 }
 
-export type PushKind = 'ban_start' | 'ban_clear' | 'test' | 'pool_challenge' | 'pool_account' | 'playlist_hold'
+export type PushKind = 'ban_start' | 'ban_clear' | 'test' | 'pool_challenge' | 'pool_account' | 'playlist_hold' | 'presave_found' | 'track_uploaded'
 
 /** What the service worker receives (as JSON) and turns into a Notification. */
 export type PushPayload = {
@@ -212,6 +212,37 @@ export function testPayload(): PushPayload {
     body: 'If you can read this, IP-ban alerts will reach this device.',
     url: '/ui/',
     tag: 'tracked-test',
+    ts: new Date().toISOString(),
+  }
+}
+
+/** mkvid ripped a pre-saved track and uploaded it (lib/track-uploads.ts); tapping opens it on YouTube Music. */
+export function trackUploadedPayload(t: { uploadId: number; artist: string | null; title: string | null; sourceName: string; videoId: string; playlistTitle: string }): PushPayload {
+  const name = [t.artist, t.title].filter(Boolean).join(' – ') || 'A pre-saved track'
+  return {
+    kind: 'track_uploaded',
+    title: 'Track ripped and uploaded',
+    body: `${name} (from ${t.sourceName}) is now in "${t.playlistTitle}"`,
+    url: `https://music.youtube.com/watch?v=${t.videoId}`,
+    tag: `track-uploaded-${t.uploadId}`,
+    ts: new Date().toISOString(),
+  }
+}
+
+/**
+ * A pre-saved track got a YouTube link on 1001tracklists (lib/presave.ts).
+ * Tapping opens the YouTube Music version; one tag per presave so two finds
+ * minutes apart do not replace each other on the device.
+ */
+export function presaveFoundPayload(p: { id: number; artist: string | null; title: string | null; videoId: string }): PushPayload {
+  const a = p.artist && p.artist !== 'ID' ? p.artist : null
+  const t = p.title && p.title !== 'ID' ? p.title : null
+  return {
+    kind: 'presave_found',
+    title: 'Pre-saved track is on YouTube',
+    body: a && t ? `${a} – ${t}` : a ?? t ?? 'A pre-saved track',
+    url: `https://music.youtube.com/watch?v=${p.videoId}`,
+    tag: `tracked-presave-${p.id}`,
     ts: new Date().toISOString(),
   }
 }

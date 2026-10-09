@@ -278,7 +278,10 @@ describe('POST /now-playing — an anonymous "ID - ID" row is playing', () => {
     const base = await ask(CUE + 10)
     serve(edited({ cued: false }))
     const withAnon = await ask(CUE + 10)
-    expect(withAnon.body).toEqual(base.body)
+    // Same answer; only rowIndex (a page position) moves past the extra row.
+    const noRowIndex = (b: any) => ({ ...b, tracks: b.tracks.map(({ rowIndex: _r, ...t }: any) => t) })
+    expect(noRowIndex(withAnon.body)).toEqual(noRowIndex(base.body))
+    expect(withAnon.body.tracks.map((t: any) => t.rowIndex)).toEqual(base.body.tracks.map((t: any) => (t.rowIndex >= 4 ? t.rowIndex + 1 : t.rowIndex)))
     expect(withAnon.body.tracks.filter((t: any) => t.isCurrent).map((t: any) => t.title)).toEqual([before.title])
     expect(withAnon.audit.select.currentFromAnonymousRow).toBe(false)
   })

@@ -134,6 +134,7 @@ describe('/mkvid routes', () => {
     expect(await health.json()).toEqual({
       ok: true,
       verifiedLists: true,
+      trackUploads: true,
       recreateStyle: 'scene',
       counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0, banned: 0 },
       accounts: [{ account: 'primary', label: 'mkvid-uploads', used: 1, cap: 24 }, { account: 'shared', label: 'tracked-youtube', used: 0, cap: 6 }],
@@ -197,20 +198,24 @@ describe('/mkvid routes', () => {
     expect((await post(env, '/mkvid/fail', { id: crypto.randomUUID() })).status).toBe(400)
   })
 
-  it('the panel API explains the queue: cap, usage, reset time, last poll, waiting line', async () => {
+  it('the panel API explains the queue: cap, usage, reset time, last poll; the waiting line is its own table', async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1', MKVID_DAILY_CLAIM_CAP: '0', MKVID_SHARED_DAILY_CLAIM_CAP: '0' })
     await enqueueMkvidRequest(env, input)
     expect(((await (await post(env, '/mkvid/claim', {})).json()) as { request: unknown }).request).toBeNull()
-    const r = await app.request('http://x/ui/api/mkvid', {}, env)
+    // Home and Settings still send ?limit=1: ignored.
+    const r = await app.request('http://x/ui/api/mkvid?limit=1', {}, env)
     expect(r.status).toBe(200)
-    const d = (await r.json()) as { dailyClaimCap: number; dailyClaims: number; quotaResetsAt: number; now: number; lastPoll: { outcome: string } | null; queue: Array<{ setUrl: string }>; settled: unknown[] }
-    expect(d).toMatchObject({ enabled: true, dailyClaimCap: 0, dailyClaims: 0, lastPoll: { outcome: 'capped', accounts: ['primary'] }, settled: [], accounts: [{ account: 'primary', cap: 0 }, { account: 'shared', cap: 0 }] })
-    expect(d.queue.map((q) => q.setUrl)).toEqual([input.setUrl])
+    const d = (await r.json()) as { dailyClaimCap: number; dailyClaims: number; quotaResetsAt: number; now: number; lastPoll: { outcome: string } | null; rendering: unknown[] }
+    expect(d).toMatchObject({ enabled: true, dailyClaimCap: 0, dailyClaims: 0, lastPoll: { outcome: 'capped', accounts: ['primary'] }, rendering: [], oldVideos: [], counts: { pending: 1 }, accounts: [{ account: 'primary', cap: 0 }, { account: 'shared', cap: 0 }] })
+    expect(d).not.toHaveProperty('queue')
     expect(d.quotaResetsAt).toBeGreaterThan(d.now)
     expect(d.quotaResetsAt - d.now).toBeLessThanOrEqual(25 * 3600)
+    const q = (await (await app.request('http://x/ui/api/mkvid/queue', {}, env)).json()) as { rows: Array<{ setUrl: string; position: number; readiness: unknown }>; total: number }
+    expect(q.rows.map((x) => [x.setUrl, x.position])).toEqual([[input.setUrl, 1]])
+    expect(q.rows[0]!.readiness).toMatchObject({ state: expect.any(String) })
   })
 
-  it('the panel API pages and filters both lists', async () => {
+  it('the queue and finished tables sort, filter, search and page on the server; positions are whole-queue', async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1', MKVID_DAILY_CLAIM_CAP: '10' })
     const sets = [
       ['a', '2026-09-05', 'lillypalmer', 'Lilly Palmer', 'soundcloud'],
@@ -220,71 +225,66 @@ describe('/mkvid routes', () => {
     for (const [n, setDate, slug, artistName, kind] of sets) {
       await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate, slug, artistName, setTitle: `${artistName} @ set ${n}`, source: { kind, url: `https://audio/${n}` } })
     }
-    type Panel = {
-      queue: Array<{ setUrl: string; position: number }>
-      settled: Array<{ setUrl: string; status: string }>
-      queueCursor: string | null
-      queueTotal: number
-      settledCursor: string | null
-      settledTotal: number
-      djs: Array<{ slug: string; label: string; count: number }>
-      counts: Record<string, number>
-      section: string
+    type Table = { rows: Array<{ setUrl: string; position?: number; status: string; artistLabel: string }>; total: number; page: number; pageCount: number }
+    const table = async (which: string, qs = '') => {
+      const r = await app.request(`http://x/ui/api/mkvid/${which}${qs}`, {}, env)
+      expect(r.status, qs).toBe(200)
+      return (await r.json()) as Table
     }
-    const panel = async (qs: string) => (await (await app.request(`http://x/ui/api/mkvid${qs}`, {}, env)).json()) as Panel
-    const names = (rows: ReadonlyArray<{ setUrl: string }>) => rows.map((r) => r.setUrl.split('/').pop())
+    const names = (t: Table) => t.rows.map((r) => r.setUrl.split('/').pop())
 
-    const p1 = await panel('?limit=2')
-    expect(names(p1.queue)).toEqual(['a', 'b'])
-    expect(p1.queue.map((q) => q.position)).toEqual([1, 2])
-    expect(p1.queueTotal).toBe(3)
-    expect(p1.djs).toEqual([
+    const q1 = await table('queue')
+    expect(names(q1)).toEqual(['a', 'b', 'c'])
+    expect(q1.rows.map((q) => q.position)).toEqual([1, 2, 3])
+    expect(q1.rows[0]!.artistLabel).toBe('Lilly Palmer')
+    const header = (await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as { djs: unknown }
+    expect(header.djs).toEqual([
       { slug: 'lillypalmer', label: 'Lilly Palmer', count: 2 },
       { slug: 'johnsummit', label: 'John Summit', count: 1 },
     ])
 
-    // The next page of one list alone: the other is left out, the header still comes along.
-    const p2 = await panel(`?limit=2&section=queue&queueCursor=${encodeURIComponent(p1.queueCursor!)}`)
-    expect(names(p2.queue)).toEqual(['c'])
-    expect(p2.queue[0]!.position).toBe(3)
-    expect(p2.queueCursor).toBeNull()
-    expect(p2.settled).toEqual([])
-    expect(p2.section).toBe('queue')
+    // Other sorts; the position stays the place in the whole queue.
+    const bySet = await table('queue', '?sort=setDate')
+    expect(names(bySet)).toEqual(['c', 'b', 'a'])
+    expect(bySet.rows.map((q) => q.position)).toEqual([3, 2, 1])
+    expect(names(await table('queue', '?sort=-dj,setDate'))).toEqual(['b', 'a', 'c'])
+    // Filters: DJ, source and free text keep whole-queue positions.
+    const jo = await table('queue', '?f.dj=eq:johnsummit')
+    expect([names(jo), jo.rows[0]!.position]).toEqual([['c'], 3])
+    expect(names(await table('queue', '?f.source=in:hearthis'))).toEqual(['b'])
+    expect(names(await table('queue', '?q=set%20a'))).toEqual(['a'])
+    expect(names(await table('queue', '?q=summit'))).toEqual(['c'])
+    expect(names(await table('queue', '?f.setDate=after:2026-09-03'))).toEqual(['a', 'b'])
+    expect((await table('finished')).total).toBe(0)
 
-    // Filters: DJ, source and free text, over both lists.
-    expect(names((await panel('?dj=johnsummit')).queue)).toEqual(['c'])
-    expect(names((await panel('?source=hearthis')).queue)).toEqual(['b'])
-    expect(names((await panel('?q=set%20a')).queue)).toEqual(['a'])
-    const waiting = await panel('?status=pending')
-    expect(names(waiting.queue)).toEqual(['a', 'b', 'c'])
-    expect(waiting.settled).toEqual([])
-
-    // A settled list to page and filter: 'a' fails, 'b' is banned, 'c' is rendering.
+    // A finished list: 'a' fails, 'b' is banned, 'c' is rendering (not finished: it is in the header).
     const first = (await (await post(env, '/mkvid/claim', {})).json()) as { request: { id: string } }
     await post(env, '/mkvid/fail', { id: first.request.id, error: 'incomplete_recording', permanent: true })
     const ids = Object.fromEntries(await Promise.all(['a', 'b'].map(async (n) => [n, (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id])))
     expect((await app.request(`http://x/ui/api/mkvid/ban/${ids.b}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)).status).toBe(200)
     await post(env, '/mkvid/claim', {})
 
-    const s1 = await panel('?limit=2')
-    expect(s1.settled.map((r) => [r.setUrl.split('/').pop(), r.status])).toEqual([['c', 'claimed'], ['a', 'failed']])
-    expect(s1.settledTotal).toBe(3)
-    const s2 = await panel(`?limit=2&section=settled&settledCursor=${encodeURIComponent(s1.settledCursor!)}`)
-    expect(names(s2.settled)).toEqual(['b'])
-    expect(s2.queue).toEqual([])
-    const problems = await panel('?status=failed,banned')
-    expect(names(problems.settled)).toEqual(['a', 'b'])
-    expect(problems.queue).toEqual([])
-    // The global counts stay global — the header is about the queue, not the filter.
-    expect(problems.counts).toMatchObject({ pending: 0, claimed: 1, failed: 1, banned: 1 })
+    const fin = await table('finished', '?size=10')
+    expect(fin.rows.map((r) => [r.setUrl.split('/').pop(), r.status]).sort()).toEqual([['a', 'failed'], ['b', 'banned']])
+    expect(names(await table('finished', '?f.status=in:failed'))).toEqual(['a'])
+    expect(names(await table('finished', '?f.error=has:incomplete'))).toEqual(['a'])
+    expect(names(await table('finished', '?sort=dj,-setDate'))).toEqual(['a', 'b'])
+    expect((await table('queue')).total).toBe(0)
+    const h = (await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as { rendering: Array<{ setUrl: string; status: string }>; counts: Record<string, number> }
+    expect(h.rendering.map((r) => [r.setUrl.split('/').pop(), r.status])).toEqual([['c', 'claimed']])
+    expect(h.counts).toMatchObject({ pending: 0, claimed: 1, failed: 1, banned: 1 })
+    // Paging: page size is clamped to 10..200.
+    for (let i = 0; i < 12; i++) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/p${i}`, setDate: `2026-08-${String(10 + i).padStart(2, '0')}` })
+    const pg = await table('queue', '?size=10&page=2')
+    expect([pg.total, pg.page, pg.pageCount, pg.rows.map((r) => r.position)]).toEqual([12, 2, 2, [11, 12]])
   })
 
-  it('a filter the panel API does not know is a 400, not an empty list', async () => {
+  it('a filter the table API does not know is a 400, not an empty list', async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
-    for (const qs of ['?status=nope', '?status=pending,nope', '?source=bandcamp', '?account=other', '?section=middle']) {
-      const r = await app.request(`http://x/ui/api/mkvid${qs}`, {}, env)
+    for (const qs of ['queue?f.status=in:nope', 'queue?f.source=in:bandcamp', 'finished?f.account=in:other', 'finished?sort=nope', 'queue?f.position=has:1']) {
+      const r = await app.request(`http://x/ui/api/mkvid/${qs}`, {}, env)
       expect([qs, r.status]).toEqual([qs, 400])
-      expect(await r.json()).toMatchObject({ error: 'invalid_request' })
+      expect(await r.json()).toMatchObject({ error: 'bad_table_query' })
     }
   })
 
@@ -312,7 +312,10 @@ describe('/mkvid routes', () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
     for (const [n, d] of [['a', '2026-09-13'], ['b', '2026-09-11'], ['c', '2026-09-05']] as Array<[string, string]>) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate: d })
     const ids = Object.fromEntries(await Promise.all(['a', 'b', 'c'].map(async (n) => [n, (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id])))
-    const panel = async () => ((await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as { queue: Array<{ setUrl: string }>; settled: Array<{ status: string }> })
+    const panel = async () => {
+      const get = async (w: string) => ((await (await app.request(`http://x/ui/api/mkvid/${w}`, {}, env)).json()) as { rows: Array<{ setUrl: string; status: string }> }).rows
+      return { queue: await get('queue'), settled: await get('finished') }
+    }
     const act = (path: string, body?: unknown) => app.request(`http://x/ui/api/mkvid/${path}`, { method: 'POST', headers: { Origin: 'http://x', 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }, env)
 
     expect((await act(`move/${ids.c}`, { to: 'sideways' })).status).toBe(400)

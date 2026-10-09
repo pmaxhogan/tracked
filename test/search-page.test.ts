@@ -35,8 +35,9 @@ async function open(search: string, answer: (u: string) => Promise<Response> | R
   const fetches: string[] = []
   const timers = new Map<number, { fn: () => void; ms: number }>()
   let tid = 0
-  const history = { urls: [] as string[], replaceState(_a: unknown, _b: string, u: string) { this.urls.push(u) } }
   const location: { search: string; pathname: string; href?: string } = { search, pathname: '/ui/search' }
+  // replaceState really changes the query string (the tables keep their state there too).
+  const history = { urls: [] as string[], replaceState(_a: unknown, _b: string, u: string) { this.urls.push(u); const i = u.indexOf('?'); location.search = i < 0 ? '' : u.slice(i) } }
   const ctx = vm.createContext({ document, console, Date, URLSearchParams, URL, AbortController, location, history,
     fetch: async (u: string) => { fetches.push(u); return answer(u) },
     setTimeout: (fn: () => void, ms: number) => { timers.set(++tid, { fn, ms }); return tid }, clearTimeout: (n: number) => { timers.delete(n) }, setInterval: () => 0, clearInterval() {},
@@ -48,7 +49,7 @@ async function open(search: string, answer: (u: string) => Promise<Response> | R
   const fire = (id: string, type: string, ev: any = {}) => listeners.get(id + ':' + type)?.({ preventDefault() {}, target: els.get(id), ...ev })
   const debounced = () => [...timers.entries()].filter(([, t]) => t.ms === 150)
   const runDebounced = async () => { for (const [k, t] of debounced()) { timers.delete(k); t.fn() } await tick() }
-  return { els, html, fetches, searchFetches, fire, timers, debounced, runDebounced, history, location }
+  return { els, html, fetches, searchFetches, fire, timers, debounced, runDebounced, history, location, listeners }
 }
 
 describe('Search page script', () => {
@@ -195,11 +196,60 @@ describe('Search page script', () => {
     p.fire('sq-tabs', 'click', { target: { closest: (s: string) => (s === '[data-kind]' ? { dataset: { kind: 'sets' } } : null) } })
     await tick()
     expect(p.searchFetches()[1]).toContain('kind=sets')
+    expect(p.searchFetches()[1]).toContain('limit=200')
     expect(p.history.urls.at(-1)).toContain('kind=sets')
-    const one = p.els.get('sq-results').innerHTML as string
-    expect(one).toContain('Sets <span class="n">2</span>')
-    expect(one.match(/data-set-row/g)!.length).toBe(2)
+    // A single kind is a table: the All list is emptied, the Sets table shows, best match first.
+    expect(p.els.get('sq-results').innerHTML).toBe('')
+    expect(p.els.get('sq-t-sets').hidden).toBe(false)
+    expect(p.els.get('sq-t-tracks').hidden).toBe(true)
+    const one = p.els.get('sqs-body').innerHTML as string
+    expect(one.match(/data-tkt-row=/g)!.length).toBe(2)
+    expect(one.indexOf('Set A')).toBeLessThan(one.indexOf('Set B'))
+    expect(one).toContain('id="sq-sets-0"')
+    expect(one).toContain('>95<') // the Match column
     expect(one).not.toContain('sq-kind')
+    expect(p.els.get('sqs-pager').innerHTML).toContain('1–2 of 2')
+  })
+
+  it('a kind tab is a sortable, filterable table: header sort, keyboard order follows the table, expand and links still work', async () => {
+    const tracks = [
+      track({ trackKey: 'ta', trackId: '55', artist: 'Zed', title: 'Track A', label: 'Lbl <x>', score: 0.9, sets: [{ url: SET_URL, title: 'S', djSlug: 'maup', djName: 'Mau P', date: '2026-01-01', cueSeconds: 65 }] }),
+      track({ trackKey: 'tb', artist: 'Abe', title: 'Track B', score: 0.5, youtubeLink: 'https://youtu.be/b', sets: [{ url: SET_URL + 'b', title: 'S2', djSlug: 'x', djName: 'X', date: '2026-09-01', cueSeconds: null }] }),
+    ]
+    const answer = (u: string) => u.startsWith('/ui/api/search') ? Response.json(response({ tracks, sets: [], djs: [] })) : u === '/ui/api/tracklist/links' ? Response.json({ links: { '55': { youtubeLink: 'https://youtu.be/zzz' } } }) : new Response('{}', { status: 404 })
+    const p = await open('?q=mau&kind=tracks', answer)
+    expect(p.searchFetches()[0]).toContain('kind=tracks&limit=200')
+    const body = () => p.els.get('sqt-body').innerHTML as string
+    expect(body().indexOf('Track A')).toBeLessThan(body().indexOf('Track B'))
+    expect(body()).toContain('Lbl &lt;x&gt;')
+    expect(body()).toContain('<mark>Mau</mark>')
+    // Sort by artist (a header click on the table root): Abe first.
+    const tableClick = p.listeners.get('sq-t-tracks:click')!
+    const sortTarget = (col: string) => { const t: any = { getAttribute: (k: string) => (k === 'data-tkt' ? 'sort' : k === 'data-col' ? col : null), closest: (sel: string) => (sel === '[data-tkt]' ? t : null) }; return { target: t } }
+    tableClick(sortTarget('artist'))
+    expect(body().indexOf('Track B')).toBeLessThan(body().indexOf('Track A'))
+    // The arrow keys walk the rows in the order shown.
+    p.fire('sq', 'keydown', { key: 'ArrowDown' })
+    expect(p.els.get('sq')['@aria-activedescendant']).toBe('sq-tracks-1')
+    p.fire('sq', 'keydown', { key: 'Enter' })
+    expect(p.location.href).toBe('/ui/set?url=' + encodeURIComponent(SET_URL + 'b'))
+    // Expand lists the sets; the links button looks the track up.
+    p.fire('sq-tables', 'click', { target: { closest: (sel: string) => (sel === '[data-exp]' ? { dataset: { exp: 'ta' } } : null) } })
+    expect(body()).toContain('class="sq-sets"')
+    expect(body()).toContain('1:05')
+    p.fire('sq-tables', 'click', { target: { closest: (sel: string) => (sel === '[data-links]' ? { dataset: { links: 'ta' } } : null) } })
+    await tick()
+    expect(body()).toContain('href="https://youtu.be/zzz"')
+    // The order (artist) survived the repaints.
+    expect(body().indexOf('Track B')).toBeLessThan(body().indexOf('Track A'))
+  })
+
+  it('a full window of 200 says so', async () => {
+    const sets = Array.from({ length: 200 }, (_, i) => ({ url: SET_URL + i, title: 'Set ' + i, djSlug: 'maup', djName: 'Mau P', date: null, videoId: null, trackCount: 1, idedCount: 1, image: null, score: 1 - i / 1000 }))
+    const p = await open('?q=mau&kind=sets', () => Response.json(response({ tracks: [], djs: [], sets })))
+    expect(p.els.get('sq-cap').hidden).toBe(false)
+    expect(p.els.get('sq-cap').textContent).toContain('best 200')
+    expect(p.els.get('sqs-pager').innerHTML).toContain('1–50 of 200')
   })
 
   it('every row has a square thumbnail: an R2 image path over a lettered placeholder; anything else is just the placeholder', async () => {
