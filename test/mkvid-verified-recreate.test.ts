@@ -381,7 +381,8 @@ describe('videos deleted on YouTube (checkDeletedMkvidVideos)', () => {
     expect(api.asked.flat().sort()).toEqual([OLD, 'liveVid0001'].sort())
     // Its item is found by paging through each playlist, and deleted by item id.
     expect(api.deleted.sort()).toEqual([`PLa:${OLD}`, `PLc:${OLD}`])
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalledWith('PLa', 'liveVid0001', 'ya29')
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    expect(listPlaylistVideoIds).not.toHaveBeenCalled()
     expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', videoId: null, attempts: 0 })
     expect(await getMkvidRequest(env, b.id)).toMatchObject({ status: 'done', videoId: 'liveVid0001' })
     expect(await env.DB.prepare('SELECT video_id, video_source FROM tracklists WHERE url = ?').bind(a.setUrl).first()).toEqual({ video_id: null, video_source: null })
@@ -407,19 +408,30 @@ describe('videos deleted on YouTube (checkDeletedMkvidVideos)', () => {
     expect((await getMkvidRequest(env, a.id))!.status).toBe('pending')
   })
 
-  it('does not believe every video gone at once, and leaves a request mid-recreation alone', async () => {
+  it('does not believe a large share of the videos gone at once', async () => {
     const env = makeEnv()
     const a = await doneRequest(env, 'set', 'scene')
     const ids = ['v0000000001', 'v0000000002', 'v0000000003', 'v0000000004']
     for (const [i, id] of ids.entries()) await otherDone(env, `n${i}`, id)
-    expect(await checkDeletedMkvidVideos(env, log, { fetcher: videosApi([OLD, ...ids]).fetcher })).toEqual({ checked: 5, gone: 5, remade: 0, skipped: 'all_gone' })
+    expect(await checkDeletedMkvidVideos(env, log, { fetcher: videosApi([OLD, ...ids]).fetcher })).toEqual({ checked: 5, gone: 5, remade: 0, skipped: 'too_many_gone' })
     expect((await getMkvidRequest(env, a.id))!.status).toBe('done')
     expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    // Recreating: its old video is gone, but the replacement is already queued.
+  })
+
+  it('a recreation whose old video is gone stops being a replacement and keeps its place in the queue', async () => {
+    const env = makeEnv()
+    const a = await doneRequest(env, 'set', null)
+    await otherDone(env, 'other', 'liveVid0001')
     expect((await recreateMkvidRequest(env, a.id, log)).ok).toBe(true)
+    const before = (await env.DB.prepare('SELECT sort_key FROM mkvid_requests WHERE id = ?').bind(a.id).first<{ sort_key: number }>())!.sort_key
     const api = videosApi([OLD])
-    expect(await checkDeletedMkvidVideos(env, log, { fetcher: api.fetcher, force: true })).toEqual({ checked: 4, gone: 0, remade: 0 })
-    expect(api.asked.flat()).not.toContain(OLD)
+    expect(await checkDeletedMkvidVideos(env, log, { fetcher: api.fetcher })).toEqual({ checked: 2, gone: 1, remade: 1 })
+    expect(api.deleted).toEqual([`PLa:${OLD}`])
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', videoId: null, replacesVideoId: null })
+    expect((await env.DB.prepare('SELECT sort_key FROM mkvid_requests WHERE id = ?').bind(a.id).first<{ sort_key: number }>())!.sort_key).toBe(before)
+    expect(await env.DB.prepare('SELECT video_id FROM tracklists WHERE url = ?').bind(a.setUrl).first()).toEqual({ video_id: null })
+    expect(await env.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first()).toEqual({ state: 'deleted', replaced_by: 'gone' })
+    expect((await retryDueOldVideoDeletions(env, log)).tried).toBe(0)
   })
 })
 

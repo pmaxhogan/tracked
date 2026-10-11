@@ -331,13 +331,13 @@ export async function removeListedVideosFromPlaylist(
   const found: Array<{ itemId: string; videoId: string }> = []
   let pageToken: string | undefined
   for (;;) {
-    const params = new URLSearchParams({ part: 'id,contentDetails', playlistId, maxResults: '50' })
+    const params = new URLSearchParams({ part: 'id,snippet,contentDetails', playlistId, maxResults: '50' })
     if (pageToken) params.set('pageToken', pageToken)
     const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
     await expectOk(res, 'playlistItems.list', playlistId)
-    const data = (await res.json()) as { items?: Array<{ id?: string; contentDetails?: { videoId?: string } }>; nextPageToken?: string }
+    const data = (await res.json()) as { items?: Array<{ id?: string; snippet?: { resourceId?: { videoId?: string } }; contentDetails?: { videoId?: string } }>; nextPageToken?: string }
     for (const it of data.items ?? []) {
-      const v = it.contentDetails?.videoId
+      const v = it.contentDetails?.videoId || it.snippet?.resourceId?.videoId
       if (it.id && v && videoIds.has(v)) found.push({ itemId: it.id, videoId: v })
     }
     if (!data.nextPageToken) break
