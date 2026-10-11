@@ -31,9 +31,12 @@ import type { Env } from '../types'
 import { dbOf } from './db'
 import { pullInHeldRecheck, TIMED_SQL } from './mkvid-readiness'
 import { errorFields, type Logger } from './log'
-import { openCombinedPlaylist, removeFromCombined, type CombinedHandle } from './combined-playlist'
-import { cachePlaylistVideoIds } from './playlist-cache'
-import { listPlaylistVideoIds, removeVideoFromPlaylist } from './youtube-playlists'
+import { loadCombinedState, openCombinedPlaylist, removeFromCombined, type CombinedHandle } from './combined-playlist'
+import { cachePlaylistVideoIds, invalidatePlaylistVideoIds } from './playlist-cache'
+import { isQuotaError, listPlaylistVideoIds, removeListedVideosFromPlaylist, removeVideoFromPlaylist } from './youtube-playlists'
+import { fetchVideoMeta, saveVideoMeta } from './video-meta'
+import { getAccessToken } from './google-oauth'
+import { getAppSettings } from './app-settings'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
@@ -212,8 +215,11 @@ export type UnpublishResult =
  * It renders again whenever the claim's gates (verified, timed, ID wait)
  * pass. Needs the YouTube connection: an artist playlist failure throws
  * before anything is written, so it leaves everything as it was.
+ * `gone` = the video is already deleted on YouTube (checkDeletedMkvidVideos):
+ * the same steps, but its old-video row is written as deleted (replaced_by
+ * 'gone') and mkvid is not asked to delete anything.
  */
-export async function unpublishMkvidRequest(env: Env, id: string, log: Logger, accessToken: string | null): Promise<UnpublishResult> {
+export async function unpublishMkvidRequest(env: Env, id: string, log: Logger, accessToken: string | null, opts: { gone?: boolean } = {}): Promise<UnpublishResult> {
   const db = dbOf(env)
   const row = await db
     .prepare('SELECT slug, set_url, status, video_id, replaces_video_id, style FROM mkvid_requests WHERE id = ?')
@@ -229,7 +235,8 @@ export async function unpublishMkvidRequest(env: Env, id: string, log: Logger, a
   const pl = await db.prepare('SELECT playlist_id FROM sub_sync WHERE slug = ?').bind(row.slug).first<{ playlist_id: string | null }>()
   if (pl?.playlist_id) {
     const ids = await listPlaylistVideoIds(pl.playlist_id, accessToken)
-    if (ids.has(videoId)) {
+    // A deleted video's item may be missing from the listing while still in the playlist: try the removal anyway.
+    if (ids.has(videoId) || opts.gone) {
       removedFromArtist = (await removeVideoFromPlaylist(pl.playlist_id, videoId, accessToken)) > 0
       ids.delete(videoId)
     }
@@ -244,7 +251,13 @@ export async function unpublishMkvidRequest(env: Env, id: string, log: Logger, a
     log.warn('mkvid.unpublish_combined_remove_failed', { id, videoId, ...errorFields(e) })
   }
   // Recorded before the request lets go of the id, so no path can lose it.
-  await markOldVideoForDelete(env, { requestId: id, slug: row.slug, setUrl: row.set_url, oldVideoId: videoId, oldStyle: row.style, replacedBy: 'unpublished' })
+  await markOldVideoForDelete(env, { requestId: id, slug: row.slug, setUrl: row.set_url, oldVideoId: videoId, oldStyle: row.style, replacedBy: opts.gone ? 'gone' : 'unpublished' })
+  if (opts.gone) {
+    await db
+      .prepare("UPDATE mkvid_old_videos SET state = 'deleted', last_error = 'already gone from YouTube', deleted_at = ?, updated_at = ? WHERE video_id = ? AND replaced_by = 'gone' AND state = 'pending'")
+      .bind(nowSeconds(), nowSeconds(), videoId)
+      .run()
+  }
   await db.batch([
     db
       .prepare(
@@ -258,7 +271,7 @@ export async function unpublishMkvidRequest(env: Env, id: string, log: Logger, a
       .bind(row.set_url, videoId),
   ])
   await pullInHeldRecheck(env, row.set_url)
-  log.info('mkvid.unpublished', { id, videoId, removedFromArtist, removedFromCombined })
+  log.info(opts.gone ? 'mkvid.gone_video_remade' : 'mkvid.unpublished', { id, videoId, removedFromArtist, removedFromCombined })
   return { ok: true, id, videoId, removedFromArtist, removedFromCombined }
 }
 
@@ -534,4 +547,116 @@ export async function resetOldVideoDelete(env: Env, videoId: string): Promise<bo
 export async function replacedVideoOf(env: Env, requestId: string): Promise<string | null> {
   const r = await dbOf(env).prepare('SELECT replaces_video_id FROM mkvid_requests WHERE id = ?').bind(requestId).first<{ replaces_video_id: string | null }>()
   return r?.replaces_video_id ?? null
+}
+
+// ─── videos deleted on YouTube ──────────────────────────────────────────────
+
+const LAST_GONE_CHECK_KEY = 'mkvid:gone_check:last'
+/** Videos one run takes out and queues again (about 100 quota units each: two playlist removals). The rest wait an hour. */
+export const GONE_MAX_PER_RUN = 10
+/** Every video looking gone at once (at least this many) is not believed: the wrong account or an API fault, not deletions. */
+export const GONE_ALL_MIN = 5
+
+export type GoneCheckResult = {
+  skipped?: 'off' | 'not_due' | 'not_connected' | 'all_gone' | 'error'
+  checked: number
+  gone: number
+  remade: number
+  stoppedBy?: 'quota'
+}
+
+/**
+ * Cron: every `mkvid.goneCheckHours` (0 = off), ask YouTube (videos.list, 1
+ * quota unit per 50) whether each delivered mkvid video still exists. One
+ * that is deleted, or whose upload YouTube failed or rejected, is taken out
+ * of the artist and combined playlists (YouTube keeps a deleted video's item
+ * in a playlist; each playlist is paged through once to find them) and its
+ * request goes back to `pending`, so mkvid renders the set again
+ * (unpublishMkvidRequest, `gone`). A request mid-recreation is
+ * left alone: its replacement is already queued. Never throws.
+ */
+export async function checkDeletedMkvidVideos(
+  env: Env,
+  log: Logger,
+  opts: { accessToken?: string; fetcher?: typeof fetch; nowMs?: number; force?: boolean } = {},
+): Promise<GoneCheckResult> {
+  const out: GoneCheckResult = { checked: 0, gone: 0, remade: 0 }
+  try {
+    const interval = (await getAppSettings(env)).mkvid.goneCheckHours * 3600
+    if (interval <= 0 && !opts.force) return { ...out, skipped: 'off' }
+    const now = Math.floor((opts.nowMs ?? Date.now()) / 1000)
+    if (!opts.force) {
+      const last = Number((await env.SUBS.get(LAST_GONE_CHECK_KEY)) ?? 0)
+      if (Number.isFinite(last) && now - last < interval) return { ...out, skipped: 'not_due' }
+    }
+    const token = opts.accessToken ?? (await getAccessToken(env))?.accessToken
+    if (!token) return { ...out, skipped: 'not_connected' }
+    await env.SUBS.put(LAST_GONE_CHECK_KEY, String(now))
+    const rows = (
+      await dbOf(env)
+        .prepare(
+          `SELECT r.id, r.video_id, s.playlist_id FROM mkvid_requests r LEFT JOIN sub_sync s ON s.slug = r.slug
+            WHERE r.status = 'done' AND r.video_id IS NOT NULL AND r.replaces_video_id IS NULL ORDER BY r.updated_at`,
+        )
+        .all<{ id: string; video_id: string; playlist_id: string | null }>()
+    ).results
+    out.checked = rows.length
+    if (rows.length === 0) return out
+    const metas = await fetchVideoMeta(rows.map((r) => r.video_id), token, opts.fetcher, now)
+    await saveVideoMeta(env, metas.values())
+    const gone = rows.filter((r) => metas.get(r.video_id)?.alive === false)
+    out.gone = gone.length
+    if (gone.length === 0) return out
+    if (gone.length === rows.length && rows.length >= GONE_ALL_MIN) {
+      log.error('mkvid.gone_check_all_gone', { checked: rows.length })
+      return { ...out, skipped: 'all_gone' }
+    }
+    const batch = gone.slice(0, GONE_MAX_PER_RUN)
+    // The playlist items first, each playlist paged through once. A playlist that fails here keeps its requests done, so the next run tries again.
+    const byPlaylist = new Map<string, Set<string>>()
+    const combinedId = (await loadCombinedState(env)).playlistId ?? null
+    for (const r of batch) {
+      for (const pl of [r.playlist_id, combinedId]) {
+        if (!pl) continue
+        if (!byPlaylist.has(pl)) byPlaylist.set(pl, new Set())
+        byPlaylist.get(pl)!.add(r.video_id)
+      }
+    }
+    const failedPlaylists = new Set<string>()
+    for (const [pl, ids] of byPlaylist) {
+      try {
+        const removed = await removeListedVideosFromPlaylist(pl, ids, token, opts.fetcher)
+        if (removed.size) await invalidatePlaylistVideoIds(env, pl)
+        log.info('mkvid.gone_playlist_cleaned', { playlistId: pl, wanted: ids.size, removed: [...removed.values()].reduce((a, b) => a + b, 0) })
+      } catch (e) {
+        failedPlaylists.add(pl)
+        log.warn('mkvid.gone_playlist_clean_failed', { playlistId: pl, ...errorFields(e) })
+        if (isQuotaError(e)) {
+          out.stoppedBy = 'quota'
+          break
+        }
+      }
+    }
+    for (const r of out.stoppedBy ? [] : batch) {
+      if ((r.playlist_id && failedPlaylists.has(r.playlist_id)) || (combinedId && failedPlaylists.has(combinedId))) continue
+      try {
+        const u = await unpublishMkvidRequest(env, r.id, log, token, { gone: true })
+        if (u.ok) out.remade += 1
+        else log.warn('mkvid.gone_video_not_remade', { id: r.id, videoId: r.video_id, error: u.error })
+      } catch (e) {
+        log.warn('mkvid.gone_video_remake_failed', { id: r.id, videoId: r.video_id, ...errorFields(e) })
+        if (isQuotaError(e)) {
+          out.stoppedBy = 'quota'
+          break
+        }
+      }
+    }
+    // More than one run takes, or one that failed: look again in an hour instead of a full interval.
+    if (out.remade < gone.length && interval > 3600) await env.SUBS.put(LAST_GONE_CHECK_KEY, String(now - interval + 3600))
+    log.info('mkvid.gone_check', { ...out })
+    return out
+  } catch (e) {
+    log.warn('mkvid.gone_check_threw', errorFields(e))
+    return { ...out, skipped: 'error' }
+  }
 }

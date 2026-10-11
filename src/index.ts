@@ -30,7 +30,7 @@ import { mkvidOpsApp } from './routes/mkvid-ops'
 import { prunePoolEvents, retryFailedPoolPushes } from './lib/pool-events'
 import { pruneSchedulerTicks, recordSchedulerTick } from './lib/tick-history'
 import { playlistHoldNotifier, runPlaylistHygiene } from './lib/playlist-hygiene'
-import { retryDueOldVideoDeletions } from './lib/mkvid-recreate'
+import { checkDeletedMkvidVideos, retryDueOldVideoDeletions } from './lib/mkvid-recreate'
 import { youtubeTokenRefresher } from './lib/google-oauth'
 import { maybeSnapshotStats } from './lib/stats'
 import { setAccessTokenRefresher } from './lib/youtube-playlists'
@@ -207,6 +207,8 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       if (env.MKVID_TOKEN) {
         const d = await retryDueOldVideoDeletions(env, log)
         if (d.tried) log.info('cron.mkvid_old_video_deletes', d)
+        // Delivered videos deleted on YouTube: out of the playlists, rendered again (self-paced, never throws).
+        if (!isDaily) await checkDeletedMkvidVideos(env, log)
       }
       if (isDaily) {
         // D1 has no TTLs: keep the audit trails at the 90-day horizon (scheduler tick history: 14 days).

@@ -33,6 +33,7 @@ const APP_GROUPS: FormGroup[] = [
           { value: 'private', label: 'private' },
         ],
       },
+      { path: 'mkvid.goneCheckHours', label: 'Look for deleted videos every', help: 'One gone from YouTube leaves the playlists and is rendered again. 0 = never. Default 6.', unit: 'h', min: 0, max: 168 },
     ],
   },
   {

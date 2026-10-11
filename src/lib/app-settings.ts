@@ -37,6 +37,8 @@ export const AppSettingsSchema = z.object({
     unverifiedRetryMinutes: z.number().int().min(5).max(24 * 60),
     /** Privacy mkvid uploads a set with (sent on every claim; an mkvid from before this uses its TRACKED_PRIVACY). */
     privacy: z.enum(['public', 'unlisted', 'private']),
+    /** Every this many hours, delivered videos that are gone from YouTube leave the playlists and are rendered again (default 6). 0 = never. */
+    goneCheckHours: z.number().min(0).max(24 * 7),
   }),
   playlists: z.object({
     /** The daily playlist sweep only reports; null = PLAYLIST_SWEEP_DRY_RUN (unset = true). */
@@ -115,7 +117,7 @@ export const AppSettingsSchema = z.object({
 export type AppSettings = z.infer<typeof AppSettingsSchema>
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  mkvid: { dailyClaimCap: null, sharedDailyClaimCap: null, claimTtlMinutes: null, maxAttempts: 3, retryBackoffHours: 6, unverifiedRetryMinutes: 60, privacy: 'unlisted' },
+  mkvid: { dailyClaimCap: null, sharedDailyClaimCap: null, claimTtlMinutes: null, maxAttempts: 3, retryBackoffHours: 6, unverifiedRetryMinutes: 60, privacy: 'unlisted', goneCheckHours: 6 },
   playlists: {
     sweepDryRun: null,
     sweepDailyRemovals: null,

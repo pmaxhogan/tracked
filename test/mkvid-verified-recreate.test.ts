@@ -23,6 +23,7 @@ import {
 import { ID_WAIT_SECONDS, isVerified, mkvidReadiness, readinessFor, pullInHeldRecheck, setAgeReference, timedRowCounts } from '../src/lib/mkvid-readiness'
 import {
   callMkvidDelete,
+  checkDeletedMkvidVideos,
   countOldStyleVideos,
   deleteBackoffSeconds,
   deleteOldVideo,
@@ -33,6 +34,7 @@ import {
   retryDueOldVideoDeletions,
 } from '../src/lib/mkvid-recreate'
 import { cachePlaylistVideoIds } from '../src/lib/playlist-cache'
+import { saveCombinedState } from '../src/lib/combined-playlist'
 import { parseTracklist } from '../src/lib/tracklists1001'
 import { saveSubState, setTracklistVideo } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
@@ -333,6 +335,93 @@ function stubMkvid(answer: (url: string, init: RequestInit) => Response) {
   return calls
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+
+describe('videos deleted on YouTube (checkDeletedMkvidVideos)', () => {
+  /**
+   * videos.list answering with every asked id except `gone`; a `failed` id comes back with uploadStatus failed.
+   * playlistItems.list answers every playlist with one item per `gone` video (YouTube keeps a deleted video's item); deletes are recorded.
+   */
+  const videosApi = (gone: string[], failed: string[] = []) => {
+    const asked: string[][] = []
+    const deleted: string[] = []
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      const u = new URL(url)
+      if (u.pathname.endsWith('/playlistItems')) {
+        if (init?.method === 'DELETE') {
+          deleted.push(u.searchParams.get('id')!)
+          return new Response(null, { status: 204 })
+        }
+        const pl = u.searchParams.get('playlistId')
+        return new Response(JSON.stringify({ items: gone.map((v) => ({ id: `${pl}:${v}`, contentDetails: { videoId: v } })) }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      const ids = u.searchParams.get('id')!.split(',')
+      asked.push(ids)
+      const items = ids.filter((id) => !gone.includes(id)).map((id) => ({ id, contentDetails: { duration: 'PT1H' }, status: { privacyStatus: 'public', uploadStatus: failed.includes(id) ? 'failed' : 'processed' } }))
+      return new Response(JSON.stringify({ items }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch
+    return { asked, deleted, fetcher }
+  }
+  /** A second done request with its own video, in the same artist playlist. */
+  async function otherDone(env: Env, name: string, videoId: string) {
+    const b = await queue(env, name)
+    await setTracklistVideo(env, 'lillypalmer', b.setUrl, { videoId, source: 'mkvid' })
+    await env.DB.prepare("UPDATE mkvid_requests SET status = 'done', video_id = ?, style = 'scene', attempts = 1 WHERE id = ?").bind(videoId, b.id).run()
+    return b
+  }
+
+  it('a deleted video leaves both playlists and its set is queued again; a live one is untouched; mkvid is not asked to delete', async () => {
+    const env = makeEnv({ MKVID_URL: 'https://mkvid.example/' })
+    const a = await doneRequest(env, 'set', 'scene')
+    const b = await otherDone(env, 'other', 'liveVid0001')
+    await saveCombinedState(env, { playlistId: 'PLc' })
+    const mkvidCalls = stubMkvid(() => json({ ok: true, outcome: 'deleted' }))
+    const api = videosApi([OLD])
+    const r = await checkDeletedMkvidVideos(env, log, { fetcher: api.fetcher })
+    expect(r).toEqual({ checked: 2, gone: 1, remade: 1 })
+    expect(api.asked.flat().sort()).toEqual([OLD, 'liveVid0001'].sort())
+    // Its item is found by paging through each playlist, and deleted by item id.
+    expect(api.deleted.sort()).toEqual([`PLa:${OLD}`, `PLc:${OLD}`])
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalledWith('PLa', 'liveVid0001', 'ya29')
+    expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', videoId: null, attempts: 0 })
+    expect(await getMkvidRequest(env, b.id)).toMatchObject({ status: 'done', videoId: 'liveVid0001' })
+    expect(await env.DB.prepare('SELECT video_id, video_source FROM tracklists WHERE url = ?').bind(a.setUrl).first()).toEqual({ video_id: null, video_source: null })
+    expect(await env.DB.prepare('SELECT state, replaced_by FROM mkvid_old_videos WHERE video_id = ?').bind(OLD).first()).toEqual({ state: 'deleted', replaced_by: 'gone' })
+    expect((await retryDueOldVideoDeletions(env, log)).tried).toBe(0)
+    expect(mkvidCalls).toEqual([])
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(a.id)
+  })
+
+  it('is paced by mkvid.goneCheckHours, off at 0, and treats a failed upload as gone', async () => {
+    const env = makeEnv()
+    const a = await doneRequest(env, 'set', 'scene')
+    await otherDone(env, 'other', 'liveVid0001')
+    const t0 = Date.now()
+    expect(await checkDeletedMkvidVideos(env, log, { fetcher: videosApi([]).fetcher, nowMs: t0 })).toEqual({ checked: 2, gone: 0, remade: 0 })
+    const api = videosApi([], [OLD])
+    expect((await checkDeletedMkvidVideos(env, log, { fetcher: api.fetcher, nowMs: t0 + 5 * 3600_000 })).skipped).toBe('not_due')
+    expect(api.asked).toEqual([])
+    expect((await updateAppSettings(env, { mkvid: { goneCheckHours: 0 } })).ok).toBe(true)
+    expect((await checkDeletedMkvidVideos(env, log, { fetcher: api.fetcher, nowMs: t0 + 7 * 3600_000 })).skipped).toBe('off')
+    expect((await updateAppSettings(env, { mkvid: { goneCheckHours: 6 } })).ok).toBe(true)
+    expect(await checkDeletedMkvidVideos(env, log, { fetcher: api.fetcher, nowMs: t0 + 7 * 3600_000 })).toEqual({ checked: 2, gone: 1, remade: 1 })
+    expect((await getMkvidRequest(env, a.id))!.status).toBe('pending')
+  })
+
+  it('does not believe every video gone at once, and leaves a request mid-recreation alone', async () => {
+    const env = makeEnv()
+    const a = await doneRequest(env, 'set', 'scene')
+    const ids = ['v0000000001', 'v0000000002', 'v0000000003', 'v0000000004']
+    for (const [i, id] of ids.entries()) await otherDone(env, `n${i}`, id)
+    expect(await checkDeletedMkvidVideos(env, log, { fetcher: videosApi([OLD, ...ids]).fetcher })).toEqual({ checked: 5, gone: 5, remade: 0, skipped: 'all_gone' })
+    expect((await getMkvidRequest(env, a.id))!.status).toBe('done')
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+    // Recreating: its old video is gone, but the replacement is already queued.
+    expect((await recreateMkvidRequest(env, a.id, log)).ok).toBe(true)
+    const api = videosApi([OLD])
+    expect(await checkDeletedMkvidVideos(env, log, { fetcher: api.fetcher, force: true })).toEqual({ checked: 4, gone: 0, remade: 0 })
+    expect(api.asked.flat()).not.toContain(OLD)
+  })
+})
 
 describe('delete video (unpublish)', () => {
   const postUi = (env: Env, path: string) => app.request(`http://x${path}`, { method: 'POST', headers: { Origin: 'http://x', 'Content-Type': 'application/json' }, body: '{}' }, env)

@@ -98,7 +98,7 @@ describe('pool settings: scheduler constants', () => {
 describe('app settings', () => {
   it('defaults equal the old constants; env-backed fields default to null', () => {
     expect(MKVID_MAX_ATTEMPTS).toBe(3)
-    expect(DEFAULT_APP_SETTINGS.mkvid).toEqual({ dailyClaimCap: null, sharedDailyClaimCap: null, claimTtlMinutes: null, maxAttempts: 3, retryBackoffHours: 6, unverifiedRetryMinutes: 60, privacy: 'unlisted' })
+    expect(DEFAULT_APP_SETTINGS.mkvid).toEqual({ dailyClaimCap: null, sharedDailyClaimCap: null, claimTtlMinutes: null, maxAttempts: 3, retryBackoffHours: 6, unverifiedRetryMinutes: 60, privacy: 'unlisted', goneCheckHours: 6 })
     expect(DEFAULT_APP_SETTINGS.playlists.shortToleranceMinutes * 60).toBe(SHORTER_THAN_CUE_TOLERANCE_SECONDS)
     expect(DEFAULT_APP_SETTINGS.playlists.audioToleranceMinutes * 60).toBe(AUDIO_LONGER_TOLERANCE_SECONDS)
     expect(DEFAULT_APP_SETTINGS.playlists).toMatchObject({ massRemovalMax: 5, massRemovalRatio: 0.3, runRemovalMax: 15, combinedDailyInsertCap: 80, combinedMaxInsertsPerRun: 20 })

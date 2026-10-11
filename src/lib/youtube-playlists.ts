@@ -316,6 +316,41 @@ export async function removeVideoFromPlaylist(
   return itemIds.length
 }
 
+/**
+ * Remove every item of `playlistId` whose video is in `videoIds`, found by
+ * paging through the whole playlist rather than by the `videoId` filter: that
+ * is how the item of a video deleted from YouTube is reliably found. Returns
+ * the deletes per video. 1 unit per page of 50 plus 50 per item removed.
+ */
+export async function removeListedVideosFromPlaylist(
+  playlistId: string,
+  videoIds: ReadonlySet<string>,
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<Map<string, number>> {
+  const found: Array<{ itemId: string; videoId: string }> = []
+  let pageToken: string | undefined
+  for (;;) {
+    const params = new URLSearchParams({ part: 'id,contentDetails', playlistId, maxResults: '50' })
+    if (pageToken) params.set('pageToken', pageToken)
+    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
+    await expectOk(res, 'playlistItems.list', playlistId)
+    const data = (await res.json()) as { items?: Array<{ id?: string; contentDetails?: { videoId?: string } }>; nextPageToken?: string }
+    for (const it of data.items ?? []) {
+      const v = it.contentDetails?.videoId
+      if (it.id && v && videoIds.has(v)) found.push({ itemId: it.id, videoId: v })
+    }
+    if (!data.nextPageToken) break
+    pageToken = data.nextPageToken
+  }
+  const out = new Map<string, number>()
+  for (const f of found) {
+    await deletePlaylistItem(f.itemId, accessToken, fetcher)
+    out.set(f.videoId, (out.get(f.videoId) ?? 0) + 1)
+  }
+  return out
+}
+
 /** YouTube's alias for the authenticated user's "Liked videos" playlist — what YouTube Music shows as "Liked songs". */
 export const LIKED_VIDEOS_PLAYLIST_ID = 'LL'
 
