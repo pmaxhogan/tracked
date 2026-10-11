@@ -36,6 +36,7 @@ import { cachePlaylistVideoIds } from '../src/lib/playlist-cache'
 import { parseTracklist } from '../src/lib/tracklists1001'
 import { saveSubState, setTracklistVideo } from '../src/lib/sync-store'
 import { makeLogger } from '../src/lib/log'
+import { updateAppSettings } from '../src/lib/app-settings'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -199,10 +200,19 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     expect(claimed.id).toBe(b.id)
     expect(claimed.tracksTrusted).toBe(true)
     expect(claimed.tracks.length).toBeGreaterThan(0)
+    expect(claimed.privacy).toBe('unlisted') // the mkvid.privacy setting's default
     expect(await getMkvidRequest(env, a.id)).toMatchObject({ status: 'pending', attempts: 0, notBefore: null, error: null })
     expect(await claimMkvidRequest(env, log, ['primary'], 'scene')).toBeNull()
     expect(await isVerified(env, a.setUrl)).toBe(false)
     expect(await isVerified(env, b.setUrl)).toBe(true)
+  })
+
+  it('a claim carries the mkvid.privacy setting, and the stored row keeps what YouTube applied', async () => {
+    const env = makeEnv()
+    const a = await queue(env, 'a', { setDate: '2026-02-01' })
+    expect((await updateAppSettings(env, { mkvid: { privacy: 'public' } })).ok).toBe(true)
+    expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!).toMatchObject({ id: a.id, privacy: 'public' })
+    expect((await getMkvidRequest(env, a.id))!.privacy).toBeNull()
   })
 
   it('passes over a verified list under 90 % timed (Render now included), and serves one at 90 %', async () => {

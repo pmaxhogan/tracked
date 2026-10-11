@@ -43,7 +43,7 @@ curl -sS -X POST https://<worker>/now-playing -H "Authorization: Bearer $TOKEN" 
 
 Sending `videoTitle` is the robust choice: even if the YouTube Data API can't confidently match the title to a video, the worker still searches 1001tracklists directly by that title, so the tracklist is found as long as 1001tracklists has it.
 
-Sets tracked already knows are answered from its own D1 before either upstream is asked. A title that names a set [mkvid](#sets-without-a-youtube-recording-mkvid) uploaded resolves straight to that upload and its tracklist (those videos are unlisted, so the YouTube Data API's search never returns them and 1001tracklists never has their URL), and a `videoUrl` the sync has already resolved a set to skips the 1001tracklists search. Such requests show `via: "tracked_db"` in the audit trail. `no_video` / `no_tracklist` responses carry a `message` field describing what happened (whether a video was matched, which searches ran).
+Sets tracked already knows are answered from its own D1 before either upstream is asked. A title that names a set [mkvid](#sets-without-a-youtube-recording-mkvid) uploaded resolves straight to that upload and its tracklist (those videos are unlisted unless `mkvid.privacy` says otherwise, so the YouTube Data API's search does not return them and 1001tracklists never has their URL), and a `videoUrl` the sync has already resolved a set to skips the 1001tracklists search. Such requests show `via: "tracked_db"` in the audit trail. `no_video` / `no_tracklist` responses carry a `message` field describing what happened (whether a video was matched, which searches ran).
 
 The response always returns `200` (errors live in `status` so the Tasker side can branch on a single field):
 
@@ -474,7 +474,7 @@ Both crons (`0 6 * * *` and `*/5 * * * *`) end with a backfill pass, in their ow
 
 ### Sets without a YouTube recording: mkvid
 
-Plenty of sets on 1001tracklists have no YouTube recording but do have the full set on **SoundCloud** or **hearthis.at**. Those go to [mkvid](https://github.com/pmaxhogan/mkvid) — the render/upload service on the NAS — which downloads the audio with yt-dlp, renders the static-waveform video and uploads it **unlisted** to the same channel; the Worker then adds that video to the artist playlist and the combined playlist exactly as if 1001tracklists had embedded it.
+Plenty of sets on 1001tracklists have no YouTube recording but do have the full set on **SoundCloud** or **hearthis.at**. Those go to [mkvid](https://github.com/pmaxhogan/mkvid) — the render/upload service on the NAS — which downloads the audio with yt-dlp, renders the static-waveform video and uploads it to the same channel (**unlisted** by default; the `mkvid.privacy` setting); the Worker then adds that video to the artist playlist and the combined playlist exactly as if 1001tracklists had embedded it.
 
 The Worker can't reach the NAS (mkvid sits behind Cloudflare Access on a cloudflared tunnel), so the integration is **pull**: the sync queues work in D1 and mkvid polls for it.
 
@@ -785,6 +785,7 @@ tlpool's numeric knobs on the same page (`src/lib/tlpool-settings-fields.ts`; tl
 | `presave.notifyFound` / `useSetFetches` / `giveUpDays` | on / on / 0 | push when one gets a YouTube link; a set page fetched for any reason updates the ID rows saved from it; stop watching after this many days (0 = never) |
 | `trackUploads.enabled` / `minWatchDays` / `allowedSources` | on / 5 / soundcloud, bandcamp, hearthis, mixcloud | queue pre-saved tracks for mkvid; watched this long first; sources in order of preference (only these four have a host allowlist) |
 | `trackUploads.dailyCap` | 4 | track claims a quota day, on top of sharing mkvid's per-project caps; 0 pauses |
+| `mkvid.privacy` | unlisted | the privacy mkvid uploads a set video with (sent on every `/mkvid/claim`; an mkvid from before this uses its `TRACKED_PRIVACY`) |
 | `trackUploads.playlistTitle` / `privacy` / `notifyUploaded` | Track uploads / unlisted / on | the playlist every track upload goes into; mkvid's upload privacy; the "Track ripped and uploaded" push |
 | `trackUploads.maxAttempts`, `retryBackoffHours`, `minDurationRatio` | 3, 6, 0.85 | failed attempts before `failed`; retry wait × attempts; a rip shorter than this share of the expected length is a preview |
 | `playlists.sweepDryRun` / `sweepDailyRemovals` | env `PLAYLIST_SWEEP_DRY_RUN` (report-only) / `PLAYLIST_SWEEP_DAILY_REMOVALS` (40) | removal sweep |

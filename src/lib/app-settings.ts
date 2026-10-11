@@ -35,6 +35,8 @@ export const AppSettingsSchema = z.object({
     retryBackoffHours: z.number().min(0.25).max(24 * 7),
     /** mkvid refused a list as unverified: look again after this, no attempt used (default 60 min). */
     unverifiedRetryMinutes: z.number().int().min(5).max(24 * 60),
+    /** Privacy mkvid uploads a set with (sent on every claim; an mkvid from before this uses its TRACKED_PRIVACY). */
+    privacy: z.enum(['public', 'unlisted', 'private']),
   }),
   playlists: z.object({
     /** The daily playlist sweep only reports; null = PLAYLIST_SWEEP_DRY_RUN (unset = true). */
@@ -113,7 +115,7 @@ export const AppSettingsSchema = z.object({
 export type AppSettings = z.infer<typeof AppSettingsSchema>
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  mkvid: { dailyClaimCap: null, sharedDailyClaimCap: null, claimTtlMinutes: null, maxAttempts: 3, retryBackoffHours: 6, unverifiedRetryMinutes: 60 },
+  mkvid: { dailyClaimCap: null, sharedDailyClaimCap: null, claimTtlMinutes: null, maxAttempts: 3, retryBackoffHours: 6, unverifiedRetryMinutes: 60, privacy: 'unlisted' },
   playlists: {
     sweepDryRun: null,
     sweepDailyRemovals: null,

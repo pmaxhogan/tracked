@@ -22,6 +22,17 @@ const APP_GROUPS: FormGroup[] = [
       { path: 'mkvid.maxAttempts', label: 'Attempts before a request fails', help: 'Default 3.', min: 1, max: 10, step: 1 },
       { path: 'mkvid.retryBackoffHours', label: 'Retry a failed render after', help: 'Times the attempts so far. Default 6.', unit: 'h', min: 0.25, max: 168 },
       { path: 'mkvid.unverifiedRetryMinutes', label: 'List not verified: look again after', help: 'No attempt used. Default 60.', unit: 'min', min: 5, max: 1440, step: 1 },
+      {
+        path: 'mkvid.privacy',
+        label: 'Upload privacy',
+        help: 'Of set videos. Default unlisted.',
+        kind: 'select',
+        options: [
+          { value: 'public', label: 'public' },
+          { value: 'unlisted', label: 'unlisted' },
+          { value: 'private', label: 'private' },
+        ],
+      },
     ],
   },
   {

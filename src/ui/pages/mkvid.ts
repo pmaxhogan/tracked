@@ -1,6 +1,6 @@
 // mkvid: sets with no YouTube recording but a SoundCloud / hearthis.at one,
-// handed to mkvid (the NAS render/upload service) to turn into an unlisted
-// video. mkvid polls the Worker; this page shows where each request stands
+// handed to mkvid (the NAS render/upload service) to turn into a video
+// (privacy: app setting mkvid.privacy). mkvid polls the Worker; this page shows where each request stands
 // (behaviour contract section 3). Data: the Access-gated GET /ui/api/mkvid
 // (the header: status line, caps, counts, DJs, rendering now, old videos) and
 // three TKTables: Queue (GET /ui/api/mkvid/queue, server-side, claim order by
@@ -464,7 +464,7 @@ ${MKVID_STATE_JS}
       common.source,
       common.account,
       { key: 'style', label: 'Style', type: 'enum', options: ['scene', 'waves', 'static'], hideOn: 'phone', render: (r) => r.videoId ? (r.style ? esc(r.style) : '<span' + TK.tip('Made before styles were recorded: an old-style video that can be recreated.') + '>old</span>') : nil },
-      { key: 'videoId', label: 'Video', type: 'text', render: (r) => r.videoId ? link(videoHref(r), 'watch', 'mk-watch', 'Opens the uploaded video on YouTube.') + (r.privacy && r.privacy !== 'unlisted' ? ' <span class="mk-cell-sub"' + TK.tip('unlisted was requested: an unverified OAuth app forces private.') + '>' + esc(r.privacy) + '</span>' : '') : nil },
+      { key: 'videoId', label: 'Video', type: 'text', render: (r) => r.videoId ? link(videoHref(r), 'watch', 'mk-watch', 'Opens the uploaded video on YouTube.') + (r.privacy === 'private' ? ' <span class="mk-cell-sub"' + TK.tip('The privacy YouTube applied. An unverified OAuth app forces private whatever was requested.') + '>private</span>' : '') : nil },
       { key: 'updatedAt', label: 'Finished', type: 'datetime', storage: 's', tip: 'When the request last changed: the upload, the failure, the ban.', render: (r) => when(r.updatedAt) },
       common.attempts,
     ],
@@ -610,7 +610,7 @@ ${MKVID_STATE_JS}
     out.push(dl([
       ['status', '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(STATUS_TIPS[r.status]) + '>' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(errorLabel(r)) + '</span>' : '')],
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '—'],
-      r.privacy ? ['privacy', esc(r.privacy) + (r.privacy !== 'unlisted' ? ' <span class="warn">(unlisted was requested — an unverified OAuth app forces private)</span>' : '')] : null,
+      r.privacy ? ['privacy', esc(r.privacy) + (r.privacy === 'private' ? ' <span class="warn">(an unverified OAuth app forces private whatever was requested)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + esc(rel(r.notBefore)) : '')],
       r.status !== 'pending' ? ['project', esc(r.accountLabel || r.account)] : null,
       r.videoId ? ['style', r.style ? esc(r.style) : '<span class="warn">unknown (old style)</span>'] : null,
@@ -701,7 +701,7 @@ ${MKVID_STATE_JS}
 export const MKVID_PAGE_HTML = shell({
   nav: 'mkvid',
   title: 'mkvid',
-  description: `Sets with no YouTube recording, ${tipTerm('rendered into a video by mkvid', 'Sets that have no YouTube recording but a SoundCloud or hearthis.at one are handed to mkvid, a service on the NAS that renders a video from the audio and uploads it as unlisted.')}. Where each request stands and why nothing is uploading.`,
+  description: `Sets with no YouTube recording, ${tipTerm('rendered into a video by mkvid', 'Sets that have no YouTube recording but a SoundCloud or hearthis.at one are handed to mkvid, a service on the NAS that renders a video from the audio and uploads it (privacy: Settings, mkvid uploads).')}. Where each request stands and why nothing is uploading.`,
   actions: `<button type="button" id="mk-recreate-old" class="btn" hidden${tipAttr('Renders every finished video made in a style other than scene again, at the back of the queue. They count against the daily cap, and each old video is deleted once its replacement is in the playlists.')}>Recreate all old-style videos</button><button type="button" id="mk-refresh" class="btn"${tipAttr('Reloads the queue and the progress bar.')}>Refresh</button>`,
   body: BODY,
   css: CSS,

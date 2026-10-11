@@ -955,10 +955,11 @@ export async function claimMkvidRequest(
   const { request, outcome } = await claimNext(env, log, accounts, style === RECREATE_STYLE, preferAccount)
   await recordMkvidPoll(env, outcome, accounts)
   if (!request) return null
-  return { ...request, ...(await getMkvidTracks(env, request.id)) }
+  // `privacy` on a claim is what to upload with (app setting mkvid.privacy), not the row's: that one is what YouTube applied last time.
+  return { ...request, privacy: (await getAppSettings(env)).mkvid.privacy, ...(await getMkvidTracks(env, request.id)) }
 }
 
-/** What `/mkvid/claim` hands out: the request plus its track list (empty + untrusted when none is stored). */
+/** What `/mkvid/claim` hands out: the request, the privacy to upload with, and its track list (empty + untrusted when none is stored). */
 export type MkvidClaim = MkvidRequest & MkvidTrackList
 
 /**
@@ -1300,7 +1301,7 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
     via: 'mkvid',
     trigger: replacing ? 'mkvid.recreate' : 'mkvid',
     message:
-      `rendered by mkvid from ${req.source} (${input.privacy ?? 'unlisted'}${input.style ? `, ${input.style}` : ''})${playlistStatus === 'duplicate' ? ' — already in the playlist' : ''}` +
+      `rendered by mkvid from ${req.source} (${input.privacy ?? 'privacy unknown'}${input.style ? `, ${input.style}` : ''})${playlistStatus === 'duplicate' ? ' — already in the playlist' : ''}` +
       (replacing ? ` — recreated: ${oldVideoId} removed from the playlists, deletion from YouTube requested` : ''),
     failureCount: null,
     meta: { ms: null },
