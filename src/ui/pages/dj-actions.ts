@@ -71,8 +71,10 @@ export const DJ_ACTIONS_JS = /* js */ `
           (stats.tracklistsProcessed || 0) + ' set' + (stats.tracklistsProcessed === 1 ? '' : 's') +
           ' processed (' + (stats.tracklistsSeen || 0) + ' total on the DJ page)' + rechecked + combined + more;
         // A run the pool stopped (busy, a stalled page load, paused) is not "synced": say why.
+        // Red only when it needs the owner; otherwise the scheduler carries on by itself.
         if (data.stoppedBy && data.stoppedBy.reason) {
-          TK.toast((resync ? 'resync ' : 'sync ') + slug + ' stopped: ' + data.stoppedBy.reason + inv + ' — ' + summary, 'bad');
+          const needsYou = !data.stoppedBy.level || data.stoppedBy.level === 'error';
+          TK.toast((resync ? 'resync ' : 'sync ') + slug + ' stopped: ' + data.stoppedBy.reason + (needsYou ? '' : ' (the scheduler tries again by itself)') + inv + ' — ' + summary, needsYou ? 'bad' : 'warn');
           return { ok: true, stopped: true, data };
         }
         TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + summary, 'ok');
@@ -111,7 +113,7 @@ export const DJ_ACTIONS_JS = /* js */ `
           ', replaced ' + sum((s) => s.videosReplaced) + ', ' + sum((s) => s.videoIdsAdded) + ' new' +
           (pending ? ' · ' + pending + ' still pending — auto-continuing every 5 min' : '') +
           (failed.length ? ' · failed: ' + failed.join(', ') : '') +
-          (stopped ? ' · stopped at ' + stopped.slug + ': ' + stopped.stoppedBy.reason : ''), stopped ? 'bad' : 'ok');
+          (stopped ? ' · stopped at ' + stopped.slug + ': ' + stopped.stoppedBy.reason : ''), !stopped ? 'ok' : !stopped.stoppedBy.level || stopped.stoppedBy.level === 'error' ? 'bad' : 'warn');
         return { ok: true, data };
       });
     }

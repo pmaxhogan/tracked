@@ -87,22 +87,29 @@ const pk = (src: string, idSql: string) => `'${src}:' || printf('%012d', ${idSql
 /** Concatenated search text, NULLs as ''. */
 const cat = (...parts: string[]) => parts.map((p) => `COALESCE(${p}, '')`).join(` || ' ' || `)
 
+/** Why a DJ's last run was stopped early (lib/sync.ts StopLevel), NULL when it was not. */
+const SYNC_STOP = `json_extract(last_run_stats, '$.stop.reason')`
+
+// `problem` is what the Activity page paints red: something that will not fix
+// itself. An attempt that is tried again (a failed playlist addition, a failed
+// sweep removal, a sync the pool stopped) and the owner's own actions (a set
+// banned from the panel) are not.
 const ARMS: string[] = [
   `SELECT ${pk('audit', 'id')} AS id, ts AS ts, 'audit' AS src, CAST(id AS TEXT) AS key, 'request' AS kind, status AS status,
      (CASE WHEN status IN ('no_video','no_tracklist','upstream_error') OR json_extract(summary, '$.impossible') = 1 THEN 1 ELSE 0 END) AS problem,
      NULL AS dj, NULL AS set_url, NULL AS video_id, summary AS search, summary AS j
    FROM now_playing_audit`,
   `SELECT ${pk('addition', 'id')}, ts, 'addition', CAST(id AS TEXT), 'playlist', status,
-     (CASE WHEN status IN ('failed','abandoned') THEN 1 ELSE 0 END),
+     (CASE WHEN status = 'abandoned' THEN 1 ELSE 0 END),
      slug, set_url, video_id, ${cat('slug', 'set_url', 'summary')}, summary
    FROM playlist_additions`,
   `SELECT ${pk('removal', 'id')}, at * 1000, 'removal', CAST(id AS TEXT), 'hygiene', status,
-     (CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+     (CASE WHEN status = 'failed' AND source != 'sweep' THEN 1 ELSE 0 END),
      slug, set_url, video_id, ${cat('source', 'reason', 'detail', 'playlist_kind', 'slug', 'set_url')},
      json_object('source', source, 'reason', reason, 'detail', detail, 'playlist_kind', playlist_kind)
    FROM playlist_removals`,
   `SELECT 'mkvid:' || id, updated_at * 1000, 'mkvid', id, 'mkvid', status,
-     (CASE WHEN status IN ('failed','banned') THEN 1 ELSE 0 END),
+     (CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
      slug, set_url, video_id, ${cat('set_title', 'slug', 'set_url', 'error')},
      json_object('set_title', set_title, 'error', error)
    FROM mkvid_requests WHERE status IN ('done','failed','banned','superseded')`,
@@ -120,10 +127,10 @@ const ARMS: string[] = [
      json_object('type', type, 'challenge_id', challenge_id, 'account_id', account_id, 'payload', payload, 'push_status', push_status)
    FROM pool_events`,
   `SELECT 'sync:' || slug, last_run_at * 1000, 'sync', slug, 'sync',
-     (CASE WHEN last_error IS NOT NULL AND last_error != '' THEN 'error' ELSE 'ok' END),
+     (CASE WHEN last_error IS NOT NULL AND last_error != '' THEN 'error' WHEN ${SYNC_STOP} IS NOT NULL THEN 'waiting' ELSE 'ok' END),
      (CASE WHEN last_error IS NOT NULL AND last_error != '' THEN 1 ELSE 0 END),
-     slug, NULL, NULL, ${cat('artist_name', 'slug', 'last_error')},
-     json_object('artist_name', artist_name, 'last_error', last_error)
+     slug, NULL, NULL, ${cat('artist_name', 'slug', 'last_error', SYNC_STOP)},
+     json_object('artist_name', artist_name, 'last_error', last_error, 'stop', ${SYNC_STOP}, 'runs', json_extract(last_run_stats, '$.stop.runs'))
    FROM sub_sync WHERE last_run_at IS NOT NULL`,
   // IP-block episodes from KV, prepared in the Worker (banRows) and bound as one JSON array.
   `SELECT 'ban:' || json_extract(value, '$.key'), json_extract(value, '$.ts'), 'ban', json_extract(value, '$.key'), 'ban',
@@ -262,8 +269,10 @@ function describe(r: RawRow): { title: string; detail: string | null } {
         detail: joinParts([account, str(j.challenge_id) && `challenge ${j.challenge_id}`, poolReason(payload.reason), (push === 'failed' || push === 'not_configured') && `push ${push}`]),
       }
     }
-    case 'sync':
-      return { title: `Sync: ${str(j.artist_name) || r.key}`, detail: clip(str(j.last_error)) }
+    case 'sync': {
+      const runs = Number(j.runs) || 0
+      return { title: `Sync: ${str(j.artist_name) || r.key}`, detail: clip(str(j.last_error)) ?? joinParts([clip(str(j.stop)), runs > 1 && `${runs} runs in a row`, str(j.stop) && 'tried again by the scheduler']) }
+    }
     case 'ban':
       return { title: str(j.title) ?? 'IP block', detail: str(j.detail) }
   }

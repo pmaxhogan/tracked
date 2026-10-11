@@ -22,11 +22,14 @@ import {
   syncOne,
   manualFetchBudget,
   BLOCK_SHAPED_FAILURE,
+  STOP_ERROR_RUNS,
+  STOP_ERROR_SECONDS,
+  AUTH_ERROR_RUNS,
   type SubState,
 } from '../src/lib/sync'
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
 import { makeLogger } from '../src/lib/log'
-import { PoolUnavailableError } from '../src/lib/pool'
+import { PoolPausedError, PoolUnavailableError } from '../src/lib/pool'
 import { POOL_SETTINGS_KEY } from '../src/lib/pool-settings'
 import { UpstreamPausedError, UpstreamUnavailableError } from '../src/lib/upstream1001'
 import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
@@ -1361,7 +1364,10 @@ describe('block handling (2026-09 IP-ban resilience)', () => {
     // No failure charged, nothing abandoned, the run's stop reason is recorded.
     expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 2 })
     expect(state.abandonedTracklistUrls).toEqual([])
-    expect(state.lastError).toMatch(/^paused: /)
+    // The owner's own pause is never an error.
+    expect(state.lastError).toBeUndefined()
+    expect(state.lastRunStats!.stop).toMatchObject({ level: 'hold', runs: 1 })
+    expect(state.lastRunStats!.stop!.reason).toMatch(/^paused: /)
     expect(await playlistAdditions(env)).toEqual([])
   })
 
@@ -1383,7 +1389,9 @@ describe('block handling (2026-09 IP-ban resilience)', () => {
     expect(r.stats.rechecksPending).toBe(1)
     const state = (await loadSubState(env, sub.slug))!
     expect(state.failureCounts).toEqual({})
+    // 1001tracklists blocking us needs the owner: an error at once.
     expect(state.lastError).toMatch(/^ip_blocked: /)
+    expect(state.lastRunStats!.stop).toMatchObject({ level: 'error', runs: 1 })
   })
 
   it('a block during the recheck window stops it without deferring the set', async () => {
@@ -1469,7 +1477,8 @@ describe('route faults are not the set\'s fault', () => {
     expect(fetch1001Html).toHaveBeenCalledTimes(1)
     expect(r.stats.tracklistsPending).toBe(2)
     const state = (await loadSubState(env, sub.slug))!
-    expect(state.lastError).toMatch(/^unavailable: 1001tracklists unreachable/)
+    expect(state.lastError).toBeUndefined()
+    expect(state.lastRunStats!.stop!.reason).toMatch(/^unavailable: 1001tracklists unreachable/)
     expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 2 })
     expect(state.abandonedTracklistUrls).toEqual([])
     expect(await playlistAdditions(env)).toEqual([])
@@ -1870,14 +1879,82 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
     expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).not.toHaveProperty('queueSeconds')
   })
 
-  it('a pool timeout stops the run with the pool\'s own words as lastError, not "1001tracklists unreachable"', async () => {
+  it('a pool timeout stops the run with the pool\'s own words as the stop reason, not "1001tracklists unreachable", and is not an error', async () => {
     const env = makeEnv()
     await saveSubState(env, sub.slug, pending)
     vi.mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('timeout', undefined, 0, { reason: 'queued', waitedSeconds: 600 }))
     const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
     expect(fetch1001Html).toHaveBeenCalledTimes(1)
     expect(r.stoppedBy).toMatchObject({ reason: 'pool busy: waited 600 s for a free browser (other fetches were running)', poolCode: 'timeout' })
-    expect((await loadSubState(env, sub.slug))!.lastError).toBe('pool busy: waited 600 s for a free browser (other fetches were running)')
+    expect(r.stoppedBy!.level).toBe('retry')
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.lastError).toBeUndefined()
+    expect(state.lastRunStats!.stop).toMatchObject({ reason: 'pool busy: waited 600 s for a free browser (other fetches were running)', code: 'timeout', level: 'retry', runs: 1 })
+  })
+
+  it('stopped runs count up in a row, become lastError only after STOP_ERROR_RUNS over STOP_ERROR_SECONDS, and a clean run clears them', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, pending)
+    vi.mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('no_healthy_account'))
+    const run = () => syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+    for (let i = 1; i < STOP_ERROR_RUNS; i++) await run()
+    let state = (await loadSubState(env, sub.slug))!
+    expect(state.lastRunStats!.stop).toMatchObject({ runs: STOP_ERROR_RUNS - 1, level: 'retry' })
+    expect(state.lastError).toBeUndefined()
+    // Enough runs, but not for long enough yet.
+    await run()
+    state = (await loadSubState(env, sub.slug))!
+    expect(state.lastRunStats!.stop!.runs).toBe(STOP_ERROR_RUNS)
+    expect(state.lastError).toBeUndefined()
+    // The same row of stops, begun more than STOP_ERROR_SECONDS ago.
+    const since = state.lastRunStats!.stop!.since - STOP_ERROR_SECONDS - 60
+    await saveSubState(env, sub.slug, { ...state, lastRunStats: { ...state.lastRunStats!, stop: { ...state.lastRunStats!.stop!, since } } })
+    await run()
+    state = (await loadSubState(env, sub.slug))!
+    expect(state.lastRunStats!.stop).toMatchObject({ runs: STOP_ERROR_RUNS + 1, since })
+    expect(state.lastError).toMatch(new RegExp(`^pool: no healthy account free for this fetch \\(${STOP_ERROR_RUNS + 1} runs in a row since `))
+    // A captcha waiting for the owner is an error on the first run.
+    vi.mocked(fetch1001Html).mockRejectedValue(new PoolPausedError('challenge_pending', 600))
+    await saveSubState(env, 'captcha', pending)
+    await syncOne(env, { ...sub, slug: 'captcha' }, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+    expect((await loadSubState(env, 'captcha'))!.lastError).toMatch(/challenge_pending/)
+    // A run the pool serves clears the row.
+    vi.mocked(fetch1001Html).mockResolvedValue({ html: '<set/>', via: 'direct', state: { cookie: '' } } as never)
+    await run()
+    state = (await loadSubState(env, sub.slug))!
+    expect(state.lastError).toBeUndefined()
+    expect(state.lastRunStats!.stop).toBeUndefined()
+  })
+
+  it('a YouTube 401 is a blip until AUTH_ERROR_RUNS runs in a row end with one; then it is the lastError, and a good run clears it', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: ['https://x/tracklist/a'] })
+    vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+    vi.mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 401, 'authError', '{"error":{"code":401}}'))
+    const run = () => syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+    for (let i = 1; i < AUTH_ERROR_RUNS; i++) await run()
+    let state = (await loadSubState(env, sub.slug))!
+    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS - 1)
+    expect(state.lastError).toBeUndefined()
+    // Never charged to the set, so it is never abandoned.
+    expect(state.failureCounts).toEqual({})
+    // A run the pool stopped did not reach YouTube: the count holds.
+    vi.mocked(fetch1001Html).mockRejectedValueOnce(new PoolUnavailableError('no_healthy_account'))
+    await run()
+    state = (await loadSubState(env, sub.slug))!
+    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS - 1)
+    expect(state.lastError).toBeUndefined()
+    await run()
+    state = (await loadSubState(env, sub.slug))!
+    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS)
+    expect(state.lastError).toMatch(new RegExp(`^YouTube refused the login on ${AUTH_ERROR_RUNS} runs in a row: `))
+    expect(state.abandonedTracklistUrls).toEqual([])
+    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
+    await run()
+    state = (await loadSubState(env, sub.slug))!
+    expect(state.lastError).toBeUndefined()
+    expect(state.lastRunStats!.authFails).toBeUndefined()
+    expect(state.processedTracklistUrls).toEqual(['https://x/tracklist/a'])
   })
 
   it('a pool refusal on the DJ page stops the run there and is recorded (it used to say "synced, 0 sets")', async () => {
@@ -1889,7 +1966,9 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
     expect(fetch1001Html).not.toHaveBeenCalled()
     expect(r.crawlStopReason).toBe('fetch_failed')
     expect(r.stoppedBy).toMatchObject({ reason: "pool slow: acct-34's page load had not finished after 600 s", poolCode: 'timeout' })
-    expect((await loadSubState(env, sub.slug))!.lastError).toBe("pool slow: acct-34's page load had not finished after 600 s")
+    const stopped = (await loadSubState(env, sub.slug))!
+    expect(stopped.lastError).toBeUndefined()
+    expect(stopped.lastRunStats!.stop).toMatchObject({ reason: "pool slow: acct-34's page load had not finished after 600 s", runs: 1 })
 
     // A page-1 failure that is not a route fault (a parse problem, a 404) still just carries on.
     ;(crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({ artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error: new Error('boom') })

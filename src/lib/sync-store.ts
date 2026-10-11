@@ -69,6 +69,14 @@ export type SubState = {
     videosReplaced?: number
     /** `pool` since 2026-09-29; the others survive in rows written before. */
     via: 'pool' | 'home-proxy' | 'home-proxy-pool' | 'unlocker' | 'direct' | 'mixed'
+    /**
+     * Present when the run was stopped early by a pool refusal or a pause
+     * (lib/sync.ts StopLevel): why, the pool's code, how many runs in a row
+     * were stopped and since when (unix s). Absent after a run that was not.
+     */
+    stop?: { reason: string; code: string | null; level: 'error' | 'retry' | 'hold'; runs: number; since: number }
+    /** Runs in a row that ended with a YouTube 401 (lib/sync.ts AUTH_ERROR_RUNS). Absent at 0. */
+    authFails?: number
   }
 }
 

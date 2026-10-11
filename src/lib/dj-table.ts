@@ -31,6 +31,9 @@ type DjDbRow = {
   last_run_at: number | null
   last_error: string | null
   last_added: number | null
+  stop_reason: string | null
+  stop_runs: number | null
+  stop_since: number | null
   sets: number
   processed: number
   pending: number
@@ -59,6 +62,16 @@ export type DjTableRow = {
   lastRunAt: number | null
   lastError: string | null
   hasError: boolean
+  /**
+   * The last run was stopped early by the pool or a pause and is not an error
+   * (lib/sync.ts StopLevel): the scheduler tries again by itself.
+   */
+  waiting: boolean
+  /** Why the last run stopped early, null when it did not. */
+  stopReason: string | null
+  /** How many runs in a row were stopped, and since when (unix ms). */
+  stopRuns: number
+  stopSince: number | null
   /** Videos the last run added (lastRunStats.videoIdsAdded). */
   lastAdded: number | null
   /** Unix ms of the newest set discovery. */
@@ -73,12 +86,16 @@ const AGG = `(SELECT slug, COUNT(*) AS sets, SUM(processed) AS processed,
   FROM tracklists GROUP BY slug)`
 
 const HAS_ERROR = `(y.last_error IS NOT NULL AND y.last_error != '')`
+const STOP_REASON = `json_extract(y.last_run_stats, '$.stop.reason')`
+const WAITING = `(${STOP_REASON} IS NOT NULL AND NOT ${HAS_ERROR})`
 
 export const DJS_TABLE: TableDef<DjDbRow, DjTableRow> = {
   from: `subscriptions s LEFT JOIN sub_sync y ON y.slug = s.slug LEFT JOIN ${AGG} t ON t.slug = s.slug`,
   select: `s.slug AS slug, s.source_url AS source_url, s.added_at AS added_at, s.position AS position,
     y.artist_name AS artist_name, y.playlist_id AS playlist_id, y.last_run_at AS last_run_at, y.last_error AS last_error,
     json_extract(y.last_run_stats, '$.videoIdsAdded') AS last_added,
+    ${STOP_REASON} AS stop_reason, json_extract(y.last_run_stats, '$.stop.runs') AS stop_runs,
+    json_extract(y.last_run_stats, '$.stop.since') AS stop_since,
     COALESCE(t.sets, 0) AS sets, COALESCE(t.processed, 0) AS processed, COALESCE(t.pending, 0) AS pending,
     COALESCE(t.abandoned, 0) AS abandoned, COALESCE(t.videos, 0) AS videos, COALESCE(t.mkvid, 0) AS mkvid,
     t.last_discovered_at AS last_discovered_at`,
@@ -98,6 +115,8 @@ export const DJS_TABLE: TableDef<DjDbRow, DjTableRow> = {
     lastRunAt: { sql: 'y.last_run_at', type: 'datetime', storage: 's' },
     lastDiscoveredAt: { sql: 't.last_discovered_at', type: 'datetime', storage: 's' },
     hasError: { sql: HAS_ERROR, type: 'bool' },
+    waiting: { sql: WAITING, type: 'bool' },
+    stopReason: { sql: STOP_REASON, type: 'text', searchable: true },
     lastError: { sql: 'y.last_error', type: 'text', searchable: true },
     hasPlaylist: { sql: '(y.playlist_id IS NOT NULL)', type: 'bool' },
     playlistId: { sql: 'y.playlist_id', type: 'text' },
@@ -125,12 +144,16 @@ export function djTableRow(r: DjDbRow): DjTableRow {
     lastRunAt: lastRun == null ? null : lastRun * 1000,
     lastError: r.last_error || null,
     hasError: !!r.last_error,
+    waiting: !!r.stop_reason && !r.last_error,
+    stopReason: r.stop_reason || null,
+    stopRuns: Number(r.stop_runs) || 0,
+    stopSince: r.stop_since == null ? null : Number(r.stop_since) * 1000,
     lastAdded: r.last_added == null ? null : Number(r.last_added),
     lastDiscoveredAt: r.last_discovered_at == null ? null : Number(r.last_discovered_at) * 1000,
   }
 }
 
-export type DjCounts = { total: number; errors: number; pending: number; neverSynced: number; noPlaylist: number; mkvid: number }
+export type DjCounts = { total: number; errors: number; waiting: number; pending: number; neverSynced: number; noPlaylist: number; mkvid: number }
 
 /** Totals for the DJs / Playlists chips (over every subscription, not the filtered page). */
 export async function djCounts(env: Env): Promise<DjCounts> {
@@ -138,16 +161,18 @@ export async function djCounts(env: Env): Promise<DjCounts> {
     .prepare(
       `SELECT COUNT(*) AS total,
          SUM(CASE WHEN ${HAS_ERROR} THEN 1 ELSE 0 END) AS errors,
+         SUM(CASE WHEN ${WAITING} THEN 1 ELSE 0 END) AS waiting,
          SUM(CASE WHEN COALESCE(t.pending, 0) > 0 THEN 1 ELSE 0 END) AS pending,
          SUM(CASE WHEN y.last_run_at IS NULL THEN 1 ELSE 0 END) AS never_synced,
          SUM(CASE WHEN y.playlist_id IS NULL THEN 1 ELSE 0 END) AS no_playlist,
          SUM(CASE WHEN COALESCE(t.mkvid, 0) > 0 THEN 1 ELSE 0 END) AS mkvid
        FROM subscriptions s LEFT JOIN sub_sync y ON y.slug = s.slug LEFT JOIN ${AGG} t ON t.slug = s.slug`,
     )
-    .first<{ total: number; errors: number | null; pending: number | null; never_synced: number | null; no_playlist: number | null; mkvid: number | null }>()
+    .first<{ total: number; errors: number | null; waiting: number | null; pending: number | null; never_synced: number | null; no_playlist: number | null; mkvid: number | null }>()
   return {
     total: Number(r?.total ?? 0),
     errors: Number(r?.errors ?? 0),
+    waiting: Number(r?.waiting ?? 0),
     pending: Number(r?.pending ?? 0),
     neverSynced: Number(r?.never_synced ?? 0),
     noPlaylist: Number(r?.no_playlist ?? 0),

@@ -306,8 +306,13 @@ ${DJ_ACTIONS_JS}
       }
       if (st.lastRunAt) {
         $last.textContent = 'Last sync ' + TK.fmt.rel(new Date(st.lastRunAt * 1000).toISOString()) + ' ';
+        const stop = st.lastRunStats && st.lastRunStats.stop;
         if (st.lastError) {
-          const b = document.createElement('span'); b.className = 'badge bad'; b.textContent = 'error'; b.setAttribute('data-tip', 'The last sync failed: ' + String(st.lastError) + ' (retried on a later scheduler tick)');
+          const b = document.createElement('span'); b.className = 'badge bad'; b.textContent = 'error'; b.setAttribute('data-tip', 'The last sync failed: ' + String(st.lastError));
+          $last.appendChild(b);
+        } else if (stop && stop.reason) {
+          // Stopped by the pool or a pause: routine, the scheduler tries again by itself.
+          const b = document.createElement('span'); b.className = 'badge info'; b.textContent = 'waiting'; b.setAttribute('data-tip', 'The last sync was stopped early: ' + String(stop.reason) + '. Nothing is lost: the scheduler tries again on a later tick' + (stop.runs > 1 ? ' (' + stop.runs + ' runs in a row so far)' : '') + '.');
           $last.appendChild(b);
         }
         $last.hidden = false;

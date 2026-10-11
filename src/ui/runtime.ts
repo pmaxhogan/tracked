@@ -157,8 +157,9 @@ var TK = (() => {
   }
 
   // link: optional { href, text } rendered as an anchor under the message (href must pass safeHref).
+  // kind: 'ok' (goes away by itself), 'warn' (stays until closed; nothing to do about it) or 'bad' (stays, an alert).
   function toast(msg, kind, detail, link) {
-    kind = kind === 'bad' ? 'bad' : 'ok';
+    kind = kind === 'bad' || kind === 'warn' ? kind : 'ok';
     if (typeof document.createElement !== 'function') {
       const plain = $('tk-toasts');
       if (plain) plain.textContent = String(msg == null ? '' : msg);

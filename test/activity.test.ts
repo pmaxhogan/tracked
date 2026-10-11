@@ -114,12 +114,41 @@ describe('activity feed (data-table contract)', () => {
     expect(past.rows).toHaveLength(3)
   })
 
+  it('what is tried again, or was the owner\'s own action, is not a problem', async () => {
+    const env = makeEnv()
+    // A failed playlist addition is retried by the next run; only giving up is a problem.
+    await addition(env, 1, 3_000, 'failed')
+    await addition(env, 2, 3_500, 'abandoned')
+    // A set banned from the panel is the owner's own click; a failed render is not.
+    const mk = (id: string, status: string, error: string) =>
+      env.DB.prepare("INSERT INTO mkvid_requests (id, slug, set_url, set_title, source, source_url, status, error, created_at, updated_at) VALUES (?, 'dj-one', ?, 'A set', 'soundcloud', 'https://soundcloud.com/x/y', ?, ?, 1, 4)")
+        .bind(id, 'https://x/tracklist/' + id, status, error).run()
+    await mk('m-banned', 'banned', 'banned from the panel')
+    await mk('m-failed', 'failed', 'probe: yt-dlp exit 1')
+    // A sync the pool stopped is waiting; one recorded as last_error is an error.
+    const stop = JSON.stringify({ stop: { reason: 'pool busy: waited 20 s for a free browser (other fetches were running)', code: 'timeout', level: 'retry', runs: 2, since: 6000 } })
+    await env.DB.prepare("INSERT INTO sub_sync (slug, artist_name, last_run_at, last_error, last_run_stats) VALUES ('dj-wait', 'DJ Wait', 7000, NULL, ?)").bind(stop).run()
+    await env.DB.prepare("INSERT INTO sub_sync (slug, artist_name, last_run_at, last_error, last_run_stats) VALUES ('dj-err', 'DJ Err', 7001, 'pool: challenge_pending', ?)").bind(stop).run()
+    const all = await page(env, '')
+    const flags = Object.fromEntries(all.rows.map((r) => [r.ref.kind + ':' + r.ref.key, [r.status, r.problem]]))
+    expect(flags).toEqual({
+      'addition:1': ['failed', false], 'addition:2': ['abandoned', true],
+      'mkvid:m-banned': ['banned', false], 'mkvid:m-failed': ['failed', true],
+      'sync:dj-wait': ['waiting', false], 'sync:dj-err': ['error', true],
+    })
+    expect(all.rows.find((r) => r.ref.key === 'dj-wait')!.detail).toBe('pool busy: waited 20 s for a free browser (other fetches were running) · 2 runs in a row · tried again by the scheduler')
+    expect(all.rows.find((r) => r.ref.key === 'dj-err')!.detail).toBe('pool: challenge_pending')
+    expect((await page(env, '?f.problem=eq:1')).rows.map((r) => r.ref.key).sort()).toEqual(['2', 'dj-err', 'm-failed'])
+    expect((await page(env, '?f.status=in:waiting')).rows.map((r) => r.ref.key)).toEqual(['dj-wait'])
+    expect((await page(env, '?q=pool busy')).rows.map((r) => r.ref.key).sort()).toEqual(['dj-err', 'dj-wait'])
+  })
+
   it('marks problems and filters to them, with the total of the filtered rows', async () => {
     const env = makeEnv()
     await audit(env, 1, 5_000, 'ok')
     await audit(env, 2, 4_000, 'no_video')
     await audit(env, 3, 6_000, 'ok', { impossible: true })
-    await addition(env, 1, 3_000, 'failed')
+    await addition(env, 1, 3_000, 'abandoned')
     await addition(env, 2, 7_000, 'added')
     const all = await page(env, '')
     expect(all.rows.find((r) => r.ref.kind === 'audit' && r.ref.key === '1')!.problem).toBe(false)

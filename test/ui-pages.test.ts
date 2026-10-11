@@ -240,7 +240,7 @@ describe('DJs page script', () => {
     const fetches: string[] = []
     const { ctx, els } = richStub(async (u: string) => {
       fetches.push(u)
-      if (u.startsWith('/ui/api/djs?')) return Response.json(djsAnswer([djRow(1), djRow(2, { hasError: true, lastError: 'boom' })]))
+      if (u.startsWith('/ui/api/djs?')) return Response.json(djsAnswer([djRow(1), djRow(2, { hasError: true, lastError: 'boom' }), djRow(3, { waiting: true, stopReason: 'pool busy <b>', stopRuns: 2 })]))
       return new Response('{}', { status: 404 })
     }, '/ui/djs')
     const r = await app.request('https://tracked.example/ui/djs', {}, env())
@@ -260,6 +260,9 @@ describe('DJs page script', () => {
     expect(body).toContain('data-act="remove"')
     expect(body).toContain('1 of 2')
     expect(body).toContain('1 pending')
+    // An error is red; a run the pool stopped is a blue "waiting" with the reason (escaped) in its tooltip.
+    expect(body.split('class="badge bad"').length - 1).toBe(1)
+    expect(body).toMatch(/class="badge info"[^>]*pool busy &lt;b&gt;[^>]*2 runs in a row so far[^>]*>waiting</)
     expect(body).toContain('https://www.youtube.com/playlist?list=PL1')
     expect(body).toContain('badge bad')
     expect(els.get('djs-chips').innerHTML).toContain('Errors')

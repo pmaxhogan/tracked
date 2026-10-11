@@ -42,9 +42,26 @@ describe('GET /ui/api/djs', () => {
     expect(body.rows.map((r: any) => r.slug)).toEqual(['alpha', 'bravo', 'charlie'])
     const a = body.rows[0]
     expect(a).toMatchObject({ name: 'Alpha One', sets: 3, processed: 2, pending: 1, videos: 2, mkvid: 1, playlistId: 'PLa', playlistUrl: 'https://www.youtube.com/playlist?list=PLa', lastRunAt: T * 1000, hasError: false, lastAdded: 2, addedAt: (T - 300) * 1000 })
-    expect(body.rows[1]).toMatchObject({ slug: 'bravo', hasError: true, lastError: 'boom: upstream', sets: 1, pending: 0, playlistUrl: null })
+    expect(a).toMatchObject({ waiting: false, stopReason: null, stopRuns: 0, stopSince: null })
+    expect(body.rows[1]).toMatchObject({ slug: 'bravo', hasError: true, waiting: false, lastError: 'boom: upstream', sets: 1, pending: 0, playlistUrl: null })
     expect(body.rows[2]).toMatchObject({ slug: 'charlie', name: 'charlie', sets: 0, lastRunAt: null, hasError: false })
-    expect(body.counts).toEqual({ total: 3, errors: 1, pending: 1, neverSynced: 1, noPlaylist: 2, mkvid: 1 })
+    expect(body.counts).toEqual({ total: 3, errors: 1, waiting: 0, pending: 1, neverSynced: 1, noPlaylist: 2, mkvid: 1 })
+  })
+  it('a run the pool stopped is waiting, not an error, until it is recorded as last_error', async () => {
+    const env = await seeded()
+    const stop = { reason: 'pool busy: waited 20 s for a free browser (other fetches were running)', code: 'timeout', level: 'retry', runs: 2, since: T - 600 }
+    await env.DB.prepare('UPDATE sub_sync SET last_run_stats = ? WHERE slug = ?').bind(JSON.stringify({ videoIdsAdded: 2, stop }), 'alpha').run()
+    let { body } = await get(env, '')
+    expect(body.rows[0]).toMatchObject({ slug: 'alpha', hasError: false, waiting: true, stopReason: stop.reason, stopRuns: 2, stopSince: (T - 600) * 1000, lastAdded: 2 })
+    expect(body.counts).toMatchObject({ errors: 1, waiting: 1 })
+    expect((await get(env, '?f.waiting=eq:1')).body.rows.map((r: any) => r.slug)).toEqual(['alpha'])
+    expect((await get(env, '?f.hasError=eq:1')).body.rows.map((r: any) => r.slug)).toEqual(['bravo'])
+    expect((await get(env, '?q=pool busy')).body.rows.map((r: any) => r.slug)).toEqual(['alpha'])
+    // Once the sync calls it an error, it is one and no longer waiting.
+    await env.DB.prepare('UPDATE sub_sync SET last_error = ? WHERE slug = ?').bind(stop.reason + ' (5 runs in a row)', 'alpha').run()
+    ;({ body } = await get(env, ''))
+    expect(body.rows[0]).toMatchObject({ slug: 'alpha', hasError: true, waiting: false })
+    expect(body.counts).toMatchObject({ errors: 2, waiting: 0 })
   })
   it('filters, searches and sorts on the server', async () => {
     const env = await seeded()

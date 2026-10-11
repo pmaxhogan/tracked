@@ -118,6 +118,7 @@ h3 { font-size: var(--fs-md); margin: 0 0 var(--sp-2); }
 .tk-toasts { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 60; display: grid; gap: var(--sp-2); max-width: min(24rem, calc(100vw - 2rem)); pointer-events: none; }
 .toast { pointer-events: auto; background: var(--elev); border: 1px solid var(--line-strong); border-radius: var(--r-tile); padding: 10px var(--sp-3); box-shadow: var(--shadow-float); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .toast.ok { border-color: var(--ok); }
+.toast.warn { border-color: var(--warn); }
 .toast.bad { border-color: var(--danger); color: var(--danger); }
 
 /* ── empty, error and loading states ── */

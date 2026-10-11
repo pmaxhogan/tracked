@@ -134,9 +134,41 @@ function retryAfterOf(e: unknown): number | null {
   return typeof r === 'number' && Number.isFinite(r) ? r : null
 }
 
+/**
+ * How a stopped run is shown. `error`: it needs the owner (a captcha waiting,
+ * 1001tracklists blocking us, a pool that is misconfigured or refuses our
+ * token), so it is the DJ's lastError at once. `hold`: the owner's own pause
+ * switch, never an error. `retry`: the pool said "not now" (busy, a slow page
+ * load, no account free, the budget spent); the scheduler tries again by
+ * itself, and it only becomes lastError once it has gone on for
+ * STOP_ERROR_RUNS runs in a row over STOP_ERROR_SECONDS.
+ */
+export type StopLevel = 'error' | 'retry' | 'hold'
+const OWNER_POOL_CODES: ReadonlySet<PoolFaultCode> = new Set(['challenge_pending', 'unauthorized', 'not_configured', 'bad_response'])
+function stopLevelFor(e: unknown): StopLevel {
+  const code = poolCodeOf(e)
+  if (code) return OWNER_POOL_CODES.has(code) ? 'error' : 'retry'
+  if (e instanceof UpstreamPausedError) return 'hold'
+  return e instanceof UpstreamUnavailableError ? 'retry' : 'error'
+}
+/**
+ * In the 6 days to 2026-10-11 a DJ had a run of stopped syncs 463 times: the
+ * longest was 7 runs, none lasted 11 hours and a later tick cleared every one.
+ * Past both of these limits it is not routine any more.
+ */
+export const STOP_ERROR_RUNS = 5
+export const STOP_ERROR_SECONDS = 12 * 60 * 60
+/**
+ * A YouTube 401 is never charged to the set (Google refuses a valid token now
+ * and then), so its rows stay `failed` and are never `abandoned`. Runs in a
+ * row that ended with one are counted instead: at this many it is not a blip
+ * but a login YouTube keeps refusing, and it becomes the DJ's lastError.
+ */
+export const AUTH_ERROR_RUNS = 3
+
 /** A run's `stoppedBy` for a stop-the-batch error. */
 function stoppedByOf(e: unknown): NonNullable<SyncOneResult['stoppedBy']> {
-  return { reason: stopReasonFor(e), retryAfterSeconds: retryAfterOf(e), poolCode: poolCodeOf(e) }
+  return { reason: stopReasonFor(e), retryAfterSeconds: retryAfterOf(e), poolCode: poolCodeOf(e), level: stopLevelFor(e) }
 }
 
 const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
@@ -343,7 +375,7 @@ export type SyncOneResult = {
     rechecksPending: number
   }
   /** Set when a pool refusal / pause stopped the run early (charged nothing). */
-  stoppedBy?: { reason: string; retryAfterSeconds: number | null; poolCode?: PoolFaultCode | null }
+  stoppedBy?: { reason: string; retryAfterSeconds: number | null; poolCode?: PoolFaultCode | null; level?: StopLevel }
   /** Why the DJ-page crawl stopped, when this run crawled. */
   crawlStopReason?: string
 }
@@ -613,7 +645,7 @@ export async function syncOne(
       // Until 2026-10-07 this was swallowed: the run said "synced, 0 sets"
       // after waiting out the pool, with no lastError.
       crawlStoppedBy = stoppedByOf(crawl.page1Error)
-      log.error('sync.batch_stopped_at_dj_page', { slug: sub.slug, ...errorFields(crawl.page1Error) })
+      log[crawlStoppedBy.level === 'error' ? 'error' : 'warn']('sync.batch_stopped_at_dj_page', { slug: sub.slug, ...errorFields(crawl.page1Error) })
     }
     // Union with previously-discovered URLs — earlier pages may have failed
     // to fetch this run but we don't want to lose them from the todo set.
@@ -716,11 +748,13 @@ export async function syncOne(
   let videoIdsAdded = 0
   let setsProcessed = 0
   let setsAbandonedThisRun = 0
-  /** Set when a block/pause stopped the run early; recorded as lastError and skips the recheck window. */
+  /** Set when a block/pause stopped the run early; recorded as lastRunStats.stop (see StopLevel) and skips the recheck window. */
   let stopReason: string | null = crawlStoppedBy?.reason ?? null
   let stoppedBy: SyncOneResult['stoppedBy'] = crawlStoppedBy
   let setsRechecked = 0
   let videosReplaced = 0
+  /** The last YouTube 401 of this run, if any (see AUTH_ERROR_RUNS). */
+  let authFailure: string | null = null
   // Artist-playlist membership changed (insert or removal) → write the
   // cached id set back at the end.
   let playlistChanged = false
@@ -1013,7 +1047,7 @@ export async function syncOne(
         // pick up exactly where we left off.
         stoppedBy = stoppedByOf(e)
         stopReason = stoppedBy.reason
-        log.error('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
+        log[stoppedBy.level === 'error' ? 'error' : 'warn']('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
         break
       }
       // Bump per-URL failure count. After ABANDON_AFTER_FAILURES, give up
@@ -1025,6 +1059,7 @@ export async function syncOne(
       // A YouTube 401 is Google refusing a valid token now and then, never
       // about the set: it is retried next run without counting toward abandoning.
       const authFlake = e instanceof YouTubeApiError && e.status === 401
+      if (authFlake) authFailure = (e instanceof Error ? e.message : String(e)).split('\n')[0]!.slice(0, 200)
       const fc = authFlake ? (failureCounts[setUrl] ?? 0) : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
       const abandon = !authFlake && fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })
@@ -1174,7 +1209,7 @@ export async function syncOne(
       if (isStopTheBatchError(e)) {
         stoppedBy = stoppedByOf(e)
         stopReason = stoppedBy.reason
-        log.error('sync.recheck_batch_stopped_blocked', { slug: sub.slug, setUrl, setsRechecked, ...errorFields(e) })
+        log[stoppedBy.level === 'error' ? 'error' : 'warn']('sync.recheck_batch_stopped_blocked', { slug: sub.slug, setUrl, setsRechecked, ...errorFields(e) })
         break
       }
       if (isQuotaError(e)) {
@@ -1190,6 +1225,7 @@ export async function syncOne(
       // after ABANDON_AFTER_FAILURES it is simply deferred to the next
       // interval instead of being retried every tick.
       const authFlake = e instanceof YouTubeApiError && e.status === 401
+      if (authFlake) authFailure = (e instanceof Error ? e.message : String(e)).split('\n')[0]!.slice(0, 200)
       const fc = authFlake ? (failureCounts[setUrl] ?? 0) : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
       const defer = !authFlake && fc >= ABANDON_AFTER_FAILURES
       log.warn('sync.recheck_failed', { slug: sub.slug, setUrl, failureCount: fc, deferring: defer, ...errorFields(e) })
@@ -1207,6 +1243,26 @@ export async function syncOne(
     }
   }
 
+  // A stopped run is kept as `stop` with how many runs in a row it has been;
+  // it is the DJ's lastError only when it needs the owner or has gone on too long.
+  const ranAt = nowSeconds()
+  // The owner's own pause starts the count over: the pool was not asked.
+  const prevStop = state.lastRunStats?.stop?.level === 'retry' && stoppedBy?.level === 'retry' ? state.lastRunStats.stop : undefined
+  const stop = stoppedBy
+    ? { reason: stoppedBy.reason, code: stoppedBy.poolCode ?? null, level: stoppedBy.level ?? 'error', runs: (prevStop?.runs ?? 0) + 1, since: prevStop?.since ?? ranAt }
+    : null
+  const stuck = !!stop && stop.level === 'retry' && stop.runs >= STOP_ERROR_RUNS && ranAt - stop.since >= STOP_ERROR_SECONDS
+  // Runs in a row that ended with a YouTube 401. A stopped run reached YouTube
+  // for nothing, so it neither adds to the count nor clears it.
+  const prevAuthFails = state.lastRunStats?.authFails ?? 0
+  const authFails = authFailure ? prevAuthFails + 1 : stop ? prevAuthFails : 0
+  const lastError = stop?.level === 'error'
+    ? stop.reason
+    : authFailure && authFails >= AUTH_ERROR_RUNS
+      ? `YouTube refused the login on ${authFails} runs in a row: ${authFailure}`
+      : stop && stuck
+        ? `${stop.reason} (${stop.runs} runs in a row since ${new Date(stop.since * 1000).toISOString()})`
+        : null
   const next: SubState = {
     playlistId,
     artistName,
@@ -1215,9 +1271,11 @@ export async function syncOne(
     abandonedTracklistUrls: [...abandoned],
     failureCounts,
     tracklistVideos,
-    lastRunAt: Math.floor(Date.now() / 1000),
-    ...(stopReason ? { lastError: stopReason } : {}),
+    lastRunAt: ranAt,
+    ...(lastError ? { lastError } : {}),
     lastRunStats: {
+      ...(stop ? { stop } : {}),
+      ...(authFails ? { authFails } : {}),
       tracklistsSeen: discovered.size,
       tracklistsProcessed: setsProcessed,
       videoIdsFound,

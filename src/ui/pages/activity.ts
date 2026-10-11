@@ -27,7 +27,7 @@ const KIND_TIPS: Record<string, string> = {
   hygiene: 'Videos removed from playlists, or found missing from them.',
   mkvid: 'Sets queued for, rendered by and uploaded through mkvid.',
   pool: 'Events from the account pool: accounts created, flagged or retired, and captchas.',
-  sync: 'DJs whose last sync ended in an error.',
+  sync: 'The last sync of each DJ: ok, waiting (the pool stopped it and the scheduler tries again) or an error.',
   ban: 'Times 1001tracklists blocked tracked.',
 }
 const RANGE_TIPS: Record<string, string> = { '24h': 'The last 24 hours.', '7d': 'The last 7 days.', '30d': 'The last 30 days.', '90d': 'The last 90 days (the longest the logs are kept).' }
@@ -49,18 +49,21 @@ export const ACTIVITY_ROW_JS = /* js */ `
   const STATUS_TIPS = {
     ok: 'It worked.', added: 'The video was added to the playlist.', duplicate: 'The video was already in the playlist.',
     replaced: 'A recheck found the set recording swapped: the old video was replaced.', no_youtube: 'The set page had no YouTube recording to add.',
-    failed: 'It failed and will be tried again.', abandoned: 'Given up after repeated failures.', error: 'The last sync of this DJ ended in an error.',
+    failed: 'It failed and will be tried again.', abandoned: 'Given up after repeated failures.', error: 'The last sync of this DJ ended in an error: it needs you, or it has kept being stopped for 12 hours.',
+    waiting: 'The pool stopped the last sync of this DJ early (busy, a slow page load, the budget spent). The scheduler tries again by itself.',
     claimed: 'mkvid took this job.', done: 'Finished.', verified: 'Two fetches by different accounts agreed on the track list.',
     open: 'The block is still active.', ended: 'The block is over.', refunded: 'mkvid gave the job back without uploading, so it does not count against the daily cap.',
     pending: 'Waiting its turn.', banned: 'Excluded from mkvid.', removed: 'Taken out of the playlists.', would_remove: 'Dry run: would be removed, nothing was deleted.', recorded: 'Found missing from a playlist and noted; it is never re-added.', undone: 'You undid this.',
   };
   // The statuses the Status filter offers (the server takes any).
   const ACTIVITY_STATUSES = ['ok', 'no_video', 'no_tracklist', 'upstream_error', 'added', 'duplicate', 'replaced', 'no_youtube', 'failed', 'abandoned', 'removed', 'would_remove', 'recorded', 'undone',
-    'done', 'banned', 'superseded', 'claimed', 'refunded', 'challenge.created', 'challenge.solved', 'challenge.expired', 'account.created', 'account.flagged', 'account.rested', 'account.retired', 'error', 'open', 'ended'];
+    'done', 'banned', 'superseded', 'claimed', 'refunded', 'challenge.created', 'challenge.solved', 'challenge.expired', 'account.created', 'account.flagged', 'account.rested', 'account.retired', 'error', 'waiting', 'open', 'ended'];
+  // Not a problem, not a success: an attempt that is tried again by itself.
+  const ACTIVITY_RETRY = new Set(['failed', 'waiting']);
   const activityTip = (r) => STATUS_TIPS[r.status] || (r.problem ? 'This event is flagged as a problem.' : '');
   function activityIso(ts) { try { return new Date(ts).toISOString(); } catch (e) { return ''; } }
   function activityStatusHtml(r) {
-    const cls = r.problem ? 'bad' : ACTIVITY_OK.has(r.status) ? 'ok' : 'neutral';
+    const cls = r.problem ? 'bad' : ACTIVITY_OK.has(r.status) ? 'ok' : ACTIVITY_RETRY.has(r.status) ? 'warn' : 'neutral';
     return '<span class="badge ' + cls + '"' + TK.tip(activityTip(r)) + '>' + esc(r.status || '?') + '</span>';
   }
   function activityEventHtml(r) {
@@ -192,7 +195,7 @@ ${ACTIVITY_DRAWER_JS}
 
   const chips = [{ id: 'k-all', label: 'All', group: 'kind', on: true, tip: 'Every kind of event.' }]
     .concat(ACTIVITY_KIND_LIST.map((k) => ({ id: 'k-' + k[0], label: k[1], group: 'kind', tip: KIND_TIPS[k[0]], filters: [{ col: 'kind', op: 'in', value: k[0] }] })))
-    .concat([{ id: 'problems', label: 'Problems only', tip: 'Only events that failed or were flagged.', filters: [{ col: 'problem', op: 'eq', value: '1' }] }])
+    .concat([{ id: 'problems', label: 'Problems only', tip: 'Only events that will not fix themselves: given up, flagged or blocked. A failed attempt that is tried again is not one.', filters: [{ col: 'problem', op: 'eq', value: '1' }] }])
     .concat(Object.keys(RANGE_MS).map((r) => ({ id: r, label: r, group: 'range', on: r === '7d', tip: RANGE_TIPS[r], filters: [{ col: 'ts', op: 'gte', value: since(RANGE_MS[r]) }] })));
 
   // The DJ select follows the table's DJ filter (set here, from a chip or from the DJ column).

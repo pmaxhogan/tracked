@@ -63,7 +63,10 @@ ${DJ_ACTIONS_JS}
   }
   function lastHtml(r) {
     const when = r.lastRunAt ? '<span class="tkt-when">' + esc(TK.fmt.rel(new Date(r.lastRunAt).toISOString())) + '</span>' : '<span class="muted">never synced</span>';
-    return when + (r.hasError ? ' <span class="badge bad"' + TK.tip('The last sync failed: ' + r.lastError + ' (retried on a later scheduler tick)') + '>error</span>' : '');
+    if (r.hasError) return when + ' <span class="badge bad"' + TK.tip('The last sync failed: ' + r.lastError) + '>error</span>';
+    // Stopped by the pool or a pause: routine, the scheduler tries again by itself.
+    if (r.waiting) return when + ' <span class="badge info"' + TK.tip('The last sync was stopped early: ' + r.stopReason + '. Nothing is lost: the scheduler tries again on a later tick' + (r.stopRuns > 1 ? ' (' + r.stopRuns + ' runs in a row so far)' : '') + '. It becomes an error only if it needs you or keeps happening for 12 hours.') + '>waiting</span>';
+    return when;
   }
   function playlistHtml(r) {
     const href = TK.safeHref(r.playlistUrl);
@@ -93,7 +96,7 @@ ${DJ_ACTIONS_JS}
       { key: 'name', label: 'DJ', type: 'text', render: nameHtml },
       { key: 'sets', label: 'Sets', type: 'number', render: setsHtml, tip: 'Sets processed (given a video, or found to have none) out of every set found on the DJ page.' },
       { key: 'pending', label: 'Pending', type: 'number', render: pendingHtml, tip: 'Sets found on the DJ page that the sync has not processed yet.' },
-      { key: 'lastRunAt', label: 'Last sync', type: 'datetime', render: lastHtml, tip: 'When the sync last ran for this DJ, and whether it ended in an error (the Errors chip lists those).' },
+      { key: 'lastRunAt', label: 'Last sync', type: 'datetime', render: lastHtml, tip: 'When the sync last ran for this DJ. "waiting": the pool stopped the run and the scheduler tries again by itself. "error": it needs you, or it has kept happening for 12 hours (the Errors chip lists those).' },
       { key: 'videos', label: 'Playlist', type: 'number', render: playlistHtml, tip: 'The DJ playlist on YouTube and how many sets have a video in it.' },
       { key: 'mkvid', label: 'mkvid', type: 'number', hideOn: 'phone', tip: 'Videos mkvid rendered from a set audio because the set had no recording.' },
       { key: 'addedAt', label: 'Added', type: 'datetime', hideOn: 'phone', render: (r) => '<span class="tkt-when">' + esc(TK.fmt.date(r.addedAt / 1000)) + '</span>', tip: 'When you subscribed.' },
@@ -102,7 +105,8 @@ ${DJ_ACTIONS_JS}
     search: 'Search DJs, slugs, errors',
     chips: [
       { id: 'all', label: 'All', group: 'f', on: true, count: (d) => d.counts && d.counts.total },
-      { id: 'errors', label: 'Errors', group: 'f', filters: [{ col: 'hasError', op: 'eq', value: '1' }], count: (d) => d.counts && d.counts.errors, tip: 'DJs whose last sync ended in an error.' },
+      { id: 'errors', label: 'Errors', group: 'f', filters: [{ col: 'hasError', op: 'eq', value: '1' }], count: (d) => d.counts && d.counts.errors, tip: 'DJs whose last sync ended in an error: something that needs you, or a stop that has kept happening for 12 hours.' },
+      { id: 'waiting', label: 'Waiting', group: 'f', filters: [{ col: 'waiting', op: 'eq', value: '1' }], count: (d) => d.counts && d.counts.waiting, tip: 'DJs whose last sync the pool stopped early (busy, a slow page load, the budget spent). The scheduler tries again by itself.' },
       { id: 'pending', label: 'Pending sets', group: 'f', filters: [{ col: 'pending', op: 'gt', value: '0' }], sort: '-pending', count: (d) => d.counts && d.counts.pending, tip: 'DJs with sets found but not processed yet.' },
       { id: 'never', label: 'Never synced', group: 'f', filters: [{ col: 'lastRunAt', op: 'empty', value: '' }], count: (d) => d.counts && d.counts.neverSynced, tip: 'DJs the sync has not run for yet.' },
     ],
