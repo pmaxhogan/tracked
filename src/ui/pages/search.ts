@@ -85,6 +85,7 @@ export const SEARCH_CSS = /* css */ `
     .sq-cell { min-width: 0; }
   }
   ${TRACK_ROW_CSS}
+  .sq-acts .btn.saved { border-color: var(--accent); color: var(--accent); text-decoration: none; }
 `
 
 const JS = /* js */ `
@@ -105,6 +106,8 @@ ${TRACK_ROW_JS}
   // nav: the results in display order, [{ id, href }]: what the arrow keys walk and Enter opens.
   let nav = [];
   const expanded = new Set(), linkState = {};
+  // psState[trackKey]: 'busy' while saving, else the pre-save { id, stage } (kept across searches).
+  const psState = {};
 
   // ── text matching: case-, diacritic- and apostrophe-insensitive ──
   function fold(ch) { return (ch.normalize ? ch.normalize('NFKD') : ch).replace(/\\p{M}+/gu, '').toLowerCase().replace(/['’‘\`´]/g, ''); }
@@ -170,7 +173,18 @@ ${TRACK_ROW_JS}
       else h += '<button type="button" class="btn small links-btn" data-links="' + esc(t.trackKey) + '"' + (st === 'loading' ? ' disabled' : '') +
         TK.tip(st && st.indexOf('err:') === 0 ? 'Lookup failed: ' + st.slice(4) + ' Press to try again.' : 'Looks up Apple Music and YouTube links for this track. Costs one 1001tracklists page view; the result is cached for 30 days.') + '>' + (st === 'loading' ? '…' : 'links') + '</button>';
     }
-    return h;
+    return h + presaveHtml(t);
+  }
+  // Pre-save: a track with no YouTube link gets the button (POST /ui/api/presaves); one already saved links to its pre-save.
+  const numericId = (t) => (t.trackId && /^\\d+$/.test(String(t.trackId)) ? String(t.trackId) : null);
+  function presaveHtml(t) {
+    const ps = psState[t.trackKey];
+    if (ps && ps !== 'busy') {
+      const found = ps.stage === 'found' || ps.stage === 'uploaded';
+      return '<a class="btn small saved" href="/ui/presave?id=' + esc(encodeURIComponent(String(ps.id))) + '"' + TK.tip(found ? 'Pre-saved and now on YouTube. Opens the pre-save.' : 'Pre-saved: rechecked twice a day until it has a YouTube link. Opens the pre-save.') + '>' + (found ? 'On YouTube ✓' : 'Pre-saved ✓') + '</a>';
+    }
+    if (t.youtubeLink || !(numericId(t) || TK.safeHref(t.trackUrl))) return '';
+    return '<button type="button" class="btn small" data-ps="' + esc(t.trackKey) + '"' + (ps === 'busy' ? ' disabled' : '') + TK.tip('Watches this track for a YouTube link: rechecked twice a day, with a push when one appears.') + '>' + (ps === 'busy' ? 'Saving…' : 'Pre-save') + '</button>';
   }
   function newestSet(t) {
     let best = null;
@@ -364,6 +378,7 @@ ${TRACK_ROW_JS}
     paint(true);
     const count = (kind === 'all' || kind === 'tracks' ? d.tracks.length : 0) + (kind === 'all' || kind === 'sets' ? (d.sets || []).length : 0) + (kind === 'all' || kind === 'djs' ? (d.djs || []).length : 0);
     if (count) $empty.hidden = true; else showEmpty('Nothing found for “' + q + '”.');
+    if (kind === 'all' || kind === 'tracks') lookupPresaved(d.tracks).catch(() => {});
   }
   function schedule() { clearTimeout(timer); timer = setTimeout(run, 150); }
   function setKind(k) { if (k === kind || known.indexOf(k) < 0) return; kind = k; renderTabs(); clearTimeout(timer); run(); }
@@ -402,12 +417,50 @@ ${TRACK_ROW_JS}
     } catch (e) { linkState[key] = 'err:' + (e && e.message ? e.message : e); }
     paint();
   }
+  async function presaveTrack(key) {
+    const t = data && data.tracks.find((x) => x.trackKey === key);
+    if (!t || psState[key]) return;
+    const body = {};
+    const id = numericId(t);
+    if (id) body.trackId = id;
+    if (TK.safeHref(t.trackUrl)) body.trackUrl = t.trackUrl;
+    if (t.artist) body.artist = t.artist;
+    if (t.title) body['title'] = t.title;
+    if (t.label) body.label = t.label;
+    const best = newestSet(t);
+    if (best) {
+      body.tracklistUrl = best.url;
+      if (best.cueSeconds != null && best.cueSeconds >= 0) body.cueSeconds = Math.round(best.cueSeconds);
+      if (best.djSlug) body.djSlug = best.djSlug;
+    }
+    psState[key] = 'busy'; paint();
+    const res = await TK.api.post('/ui/api/presaves', body);
+    const d = res.data && typeof res.data === 'object' ? res.data : {};
+    if (!res.ok || !d.presave) { delete psState[key]; TK.toast('Pre-save failed: ' + TK.errText(res, 'failed (' + res.status + ')'), 'bad'); paint(); return; }
+    psState[key] = { id: d.presave.id, stage: d.presave.stage };
+    paint();
+    TK.toast(d.message || 'Pre-saved.', 'ok', null, { href: '/ui/presave?id=' + encodeURIComponent(String(d.presave.id)), text: 'Open pre-save' });
+  }
+  // Which of the tracks on screen are already pre-saved (by 1001tracklists track id).
+  async function lookupPresaved(tracks) {
+    const byId = {};
+    for (const t of tracks) { const id = numericId(t); if (id && !psState[t.trackKey]) byId[id] = t.trackKey; }
+    const ids = Object.keys(byId).slice(0, 500);
+    if (!ids.length) return;
+    const res = await TK.api.post('/ui/api/presaves/lookup', { trackIds: ids });
+    const hits = res.ok && res.data && res.data.byTrackId && typeof res.data.byTrackId === 'object' ? res.data.byTrackId : {};
+    let any = false;
+    for (const id of ids) { const h = hits[id]; if (h && h.id != null && !psState[byId[id]]) { psState[byId[id]] = { id: h.id, stage: h.stage }; any = true; } }
+    if (any && data && data.tracks === tracks) paint();
+  }
   // One delegated handler for the All list and the tables (a table's own handler ignores these buttons).
   function onResultsClick(ev) {
     const t = ev.target;
     if (!t || !t.closest) return;
     const lb = t.closest('[data-links]');
     if (lb && lb.dataset) { lookupLinks(lb.dataset.links); return; }
+    const pb = t.closest('[data-ps]');
+    if (pb && pb.dataset) { presaveTrack(pb.dataset.ps); return; }
     const eb = t.closest('[data-exp]');
     if (eb && eb.dataset) { if (expanded.has(eb.dataset.exp)) expanded.delete(eb.dataset.exp); else expanded.add(eb.dataset.exp); paint(); return; }
     const kb = t.closest('[data-kind]');

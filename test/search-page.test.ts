@@ -30,7 +30,7 @@ async function open(search: string, answer: (u: string) => Promise<Response> | R
   const listeners = new Map<string, Fn>()
   const el = (id: string): any => ({ innerHTML: '', textContent: '', value: '', hidden: false, checked: false, disabled: false, className: '', src: '', dataset: {}, style: {}, options: [],
     setAttribute(k: string, v: string) { (this as any)['@' + k] = v }, removeAttribute() {}, scrollIntoView() {},
-    addEventListener(t: string, fn: Fn) { listeners.set(id + ':' + t, fn) }, focus() {}, add() {}, remove() {}, showModal() {}, close() {}, querySelector: () => el('q'), querySelectorAll: () => [], closest: () => null })
+    addEventListener(t: string, fn: Fn) { listeners.set(id + ':' + t, fn) }, focus() {}, add() {}, remove() {}, appendChild() {}, showModal() {}, close() {}, querySelector: () => el('q'), querySelectorAll: () => [], closest: () => null })
   const document = { hidden: false, getElementById: (id: string) => (els.has(id) ? els.get(id) : (els.set(id, el(id)), els.get(id))), querySelector: () => null, addEventListener() {}, createElement: () => el('new') }
   const fetches: string[] = []
   const timers = new Map<number, { fn: () => void; ms: number }>()
@@ -174,6 +174,30 @@ describe('Search page script', () => {
     const out = p.els.get('sq-results').innerHTML as string
     expect(out).toContain('href="https://youtu.be/zzz"')
     expect(out).not.toContain('data-links="a"')
+  })
+
+  it('a track with no YouTube link gets a Pre-save button; one already pre-saved links to its pre-save; pressing it saves the track', async () => {
+    const r = response({ sets: [], djs: [], tracks: [
+      track({ trackKey: 'a', trackId: '55', title: 'Not Saved' }),
+      track({ trackKey: 'b', trackId: '56', title: 'Has Link', youtubeLink: 'https://youtu.be/abc' }),
+      track({ trackKey: 'c', trackId: '57', title: 'Saved Before' }),
+      track({ trackKey: 'd', trackId: null, trackUrl: null, title: 'Nothing To Save By' }),
+    ] })
+    const answer = (u: string) => u.startsWith('/ui/api/search') ? Response.json(r)
+      : u === '/ui/api/presaves/lookup' ? Response.json({ byTrackId: { '57': { id: 9, stage: 'watching' } }, byRow: {} })
+      : u === '/ui/api/presaves' ? Response.json({ ok: true, created: true, presave: { id: 12, stage: 'watching' }, message: 'Pre-saved: Mau P – Not Saved' })
+      : new Response('{}', { status: 404 })
+    const p = await open('?q=mau', answer)
+    let out = p.els.get('sq-results').innerHTML as string
+    expect([...out.matchAll(/data-ps="([^"]+)"/g)].map((m) => m[1])).toEqual(['a'])
+    expect(out).toContain('href="/ui/presave?id=9"')
+    expect(out).toContain('Pre-saved ✓')
+    p.fire('sq-results', 'click', { target: { closest: (sel: string) => (sel === '[data-ps]' ? { dataset: { ps: 'a' } } : null) } })
+    await tick()
+    expect(p.fetches.filter((u) => u === '/ui/api/presaves')).toHaveLength(1)
+    out = p.els.get('sq-results').innerHTML as string
+    expect(out).not.toContain('data-ps="a"')
+    expect(out).toContain('href="/ui/presave?id=12"')
   })
 
   it('All is one list: DJs first, then tracks and sets by score (a set first on a tie); a tab shows one kind', async () => {
