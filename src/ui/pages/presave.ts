@@ -137,6 +137,9 @@ ${PRESAVE_UI_JS}
     h += dt('Identified', at(p.identifiedAt));
     h += dt('On YouTube', at(p.foundAt), p.notifiedAt ? 'pushed ' + esc(rel(p.notifiedAt)) : '');
     if (up && up.completedAt && up.status === 'done') h += dt('Uploaded', at(up.completedAt), 'by mkvid');
+    // The like on the YouTube account: red only for a refusal the owner has to look at.
+    if (p.likedAt) h += dt('Liked', at(p.likedAt), 'on YouTube');
+    else if (p.likeError) h += dt('Like', '<span class="' + (/^forbidden:/.test(p.likeError) ? 'bad' : 'sub') + '">' + esc(p.likeError) + '</span>', p.likeNextAt ? 'tried again ' + esc(rel(p.likeNextAt)) : '');
     h += dt('Dismissed', at(p.dismissedAt));
     h += dt('Last check', p.lastCheckedAt ? at(p.lastCheckedAt) + ' <span class="ps-res ' + resultCls(p.lastResult) + '" style="display:inline">' + esc(resultText(p.lastResult)) + '</span>' : '<span class="sub">never</span>');
     if (p.lastError) h += dt('Last error', '<span class="bad">' + esc(p.lastError) + '</span>');

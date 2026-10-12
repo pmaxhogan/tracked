@@ -3,7 +3,8 @@ import { nowPlayingRoute, nowPlayingHandler } from './routes/now-playing'
 import { tracklistRoute, tracklistHandler } from './routes/tracklist'
 import { tracklistPurgeRoute, tracklistPurgeHandler } from './routes/tracklist-purge'
 import { likesRoute, likesHandler } from './routes/likes'
-import { presaveRoute, presaveHandler, presaveStatusRoute, presaveStatusHandler } from './routes/presave'
+import { presaveRoute, presaveHandler, presaveStatusRoute, presaveStatusHandler, presaveLikeBackfillRoute, presaveLikeBackfillHandler } from './routes/presave'
+import { retryDuePresaveLikes } from './lib/presave-like'
 import { likedSongsRoute, likedSongsHandler } from './routes/liked-songs'
 import { HOME_HTML, subscriptionsApp } from './routes/subscriptions'
 import { servePage } from './ui/pages'
@@ -79,6 +80,7 @@ app.openapi(likesRoute, likesHandler)
 // Pre-save a track (routes/presave.ts), same Tasker bearer.
 app.openapi(presaveRoute, presaveHandler)
 app.openapi(presaveStatusRoute, presaveStatusHandler)
+app.openapi(presaveLikeBackfillRoute, presaveLikeBackfillHandler)
 // Gated by its own LIKED_SONGS_TOKEN. Must stay above the API_TOKEN wildcard
 // gate below — a route registered first, with route-level middleware, answers
 // before that gate ever runs.
@@ -241,6 +243,11 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         await retryFailedPoolPushes(env, { log })
       } catch (e) {
         log.warn('cron.push_retries_threw', errorFields(e))
+      }
+      // Pre-saved tracks whose like failed and is due again (lib/presave-like.ts; one indexed query when none, never throws).
+      if (!isDaily) {
+        const l = await retryDuePresaveLikes(env, log)
+        if (l.tried) log.info('cron.presave_like_retries', l)
       }
       // Separate try/catch: a failed tick shouldn't stop the combined
       // playlist from catching up on everything that *did* land.

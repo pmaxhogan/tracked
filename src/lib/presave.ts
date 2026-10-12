@@ -14,7 +14,8 @@
  * An identified row takes the row's track id and moves on to `links` in the
  * same call. A YouTube link moves it to `found` and pushes to every device;
  * none hands it to mkvid's track uploads (lib/track-uploads.ts), which decides
- * by itself whether it is due.
+ * by itself whether it is due. A pre-save that gets its video, found or
+ * uploaded, is liked on the owner's YouTube account (lib/presave-like.ts).
  *
  * Every check appends a `presave_checks` row. A pool refusal changes nothing
  * but the failure count and the next check time, and the scheduler reads it
@@ -44,6 +45,7 @@ import { poolCodeOf } from './pool'
 import { presaveFoundPayload, sendPushToAll } from './web-push'
 import { labelFromSetUrl } from './activity'
 import { maybeQueueTrackUpload, supersedeTrackUploadsForPresave } from './track-uploads'
+import { onPresaveResolved } from './presave-like'
 
 const HOUR_MS = 3600_000
 const DAY_MS = 24 * HOUR_MS
@@ -95,6 +97,11 @@ export type PresaveRow = {
   found_at: number | null
   notified_at: number | null
   dismissed_at: number | null
+  /** The like on the owner's YouTube account (lib/presave-like.ts, migration 0020). */
+  liked_at: number | null
+  like_attempts: number
+  like_error: string | null
+  like_next_at: number | null
 }
 
 export type PresaveCheckRow = {
@@ -146,6 +153,11 @@ export type PresaveOut = {
   foundAt: number | null
   notifiedAt: number | null
   dismissedAt: number | null
+  /** When its video was liked on the connected YouTube account. */
+  likedAt: number | null
+  /** Why the last try did not like it (`<kind>: <detail>`), and when it is tried again (null = it is not). */
+  likeError: string | null
+  likeNextAt: number | null
   /** createdAt + trackUploads.minWatchDays: when mkvid may rip it. */
   uploadEligibleAt: number
 }
@@ -213,6 +225,9 @@ export function presaveOut(r: PresaveRow, settings: Pick<AppSettings, 'trackUplo
     foundAt: r.found_at,
     notifiedAt: r.notified_at,
     dismissedAt: r.dismissed_at,
+    likedAt: r.liked_at ?? null,
+    likeError: r.like_error ?? null,
+    likeNextAt: r.like_next_at ?? null,
     uploadEligibleAt: r.created_at + Math.round(settings.trackUploads.minWatchDays * DAY_MS),
   }
 }
@@ -576,6 +591,9 @@ async function checkLinks(env: Env, p: PresaveRow, trigger: PresaveTrigger, sett
     } catch (e) {
       log.warn('presave.supersede_failed', { id: p.id, ...errorFields(e) })
     }
+    // It has its video: liked on the owner's YouTube account (never throws; a failed like is retried by the cron).
+    const liked = await onPresaveResolved(env, p.id, log, { now })
+    if (liked) w = { ...w, presave: { ...w.presave, ...liked } }
     if (settings.presave.notifyFound) {
       const sent = await sendPushToAll(env, presaveFoundPayload({ id: p.id, artist: w.presave.artist, title: w.presave.title, videoId }), log).catch(() => null)
       if (sent && sent.sent > 0) {
@@ -1126,8 +1144,12 @@ export async function markPresaveUploaded(env: Env, presaveId: number, videoId: 
   const w = await writeCheck(env, p, patch, { trigger: 'upload', result: 'uploaded', detail: { videoId, ...(detail && typeof detail === 'object' ? (detail as object) : detail !== undefined ? { detail } : {}) } }, now)
   if (p.stage === 'found') {
     await dbOf(env).prepare('UPDATE presave_checks SET youtube_video_id = ? WHERE id = ?').bind(videoId, w.check.id).run()
+    return w.presave
   }
-  return w.presave
+  // The upload is its video now: liked like a found one (never throws; a failed like is retried by the cron).
+  if (!w.applied) return w.presave
+  const liked = await onPresaveResolved(env, p.id, undefined, { now })
+  return liked ? { ...w.presave, ...liked } : w.presave
 }
 
 /** "Pre-saved" state for track rows: by medialink id, and by row of one set (rows saved without an id). */

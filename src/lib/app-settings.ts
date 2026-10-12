@@ -78,6 +78,8 @@ export const AppSettingsSchema = z.object({
     retryMinutes: z.number().int().min(5).max(24 * 60),
     /** Push to every device when a pre-saved track gets a YouTube link. */
     notifyFound: z.boolean(),
+    /** Like a pre-saved track's video on the connected YouTube account once it has one (lib/presave-like.ts; 50 units each). */
+    likeOnYouTube: z.boolean(),
     /** A set page fetched for any reason updates the pre-saved rows of that set (free). */
     useSetFetches: z.boolean(),
     /** Stop watching a track after this many days without a link (0 = never). */
@@ -138,6 +140,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     priority: 'recheck',
     retryMinutes: 60,
     notifyFound: true,
+    likeOnYouTube: true,
     useSetFetches: true,
     giveUpDays: 0,
   },

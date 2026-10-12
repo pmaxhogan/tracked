@@ -4,6 +4,7 @@
  * Tasker (bearer API_TOKEN, registered in index.ts with app.openapi like /likes):
  *   POST /presave         save a track to watch → 200 { ok, created, presave, message }
  *   GET  /presave/status  ?trackId= | ?trackUrl= → { presave | null }
+ *   POST /presave/like-backfill  { dryRun?, limit?, afterId? } → one page of lib/presave-like.ts backfillPresaveLikes
  *
  * Admin UI (CF Access, mounted at /ui/api by routes/subscriptions.ts):
  *   GET    /presaves               data table (lib/table-query.ts) + counts per stage
@@ -49,6 +50,7 @@ import {
   type PresaveRow,
   type PresaveSource,
 } from '../lib/presave'
+import { backfillPresaveLikes, BACKFILL_MAX_LIKES } from '../lib/presave-like'
 import { ErrorResponse } from '../schemas'
 
 // ─── schemas (OpenAPI) ──────────────────────────────────────────────────────
@@ -99,6 +101,9 @@ export const PresaveOutSchema = z
     foundAt: ms('When 1001tracklists had a YouTube link'),
     notifiedAt: ms('When the push went out'),
     dismissedAt: ms('When it was dismissed'),
+    likedAt: ms('When its video was liked on the connected YouTube account'),
+    likeError: z.string().nullable().openapi({ description: 'Why the last try did not like it: `<kind>: <detail>`, kind = quota | transient | not_connected (tried again) | gone | forbidden | disliked (not tried again).' }),
+    likeNextAt: ms('When the like is tried again; null when it is not'),
     uploadEligibleAt: z.number().int().openapi({ description: 'createdAt + trackUploads.minWatchDays (unix ms).' }),
   })
   .openapi('Presave')
@@ -161,6 +166,61 @@ export const presaveStatusRoute = createRoute({
     401: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Missing/invalid bearer token' },
   },
 })
+
+const LikeBackfillItemSchema = z.object({
+  id: z.number().int(),
+  artist: z.string().nullable(),
+  title: z.string().nullable(),
+  stage: z.string(),
+  videoId: z.string(),
+  rating: z.enum(['like', 'dislike', 'none', 'unspecified', 'unknown']).openapi({ description: "videos.getRating's answer; unknown when it was not read or did not name the video." }),
+  action: z.enum(['would_like', 'liked', 'already_liked', 'left_disliked', 'failed', 'not_tried']),
+  error: z.string().optional(),
+})
+
+export const PresaveLikeBackfillRequest = z
+  .object({
+    dryRun: z.boolean().optional().openapi({ description: 'Default true: list what would be liked and its quota cost; nothing is liked or written.' }),
+    limit: z.number().int().min(0).max(BACKFILL_MAX_LIKES).optional().openapi({ description: `videos.rate calls this request makes at most (50 units each; default ${BACKFILL_MAX_LIKES}).` }),
+    afterId: z.number().int().min(0).optional().openapi({ description: 'The previous answer\'s nextAfterId.' }),
+    includeStopped: z.boolean().optional().openapi({ description: 'Also the ones given up on (video gone, refused, disliked).' }),
+  })
+  .openapi('PresaveLikeBackfillRequest')
+
+export const PresaveLikeBackfillResponse = z
+  .object({
+    dryRun: z.boolean(),
+    total: z.number().int().openapi({ description: 'Pre-saves with a video and no like, before this request.' }),
+    items: z.array(LikeBackfillItemSchema),
+    liked: z.number().int(),
+    alreadyLiked: z.number().int(),
+    wouldLike: z.number().int(),
+    failed: z.number().int(),
+    units: z.object({ getRating: z.number().int(), rate: z.number().int() }).openapi({ description: 'Quota units: getRating spent by this request (a dry run too), rate spent (live) or needed (dry run).' }),
+    stoppedBy: z.enum(['quota', 'not_connected', 'error']).nullable(),
+    message: z.string().optional(),
+    nextAfterId: z.number().int().nullable().openapi({ description: 'afterId of the next page; null when this was the last one.' }),
+  })
+  .openapi('PresaveLikeBackfillResponse')
+
+export const presaveLikeBackfillRoute = createRoute({
+  method: 'post',
+  path: '/presave/like-backfill',
+  middleware: [bearerAuth] as const,
+  security: [{ bearerAuth: [] }],
+  summary: 'Like the videos of pre-saves that have one and are not liked yet, one bounded page (scripts/presave-like-backfill.mjs)',
+  request: { body: { content: { 'application/json': { schema: PresaveLikeBackfillRequest } }, required: true } },
+  responses: {
+    200: { content: { 'application/json': { schema: PresaveLikeBackfillResponse } }, description: 'The page: what was (or would be) liked. Out of quota is `stoppedBy: quota`, not an error status.' },
+    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Bad input' },
+    401: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Missing/invalid bearer token' },
+  },
+})
+
+export const presaveLikeBackfillHandler: RouteHandler<typeof presaveLikeBackfillRoute, { Bindings: Env }> = async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'presave.like_backfill' })
+  return c.json(await backfillPresaveLikes(c.env, c.req.valid('json'), { log }), 200)
+}
 
 // ─── shared save ────────────────────────────────────────────────────────────
 

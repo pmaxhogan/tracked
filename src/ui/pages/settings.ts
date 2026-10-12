@@ -75,6 +75,7 @@ const APP_GROUPS: FormGroup[] = [
       },
       { path: 'presave.retryMinutes', label: 'Retry a failed lookup after', help: 'Pool refused or a page error. Default 60.', unit: 'min', min: 5, max: 1440, step: 1 },
       { path: 'presave.notifyFound', label: 'Push when one is on YouTube', help: 'To every device. Tapping opens YouTube Music.', kind: 'bool' },
+      { path: 'presave.likeOnYouTube', label: 'Like it on YouTube', help: 'Once it has a video (found or uploaded), so it is in your liked music. 50 quota units each.', kind: 'bool' },
       { path: 'presave.useSetFetches', label: 'Learn from set fetches', help: 'A set page fetched for any reason updates the ID rows saved from it. Free.', kind: 'bool' },
       { path: 'presave.giveUpDays', label: 'Stop watching after', help: 'Days without a link. 0 = never.', unit: 'days', min: 0, max: 3650, step: 1 },
     ],
