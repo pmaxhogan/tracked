@@ -114,7 +114,8 @@ export const SET_DIAG_JS = /* js */ `
     const failed = removals.find((r) => r.status === 'failed');
     if (removed.length) {
       const reasons = removed.map((r) => DIAG_REMOVED[r.reason] || r.reason).filter((r, i, a) => a.indexOf(r) === i);
-      tone = 'bad'; finding = 'Blocked from ' + removed.length + ' playlist(s): ' + reasons.join(', ') + '.';
+      // A video that died is dealt with by itself (taken out, its set queued for a new one): information. One you removed is your own doing and stays as it was.
+      tone = removed.every((r) => r.reason === 'dead') ? 'info' : 'bad'; finding = 'Blocked from ' + removed.length + ' playlist(s): ' + reasons.join(', ') + '.';
     }
     else if (failed) { tone = 'bad'; finding = 'A removal failed: ' + (failed.detail || 'no detail') + '.'; }
     else if (removals.some((r) => r.status === 'would_remove' && r.source !== 'dead')) { tone = 'warn'; finding = 'The sweep would remove it (dry run).'; }

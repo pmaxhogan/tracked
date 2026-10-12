@@ -50,10 +50,10 @@ const JS = (labels: Record<string, string>) => /* js */ `
   };
   // A dead video's rows are written by the playlist comparison, not the sweep, and none of them needs anything from you.
   const DEAD_STATUS_TIPS = {
-    would_remove: 'The video looks deleted or private on YouTube and is still in the playlist. It is taken out by itself once it has stayed that way for a few days (never while the sweep is a dry run). If it comes back, this row goes away.',
+    would_remove: 'The video looks deleted or private on YouTube and is still in the playlist. It is taken out by itself once it has stayed that way for 3 days (never while the sweep is a dry run). If it comes back, this row goes away. If YouTube keeps refusing to take it out, it is left alone for a week and then tried again.',
     removed: 'The video stayed deleted or private, so it was taken out of the playlist.',
-    recorded: 'The video was found deleted or private. tracked noted it and will not add it back.',
-    undone: 'You undid this: the video is kept, or may be added again if it comes back.',
+    recorded: 'The video was found deleted or private. tracked noted it and will not add it back. If it is still in the playlist, it is taken out by itself once it has stayed that way for 3 days.',
+    undone: 'You undid this: the video is kept, or may be added again if it comes back. One that is still in the playlist and stays deleted or private is still taken out after 3 days, unless you chose Keep it.',
   };
   const statusView = (r) => r.source === 'dead'
     ? { cls: r.status === 'would_remove' ? 'info' : 'neutral', text: r.status === 'would_remove' ? 'waiting' : String(r.status).replace('_', ' '), tip: DEAD_STATUS_TIPS[r.status] || STATUS_TIPS[r.status] || 'The state of this removal.' }

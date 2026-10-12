@@ -894,7 +894,233 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
     expect((await removals(env)).filter((x) => x.status === 'removed' || x.status === 'would_remove')).toEqual([])
   })
 
+  describe('a failure of the dead-video pass never stops the comparison and is never read as "no waits"', () => {
+    it('when its setup cannot be read, dead videos are left alone and the comparison itself carries on: findings recorded, holds written, pushes sent', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await seedSub(env, 'dj2', 'PLtwo')
+      for (let i = 1; i <= 10; i++) await seedSet(env, `https://www.1001tracklists.com/tracklist/9${i}/dj2-set-2026-09-01.html`, `two${String(i).padStart(8, '0')}`, { slug: 'dj2', pos: i, playlistId: 'PLtwo' })
+      await waited(env, [GONE])
+      const stored = await env.SUBS.get('hygiene:dead:seen')
+      // dj: one missing video and a dead one whose wait is over. dj2: lost four of ten, which is a hold.
+      listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9]), GONE], PLtwo: [1, 2, 3, 4, 5, 6].map((i) => `two${String(i).padStart(8, '0')}`) }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      const realGet = env.SUBS.get.bind(env.SUBS)
+      vi.spyOn(env.SUBS, 'get').mockImplementation((async (key: string, ...rest: any[]) => {
+        if (key === 'hygiene:dead:seen') throw new Error('KV GET failed: 500')
+        return (realGet as any)(key, ...rest)
+      }) as any)
+      const notify = vi.fn(async () => {})
+      const r = await comparePlaylists(env, 'tok', { log, notify, now: T })
+      expect(r[0]).toMatchObject({ slug: SLUG, status: 'ok', missing: 1, owner: 1 })
+      expect(r[1]).toMatchObject({ slug: 'dj2', status: 'held', missing: 4 })
+      expect(await listHolds(env)).toMatchObject([{ playlistId: 'PLtwo', missing: 4, notified: true }])
+      expect(notify).toHaveBeenCalledTimes(1)
+      // Nothing about dead videos: no delete, no row, and the stored waits are exactly what they were.
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect((await removals(env)).filter((x) => x.source === 'dead')).toEqual([])
+      vi.restoreAllMocks()
+      expect(await env.SUBS.get('hygiene:dead:seen')).toBe(stored)
+    })
+
+    it('a throw later in the comparison does not lose a wait that started earlier in it', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await seedSub(env, 'dj2', 'PLtwo')
+      for (let i = 1; i <= 10; i++) await seedSet(env, `https://www.1001tracklists.com/tracklist/9${i}/dj2-set-2026-09-01.html`, `two${String(i).padStart(8, '0')}`, { slug: 'dj2', pos: i, playlistId: 'PLtwo' })
+      // dj: a dead video seen for the first time. dj2: one video missing, and recording that throws.
+      listing({ [PL]: [...TEN, GONE], PLtwo: [1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => `two${String(i).padStart(8, '0')}`) }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      const realPrepare = env.DB.prepare.bind(env.DB)
+      const spy = vi.spyOn(env.DB, 'prepare').mockImplementation((sql: string) => {
+        if (/INSERT INTO removed_videos/.test(sql)) throw new Error('D1_ERROR: boom')
+        return realPrepare(sql)
+      })
+      await expect(comparePlaylists(env, 'tok', { log, now: T })).rejects.toThrow('boom')
+      spy.mockRestore()
+      expect(await seen(env)).toEqual({ [`${PL} ${GONE}`]: T })
+      // So the next comparison counts its days from T, not from itself.
+      listing({ [PL]: [...TEN, GONE], PLtwo: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => `two${String(i).padStart(8, '0')}`) }, { as: { [GONE]: 'private' } })
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 3 * DAYS }))[0]).toMatchObject({ deadRemoved: 1 })
+    })
+
+    it('a stored first-seen time that is not a past time (null, 0, negative, in the future, not a number) is no elapsed wait: that video starts over from now', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      const odd = { gone000000a: null, gone000000b: 0, gone000000c: -5, gone000000d: T + 86400, gone000000e: 'yesterday', gone000000f: 1 }
+      await env.SUBS.put('hygiene:dead:seen', JSON.stringify(Object.fromEntries(Object.entries(odd).map(([id, at]) => [`${PL} ${id}`, at]))))
+      // Six dead of 26: under the many-at-once guard.
+      const filler = Array.from({ length: 10 }, (_, i) => `fill${String(i).padStart(7, '0')}`)
+      listing({ [PL]: [...TEN, ...filler, ...Object.keys(odd)] }, { as: Object.fromEntries(Object.keys(odd).map((id) => [id, 'private' as const])) })
+      metaAnswer(Object.fromEntries(Object.keys(odd).map((id) => [id, { alive: false }])))
+      expect((await comparePlaylists(env, 'tok', { log, now: T }))[0]).toMatchObject({ deadRemoved: 1, deadReported: 5 })
+      // Only the one with a real past time went.
+      expect(deleted()).toEqual(['item-gone000000f'])
+      expect(await seen(env)).toEqual(Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((x) => [`${PL} gone000000${x}`, T])))
+      expect((await removals(env)).filter((x) => x.status === 'would_remove').map((x) => x.at)).toEqual([T, T, T, T, T])
+      // And they then wait their three days like any other.
+      listing({ [PL]: [...TEN, ...filler, ...Object.keys(odd).slice(0, 5)] }, { as: Object.fromEntries(Object.keys(odd).map((id) => [id, 'private' as const])) })
+      await approveDeadHold(env, PL, T)
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 2 * DAYS }))[0]!.deadRemoved ?? 0).toBe(0)
+      expect(deleted()).toHaveLength(1)
+    })
+
+    it('a stored value that is no map at all restarts every wait rather than deleting anything', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await env.SUBS.put('hygiene:dead:seen', JSON.stringify([1, 2, 3]))
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect(await seen(env)).toEqual({ [`${PL} ${GONE}`]: T })
+    })
+  })
+
+  describe('the delete count is handed on in memory: a KV read that lags a write cannot lose it', () => {
+    /** Every read of the day's counter answers "nothing yet", as KV may for a key written seconds ago. The real value is `stored()`. */
+    function laggingCounter(env: Env) {
+      const realGet = env.CACHE.get.bind(env.CACHE)
+      vi.spyOn(env.CACHE, 'get').mockImplementation((async (key: string, ...rest: any[]) => (key.startsWith('hygiene:sweep:deletes:') ? null : (realGet as any)(key, ...rest))) as any)
+      return async (nowS: number) => Number((await (realGet as any)(`hygiene:sweep:deletes:${new Date(nowS * 1000).toISOString().slice(0, 10)}`)) ?? 0)
+    }
+
+    it('the sweep of the same tick gets the count from the comparison, not from KV: the daily budget is not spent twice', async () => {
+      const env = makeEnv({ ...LIVE, PLAYLIST_SWEEP_DAILY_REMOVALS: '2' })
+      await seedFive(env)
+      // The sweep would take vid…1 out (its page says it is no full recording); the comparison has two dead videos due.
+      await saveSetFacts(env, facts(setUrl(1), { noFullNotice: true }))
+      await waited(env, ['gone000000a', 'gone000000b'])
+      listing({ [PL]: [...TEN, 'gone000000a', 'gone000000b'] }, { as: { gone000000a: 'private', gone000000b: 'private' } })
+      metaAnswer({ gone000000a: { alive: false }, gone000000b: { alive: false } })
+      const stored = laggingCounter(env)
+      const r = await runPlaylistHygiene(env, log, { accessToken: 'tok', nowMs: T * 1000 })
+      expect(r.compare![0]).toMatchObject({ deadRemoved: 2 })
+      expect(deleted()).toHaveLength(2)
+      // The budget of 2 is spent; the sweep knows, although every read of the counter said 0.
+      expect(r.sweep).toMatchObject({ dryRun: false, rejected: 1, budget: 2, budgetLeft: 0, deletes: 0, stoppedBy: 'budget' })
+      expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+      expect(await stored(T)).toBe(2)
+    })
+
+    it('the refund is the known "before plus deleted", never a re-read minus the unused: it cannot wipe the charge', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await waited(env, ['gone000000a', 'gone000000b', 'gone000000c'])
+      listing({ [PL]: [...TEN, 'gone000000a', 'gone000000b', 'gone000000c'] }, { as: { gone000000a: 'private', gone000000b: 'private', gone000000c: 'private' } })
+      metaAnswer({ gone000000a: { alive: false }, gone000000b: { alive: false }, gone000000c: { alive: false } })
+      // Five deletes were already made today, and KV shows them when the run starts; from then on its reads lag.
+      await env.CACHE.put(`hygiene:sweep:deletes:${new Date(T * 1000).toISOString().slice(0, 10)}`, '5')
+      const realGet = env.CACHE.get.bind(env.CACHE)
+      let reads = 0
+      vi.spyOn(env.CACHE, 'get').mockImplementation((async (key: string, ...rest: any[]) => (key.startsWith('hygiene:sweep:deletes:') && ++reads > 1 ? null : (realGet as any)(key, ...rest))) as any)
+      const writes: string[] = []
+      const realPut = env.CACHE.put.bind(env.CACHE)
+      vi.spyOn(env.CACHE, 'put').mockImplementation((async (key: string, value: string, ...rest: any[]) => {
+        if (key.startsWith('hygiene:sweep:deletes:')) writes.push(value)
+        return (realPut as any)(key, value, ...rest)
+      }) as any)
+      // The second of the three deletes is refused.
+      vi.mocked(deletePlaylistItem).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new YouTubeApiError('playlistItems.delete', 500, null, 'oops')).mockResolvedValueOnce(undefined)
+      const spend = { used: null as number | null }
+      expect((await comparePlaylists(env, 'tok', { log, now: T, spend }))[0]).toMatchObject({ deadRemoved: 2 })
+      // Charged 5 + 3 ahead, then set to 5 + 2: never below what was spent.
+      expect(writes).toEqual(['8', '7'])
+      expect(spend.used).toBe(7)
+    })
+
+    it("the sweep's own deletes are counted on top of what it knows, not on a read that lags", async () => {
+      const env = makeEnv({ REJECT_VERTICAL: '1' })
+      await seedSub(env)
+      await seedCombined(env)
+      await seedSet(env, setUrl(2), 'notc0000001', { pos: 1 })
+      await seedSet(env, setUrl(3), 'notc0000002', { pos: 2 })
+      await saveSetFacts(env, facts(setUrl(2), { noFullNotice: true }))
+      await saveSetFacts(env, facts(setUrl(3), { noFullNotice: true }))
+      const stored = laggingCounter(env)
+      const r = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 }, nowMs: T * 1000, usedAtLeast: 3 })
+      expect(r).toMatchObject({ deletes: 4, budgetLeft: 33 })
+      expect(await stored(T)).toBe(7)
+    })
+  })
+
+  describe('a delete YouTube keeps refusing', () => {
+    it('is left alone for a week after three refusals, says so on its row as plain information, and is then tried afresh', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await waited(env, [GONE])
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      vi.mocked(deletePlaylistItem).mockRejectedValue(new YouTubeApiError('playlistItems.delete', 403, 'playlistItemsNotAccessible', '{}'))
+      const H6 = 6 * 3600
+      for (const at of [T, T + H6, T + 2 * H6]) expect((await comparePlaylists(env, 'tok', { log, now: at }))[0]!.deadRemoved ?? 0).toBe(0)
+      expect(deletePlaylistItem).toHaveBeenCalledTimes(3)
+      // Nothing was spent on them.
+      expect(await sweepDeletesUsed(env, T * 1000)).toBe(0)
+      // From the fourth comparison on it is not asked for, and the row says why and until when.
+      for (const at of [T + 3 * H6, T + 4 * DAYS, T + 2 * H6 + 7 * DAYS - 60]) {
+        expect((await comparePlaylists(env, 'tok', { log, now: at }))[0]).toMatchObject({ deadReported: 1 })
+      }
+      expect(deletePlaylistItem).toHaveBeenCalledTimes(3)
+      const until = new Date((T + 2 * H6 + 7 * DAYS) * 1000).toISOString().slice(0, 10)
+      expect(await removals(env)).toMatchObject([{ source: 'dead', status: 'would_remove', video_id: GONE, detail: `looks deleted or private since 1970-01-01; YouTube refused to take it out 3 times, tried again after ${until}` }])
+      expect((await removals(env)).some((x) => x.status === 'failed')).toBe(false)
+      // A week after the last refusal: tried again, and this time YouTube does it.
+      vi.mocked(deletePlaylistItem).mockReset().mockResolvedValue(undefined)
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 2 * H6 + 7 * DAYS }))[0]).toMatchObject({ deadRemoved: 1 })
+      expect(await removals(env)).toMatchObject([{ status: 'removed', video_id: GONE }])
+      expect(await env.SUBS.get('hygiene:dead:refused', 'json')).toEqual({})
+    })
+
+    it('a quota reply is not a refusal, and a video that is back forgets its refusals', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await waited(env, [GONE])
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      vi.mocked(deletePlaylistItem).mockRejectedValue(new YouTubeApiError('playlistItems.delete', 403, 'quotaExceeded', '{}'))
+      await comparePlaylists(env, 'tok', { log, now: T })
+      expect(await env.SUBS.get('hygiene:dead:refused', 'json')).toBeNull()
+      await env.CACHE.delete('yt:quota:out')
+      vi.mocked(deletePlaylistItem).mockRejectedValue(new YouTubeApiError('playlistItems.delete', 500, null, 'oops'))
+      await comparePlaylists(env, 'tok', { log, now: T + 3600 })
+      expect(await env.SUBS.get('hygiene:dead:refused', 'json')).toEqual({ [`${PL} ${GONE}`]: { n: 1, at: T + 3600 } })
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'public' } })
+      metaAnswer({})
+      await comparePlaylists(env, 'tok', { log, now: T + 7200 })
+      expect(await env.SUBS.get('hygiene:dead:refused', 'json')).toEqual({})
+    })
+  })
+
   describe('the owner can undo', () => {
+    it('Allow again on a recorded dead video while it waits sticks: the husk still goes after three days, but it is not put back on the never-add list', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      listing({ [PL]: TEN }, { as: { vid00000003: 'deleted' } })
+      metaAnswer({ vid00000003: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      const [rec] = await removals(env)
+      expect(rec).toMatchObject({ source: 'dead', status: 'recorded' })
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(true)
+      expect(await undoRemoval(env, 'tok', rec!.id, log)).toEqual({ ok: true, readded: false })
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(false)
+      // While it waits the row stays as the owner left it: not turned back into a waiting row, not blocked again.
+      await comparePlaylists(env, 'tok', { log, now: T + DAYS })
+      expect(await removals(env)).toMatchObject([{ id: rec!.id, status: 'undone' }])
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(false)
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      // Day 3: the item is deleted, and the owner's choice holds.
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 3 * DAYS }))[0]).toMatchObject({ deadRemoved: 1 })
+      expect(deleted()).toEqual(['item-vid00000003'])
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(false)
+      expect(await removals(env)).toMatchObject([{ status: 'removed', detail: 'deleted or private since 2026-10-01; taken out of the playlist; may be added again if it comes back (you allowed it)' }])
+      expect((await confirmedMembership(env, PL)).get('vid00000003')).toBe('out')
+      // Back on YouTube later: the sync's gate lets it through.
+      metaAnswer({})
+      const pick = await pickSetVideo(env, { slug: SLUG, setUrl: setUrl(3), html: '<html></html>', rawVideoId: 'vid00000003', playlistId: PL, accessToken: 'tok', log })
+      expect(pick.videoId).toBe('vid00000003')
+    })
+
     it('Keep it on a waiting video: it is never taken out, however long it stays dead', async () => {
       const env = makeEnv(LIVE)
       await seedFive(env)

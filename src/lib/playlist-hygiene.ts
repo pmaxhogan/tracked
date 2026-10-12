@@ -510,17 +510,21 @@ export async function sweepDeletesUsed(env: Env, nowMs = Date.now()): Promise<nu
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 
-async function bumpSweepDeletes(env: Env, n: number, nowMs = Date.now()): Promise<void> {
-  if (n <= 0) return
-  const used = await sweepDeletesUsed(env, nowMs)
-  await env.CACHE.put(SWEEP_DELETES_PREFIX + dayKey(nowMs), String(used + n), { expirationTtl: 2 * DAY })
+async function writeSweepDeletes(env: Env, value: number, nowMs: number): Promise<void> {
+  await env.CACHE.put(SWEEP_DELETES_PREFIX + dayKey(nowMs), String(Math.max(0, Math.floor(value))), { expirationTtl: 2 * DAY })
 }
 
-/** Give back deletes that were charged ahead and then not made (`deleteDeadVideos`). */
-async function refundSweepDeletes(env: Env, n: number, nowMs = Date.now()): Promise<void> {
-  if (n <= 0) return
-  const used = await sweepDeletesUsed(env, nowMs)
-  await env.CACHE.put(SWEEP_DELETES_PREFIX + dayKey(nowMs), String(Math.max(0, used - n)), { expirationTtl: 2 * DAY })
+/**
+ * Count `n` more deletes and return the day's new count. `known` is what the
+ * caller already knows the count to be (its own earlier writes, or the pass
+ * before it in the same tick): a KV read may lag a write made seconds ago, so
+ * the count is never written lower than that plus `n`.
+ */
+async function bumpSweepDeletes(env: Env, n: number, nowMs = Date.now(), known = 0): Promise<number> {
+  const used = Math.max(await sweepDeletesUsed(env, nowMs), known)
+  if (n <= 0) return used
+  await writeSweepDeletes(env, used + n, nowMs)
+  return used + n
 }
 
 export type SweepResult = {
@@ -551,7 +555,14 @@ type AddedRow = { slug: string; url: string; video_id: string; playlist_id: stri
 export async function runRemovalSweep(
   env: Env,
   accessToken: string,
-  opts: { log: Logger; settings?: SweepSettings; fetcher?: typeof fetch; nowMs?: number },
+  opts: {
+    log: Logger
+    settings?: SweepSettings
+    fetcher?: typeof fetch
+    nowMs?: number
+    /** Deletes the comparison of this same tick knows the day stands at (its dead videos): KV may not show them yet. */
+    usedAtLeast?: number
+  },
 ): Promise<SweepResult> {
   const { log } = opts
   const nowMs = opts.nowMs ?? Date.now()
@@ -572,7 +583,9 @@ export async function runRemovalSweep(
   const overrides = await overriddenIds(env)
   const mkvidOwn = await mkvidUploadedIds(env, log)
   const candidates = rows.filter((r) => !overrides.has(r.video_id) && !mkvidOwn.has(r.video_id))
-  const used = await sweepDeletesUsed(env, nowMs)
+  const used = Math.max(await sweepDeletesUsed(env, nowMs), opts.usedAtLeast ?? 0)
+  /** The day's count as this run knows it; each delete is written on top of it, never on a read that lags. */
+  let known = used
   const result: SweepResult = {
     dryRun: settings.dryRun,
     candidates: candidates.length,
@@ -678,7 +691,7 @@ export async function runRemovalSweep(
         deletesHere += n
         budgetLeft -= n
         // Counted per delete (m3): a throw or a killed run later on cannot leave deletes uncounted.
-        await bumpSweepDeletes(env, n, nowMs)
+        known = await bumpSweepDeletes(env, n, nowMs, known)
         touched.add(pl)
         // Taken out by tracked itself: the comparison must never read its absence as the owner's doing.
         await markOutOfPlaylist(env, pl, r.video_id, 'sweep')
@@ -977,9 +990,61 @@ const DEAD_SEEN_KEY = 'hygiene:dead:seen'
 type DeadSeen = Record<string, number>
 const seenKey = (playlistId: string, videoId: string) => `${playlistId} ${videoId}`
 
-async function loadDeadSeen(env: Env): Promise<DeadSeen> {
-  const v = (await env.SUBS.get(DEAD_SEEN_KEY, 'json')) as DeadSeen | null
-  return v && typeof v === 'object' ? v : {}
+/**
+ * The stored waits. A read that fails throws (the caller then does nothing
+ * about dead videos this time): it is never taken for "no waits". A time that
+ * is not a past unix time (null, 0, negative, in the future, not a number)
+ * would read as "waited long enough", so it is replaced by `now`: that video's
+ * wait starts over, and it is said once.
+ */
+async function loadDeadSeen(env: Env, now: number, log: Logger): Promise<{ seen: DeadSeen; repaired: boolean }> {
+  const v = (await env.SUBS.get(DEAD_SEEN_KEY, 'json')) as unknown
+  if (v === null || v === undefined) return { seen: {}, repaired: false }
+  if (typeof v !== 'object' || Array.isArray(v)) {
+    log.error('hygiene.dead.seen_unreadable', { type: Array.isArray(v) ? 'array' : typeof v })
+    return { seen: {}, repaired: true }
+  }
+  const seen: DeadSeen = {}
+  const bad: string[] = []
+  for (const [key, at] of Object.entries(v as Record<string, unknown>)) {
+    const ok = typeof at === 'number' && Number.isFinite(at) && at > 0 && at <= now
+    seen[key] = ok ? (at as number) : now
+    if (!ok) bad.push(key)
+  }
+  if (bad.length > 0) log.error('hygiene.dead.seen_repaired', { count: bad.length, keys: bad.slice(0, 20) })
+  return { seen, repaired: bad.length > 0 }
+}
+
+/** A delete YouTube refuses this many times in a row (for a reason that is not quota) is left alone for DEAD_REFUSAL_PAUSE_DAYS, then tried afresh. */
+export const DEAD_REFUSALS_MAX = 3
+export const DEAD_REFUSAL_PAUSE_DAYS = 7
+
+/** Refused deletes: `<playlistId> <videoId>` → how many in a row, and when the last one was. In SUBS, next to the waits. */
+const DEAD_REFUSED_KEY = 'hygiene:dead:refused'
+type DeadRefused = Record<string, { n: number; at: number }>
+
+async function loadDeadRefused(env: Env): Promise<DeadRefused> {
+  const v = (await env.SUBS.get(DEAD_REFUSED_KEY, 'json')) as unknown
+  const out: DeadRefused = {}
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out
+  for (const [key, r] of Object.entries(v as Record<string, { n?: unknown; at?: unknown } | null>)) {
+    if (r && typeof r.n === 'number' && r.n > 0 && typeof r.at === 'number' && Number.isFinite(r.at)) out[key] = { n: r.n, at: r.at }
+  }
+  return out
+}
+
+/** Unix seconds until which a video's delete is not tried again, or null when it may be tried. */
+function refusedUntil(r: { n: number; at: number } | undefined, now: number): number | null {
+  if (!r || r.n < DEAD_REFUSALS_MAX) return null
+  const until = r.at + DEAD_REFUSAL_PAUSE_DAYS * DAY
+  // A time in the future is no reason to wait longer than the pause itself.
+  return now < until && r.at <= now ? until : null
+}
+
+/** Writes back what a run changed of the waits and the refusals. Never throws. */
+async function saveDeadState(env: Env, run: DeadRun, log: Logger): Promise<void> {
+  if (run.seenChanged) await env.SUBS.put(DEAD_SEEN_KEY, JSON.stringify(run.seen)).catch((e) => log.warn('hygiene.dead.seen_write_failed', errorFields(e)))
+  if (run.refusedChanged) await env.SUBS.put(DEAD_REFUSED_KEY, JSON.stringify(run.refused)).catch((e) => log.warn('hygiene.dead.refused_write_failed', errorFields(e)))
 }
 
 /** A playlist whose listing called implausibly many videos dead: nothing is taken out of it until the owner says they are. */
@@ -1041,21 +1106,34 @@ type DeadRun = {
   kept: Set<string>
   seen: DeadSeen
   seenChanged: boolean
+  refused: DeadRefused
+  refusedChanged: boolean
   /** Dead for the whole wait, in playlists that are not held: what `deleteDeadVideos` takes out. */
   due: Array<{ p: Pending; videoId: string; itemIds: string[] }>
   stoppedBy: 'budget' | 'quota' | 'counter' | null
+  /** The day's delete count as read when the run began. */
+  used: number
+  /** What this run knows the count to be after its own deletes; null until it wrote the counter. Handed to the sweep of the same tick. */
+  usedNow: number | null
 }
 
+/** Throws when any of what it reads cannot be read: the caller then leaves dead videos alone for this comparison. */
 async function startDeadRun(env: Env, nowMs: number, log: Logger): Promise<DeadRun> {
   const settings = sweepSettings(env, await getAppSettings(env))
+  const used = await sweepDeletesUsed(env, nowMs)
+  const { seen, repaired } = await loadDeadSeen(env, Math.floor(nowMs / 1000), log)
   return {
     dryRun: settings.dryRun,
-    budgetLeft: Math.max(0, settings.dailyRemovals - (await sweepDeletesUsed(env, nowMs))),
+    budgetLeft: Math.max(0, settings.dailyRemovals - used),
+    used,
+    usedNow: null,
     nowMs,
     mkvidOwn: await mkvidUploadedIds(env, log),
     kept: await overriddenIds(env),
-    seen: await loadDeadSeen(env),
-    seenChanged: false,
+    seen,
+    seenChanged: repaired,
+    refused: await loadDeadRefused(env),
+    refusedChanged: false,
     due: [],
     // Nothing is asked or written while the day's quota is out.
     stoppedBy: (await getQuotaOut(env, nowMs)) ? 'quota' : null,
@@ -1064,8 +1142,9 @@ async function startDeadRun(env: Env, nowMs: number, log: Logger): Promise<DeadR
 
 const day = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 10)
 
-/** The line a waiting row carries; it says what will happen, which depends on whether the sweep is live. */
-function waitingDetail(since: number, dryRun: boolean): string {
+/** The line a waiting row carries; it says what will happen, which depends on whether the sweep is live and on whether YouTube keeps refusing the delete. */
+function waitingDetail(since: number, dryRun: boolean, pausedUntil: number | null = null): string {
+  if (pausedUntil !== null && !dryRun) return `looks deleted or private since ${day(since)}; YouTube refused to take it out ${DEAD_REFUSALS_MAX} times, tried again after ${day(pausedUntil)}`
   return dryRun
     ? `looks deleted or private since ${day(since)}; dry run: it stays in the playlist`
     : `looks deleted or private since ${day(since)}; removed after ${DEAD_GRACE_DAYS} days if it stays that way`
@@ -1112,6 +1191,10 @@ async function judgeDeadVideos(
   const prefix = `${ctx.playlistId} `
   /** The video is alive again, left the playlist, or is to be kept: the wait is over and so is its row. */
   const forget = async (id: string) => {
+    if (run.refused[seenKey(ctx.playlistId, id)]) {
+      delete run.refused[seenKey(ctx.playlistId, id)]
+      run.refusedChanged = true
+    }
     if (run.seen[seenKey(ctx.playlistId, id)] === undefined) return
     delete run.seen[seenKey(ctx.playlistId, id)]
     run.seenChanged = true
@@ -1157,18 +1240,25 @@ async function judgeDeadVideos(
     }
     const since = run.seen[key]!
     const waited = now - since >= DEAD_GRACE_DAYS * DAY
-    if (!run.dryRun && !held && waited) {
+    // Refused DEAD_REFUSALS_MAX times in a row: left alone for the pause, then the count starts afresh.
+    const pausedUntil = refusedUntil(run.refused[key], now)
+    if (pausedUntil === null && (run.refused[key]?.n ?? 0) >= DEAD_REFUSALS_MAX) {
+      delete run.refused[key]
+      run.refusedChanged = true
+    }
+    if (!run.dryRun && !held && waited && pausedUntil === null) {
       run.due.push({ p, videoId: id, itemIds: p.deadItems.get(id) ?? [] })
       continue
     }
     // Shown as waiting. The row is dated when the video was first seen dead and is not written again;
-    // only its line follows the dry-run setting. One the comparison recorded keeps that row.
-    const detail = waitingDetail(since, run.dryRun)
+    // only its line follows the dry-run setting and a pause. One the comparison recorded, or the owner
+    // undid ("Allow again"), keeps that row and its date; a recorded one says when it is paused.
+    const detail = waitingDetail(since, run.dryRun, pausedUntil)
     const had = await db.prepare("SELECT status, detail FROM playlist_removals WHERE source = 'dead' AND video_id = ? AND playlist_id = ?").bind(id, ctx.playlistId).first<{ status: string; detail: string | null }>()
-    if (!had || (had.status !== 'would_remove' && had.status !== 'recorded')) {
+    if (!had || !['would_remove', 'recorded', 'undone'].includes(had.status)) {
       await logRemoval(env, { at: since, source: 'dead', status: 'would_remove', slug: ctx.slug, set_url: p.setUrlsOf(id)[0] ?? null, video_id: id, playlist_id: ctx.playlistId, playlist_kind: ctx.kind, reason: 'dead', detail })
-    } else if (had.status === 'would_remove' && had.detail !== detail) {
-      await db.prepare("UPDATE playlist_removals SET detail = ? WHERE source = 'dead' AND status = 'would_remove' AND video_id = ? AND playlist_id = ?").bind(detail, id, ctx.playlistId).run()
+    } else if ((had.status === 'would_remove' || (had.status === 'recorded' && pausedUntil !== null)) && had.detail !== detail) {
+      await db.prepare("UPDATE playlist_removals SET detail = ? WHERE source = 'dead' AND status = ? AND video_id = ? AND playlist_id = ?").bind(detail, had.status, id, ctx.playlistId).run()
     }
     out.reported++
   }
@@ -1187,7 +1277,15 @@ async function judgeDeadVideos(
  * after YouTube had already deleted. If that one write fails nothing is
  * deleted (never an overspend); deletes that then do not happen are given
  * back at the end, best effort (a failed refund only leaves the day's budget
- * a little short).
+ * a little short). KV reads can lag a write made seconds earlier, so no count
+ * is ever taken from a re-read alone: the charge is written on top of the
+ * higher of the run's first read and the current one, the refund is the
+ * known "before + deleted", and that number goes to the sweep of the same
+ * tick in memory (`spend`, `usedAtLeast`).
+ *
+ * A delete YouTube refuses for a reason that is not quota is counted. After
+ * `DEAD_REFUSALS_MAX` in a row the video is left alone for
+ * `DEAD_REFUSAL_PAUSE_DAYS` (its row says so), then tried afresh.
  *
  * The item id comes from the listing, so a removal is one
  * playlistItems.delete (50 units) and no lookup: a lookup by video id is what
@@ -1216,9 +1314,12 @@ async function deleteDeadVideos(env: Env, accessToken: string, run: DeadRun, opt
     reserved += d.itemIds.length
     todo.push(d)
   }
+  /** The day's count before this run's deletes: the higher of what the run read at its start and what KV says now. */
+  let before = run.used
   if (todo.length > 0) {
     try {
-      await bumpSweepDeletes(env, reserved, run.nowMs)
+      before = (await bumpSweepDeletes(env, reserved, run.nowMs, run.used)) - reserved
+      run.usedNow = before + reserved
     } catch (e) {
       // The day's count could not be written: deleting now could overspend it, so nothing is deleted this run.
       run.stoppedBy = 'counter'
@@ -1242,6 +1343,11 @@ async function deleteDeadVideos(env: Env, accessToken: string, run: DeadRun, opt
       if (isQuotaError(e)) {
         await noteQuotaOut(env, e, log)
         quota = true
+      } else {
+        // Not quota: counted, so a delete YouTube will never make is not asked for every six hours for ever.
+        const key = seenKey(ctx.playlistId, d.videoId)
+        run.refused[key] = { n: (run.refused[key]?.n ?? 0) + 1, at: Math.floor(run.nowMs / 1000) }
+        run.refusedChanged = true
       }
     }
     deleted += gone
@@ -1249,10 +1355,20 @@ async function deleteDeadVideos(env: Env, accessToken: string, run: DeadRun, opt
     // Every item of the video is out: the bookkeeping, each step on its own so one failing does not cost the others.
     if (gone === d.itemIds.length) {
       const setUrl = d.p.setUrlsOf(d.videoId)[0] ?? null
+      const since = day(run.seen[seenKey(ctx.playlistId, d.videoId)] ?? Math.floor(run.nowMs / 1000))
+      // The owner pressed "Allow again" on its row while it waited: it still goes (nobody can play it), but it is
+      // not put back on the never-add list, so the sync adds it again should it come back.
+      const allowed = await db
+        .prepare("SELECT 1 AS x FROM playlist_removals WHERE source = 'dead' AND status = 'undone' AND video_id = ? AND playlist_id = ?")
+        .bind(d.videoId, ctx.playlistId)
+        .first<{ x: number }>()
+        .then((r) => !!r)
+        // Not known: the usual, safer bookkeeping (blocked; the owner can lift it again).
+        .catch(() => false)
       const steps: Array<[string, () => Promise<unknown>]> = [
         ['mark_out', () => markOutOfPlaylist(env, ctx.playlistId, d.videoId, 'dead')],
-        ['block', () => recordRemoved(env, { playlistId: ctx.playlistId, videoId: d.videoId, slug: ctx.slug, setUrl, reason: 'dead' })],
-        ['log', () => logRemoval(env, { at: Math.floor(run.nowMs / 1000), source: 'dead', status: 'removed', slug: ctx.slug, set_url: setUrl, video_id: d.videoId, playlist_id: ctx.playlistId, playlist_kind: ctx.kind, reason: 'dead', detail: `deleted or private since ${day(run.seen[seenKey(ctx.playlistId, d.videoId)] ?? Math.floor(run.nowMs / 1000))}; taken out of the playlist` })],
+        ...(allowed ? [] : [['block', () => recordRemoved(env, { playlistId: ctx.playlistId, videoId: d.videoId, slug: ctx.slug, setUrl, reason: 'dead' })] as [string, () => Promise<unknown>]]),
+        ['log', () => logRemoval(env, { at: Math.floor(run.nowMs / 1000), source: 'dead', status: 'removed', slug: ctx.slug, set_url: setUrl, video_id: d.videoId, playlist_id: ctx.playlistId, playlist_kind: ctx.kind, reason: 'dead', detail: `deleted or private since ${since}; taken out of the playlist${allowed ? '; may be added again if it comes back (you allowed it)' : ''}` })],
       ]
       if (ctx.kind === 'artist' && ctx.slug && d.p.setUrlsOf(d.videoId).length > 0) steps.push(['clear_set', () => clearSetVideoStmt(db, ctx.slug!, d.videoId).run()])
       for (const [step, fn] of steps) {
@@ -1264,6 +1380,10 @@ async function deleteDeadVideos(env: Env, accessToken: string, run: DeadRun, opt
       }
       delete run.seen[seenKey(ctx.playlistId, d.videoId)]
       run.seenChanged = true
+      if (run.refused[seenKey(ctx.playlistId, d.videoId)]) {
+        delete run.refused[seenKey(ctx.playlistId, d.videoId)]
+        run.refusedChanged = true
+      }
       removed.set(ctx.playlistId, (removed.get(ctx.playlistId) ?? 0) + 1)
     }
     if (quota) {
@@ -1272,7 +1392,16 @@ async function deleteDeadVideos(env: Env, accessToken: string, run: DeadRun, opt
     }
   }
   for (const pl of touched) await invalidatePlaylistVideoIds(env, pl).catch(() => {})
-  if (deleted < reserved) await refundSweepDeletes(env, reserved - deleted, run.nowMs).catch((e) => log.warn('hygiene.dead.budget_refund_failed', { unused: reserved - deleted, ...errorFields(e) }))
+  // Deletes charged and not made are given back: the count is set to what this run KNOWS was spent (never a
+  // re-read, which may lag the charge and would wipe it). A refused write leaves the day a little short.
+  if (todo.length > 0 && deleted < reserved) {
+    try {
+      await writeSweepDeletes(env, before + deleted, run.nowMs)
+      run.usedNow = before + deleted
+    } catch (e) {
+      log.warn('hygiene.dead.budget_refund_failed', { unused: reserved - deleted, ...errorFields(e) })
+    }
+  }
   run.budgetLeft -= deleted
   log.info('hygiene.dead.done', { due: run.due.length, deleted, videos: [...removed.values()].reduce((a, b) => a + b, 0), budgetLeft: run.budgetLeft, stoppedBy: run.stoppedBy })
   return removed
@@ -1297,7 +1426,14 @@ async function deleteDeadVideos(env: Env, accessToken: string, run: DeadRun, opt
 export async function comparePlaylists(
   env: Env,
   accessToken: string,
-  opts: { log: Logger; notify?: Notifier; fetcher?: typeof fetch; now?: number },
+  opts: {
+    log: Logger
+    notify?: Notifier
+    fetcher?: typeof fetch
+    now?: number
+    /** Filled in with the day's delete count as this run knows it after taking out dead videos, for the sweep that follows (`usedAtLeast`). */
+    spend?: { used: number | null }
+  },
 ): Promise<ComparePlaylistResult[]> {
   const { log } = opts
   const now = opts.now ?? nowSeconds()
@@ -1393,60 +1529,78 @@ export async function comparePlaylists(
   const newHolds: PlaylistHold[] = []
   /** Set up at the first playlist that has a dead video in it; most runs have none. */
   let deadRun: DeadRun | null = null
+  /** Its setup failed: dead videos are left alone for this comparison. */
+  let deadOff = false
 
-  for (const p of pending) {
-    const { ctx } = p
-    let hold = false
-    if (p.missing.length === 0) await clearHold(env, ctx.playlistId)
-    else if (approved.has(ctx.playlistId)) {
-      await clearHold(env, ctx.playlistId)
-      log.warn('hygiene.compare.hold_approved', { ...ctx, expected: p.expected, missing: p.missing.length })
-    } else if (breaker || isMassRemoval(p.missing.length, p.expected, massLimits)) hold = true
-    else await clearHold(env, ctx.playlistId)
+  // The dead-video pass rides this loop but is not the comparison: whatever fails in it (its setup, one
+  // playlist, the deletes), the comparison goes on, and what it learned about waits is saved in the `finally`.
+  try {
+    for (const p of pending) {
+      const { ctx } = p
+      let hold = false
+      if (p.missing.length === 0) await clearHold(env, ctx.playlistId)
+      else if (approved.has(ctx.playlistId)) {
+        await clearHold(env, ctx.playlistId)
+        log.warn('hygiene.compare.hold_approved', { ...ctx, expected: p.expected, missing: p.missing.length })
+      } else if (breaker || isMassRemoval(p.missing.length, p.expected, massLimits)) hold = true
+      else await clearHold(env, ctx.playlistId)
 
-    if (hold) {
-      const prev = (await env.SUBS.get(HOLD_PREFIX + ctx.playlistId, 'json')) as PlaylistHold | null
-      const missingIds = [...p.missing].sort().slice(0, 500)
-      const sameIds = !!prev && JSON.stringify(prev.missingIds ?? []) === JSON.stringify(missingIds)
-      const h: PlaylistHold = { ...ctx, expected: p.expected, missing: p.missing.length, missingIds, runWide: breaker && !isMassRemoval(p.missing.length, p.expected, massLimits), at: sameIds ? prev!.at : now, notified: sameIds ? prev!.notified : false }
-      log.error('hygiene.compare.held', { ...h, missingIds: missingIds.slice(0, 20) })
-      newHolds.push(h)
-      results[p.slot] = { ...ctx, status: 'held', expected: p.expected, missing: p.missing.length, owner: 0, dead: 0 }
-      continue
+      if (hold) {
+        const prev = (await env.SUBS.get(HOLD_PREFIX + ctx.playlistId, 'json')) as PlaylistHold | null
+        const missingIds = [...p.missing].sort().slice(0, 500)
+        const sameIds = !!prev && JSON.stringify(prev.missingIds ?? []) === JSON.stringify(missingIds)
+        const h: PlaylistHold = { ...ctx, expected: p.expected, missing: p.missing.length, missingIds, runWide: breaker && !isMassRemoval(p.missing.length, p.expected, massLimits), at: sameIds ? prev!.at : now, notified: sameIds ? prev!.notified : false }
+        log.error('hygiene.compare.held', { ...h, missingIds: missingIds.slice(0, 20) })
+        newHolds.push(h)
+        results[p.slot] = { ...ctx, status: 'held', expected: p.expected, missing: p.missing.length, owner: 0, dead: 0 }
+        continue
+      }
+      const ids = [...new Set([...p.missing, ...p.deadHere])]
+      const labels = await classify(env, ids, p.deadPresent, accessToken, log, opts.fetcher)
+      const findings = ids.map((id) => ({ videoId: id, reason: labels.get(id)!, setUrls: p.setUrlsOf(id) }))
+      await applyFindings(env, findings, ctx)
+      if (p.after) await p.after()
+      const owner = findings.filter((f) => f.reason === 'owner').length
+      results[p.slot] = { ...ctx, status: 'ok', expected: p.expected, missing: p.missing.length, owner, dead: findings.length - owner }
+      if (findings.length > 0) log.warn('hygiene.compare.removals_recorded', { ...ctx, owner, dead: findings.length - owner, videoIds: ids.slice(0, 50) })
+      // Dead videos still in the playlist, and the ones that were waiting and are back or gone (see judgeDeadVideos).
+      if (!deadRun && !deadOff) {
+        try {
+          deadRun = await startDeadRun(env, now * 1000, log)
+        } catch (e) {
+          // Its settings, budget or waits could not be read. Nothing is known, so nothing is judged, started, ended or deleted this time.
+          deadOff = true
+          log.error('hygiene.dead.start_failed', errorFields(e))
+        }
+      }
+      if (deadRun && (p.deadItems.size > 0 || Object.keys(deadRun.seen).some((k) => k.startsWith(`${ctx.playlistId} `)))) {
+        try {
+          const d = await judgeDeadVideos(env, accessToken, p, deadRun, { log, fetcher: opts.fetcher })
+          if (d.reported > 0) results[p.slot] = { ...results[p.slot]!, deadRemoved: 0, deadReported: d.reported }
+        } catch (e) {
+          // This playlist's dead videos wait for the next comparison; the others, and the comparison itself, go on.
+          log.warn('hygiene.dead.judge_failed', { ...ctx, ...errorFields(e) })
+        }
+      }
     }
-    const ids = [...new Set([...p.missing, ...p.deadHere])]
-    const labels = await classify(env, ids, p.deadPresent, accessToken, log, opts.fetcher)
-    const findings = ids.map((id) => ({ videoId: id, reason: labels.get(id)!, setUrls: p.setUrlsOf(id) }))
-    await applyFindings(env, findings, ctx)
-    if (p.after) await p.after()
-    const owner = findings.filter((f) => f.reason === 'owner').length
-    results[p.slot] = { ...ctx, status: 'ok', expected: p.expected, missing: p.missing.length, owner, dead: findings.length - owner }
-    if (findings.length > 0) log.warn('hygiene.compare.removals_recorded', { ...ctx, owner, dead: findings.length - owner, videoIds: ids.slice(0, 50) })
-    // Dead videos still in the playlist, and the ones that were waiting and are back or gone (see judgeDeadVideos).
-    deadRun ??= await startDeadRun(env, now * 1000, log)
-    if (p.deadItems.size > 0 || Object.keys(deadRun.seen).some((k) => k.startsWith(`${ctx.playlistId} `))) {
+    // After every playlist's findings are applied: a dead video the sync added is on the blocklist, and its set cleared, before its item goes.
+    if (deadRun) {
       try {
-        const d = await judgeDeadVideos(env, accessToken, p, deadRun, { log, fetcher: opts.fetcher })
-        if (d.reported > 0) results[p.slot] = { ...results[p.slot]!, deadRemoved: 0, deadReported: d.reported }
+        const removed = await deleteDeadVideos(env, accessToken, deadRun, { log, fetcher: opts.fetcher })
+        for (const p of pending) {
+          const n = removed.get(p.ctx.playlistId)
+          if (n) results[p.slot] = { ...results[p.slot]!, deadRemoved: n, deadReported: results[p.slot]!.deadReported ?? 0 }
+        }
       } catch (e) {
-        // This playlist's dead videos wait for the next comparison; the others, and the comparison itself, go on.
-        log.warn('hygiene.dead.judge_failed', { ...ctx, ...errorFields(e) })
+        log.error('hygiene.dead.threw', errorFields(e))
       }
     }
-  }
-  // After every playlist's findings are applied: a dead video the sync added is on the blocklist, and its set cleared, before its item goes.
-  if (deadRun) {
-    try {
-      const removed = await deleteDeadVideos(env, accessToken, deadRun, { log, fetcher: opts.fetcher })
-      for (const p of pending) {
-        const n = removed.get(p.ctx.playlistId)
-        if (n) results[p.slot] = { ...results[p.slot]!, deadRemoved: n, deadReported: results[p.slot]!.deadReported ?? 0 }
-      }
-    } catch (e) {
-      log.error('hygiene.dead.threw', errorFields(e))
-    } finally {
-      // A wait that started or ended is remembered even when a delete threw. A lost write only makes a wait start again.
-      if (deadRun.seenChanged) await env.SUBS.put(DEAD_SEEN_KEY, JSON.stringify(deadRun.seen)).catch((e) => log.warn('hygiene.dead.seen_write_failed', errorFields(e)))
+  } finally {
+    // Waits that started or ended, and refused deletes, are remembered whatever threw above. A lost write only makes a wait start again.
+    if (deadRun) {
+      await saveDeadState(env, deadRun, log)
+      // What the day's delete budget stands at now, for the sweep that follows in the same tick.
+      if (opts.spend && deadRun.usedNow !== null) opts.spend.used = deadRun.usedNow
     }
   }
 
@@ -1648,13 +1802,16 @@ export async function runPlaylistHygiene(
     const token = opts.accessToken ?? (await getAccessToken(env))?.accessToken
     if (!token) return { skipped: 'youtube_not_connected' }
     const out: { compare?: ComparePlaylistResult[]; sweep?: SweepResult } = {}
+    // The comparison's dead-video deletes and the sweep draw on one daily budget, seconds apart: the count is handed
+    // over in memory, since a KV read that soon after the write may not show it.
+    const spend: { used: number | null } = { used: null }
     if (wantCompare) {
       await env.SUBS.put(LAST_COMPARE_KEY, String(now))
-      out.compare = await comparePlaylists(env, token, { log, notify: opts.notify, fetcher: opts.fetcher, now })
+      out.compare = await comparePlaylists(env, token, { log, notify: opts.notify, fetcher: opts.fetcher, now, spend })
     }
     if (wantSweep) {
       await env.SUBS.put(LAST_SWEEP_KEY, String(now))
-      out.sweep = await runRemovalSweep(env, token, { log, fetcher: opts.fetcher, nowMs })
+      out.sweep = await runRemovalSweep(env, token, { log, fetcher: opts.fetcher, nowMs, usedAtLeast: spend.used ?? undefined })
     }
     return out
   } catch (e) {

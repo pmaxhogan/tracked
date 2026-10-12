@@ -892,6 +892,15 @@ describe('Set diagnostics', () => {
     expect(rows.map((r: any) => r.tone)).toEqual(['warn', 'info', 'info', 'neutral', 'info', 'ok', 'neutral'])
     for (const r of rows) { expect(typeof r.label).toBe('string'); expect(typeof r.finding).toBe('string'); expect(Array.isArray(r.facts)).toBe(true) }
   })
+  it('setDiagRows: a video blocked because it died is information (handled by itself); one the owner removed stays as it was', async () => {
+    const ctx = await diagCtx()
+    const hy = (removed: object[]) => ctx.setDiagRows({ ...empty(), hygiene: { removed, removals: [] } }).find((r: any) => r.key === 'hygiene')
+    const dead = hy([{ playlistId: 'PL1', reason: 'dead', at: 1_790_000_000, slug: 'dj' }, { playlistId: 'PLc', reason: 'dead', at: 1_790_000_000, slug: null }])
+    expect(dead.tone).toBe('info')
+    expect(dead.finding).toBe('Blocked from 2 playlist(s): video died.')
+    expect(hy([{ playlistId: 'PL1', reason: 'owner', at: 1_790_000_000, slug: 'dj' }]).tone).toBe('bad')
+    expect(hy([{ playlistId: 'PL1', reason: 'dead', at: 1, slug: 'dj' }, { playlistId: 'PLc', reason: 'button', at: 1, slug: null }]).tone).toBe('bad')
+  })
   it('setDiagRows: a dead video waiting to be taken out is information, not the sweep and not a warning', async () => {
     const ctx = await diagCtx()
     const hy = (removals: object[]) => ctx.setDiagRows({ ...empty(), hygiene: { removed: [], removals } }).find((r: any) => r.key === 'hygiene')
