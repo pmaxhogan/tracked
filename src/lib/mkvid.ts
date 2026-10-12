@@ -40,7 +40,8 @@ import { errorFields, type Logger } from './log'
 import { flushPlaylistAdditions, type PlaylistAdditionRecord } from './playlist-audit'
 import { addToCombined, flushCombined, openCombinedPlaylist, type CombinedAdditionStatus, type CombinedHandle } from './combined-playlist'
 import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds } from './playlist-cache'
-import { addVideoToPlaylist, PlaylistNotFoundError } from './youtube-playlists'
+import { PlaylistNotFoundError } from './youtube-playlists'
+import { insertInOrder } from './playlist-order-store'
 import { getTracklistRow, setTracklistVideo } from './sync-store'
 import { isVerified, tracklistFingerprint, verifiedFingerprint } from './verification'
 import { markInPlaylist } from './playlist-blocklist'
@@ -1239,7 +1240,8 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
   }
   let playlistStatus: 'added' | 'duplicate' = 'duplicate'
   if (!existing.has(input.videoId)) {
-    await addVideoToPlaylist(playlistId!, input.videoId, accessToken)
+    // At the place the set's date gives it (lib/playlist-order.ts), like the sync's inserts.
+    await insertInOrder(env, { playlistId: playlistId!, videoId: input.videoId, existing, accessToken, log, setUrl: req.setUrl })
     existing.add(input.videoId)
     await cachePlaylistVideoIds(env, playlistId!, existing)
     await markInPlaylist(env, playlistId!, input.videoId, 'mkvid')
@@ -1251,7 +1253,7 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
   let combined: CombinedHandle | null = null
   try {
     combined = await openCombinedPlaylist(env, accessToken, log)
-    if (combined) combinedStatus = await addToCombined(env, combined, input.videoId, accessToken, log)
+    if (combined) combinedStatus = await addToCombined(env, combined, input.videoId, accessToken, log, req.setUrl)
   } catch (e) {
     combinedStatus = 'failed'
     log.warn('mkvid.combined_add_failed', { id: req.id, videoId: input.videoId, ...errorFields(e) })

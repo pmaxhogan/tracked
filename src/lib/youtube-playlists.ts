@@ -8,6 +8,7 @@
  *   - playlists.insert        50
  *   - playlistItems.list       1
  *   - playlistItems.insert    50
+ *   - playlistItems.update    50
  *
  * Errors include the full JSON response body in the message so failures are
  * readable in the worker log without sprinkling toString fallbacks at call
@@ -241,14 +242,24 @@ export async function listPlaylistVideoIds(
   }
 }
 
+/**
+ * playlistItems.insert (50 units, with or without a position). `opts.position`
+ * is the 0-based index the video ends up at (lib/playlist-order.ts); without
+ * it YouTube appends.
+ */
 export async function addVideoToPlaylist(
   playlistId: string,
   videoId: string,
   accessToken: string,
   fetcher: typeof fetch = fetch,
+  opts: { position?: number | null } = {},
 ): Promise<void> {
   const body = {
-    snippet: { playlistId, resourceId: { kind: 'youtube#video', videoId } },
+    snippet: {
+      playlistId,
+      resourceId: { kind: 'youtube#video', videoId },
+      ...(typeof opts.position === 'number' ? { position: opts.position } : {}),
+    },
   }
   const res = await authedFetch(
     `${API}/playlistItems?part=snippet`,
@@ -257,6 +268,30 @@ export async function addVideoToPlaylist(
     fetcher,
   )
   await expectOk(res, 'playlistItems.insert', playlistId)
+}
+
+/**
+ * playlistItems.update (50 units): move one item to index `position` of its
+ * playlist; the items between its old and new place shift by one. The API
+ * replaces the whole snippet, so the playlist and the video are sent again.
+ */
+export async function movePlaylistItem(
+  item: { itemId: string; playlistId: string; videoId: string },
+  position: number,
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  const body = {
+    id: item.itemId,
+    snippet: { playlistId: item.playlistId, resourceId: { kind: 'youtube#video', videoId: item.videoId }, position },
+  }
+  const res = await authedFetch(
+    `${API}/playlistItems?part=snippet`,
+    accessToken,
+    { method: 'PUT', body: JSON.stringify(body) },
+    fetcher,
+  )
+  await expectOk(res, 'playlistItems.update', item.playlistId)
 }
 
 /**

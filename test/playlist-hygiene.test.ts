@@ -458,7 +458,8 @@ describe('undoRemoval', () => {
     const [rec] = await removals(env)
     const r = await undoRemoval(env, 'tok', rec!.id, log)
     expect(r).toEqual({ ok: true, readded: true })
-    expect(addVideoToPlaylist).toHaveBeenCalledWith(PL, 'vid00000001', 'tok', undefined)
+    // Back in front: its set (09-01) is earlier than the nine still in the playlist.
+    expect(addVideoToPlaylist).toHaveBeenCalledWith(PL, 'vid00000001', 'tok', undefined, { position: 0 })
     expect(await isBlocked(env, PL, 'vid00000001')).toBe(false)
     expect((await row(env, setUrl(1)))!.video_id).toBe('vid00000001')
     expect((await removals(env))[0]!.status).toBe('undone')

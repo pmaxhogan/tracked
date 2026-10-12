@@ -54,7 +54,8 @@ import {
   removeVideoFromPlaylist,
   type RawPlaylistItem,
 } from './youtube-playlists'
-import { cachePlaylistVideoIds, invalidatePlaylistVideoIds } from './playlist-cache'
+import { cachePlaylistVideoIds, invalidatePlaylistVideoIds, peekCachedPlaylistVideoIds } from './playlist-cache'
+import { insertInOrder } from './playlist-order-store'
 import { loadCombinedState } from './combined-playlist'
 import { getAccessToken } from './google-oauth'
 import { parseCueValueData } from './tracklists1001'
@@ -1170,7 +1171,11 @@ export async function undoRemoval(env: Env, accessToken: string, id: number, log
   let readded = false
   try {
     if (row.status !== 'would_remove') {
-      await addVideoToPlaylist(row.playlist_id, row.video_id, accessToken, fetcher)
+      // Back at the place its set's date gives it when the playlist's snapshot is at hand;
+      // without one it is appended and the reorder pass moves it (lib/playlist-reorder.ts).
+      const inPlaylist = await peekCachedPlaylistVideoIds(env, row.playlist_id)
+      if (inPlaylist) await insertInOrder(env, { playlistId: row.playlist_id, videoId: row.video_id, existing: inPlaylist, accessToken, log, setUrl: row.set_url, fetcher })
+      else await addVideoToPlaylist(row.playlist_id, row.video_id, accessToken, fetcher)
       readded = true
       await markInPlaylist(env, row.playlist_id, row.video_id, 'undo')
       await unblock(env, row.playlist_id, row.video_id)

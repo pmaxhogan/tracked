@@ -47,6 +47,12 @@ export async function getCachedPlaylistVideoIds(
   return ids
 }
 
+/** The snapshot if there is one, without ever listing the playlist (no quota, no network). */
+export async function peekCachedPlaylistVideoIds(env: Env, playlistId: string): Promise<Set<string> | null> {
+  const cached = await getJson<{ videoIds: string[] }>(env.CACHE, `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`)
+  return cached ? new Set(cached.videoIds) : null
+}
+
 export async function cachePlaylistVideoIds(env: Env, playlistId: string, ids: Set<string>): Promise<void> {
   const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
   await putJson(env.CACHE, key, { videoIds: [...ids] }, TTL.PLAYLIST_VIDEO_IDS)

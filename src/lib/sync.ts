@@ -61,13 +61,13 @@ import { prettifySlug } from './prettify-slug'
 
 import { getAccessToken } from './google-oauth'
 import {
-  addVideoToPlaylist,
   isPermanentInsertError,
   isQuotaError,
   PlaylistNotFoundError,
   removeVideoFromPlaylist,
   YouTubeApiError,
 } from './youtube-playlists'
+import { insertInOrder, type OrderKeyCache } from './playlist-order-store'
 import {
   cachePlaylistVideoIds,
   findOrCreatePlaylist,
@@ -779,12 +779,12 @@ export async function syncOne(
     }
     return combined.handle
   }
-  const mirrorToCombined = async (videoId: string): Promise<CombinedAdditionStatus> => {
+  const mirrorToCombined = async (videoId: string, setUrl?: string): Promise<CombinedAdditionStatus> => {
     const handle = await openCombinedOnce()
     if (!handle) return 'unavailable'
     try {
       if (await combinedRefuses(env, handle.playlistId, videoId, handle.videoIds)) return 'unavailable'
-      const status = await addToCombined(env, handle, videoId, accessToken, log)
+      const status = await addToCombined(env, handle, videoId, accessToken, log, setUrl)
       if (status === 'added') {
         log.info('sync.combined_added', { slug: sub.slug, videoId, playlistId: handle.playlistId })
       }
@@ -913,10 +913,14 @@ export async function syncOne(
    * Insert into the artist playlist, recovering once from a playlist deleted
    * mid-run (re-resolve by title, then retry; later iterations pick up the
    * new id). Updates the in-memory membership set and the added counter.
+   * The video goes in at the place its set's date gives it (lib/playlist-order.ts).
    */
-  const addToArtistPlaylist = async (videoId: string): Promise<void> => {
+  const orderKeys: OrderKeyCache = {}
+  const insertOrdered = (videoId: string, setUrl: string) =>
+    insertInOrder(env, { playlistId, videoId, existing: existingVideoIds, accessToken, log, setUrl, cache: orderKeys })
+  const addToArtistPlaylist = async (videoId: string, setUrl: string): Promise<void> => {
     try {
-      await addVideoToPlaylist(playlistId, videoId, accessToken)
+      await insertOrdered(videoId, setUrl)
     } catch (e) {
       if (!(e instanceof PlaylistNotFoundError)) throw e
       log.warn('sync.playlist_stale_midrun', { slug: sub.slug, stalePlaylistId: playlistId })
@@ -929,7 +933,7 @@ export async function syncOne(
       } else {
         existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log)
       }
-      await addVideoToPlaylist(playlistId, videoId, accessToken)
+      await insertOrdered(videoId, setUrl)
     }
     existingVideoIds.add(videoId)
     // Confirmed insert: from now on the comparison expects it in this playlist.
@@ -983,14 +987,14 @@ export async function syncOne(
       if (videoId) {
         videoIdsFound += 1
         if (!existingVideoIds.has(videoId)) {
-          await addToArtistPlaylist(videoId)
+          await addToArtistPlaylist(videoId, setUrl)
           log.info('sync.added', { slug: sub.slug, setUrl, videoId, playlistId })
           auditSet('added', setUrl, {
             videoId,
             videoUrl: watchUrl(videoId),
             via: setFetched.via,
             meta: { ms: Date.now() - tSet },
-            combinedStatus: await mirrorToCombined(videoId),
+            combinedStatus: await mirrorToCombined(videoId, setUrl),
           })
         } else {
           log.info('sync.already_in_playlist', { slug: sub.slug, setUrl, videoId })
@@ -1002,7 +1006,7 @@ export async function syncOne(
             videoUrl: watchUrl(videoId),
             via: setFetched.via,
             meta: { ms: Date.now() - tSet },
-            combinedStatus: await mirrorToCombined(videoId),
+            combinedStatus: await mirrorToCombined(videoId, setUrl),
           })
         }
       } else {
@@ -1158,7 +1162,7 @@ export async function syncOne(
         videoIdsFound += 1
         const wasPresent = existingVideoIds.has(videoId)
         if (!wasPresent) {
-          await addToArtistPlaylist(videoId)
+          await addToArtistPlaylist(videoId, setUrl)
           log.info('sync.recheck_added', { slug: sub.slug, setUrl, videoId, playlistId })
         }
         tracklistVideos[setUrl] = { videoId, checkedAt }
@@ -1168,7 +1172,7 @@ export async function syncOne(
           videoUrl: watchUrl(videoId),
           via: setFetched.via,
           meta: { ms: Date.now() - tSet },
-          combinedStatus: await mirrorToCombined(videoId),
+          combinedStatus: await mirrorToCombined(videoId, setUrl),
         })
       } else {
         // Swapped recording. New is strictly better: out with the old (from
@@ -1200,8 +1204,8 @@ export async function syncOne(
             }
           }
         }
-        if (!existingVideoIds.has(videoId)) await addToArtistPlaylist(videoId)
-        const combinedStatus = await mirrorToCombined(videoId)
+        if (!existingVideoIds.has(videoId)) await addToArtistPlaylist(videoId, setUrl)
+        const combinedStatus = await mirrorToCombined(videoId, setUrl)
         tracklistVideos[setUrl] = { videoId, checkedAt }
         videosReplaced += 1
         log.info('sync.recheck_replaced', {
