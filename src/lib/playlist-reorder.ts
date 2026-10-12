@@ -156,10 +156,11 @@ const PROGRESS_CHECK_MIN_MOVES = 3
 const CONFIRM_RETRY_MS = 1500
 /**
  * Units the read-back of a first move may cost in a playlist of `items`
- * entries: two lookups and two more when it has to look again, or, when a
- * video it asks about is gone, at most two lookups and two listings.
+ * entries: two lookups and two more when it has to look again. When a video
+ * it asks about turns out to be gone a listing takes over, at the worst after
+ * two lookups with a second listing to look again, or after four lookups.
  */
-const confirmUnits = (items: number) => 2 + 2 * listUnits(items)
+const confirmUnits = (items: number) => Math.max(2 + 2 * listUnits(items), 4 + listUnits(items))
 /** Budgets the report gives a duration for, so a paused pass still says what each would mean. */
 const SAMPLE_DAILY_UNITS = [1000, 2000, 4000]
 

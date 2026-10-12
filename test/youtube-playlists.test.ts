@@ -223,7 +223,7 @@ describe('isUnavailableItem (the husk of a deleted or foreign private video)', (
   it("is not one for the owner's own private upload, which lists with its channel and publish date", () => {
     expect(isUnavailableItem(item({ title: 'My set', videoOwnerChannelId: 'UCme', videoOwnerChannelTitle: 'Me' }, 'private', { videoPublishedAt: '2026-01-01T00:00:00Z' }))).toBe(false)
     // Even one the owner named "Private video".
-    expect(isUnavailableItem(item({ title: 'Private video', videoOwnerChannelId: 'UCme' }, 'private'))).toBe(false)
+    expect(isUnavailableItem(item({ title: 'Private video', videoOwnerChannelId: 'UCme', videoOwnerChannelTitle: 'Me' }, 'private'))).toBe(false)
     expect(isUnavailableItem(item({ title: 'Private video', videoOwnerChannelTitle: 'Me' }, 'private'))).toBe(false)
     expect(isUnavailableItem(item({ title: 'Deleted video' }, 'private', { videoPublishedAt: '2026-01-01T00:00:00Z' }))).toBe(false)
   })

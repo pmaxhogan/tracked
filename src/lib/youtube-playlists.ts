@@ -428,7 +428,7 @@ export type RawPlaylistItem = Record<string, unknown> & {
  * their real title and channel. Every sign has to agree:
  *   - the title is YouTube's placeholder, "Deleted video" or "Private video";
  *   - the item names no channel the video belongs to
- *     (`snippet.videoOwnerChannelId` / `videoOwnerChannelTitle`) and no
+ *     (`snippet.videoOwnerChannelTitle`) and no
  *     `contentDetails.videoPublishedAt`;
  *   - `status.privacyStatus` is `private` for a "Private video", and is not
  *     `public` or `unlisted` for a "Deleted video".
@@ -436,10 +436,10 @@ export type RawPlaylistItem = Record<string, unknown> & {
  * and neither is an item whose listing left any of this out.
  */
 export function isUnavailableItem(it: RawPlaylistItem): boolean {
-  const snippet = it.snippet as { title?: unknown; videoOwnerChannelId?: unknown; videoOwnerChannelTitle?: unknown } | undefined
+  const snippet = it.snippet as { title?: unknown; videoOwnerChannelTitle?: unknown } | undefined
   const privacy = (it.status as { privacyStatus?: unknown } | undefined)?.privacyStatus
   if (privacy === 'public' || privacy === 'unlisted') return false
-  if (snippet?.videoOwnerChannelId || snippet?.videoOwnerChannelTitle) return false
+  if (snippet?.videoOwnerChannelTitle) return false
   if ((it.contentDetails as { videoPublishedAt?: unknown } | undefined)?.videoPublishedAt) return false
   if (snippet?.title === 'Deleted video') return true
   return snippet?.title === 'Private video' && privacy === 'private'
