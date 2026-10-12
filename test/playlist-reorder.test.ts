@@ -7,6 +7,7 @@ import { saveCombinedState } from '../src/lib/combined-playlist'
 import { DEFAULT_APP_SETTINGS, updateAppSettings } from '../src/lib/app-settings'
 import { loadOrderState, managedPlaylists, orderQueue, orderReport, orderUnitsUsedToday, quotaStop, runOrderPass } from '../src/lib/playlist-reorder'
 import { YouTubeApiError } from '../src/lib/youtube-playlists'
+import { getQuotaOut } from '../src/lib/youtube-quota'
 
 const log = makeLogger({ task: 'test' })
 const setUrl = (n: number, date: string) => `https://www.1001tracklists.com/tracklist/${n}/dj-set-${n}-${date}.html`
@@ -214,6 +215,8 @@ describe('runOrderPass', () => {
     expect(await run(env, yt)).toMatchObject({ read: 0, moved: 0, stoppedBy: 'quota' })
     expect(yt.calls).toHaveLength(callsAfter)
     expect((await orderReport(env, { log, accessToken: 'tok' })).quotaStoppedUntil).not.toBeNull()
+    // The flag every YouTube writer shares is what holds it (lib/youtube-quota.ts).
+    expect(await getQuotaOut(env)).not.toBeNull()
 
     // Midnight Pacific has passed and the quota is back.
     vi.setSystemTime(new Date('2026-10-13T08:00:00Z'))
@@ -228,7 +231,7 @@ describe('runOrderPass', () => {
     yt.refuseAfterUnits = 101
     yt.refuseWith = 'rateLimitExceeded'
     expect(await run(env, yt)).toMatchObject({ moved: 2, stoppedBy: 'rate_limit' })
-    expect((await loadOrderState(env)).quotaStoppedAt ?? null).toBeNull()
+    expect(await getQuotaOut(env)).toBeNull()
     expect((await orderReport(env, { log, accessToken: 'tok' })).quotaStoppedUntil).toBeNull()
     // Five minutes later, the same quota day.
     yt.refuseAfterUnits = Infinity

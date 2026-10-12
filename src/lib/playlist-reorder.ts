@@ -44,9 +44,10 @@
  * **Limits.** `playlists.orderDailyUnits` is everything the pass may spend in
  * a quota day (midnight Pacific), listings included and failed moves too
  * (YouTube charges for those). `playlists.orderMovesPerRun` (default 10) and
- * a wall-clock ceiling bound one run. A daily-quota reply stops the pass
- * until the quota day rolls over; a per-minute rate limit ends the run only.
- * See `quotaStop` and `youtubeQuotaOut` below.
+ * a wall-clock ceiling bound one run. A daily-quota reply, to this pass or to
+ * any other YouTube writer (lib/youtube-quota.ts), stops the pass until the
+ * quota day rolls over; a per-minute rate limit ends the run only. See
+ * `quotaStop` and `youtubeQuotaOut` below.
  *
  * **Order of work.** Playlists never read first (reading is what the dry run
  * needs), then playlists with moves left, fewest first, so whole playlists
@@ -61,43 +62,37 @@ import { getAppSettings } from './app-settings'
 import { dbOf } from './db'
 import { getAccessToken } from './google-oauth'
 import { errorFields, type Logger } from './log'
-import { quotaDayEnd, quotaDayStart } from './mkvid'
+import { quotaDayStart } from './mkvid'
 import { estimateDays, listUnits, planMoves, UNDATED, UNITS_PER_MOVE, type Move, type OrderKey, type OrderNeed } from './playlist-order'
 import { loadOrderKeys, type OrderKeys } from './playlist-order-store'
+import { quotaKind } from './youtube-error'
+import { getQuotaOut, noteQuotaOut } from './youtube-quota'
 import { getPlaylistItemPosition, isQuotaError, listPlaylistItems, movePlaylistItem, PlaylistNotFoundError, YouTubeApiError } from './youtube-playlists'
 
-// ─── quota: the two places to reconcile with lib/youtube-error.ts / lib/youtube-quota.ts ───
+// ─── quota: the two places this file asks about it ──────────────────────────
 
 /**
- * What a failed YouTube call says about quota:
+ * What a failed YouTube call says about quota (lib/youtube-error.ts decides):
  *   - `daily`  the day's quota is spent (`quotaExceeded`, `dailyLimitExceeded`):
  *              nothing succeeds until midnight Pacific.
  *   - `rate`   a per-minute limit (`rateLimitExceeded`, `userRateLimitExceeded`):
  *              this run ends, the next tick may try again.
  *   - null     not about quota.
  * The only place this file classifies a reply.
- * MERGE: once lib/youtube-error.ts exists this is `quotaKind(e.reason)`
- * ('quota' → 'daily', 'rate_limit' → 'rate') behind the same `isQuotaError` test.
  */
 export function quotaStop(e: unknown): 'daily' | 'rate' | null {
   if (!isQuotaError(e)) return null
-  const reason = e instanceof YouTubeApiError ? e.reason : null
-  return reason === 'quotaExceeded' || reason === 'dailyLimitExceeded' ? 'daily' : 'rate'
+  return quotaKind((e as YouTubeApiError).reason) === 'quota' ? 'daily' : 'rate'
 }
 
 /**
  * "Is YouTube's daily quota out?" The one call site the pass and the report
- * ask. Today it is this pass's own memory of a daily-quota reply.
- * MERGE: lib/youtube-quota.ts keeps `yt:quota:out` for every writer, set on
- * any daily-quota reply and expiring at `quotaDayEnd()`; read that flag here
- * (and set it in `noteQuotaOut`) and `OrderState.quotaStoppedAt` can go.
+ * ask: the flag every YouTube writer shares (`yt:quota:out`,
+ * lib/youtube-quota.ts), set on any daily-quota reply, this pass's included,
+ * and gone at midnight Pacific. Returns the unix seconds it holds until, or null.
  */
-async function youtubeQuotaOut(_env: Env, state: OrderState): Promise<boolean> {
-  return !!state.quotaStoppedAt && state.quotaStoppedAt >= quotaDayStart()
-}
-
-function noteQuotaOut(state: OrderState, now: number): void {
-  state.quotaStoppedAt = now
+async function youtubeQuotaOut(env: Env): Promise<number | null> {
+  return (await getQuotaOut(env))?.until ?? null
 }
 
 // ─── state ──────────────────────────────────────────────────────────────────
@@ -154,8 +149,6 @@ export type OrderStop = 'paused' | 'not_connected' | 'quota' | 'rate_limit' | 'b
 
 export type OrderState = {
   playlists: Record<string, OrderPlaylistState>
-  /** Unix seconds of the daily-quota reply that stopped the pass (see `youtubeQuotaOut`). */
-  quotaStoppedAt?: number | null
   lastRun?: { at: number; trigger: string | null; read: number; moved: number; units: number; stoppedBy: OrderStop } | null
 }
 
@@ -285,7 +278,7 @@ export async function runOrderPass(
   const used = await orderUnitsUsedToday(env)
   const done = (stoppedBy: OrderStop, read = 0, moved = 0, units = 0): OrderPassResult => ({ ok: true, read, moved, units, stoppedBy, unitsUsedToday: used + units, dailyUnits })
   const state = await loadOrderState(env)
-  if (await youtubeQuotaOut(env, state)) return done('quota')
+  if (await youtubeQuotaOut(env)) return done('quota')
   // Not worth a listing when what is left cannot pay for one move.
   if (dailyUnits - used < UNITS_PER_MOVE + 1) return done('budget')
 
@@ -302,9 +295,10 @@ export async function runOrderPass(
   let stoppedBy: OrderStop = null
   let keys: OrderKeys | null = null
   const left = () => dailyUnits - used - units
-  /** A quota reply ends the pass: for the day, or for this run. */
-  const passStop = (e: unknown): OrderStop => {
+  /** A quota reply ends the pass: for the day (every YouTube writer is told), or for this run. */
+  const passStop = async (e: unknown): Promise<OrderStop> => {
     const q = quotaStop(e)
+    if (q === 'daily') await noteQuotaOut(env, e, log)
     return q === 'daily' ? 'quota' : q === 'rate' ? 'rate_limit' : null
   }
 
@@ -330,7 +324,7 @@ export async function runOrderPass(
     } catch (e) {
       // A listing that failed part-way still cost its first page.
       units += 1
-      stoppedBy = passStop(e)
+      stoppedBy = await passStop(e)
       if (stoppedBy) break
       state.playlists[p.playlistId] = {
         ...p, items: before?.items ?? 0, undated: before?.undated ?? 0, moves: before?.moves ?? 0, units: before?.units ?? 0, checkedAt: now, moved: before?.moved ?? 0, lastRun: before?.lastRun ?? null,
@@ -373,7 +367,7 @@ export async function runOrderPass(
       try {
         replied = await movePlaylistItem(item, m.position, accessToken, opts.fetcher)
       } catch (e) {
-        stoppedBy = passStop(e)
+        stoppedBy = await passStop(e)
         if (stoppedBy) break
         // Every later move of the plan assumed this one happened: the next run plans afresh.
         const manual = e instanceof YouTubeApiError && e.status === 400 && e.reason === 'manualSortRequired'
@@ -406,7 +400,6 @@ export async function runOrderPass(
     if (stoppedBy) break
   }
 
-  if (stoppedBy === 'quota') noteQuotaOut(state, now)
   state.lastRun = { at: now, trigger: opts.trigger ?? null, read, moved, units, stoppedBy }
   try {
     await chargeUnits(env, units)
@@ -479,7 +472,7 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
         unitsSpent += 1
         const q = quotaStop(e)
         if (q) {
-          if (q === 'daily') noteQuotaOut(state, now)
+          if (q === 'daily') await noteQuotaOut(env, e, opts.log)
           fresh = false
           break
         }
@@ -512,7 +505,7 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
     unitsUsedToday: await orderUnitsUsedToday(env),
     estimate: { moves: sum(todo, (r) => r.moves), units: est.units, days: Number.isFinite(est.days) ? est.days : null },
     daysAt: SAMPLE_DAILY_UNITS.map((u) => ({ dailyUnits: u, days: estimateDays(todo, u, settings.orderMovesPerRun).days })),
-    quotaStoppedUntil: (await youtubeQuotaOut(env, state)) ? quotaDayEnd() : null,
+    quotaStoppedUntil: await youtubeQuotaOut(env),
     lastRun: state.lastRun ?? null,
   }
 }
