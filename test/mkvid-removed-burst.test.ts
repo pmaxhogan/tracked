@@ -501,6 +501,56 @@ describe('KV trouble never breaks a page or thaws a request', () => {
     expect(await raw.get(REMOVED_BURST_ACK_KEY, 'json')).toEqual({ ackAt: T + 120 })
   })
 
+  it('a burst kept open below the count stays frozen when KV cannot be read', async () => {
+    let down = false
+    const { env, puts } = flaky({ get: () => down })
+    await three(env)
+    expect(await getRemovedBurst(env)).toMatchObject({ since: T, count: 3 })
+    // The owner retried two by hand: one is left, held only by the remembered start.
+    expect(await retryMkvidRequest(env, 'a')).toBe(true)
+    expect(await retryMkvidRequest(env, 'b')).toBe(true)
+    expect(await getRemovedBurst(env)).toMatchObject({ since: T, count: 1 })
+    const before = puts.length
+    down = true
+    expect(await getRemovedBurst(env)).toEqual({ since: T + 120, count: 1, sources: { soundcloud: 1 }, threshold: 3 })
+    expect((await getJson<Fin>(env, '/ui/api/mkvid/finished?f.status=in:removed_unconfirmed')).rows.map((r) => [r.id, r.outcome])).toEqual([['c', 'removed_unconfirmed']])
+    expect(await enqueueOtherSource(env, 'c')).toBe('exists')
+    expect(await failMkvidRequest(env, { id: 'c', error: 'render: ffmpeg exit 1', permanent: false }, log)).toEqual({ status: 'failed', attempts: 1 })
+    expect(await stored(env, 'c')).toMatchObject({ status: 'failed', error: GONE, source: 'soundcloud', updated_at: T + 120 })
+    expect(puts.length).toBe(before)
+    // KV is back: the same burst as before, from its remembered start.
+    down = false
+    expect(await getRemovedBurst(env)).toMatchObject({ since: T, count: 1 })
+    expect(await enqueueOtherSource(env, 'c')).toBe('exists')
+  })
+
+  it('switching the setting off forgets an open burst: switching it on again does not resume it', async () => {
+    const env = makeEnv()
+    await three(env)
+    expect(await getRemovedBurst(env)).toMatchObject({ since: T, count: 3 })
+    expect(await retryMkvidRequest(env, 'a')).toBe(true)
+    expect(await retryMkvidRequest(env, 'b')).toBe(true)
+    expect((await updateAppSettings(env, { mkvid: { removedBurstCount: 0 } })).ok).toBe(true)
+    expect(await getRemovedBurst(env)).toBeNull()
+    expect(await env.SUBS.get(REMOVED_BURST_KEY, 'json')).toEqual({ since: null })
+    expect((await updateAppSettings(env, { mkvid: { removedBurstCount: 3 } })).ok).toBe(true)
+    // One removal left from before, one new one: two, not a burst of three.
+    await row(env, 'd', T + 5 * DAY)
+    expect(await getRemovedBurst(env)).toBeNull()
+    expect(await enqueueOtherSource(env, 'd')).toBe('requeued')
+  })
+
+  it('an error that is not KV is not reported as a storage failure', async () => {
+    const env = makeEnv()
+    await three(env)
+    const broken = { ...env, DB: { prepare: () => { throw new Error('D1_ERROR: no such table') } } } as unknown as Env
+    for (const what of ['retry', 'confirm']) {
+      const res = await post(broken, `/ui/api/mkvid/removed-burst/${what}`)
+      expect([what, res.status]).toEqual([what, 500])
+      expect(await res.text()).not.toContain('state_unavailable')
+    }
+  })
+
   it('each answer writes KV once, and "They are really gone" tries once more when its write is refused', async () => {
     const once = flaky({ put: (key, nth) => key === REMOVED_BURST_ACK_KEY && nth === 1 })
     await three(once.env)

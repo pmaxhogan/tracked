@@ -37,16 +37,22 @@
  *   - `mkvid:removed-burst` `{ since }`: the open burst's start, kept so that
  *     acting on some of its requests does not quietly dissolve it for the
  *     rest. Written by whoever reads a burst opening or ending, best effort:
- *     a write KV refuses (two reads in one second) is redone by the next read.
+ *     a write KV refuses (two reads in one second) is tried again by every
+ *     later read, for as long as the stored requests still make the same
+ *     burst. Accepted: if the opening write never lands and the owner then
+ *     retries or bans requests by hand until fewer than the count are left,
+ *     nothing remembers the burst and the rest read as ordinary removals.
  *     A start at or before `ackAt` is a leftover from before the answer and
  *     is ignored, so no late or stale write of it can undo "really gone".
+ *     Cleared when the setting is 0, so switching it on again starts afresh.
  *
  * Which requests are in it is never stored: it is read from mkvid_requests
  * (status, error, updated_at) every time, so there is no migration and the
  * freeze does not depend on KV being current. When KV cannot be read at all,
- * the burst is worked out from the stored requests alone (as if nothing had
- * ever been settled), nothing is written, and the pages still render: red and
- * frozen is the safe side to be wrong on.
+ * neither what was settled nor a burst kept open below the count is known, so
+ * every removal there is counts as unconfirmed for that read, however few:
+ * nothing is written, the pages still render, and red and frozen is the safe
+ * side to be wrong on.
  *
  * `updated_at` stands for "when it failed": nothing but an owner action writes
  * a failed row after its failure.
@@ -80,10 +86,10 @@ export type RemovedBurst = {
   threshold: number
 }
 
-/** The burst's state could not be read from KV, so an answer cannot be taken now. */
+/** The burst's state could not be read from KV, or the answer could not be stored there: an answer cannot be taken now. */
 export class RemovedBurstUnavailable extends Error {
-  constructor() {
-    super('the removed-recordings state could not be read')
+  constructor(message = 'The removed-recordings state could not be read. Try again in a moment.') {
+    super(message)
   }
 }
 
@@ -130,7 +136,11 @@ const REMOVED_WHERE = `status = 'failed' AND ${mkvidRemovedSql('error')}`
 async function read(env: BurstEnv, remember = true): Promise<{ state: State; burst: RemovedBurst | null; last: number }> {
   const state = await loadState(env)
   const threshold = (await getAppSettings(env)).mkvid.removedBurstCount
-  if (threshold <= 0) return { state, burst: null, last: state.ackAt }
+  if (threshold <= 0) {
+    // Switched off: forget an open burst's start, or switching it on again would resume it and take in every removal since.
+    if (state.stored !== null && state.known && remember) await saveSince(env, null)
+    return { state, burst: null, last: state.ackAt }
+  }
   const res = await dbOf(env as Env)
     .prepare(`SELECT updated_at AS at, source FROM mkvid_requests WHERE ${REMOVED_WHERE} AND updated_at > ? ORDER BY updated_at ASC LIMIT ${SCAN}`)
     .bind(state.ackAt)
@@ -141,6 +151,8 @@ async function read(env: BurstEnv, remember = true): Promise<{ state: State; bur
   // Every request in it was retried or banned by hand: it is over.
   if (since !== null && !rows.some((r) => r.at >= since!)) since = null
   if (since === null) since = removedBurstStart(rows.map((r) => r.at), threshold)
+  // KV could not be read: a burst kept open below the count would be missed, so every removal there is counts, however few.
+  if (!state.known) since = rows.length ? rows[0]!.at : null
   // `remember` is off for the two answers, which write for themselves: one write a call.
   if (since !== state.stored && state.known && remember) await saveSince(env, since)
   if (since === null) return { state, burst: null, last }
@@ -169,7 +181,7 @@ export async function removedBurstSince(env: BurstEnv): Promise<number | null> {
  * `recording_removed` (queued again by themselves if the page links another
  * recording) and are never counted again; later removals start a new count.
  * Null when no burst is open. Throws RemovedBurstUnavailable when KV cannot
- * be read, and KV's own error when the answer cannot be stored.
+ * be read, or when the answer cannot be stored.
  *
  * Only `ackAt` is written (at most twice, a second apart), and only upward.
  * The stored start is left behind: it is at or before `ackAt` now, so every
@@ -185,7 +197,11 @@ export async function confirmRemovedBurst(env: BurstEnv): Promise<RemovedBurst |
       await env.SUBS.put(REMOVED_BURST_ACK_KEY, body)
     } catch {
       await new Promise((r) => setTimeout(r, ACK_RETRY_MS))
-      await env.SUBS.put(REMOVED_BURST_ACK_KEY, body)
+      try {
+        await env.SUBS.put(REMOVED_BURST_ACK_KEY, body)
+      } catch {
+        throw new RemovedBurstUnavailable('The answer could not be stored. Try again in a moment.')
+      }
     }
   }
   return burst

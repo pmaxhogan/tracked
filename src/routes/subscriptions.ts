@@ -844,7 +844,7 @@ subscriptionsApp.post('/api/mkvid/removed-burst/retry', async (c) => {
   } catch (e) {
     if (!(e instanceof RemovedBurstUnavailable)) throw e
     log.warn('subs.mkvid_removed_burst_retry_unavailable', errorFields(e))
-    return c.json({ error: 'state_unavailable', message: 'The removed-recordings state could not be read. Try again in a moment.' }, 503)
+    return c.json({ error: 'state_unavailable', message: e.message }, 503)
   }
   log.info('subs.mkvid_removed_burst_retry', r ? { since: r.burst.since, count: r.burst.count, requeued: r.requeued } : { ok: false })
   return r ? c.json({ ok: true, requeued: r.requeued, since: r.burst.since }) : c.json({ error: 'no_burst' }, 409)
@@ -857,8 +857,9 @@ subscriptionsApp.post('/api/mkvid/removed-burst/confirm', async (c) => {
   try {
     burst = await confirmRemovedBurst(c.env)
   } catch (e) {
+    if (!(e instanceof RemovedBurstUnavailable)) throw e
     log.warn('subs.mkvid_removed_burst_confirm_unavailable', errorFields(e))
-    return c.json({ error: 'state_unavailable', message: 'The answer could not be stored. Try again in a moment.' }, 503)
+    return c.json({ error: 'state_unavailable', message: e.message }, 503)
   }
   log.info('subs.mkvid_removed_burst_confirm', burst ? { since: burst.since, count: burst.count } : { ok: false })
   return burst ? c.json({ ok: true, confirmed: burst.count, since: burst.since }) : c.json({ error: 'no_burst' }, 409)
