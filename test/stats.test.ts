@@ -50,6 +50,20 @@ describe('computeStats', () => {
     expect(s.pool).toEqual({ ok: false, error: 'not configured' })
   })
 
+  it('an mkvid request that ended for want of a usable recording is not counted as failed', async () => {
+    const e = env()
+    await seed(e)
+    const fail = (id: string, error: string) =>
+      e.DB.prepare("INSERT INTO mkvid_requests (id, slug, set_url, source, source_url, status, error, created_at, updated_at) VALUES (?, 'fisher', ?, 'soundcloud', 's', 'failed', ?, ?, ?)").bind(id, 'https://x/' + id, error, NOW - DAY, NOW - DAY).run()
+    await fail('f1', 'too many attempts')
+    await fail('g1', 'probe: yt-dlp exit 1: ERROR: [soundcloud] 77: Unable to download JSON metadata: HTTP Error 404: Not Found')
+    await fail('g2', "incomplete_recording: source is 1824s but the tracklist's last cue is at 7009s")
+    const s = await computeStats(e, NOW)
+    expect(s.cards).toMatchObject({ mkvidDone: 1, mkvidPending: 1, mkvidFailed: 1, mkvidNoRecording: 2 })
+    expect(s.daily.mkvidFailed!.at(-2)).toEqual(['2026-10-08', 1])
+    expect(Object.fromEntries(s.breakdowns.mkvidStatus.map((x) => [x.label, x.value]))).toEqual({ done: 1, pending: 1, failed: 1, recording_removed: 1, recording_short: 1 })
+  })
+
   it('fillDays zero-fills the window, oldest first', () => {
     expect(fillDays([{ d: '2026-10-08', n: 3 }], NOW, 3)).toEqual([['2026-10-07', 0], ['2026-10-08', 3], ['2026-10-09', 0]])
   })

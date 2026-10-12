@@ -28,6 +28,7 @@ import { dbOf, parseJson } from './db'
 import { REASON_LABELS } from './playlist-hygiene'
 import { errorOneLine, QUOTA_LIKE, RATE_LIMIT_LIKE } from './youtube-error'
 import { buildTableSql, parseTableQuery, type TableDef, type TableQuery, type TableResult, type TableParams } from './table-query'
+import { mkvidFailureKindSql, mkvidNoRecordingSql, mkvidOutcomeLine } from './mkvid-outcome'
 
 export const ACTIVITY_KINDS = ['request', 'playlist', 'hygiene', 'mkvid', 'pool', 'sync', 'ban'] as const
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number]
@@ -111,7 +112,9 @@ const REMOVAL_QUOTA = `(${likeAny(REMOVAL_DETAIL, QUOTA_LIKE)} OR ${likeAny(REMO
 // `problem` is what the Activity page paints red: something that will not fix
 // itself. An attempt that is tried again (a failed playlist addition, a failed
 // sweep removal, a sync the pool stopped) and the owner's own actions (a set
-// banned from the panel) are not.
+// banned from the panel) are not. Nor is an mkvid request that ended because
+// the set has no usable recording (lib/mkvid-outcome.ts): its status reads
+// `recording_removed` or `recording_short` instead of `failed`, derived here.
 const ARMS: string[] = [
   `SELECT ${pk('audit', 'id')} AS id, ts AS ts, 'audit' AS src, CAST(id AS TEXT) AS key, 'request' AS kind, status AS status,
      (CASE WHEN status IN ('no_video','no_tracklist','upstream_error') OR json_extract(summary, '$.impossible') = 1 THEN 1 ELSE 0 END) AS problem,
@@ -126,10 +129,10 @@ const ARMS: string[] = [
      slug, set_url, video_id, ${cat('source', 'reason', 'detail', 'playlist_kind', 'slug', 'set_url')},
      json_object('source', source, 'reason', reason, 'detail', detail, 'playlist_kind', playlist_kind)
    FROM playlist_removals`,
-  `SELECT 'mkvid:' || id, updated_at * 1000, 'mkvid', id, 'mkvid', status,
-     (CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+  `SELECT 'mkvid:' || id, updated_at * 1000, 'mkvid', id, 'mkvid', ${mkvidFailureKindSql('status', 'error')},
+     (CASE WHEN status = 'failed' AND NOT ${mkvidNoRecordingSql('error')} THEN 1 ELSE 0 END),
      slug, set_url, video_id, ${cat('set_title', 'slug', 'set_url', 'error')},
-     json_object('set_title', set_title, 'error', error)
+     json_object('set_title', set_title, 'error', error, 'source', source)
    FROM mkvid_requests WHERE status IN ('done','failed','banned','superseded')`,
   // A track upload's claim (request_id 'track:<id>', lib/track-uploads.ts) has no mkvid_requests row: name the track instead.
   `SELECT ${pk('claim', 'c.id')}, c.claimed_at * 1000, 'claim', CAST(c.id AS TEXT), 'mkvid',
@@ -228,10 +231,12 @@ export function supersededReason(error: string | null | undefined): string {
   return clip(e) ?? 'superseded'
 }
 
-function mkvidDetail(r: { status: string; video_id: string | null; error: string | null }): string | null {
+function mkvidDetail(r: { status: string; video_id: string | null; error: string | null; source: string | null }): string | null {
   switch (r.status) {
     case 'done': return r.video_id ? `uploaded ${r.video_id}` : 'uploaded'
     case 'failed': return errorLine(r.error)
+    case 'recording_removed':
+    case 'recording_short': return mkvidOutcomeLine({ status: 'failed', error: r.error, source: r.source })
     case 'banned': return 'banned from mkvid'
     case 'superseded': return supersededReason(r.error)
     default: return null
@@ -267,7 +272,7 @@ function describe(r: RawRow): { title: string; detail: string | null } {
       return { title: `${REMOVAL_SOURCE_LABEL[source] ?? source}: ${REASON_LABELS[reason] ?? reason}`, detail: joinParts([errorLine(str(j.detail), r.status), `${String(j.playlist_kind ?? '')} playlist`]) }
     }
     case 'mkvid':
-      return { title: str(j.set_title) || labelFromSetUrl(r.set_url), detail: mkvidDetail({ status: r.status, video_id: r.video_id, error: str(j.error) }) }
+      return { title: str(j.set_title) || labelFromSetUrl(r.set_url), detail: mkvidDetail({ status: r.status, video_id: r.video_id, error: str(j.error), source: str(j.source) }) }
     case 'claim': {
       const tuId = j.tu_id == null ? null : Number(j.tu_id)
       const track = tuId != null ? [str(j.tu_artist), str(j.tu_title)].filter(Boolean).join(' – ') || `track upload ${tuId}` : null

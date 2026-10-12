@@ -225,7 +225,9 @@ ${ACTIVITY_DRAWER_JS}
       tileHtml('t-mk', esc(st[1]), caps || esc(st[2]), { vcls: 'small ' + st[0], meter: meter(eff.used, eff.cap) });
       const items = [];
       const c = d.counts || {};
-      if (c.failed) items.push(item('/ui/mkvid?status=failed&tab=settled', 'bad', c.failed + ' mkvid request' + (c.failed === 1 ? '' : 's') + ' failed', 'Retry or ban them on the mkvid page', 'mkvid'));
+      // Real failures only: a set whose recording was removed or is too short is nothing to act on.
+      const failed = d.outcomes ? d.outcomes.failed || 0 : c.failed || 0;
+      if (failed) items.push(item('/ui/mkvid?status=failed&tab=settled', 'bad', failed + ' mkvid request' + (failed === 1 ? '' : 's') + ' failed', 'Retry or ban them on the mkvid page', 'mkvid'));
       const olds = d.oldVideos || [];
       if (olds.length) items.push(item('/ui/mkvid?tab=old', 'warn', olds.length + ' old video' + (olds.length === 1 ? ' is' : 's are') + ' not deleted from YouTube yet', 'A recreation replaced ' + (olds.length === 1 ? 'it' : 'them'), 'Old videos'));
       if (st[0] === 'bad') items.push(item('/ui/mkvid', 'bad', 'mkvid: ' + st[1], st[2], 'mkvid'));

@@ -246,12 +246,14 @@ const JS = /* js */ `
     tile('Uploaded', c.mkvidDone, nf(last(dl.mkvidDone, 7)) + ' in 7 days');
     tile('Queued', c.mkvidPending, 'waiting or rendering');
     tile('Failed', c.mkvidFailed, 'can be retried');
+    tile('No recording', c.mkvidNoRecording, 'removed or too short');
     tile('Banned', c.mkvidBanned, 'sources refused');
     dailyChart('s3', 'mkvid results per day', [{ label: 'Uploaded', values: dl.mkvidDone }, { label: 'Failed', values: dl.mkvidFailed }], nf(last(dl.mkvidDone, 7)) + ' uploaded in 7 days');
     dailyChart('s2', 'Sets queued for mkvid per day', [{ label: 'Queued', values: dl.mkvidQueued }], nf(last(dl.mkvidQueued, 7)) + ' in 7 days');
     chart('s1', 'Uploads by account', null, () => seg(b.mkvidAccount.map((p, i) => ({ label: p.label, value: p.value, color: C[i] }))), listTable(b.mkvidAccount, 'Account'));
     chart('s2', 'Uploads by audio source', null, () => hbars(b.mkvidSource.map((x) => ({ label: x.label, value: x.value }))), listTable(b.mkvidSource, 'Source'));
-    chart('s2', 'All requests by status', null, () => hbars(b.mkvidStatus.map((x) => ({ label: x.label, value: x.value }))), listTable(b.mkvidStatus, 'Status'));
+    const mkStatus = b.mkvidStatus.map((x) => ({ label: x.label === 'recording_short' ? 'recording too short' : x.label.replace(/_/g, ' '), value: x.value }));
+    chart('s2', 'All requests by status', null, () => hbars(mkStatus), listTable(mkStatus, 'Status'));
 
     sec('Pre-saves');
     tile('Found on YouTube', c.presavesFound, 'by 1001tracklists');

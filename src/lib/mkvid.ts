@@ -49,6 +49,7 @@ import { CLAIM_READY_SQL, ID_WAIT_SECONDS, pullInHeldRecheck, timedRowCounts } f
 import { isOldStyle, queueBannedUploadForDelete, queueSupersededOldVideo, RECREATE_STYLE, retireReplacedVideo, retireSupersededOldVideo } from './mkvid-recreate'
 import { decodeEntities } from './html-entities'
 import { DEFAULT_APP_SETTINGS, getAppSettings, type AppSettings } from './app-settings'
+import { MKVID_OUTCOMES, mkvidNoRecordingSql, mkvidOutcome, mkvidOutcomeDetail, mkvidOutcomeLine, mkvidOutcomeSql, type MkvidOutcome } from './mkvid-outcome'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
@@ -598,14 +599,15 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
     )
     .run()
   if ((r.meta.changes ?? 0) > 0) return 'queued'
-  // A request refused because its recording ends before the tracklist does gets
-  // another go when the page now offers a different recording (a second, full
-  // player — see extractSetAudioSource). The panel's Retry keeps the old source.
+  // A request refused because its recording ends before the tracklist does, or
+  // is gone from its source (lib/mkvid-outcome.ts), gets another go when the
+  // page now offers a different recording (a second, full player — see
+  // extractSetAudioSource — or a new upload). The panel's Retry keeps the old source.
   const re = await dbOf(env)
     .prepare(
       `UPDATE mkvid_requests SET source = ?, source_url = ?, last_cue_seconds = ?, status = 'pending', attempts = 0, not_before = NULL,
               claimed_at = NULL, error = NULL, updated_at = ?
-       WHERE set_url = ? AND status = 'failed' AND error LIKE 'incomplete_recording%' AND source_url IS NOT ?`,
+       WHERE set_url = ? AND status = 'failed' AND ${mkvidNoRecordingSql('error')} AND source_url IS NOT ?`,
     )
     .bind(input.source.kind, input.source.url, v(input.lastCueSeconds), now, input.setUrl, input.source.url)
     .run()
@@ -939,6 +941,19 @@ export async function countMkvidRequests(env: Env): Promise<Record<MkvidStatus, 
   const res = await dbOf(env).prepare('SELECT status, COUNT(*) AS n FROM mkvid_requests GROUP BY status').all<{ status: string; n: number }>()
   const out: Record<MkvidStatus, number> = { pending: 0, claimed: 0, done: 0, failed: 0, superseded: 0, banned: 0 }
   for (const r of res.results) if (r.status in out) out[r.status as MkvidStatus] = Number(r.n)
+  return out
+}
+
+/** The statuses of a request that has left the queue. */
+export const MKVID_FINISHED_SQL = "status IN ('done', 'failed', 'superseded', 'banned')"
+
+/** The finished requests by outcome (lib/mkvid-outcome.ts): `failed` here is real failures only. */
+export async function countMkvidOutcomes(env: Env): Promise<Record<MkvidOutcome, number>> {
+  const res = await dbOf(env)
+    .prepare(`SELECT ${mkvidOutcomeSql('status', 'error')} AS k, COUNT(*) AS n FROM mkvid_requests WHERE ${MKVID_FINISHED_SQL} GROUP BY k`)
+    .all<{ k: string | null; n: number }>()
+  const out = Object.fromEntries(MKVID_OUTCOMES.map((k) => [k, 0])) as Record<MkvidOutcome, number>
+  for (const r of res.results) if (r.k !== null && r.k in out) out[r.k as MkvidOutcome] = Number(r.n)
   return out
 }
 
@@ -1451,6 +1466,11 @@ export function requestSummary(r: MkvidRequest): Record<string, unknown> {
     accountLabel: MKVID_ACCOUNT_LABELS[r.account],
     /** A video made with a style other than the current one (unknown counts): "Recreate all old-style videos" takes it. */
     oldStyle: !!r.videoId && isOldStyle(r.style),
+    /** Where a finished request ended (lib/mkvid-outcome.ts); null while it is queued or rendering. */
+    outcome: mkvidOutcome(r),
+    /** A no-recording outcome in plain words, with what the stored error says: one line, and the line plus what it means. Else null. */
+    outcomeLine: mkvidOutcomeLine(r),
+    outcomeDetail: mkvidOutcomeDetail(r),
   }
 }
 

@@ -140,6 +140,7 @@ export const SET_DIAG_JS = /* js */ `
     }
     else if (m.status === 'claimed') { tone = 'info'; finding = 'Rendering now.'; }
     else if (m.status === 'done') { tone = 'ok'; finding = 'Uploaded ' + (m.videoId || '(no video id)') + '.'; }
+    else if (m.status === 'failed' && m.outcomeDetail) { tone = 'neutral'; finding = m.outcomeDetail; }
     else if (m.status === 'failed') { tone = 'bad'; finding = 'Failed: ' + (m.error || 'no error recorded') + '.'; }
     else if (m.status === 'banned') { tone = 'bad'; finding = 'Banned from mkvid.'; }
     else if (m.status === 'superseded') { tone = 'neutral'; const why = m.supersededReason || 'superseded'; finding = why.charAt(0).toUpperCase() + why.slice(1) + '.'; }
@@ -147,6 +148,7 @@ export const SET_DIAG_JS = /* js */ `
     const l = m.list;
     const facts = [
       ['Attempts', String(m.attempts)],
+      ...(m.outcomeDetail && m.error ? [['mkvid said', m.error]] : []),
       ['Account', m.account || '—'],
       ['Style', m.style || 'default'],
       ['Skip ID wait', diagYes(m.skipIdWait)],

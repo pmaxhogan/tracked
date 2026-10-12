@@ -561,6 +561,23 @@ describe('DJ profile set table', () => {
 })
 
 describe('Home page', () => {
+  it('mkvid requests that ended for want of a usable recording are not listed as needing attention; real failures are', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const mk = (outcomes: Record<string, number>) => ({ enabled: true, dailyClaimCap: 30, dailyClaims: 3, now, quotaResetsAt: now + 3600, counts: { pending: 0, claimed: 0, done: 4, failed: 5 }, outcomes,
+      accounts: [{ account: 'primary', label: 'primary', cap: 24, used: 3 }], lastPoll: { at: now, outcome: 'ok', accounts: ['primary'] }, oldVideos: [] })
+    const attnFor = async (outcomes: Record<string, number>) => {
+      const { ctx, els } = richStub(async (u: string) => (u.startsWith('/ui/api/mkvid') ? Response.json(mk(outcomes)) : new Response('{}', { status: 404 })), '/ui')
+      ;(ctx as any).URL = URL
+      const html = await (await app.request('https://tracked.example/ui', {}, env())).text()
+      for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+      for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0))
+      return els.get('attn').innerHTML as string
+    }
+    expect(await attnFor({ failed: 0, recording_removed: 3, recording_short: 2 })).not.toContain('/ui/mkvid?status=failed')
+    const some = await attnFor({ failed: 1, recording_removed: 3, recording_short: 1 })
+    expect(some).toContain('/ui/mkvid?status=failed')
+    expect(some).toContain('1 mkvid request failed')
+  })
   it('/ui is the Home page and auto-prompts for notifications (ban page "home")', async () => {
     const html = await (await app.request('https://tracked.example/ui', {}, env())).text()
     expect(html).toContain('data-ban-page="home"')
@@ -937,6 +954,14 @@ describe('Set diagnostics', () => {
     expect(supOfficial.finding).toBe('Superseded by an official recording (vidoffic001).')
     const supTwin = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'superseded', position: null, readiness: null, supersededReason: 'duplicate URL: kept under another URL' }) }).mkvid
     expect(supTwin.finding).toBe('Duplicate URL: kept under another URL.')
+    // A request that ended for want of a usable recording is not a failure: neutral, in plain words, mkvid's text among the facts.
+    const said = 'probe: yt-dlp exit 1: ERROR: HTTP Error 404: Not Found'
+    const gone = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'failed', position: null, readiness: null, error: said, outcome: 'recording_removed', outcomeDetail: 'The recording is gone from SoundCloud. Nothing to do.' }) }).mkvid
+    expect([gone.tone, gone.finding]).toEqual(['neutral', 'The recording is gone from SoundCloud. Nothing to do.'])
+    expect(gone.facts).toContainEqual(['mkvid said', said])
+    const broken = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'failed', position: null, readiness: null, error: 'too many attempts', outcome: 'failed', outcomeDetail: null }) }).mkvid
+    expect([broken.tone, broken.finding]).toEqual(['bad', 'Failed: too many attempts.'])
+    expect(broken.facts.map((f: string[]) => f[0])).not.toContain('mkvid said')
   })
   it('the sticky column scrolls on its own from 1100px', async () => {
     const { SET_DIAG_CSS } = await import('../src/ui/pages/set-diag')

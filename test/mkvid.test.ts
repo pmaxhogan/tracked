@@ -224,13 +224,28 @@ describe('queue lifecycle', () => {
     expect(await enqueueRaw(env, { ...input, source: full })).toBe('exists')
   })
 
+  it('a failure because the recording is gone from its source is requeued by a different source too, and only then', async () => {
+    const env = makeEnv()
+    await enqueueMkvidRequest(env, input)
+    const req = (await claimMkvidRequest(env, log))!
+    await failMkvidRequest(env, { id: req.id, error: 'probe: yt-dlp exit 1: ERROR: [soundcloud] 1234: Unable to download JSON metadata: HTTP Error 404: Not Found', permanent: true }, log)
+    // The page still lists the recording that is gone: nothing to try.
+    expect(await enqueueRaw(env, input)).toBe('exists')
+    expect((await getMkvidRequest(env, req.id))!.status).toBe('failed')
+    const other = { kind: 'soundcloud' as const, url: 'https://api.soundcloud.com/tracks/5' }
+    expect(await enqueueRaw(env, { ...input, source: other, lastCueSeconds: 4000 })).toBe('requeued')
+    expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'pending', attempts: 0, error: null, notBefore: null, sourceUrl: other.url, lastCueSeconds: 4000 })
+    expect(await enqueueRaw(env, { ...input, source: other })).toBe('exists')
+  })
+
   it('a failure for another reason is not requeued by a new source', async () => {
     const env = makeEnv()
     await enqueueMkvidRequest(env, input)
     const req = (await claimMkvidRequest(env, log))!
-    await failMkvidRequest(env, { id: req.id, error: 'probe: HTTP Error 404', permanent: true }, log)
+    // A 404 outside mkvid's source checks says nothing about the recording.
+    await failMkvidRequest(env, { id: req.id, error: 'yt-dlp exit 1: ERROR: HTTP Error 404: Not Found', permanent: true }, log)
     expect(await enqueueRaw(env, { ...input, source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/5' } })).toBe('exists')
-    expect((await getMkvidRequest(env, req.id))!.status).toBe('failed')
+    expect((await getMkvidRequest(env, req.id))!).toMatchObject({ status: 'failed', sourceUrl: input.source.url })
   })
 
   it('fail: retryable goes back to pending with a backoff, permanent parks it, exhausted parks it', async () => {

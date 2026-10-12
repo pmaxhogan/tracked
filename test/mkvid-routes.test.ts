@@ -225,7 +225,7 @@ describe('/mkvid routes', () => {
     for (const [n, setDate, slug, artistName, kind] of sets) {
       await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate, slug, artistName, setTitle: `${artistName} @ set ${n}`, source: { kind, url: `https://audio/${n}` } })
     }
-    type Table = { rows: Array<{ setUrl: string; position?: number; status: string; artistLabel: string }>; total: number; page: number; pageCount: number }
+    type Table = { rows: Array<{ setUrl: string; position?: number; status: string; outcome: string | null; artistLabel: string }>; total: number; page: number; pageCount: number; counts: Record<string, number> }
     const table = async (which: string, qs = '') => {
       const r = await app.request(`http://x/ui/api/mkvid/${which}${qs}`, {}, env)
       expect(r.status, qs).toBe(200)
@@ -265,18 +265,132 @@ describe('/mkvid routes', () => {
     await post(env, '/mkvid/claim', {})
 
     const fin = await table('finished', '?size=10')
-    expect(fin.rows.map((r) => [r.setUrl.split('/').pop(), r.status]).sort()).toEqual([['a', 'failed'], ['b', 'banned']])
-    expect(names(await table('finished', '?f.status=in:failed'))).toEqual(['a'])
+    // The stored status is unchanged; the Status column is the outcome, and 'a' has no usable recording: not a failure.
+    expect(fin.rows.map((r) => [r.setUrl.split('/').pop(), r.status, r.outcome]).sort()).toEqual([['a', 'failed', 'recording_short'], ['b', 'banned', 'banned']])
+    expect(names(await table('finished', '?f.status=in:failed'))).toEqual([])
+    expect(names(await table('finished', '?f.status=in:recording_short'))).toEqual(['a'])
+    expect(names(await table('finished', '?f.status=in:failed|banned'))).toEqual(['b'])
+    expect(fin.counts).toEqual({ done: 0, failed: 0, recording_removed: 0, recording_short: 1, has_recording: 0, duplicate: 0, superseded: 0, banned: 1 })
     expect(names(await table('finished', '?f.error=has:incomplete'))).toEqual(['a'])
     expect(names(await table('finished', '?sort=dj,-setDate'))).toEqual(['a', 'b'])
     expect((await table('queue')).total).toBe(0)
-    const h = (await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as { rendering: Array<{ setUrl: string; status: string }>; counts: Record<string, number> }
+    const h = (await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as { rendering: Array<{ setUrl: string; status: string }>; counts: Record<string, number>; outcomes: Record<string, number> }
     expect(h.rendering.map((r) => [r.setUrl.split('/').pop(), r.status])).toEqual([['c', 'claimed']])
     expect(h.counts).toMatchObject({ pending: 0, claimed: 1, failed: 1, banned: 1 })
+    expect(h.outcomes).toMatchObject({ failed: 0, recording_short: 1, banned: 1 })
     // Paging: page size is clamped to 10..200.
     for (let i = 0; i < 12; i++) await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/p${i}`, setDate: `2026-08-${String(10 + i).padStart(2, '0')}` })
     const pg = await table('queue', '?size=10&page=2')
     expect([pg.total, pg.page, pg.pageCount, pg.rows.map((r) => r.position)]).toEqual([12, 2, 2, [11, 12]])
+  })
+
+  it('the finished Status column is the outcome: it filters, sorts and counts across every page', async () => {
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
+    const GONE = 'probe: yt-dlp exit 1: ERROR: [soundcloud] 77: Unable to download JSON metadata: HTTP Error 404: Not Found'
+    const SHORT = "incomplete_recording: source is 1824s but the tracklist's last cue is at 7009s"
+    // 12 uploads, newest; then the rest, older, so the default first page of 10 holds none of them.
+    const rows: Array<[string, string, string | null]> = Array.from({ length: 12 }, (_, i): [string, string, string | null] => [`d${i}`, 'done', null])
+    rows.push(['g1', 'failed', GONE], ['g2', 'failed', GONE], ['g3', 'failed', GONE], ['s1', 'failed', SHORT], ['s2', 'failed', SHORT],
+      ['f1', 'failed', 'too many attempts'], ['x1', 'superseded', '1001tracklists now has abcdefghijk'], ['x2', 'superseded', 'duplicate of the same 1001tracklists id under another URL'], ['b1', 'banned', 'banned from the panel'],
+      ['p1', 'pending', GONE])
+    let t = 5000
+    for (const [id, status, error] of rows) {
+      await env.DB.prepare("INSERT INTO mkvid_requests (id, slug, set_url, set_title, source, source_url, status, error, created_at, updated_at) VALUES (?, 'dj', ?, ?, 'soundcloud', 'https://api.soundcloud.com/tracks/77', ?, ?, 1, ?)")
+        .bind(id, `https://x/tracklist/${id}`, `Set ${id}`, status, error, t--).run()
+    }
+    type Row = { id: string; status: string; outcome: string | null; outcomeLine: string | null; outcomeDetail: string | null }
+    type Table = { rows: Row[]; total: number; pageCount: number; counts: Record<string, number> }
+    const fin = async (qs: string) => {
+      const r = await app.request(`http://x/ui/api/mkvid/finished${qs}`, {}, env)
+      expect(r.status, qs).toBe(200)
+      return (await r.json()) as Table
+    }
+    const ids = (x: Table) => x.rows.map((r) => r.id).sort()
+
+    const first = await fin('?size=10')
+    expect([first.total, first.pageCount, first.rows.every((r) => r.outcome === 'done')]).toEqual([21, 3, true])
+    const counts = { done: 12, failed: 1, recording_removed: 3, recording_short: 2, has_recording: 1, duplicate: 1, superseded: 0, banned: 1 }
+    expect(first.counts).toEqual(counts)
+
+    const gone = await fin('?size=10&f.status=in:recording_removed')
+    expect([gone.total, ids(gone)]).toEqual([3, ['g1', 'g2', 'g3']])
+    expect(gone.rows[0]).toMatchObject({ status: 'failed', outcome: 'recording_removed', outcomeLine: 'The recording is gone from SoundCloud (the link answers "not found").' })
+    expect(gone.rows[0]!.outcomeDetail).toContain('Nothing to do')
+    // The counts are the whole list, whatever is filtered.
+    expect(gone.counts).toEqual(counts)
+    expect(ids(await fin('?size=10&f.status=in:recording_short'))).toEqual(['s1', 's2'])
+    expect(ids(await fin('?size=10&f.status=in:recording_removed|recording_short'))).toEqual(['g1', 'g2', 'g3', 's1', 's2'])
+    const failed = await fin('?size=10&f.status=in:failed')
+    expect([failed.total, ids(failed), failed.rows[0]!.outcomeDetail]).toEqual([1, ['f1'], null])
+    expect(ids(await fin('?f.status=in:has_recording'))).toEqual(['x1'])
+    expect(ids(await fin('?f.status=in:duplicate'))).toEqual(['x2'])
+    expect((await fin('?f.status=in:superseded')).total).toBe(0)
+    expect(ids(await fin('?f.status=nin:done'))).toEqual(['b1', 'f1', 'g1', 'g2', 'g3', 's1', 's2', 'x1', 'x2'])
+    // Sorted by it, the outcomes group together.
+    expect((await fin('?size=200&sort=status')).rows.map((r) => r.outcome).filter((o, i, a) => o !== a[i - 1])).toEqual(['banned', 'done', 'duplicate', 'failed', 'has_recording', 'recording_removed', 'recording_short'])
+    // A value that is not an outcome is refused; a waiting request has none.
+    expect((await app.request('http://x/ui/api/mkvid/finished?f.status=in:pending', {}, env)).status).toBe(400)
+
+    const h = (await (await app.request('http://x/ui/api/mkvid', {}, env)).json()) as { counts: Record<string, number>; outcomes: Record<string, number> }
+    expect(h.counts).toMatchObject({ failed: 6, done: 12, superseded: 2 })
+    expect(h.outcomes).toEqual(counts)
+  })
+
+  it('the queue Status column is the readiness state: it filters and counts on the server, and agrees with each row', async () => {
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
+    const now = Math.floor(Date.now() / 1000)
+    const day = (ago: number) => new Date((now - ago * 86400) * 1000).toISOString().slice(0, 10)
+    const q = async (n: string, setDate: string | null) => {
+      await enqueueRaw(env, { ...input, setUrl: `https://x/tracklist/${n}`, setDate, source: { kind: 'soundcloud', url: `https://audio/${n}` } })
+      return (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id
+    }
+    await q('ready', day(30))
+    await storeVerifiedList(env, 'https://x/tracklist/ready')
+    await q('nolist', day(30))
+    await q('untrusted', day(30))
+    await storeVerifiedList(env, 'https://x/tracklist/untrusted', { trusted: false })
+    await q('untimed', day(30))
+    await storeVerifiedList(env, 'https://x/tracklist/untimed', { rows: 10, untimedRows: 5 })
+    await q('ids-new', day(1))
+    await storeVerifiedList(env, 'https://x/tracklist/ids-new', { rows: 4, idRows: 2 })
+    await q('ids-old', day(30))
+    await storeVerifiedList(env, 'https://x/tracklist/ids-old', { rows: 4, idRows: 2 })
+    const skip = await q('ids-skip', day(1))
+    await storeVerifiedList(env, 'https://x/tracklist/ids-skip', { rows: 4, idRows: 2 })
+    await env.DB.prepare('UPDATE mkvid_requests SET skip_id_wait = 1 WHERE id = ?').bind(skip).run()
+    // No set date: the wait counts from when the set was queued.
+    await q('ids-undated', null)
+    await storeVerifiedList(env, 'https://x/tracklist/ids-undated', { rows: 4, idRows: 2 })
+    const back = await q('backoff', day(30))
+    await storeVerifiedList(env, 'https://x/tracklist/backoff')
+    await env.DB.prepare("UPDATE mkvid_requests SET not_before = ?, error = 'yt-dlp exit 1' WHERE id = ?").bind(now + 3600, back).run()
+    const past = await q('backoff-over', day(30))
+    await storeVerifiedList(env, 'https://x/tracklist/backoff-over')
+    await env.DB.prepare("UPDATE mkvid_requests SET not_before = ?, error = 'yt-dlp exit 1' WHERE id = ?").bind(now - 3600, past).run()
+
+    type Table = { rows: Array<{ setUrl: string; status: string; readiness: { state: string } }>; total: number; counts: Record<string, number> }
+    const queue = async (qs: string) => {
+      const r = await app.request(`http://x/ui/api/mkvid/queue${qs}`, {}, env)
+      expect(r.status, qs).toBe(200)
+      return (await r.json()) as Table
+    }
+    const names = (x: Table) => x.rows.map((r) => r.setUrl.split('/').pop()).sort()
+    const all = await queue('')
+    expect(all.total).toBe(10)
+    expect(all.counts).toEqual({ unverified: 2, untimed: 1, waiting_ids: 2, backoff: 1, ready: 4 })
+    expect(names(await queue('?f.status=in:ready'))).toEqual(['backoff-over', 'ids-old', 'ids-skip', 'ready'])
+    expect(names(await queue('?f.status=in:unverified'))).toEqual(['nolist', 'untrusted'])
+    expect(names(await queue('?f.status=in:untimed'))).toEqual(['untimed'])
+    expect(names(await queue('?f.status=in:waiting_ids'))).toEqual(['ids-new', 'ids-undated'])
+    expect(names(await queue('?f.status=in:backoff'))).toEqual(['backoff'])
+    // The filter (SQL) and the row's own readiness (computed in the Worker) are the same answer; every row stays `pending`.
+    for (const state of Object.keys(all.counts)) {
+      const t = await queue(`?size=10&f.status=in:${state}`)
+      expect([state, t.total, t.rows.map((r) => r.readiness.state), t.rows.map((r) => r.status)]).toEqual([state, all.counts[state], t.rows.map(() => state), t.rows.map(() => 'pending')])
+      expect(t.counts).toEqual(all.counts)
+    }
+    expect(names(await queue('?f.status=in:ready&sort=status'))).toHaveLength(4)
+    expect((await app.request('http://x/ui/api/mkvid/queue?f.status=in:failed', {}, env)).status).toBe(400)
   })
 
   it('a filter the table API does not know is a 400, not an empty list', async () => {

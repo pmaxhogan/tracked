@@ -199,6 +199,73 @@ describe('mkvid page tables', () => {
     expect(old.get('mk-p-settled').hidden).toBe(false)
     expect(old.get('mk-p-queue').hidden).toBe(true)
   })
+
+  it('a set without a usable recording reads neutral and in plain words, and is not counted as failed; a real failure stays red', async () => {
+    const said = 'probe: yt-dlp exit 1: ERROR: [soundcloud] 77: Unable to download JSON metadata: HTTP Error 404: Not Found'
+    const line = 'The recording is gone from SoundCloud (the link answers "not found").'
+    const GONE = { ...DONE, id: 'g1', setTitle: 'Gone Set', status: 'failed', videoId: null, error: said, outcome: 'recording_removed', outcomeLine: line, outcomeDetail: line + ' No video can be made without it. Nothing to do.' }
+    const BROKEN = { ...DONE, id: 'f1', setTitle: 'Broken Set', status: 'failed', videoId: null, error: 'too many attempts', outcome: 'failed', outcomeLine: null, outcomeDetail: null }
+    const DUP = { ...DONE, id: 'x1', setTitle: 'Dup Set', status: 'superseded', videoId: null, error: 'duplicate of the same 1001tracklists id under another URL', outcome: 'duplicate', outcomeLine: null, outcomeDetail: null }
+    const counts = { done: 0, failed: 1, recording_removed: 1, recording_short: 0, has_recording: 0, duplicate: 1, superseded: 0, banned: 0 }
+    const { get, calls } = page((url) => {
+      if (url.startsWith('/ui/api/mkvid/finished?')) return Response.json({ ...tableOf([GONE, BROKEN, DUP]), counts })
+      if (url === '/ui/api/mkvid') return Response.json(header({ counts: { pending: 2, claimed: 1, done: 1, failed: 2, superseded: 1, banned: 0 }, outcomes: counts }))
+      return answers(url)
+    })
+    await settle()
+    const fin = get('fin-body').innerHTML as string
+    expect(fin).toContain('<span class="badge neutral" data-tip="' + line.replace(/"/g, '&quot;') + ' No video can be made without it. Nothing to do.">recording removed</span>')
+    expect(fin).toContain('>duplicate</span>')
+    // One red badge, one red row, one red error text: the real failure only.
+    expect(fin.match(/class="badge bad"/g)).toHaveLength(1)
+    expect(fin.match(/mk-failed/g)).toHaveLength(1)
+    expect(fin.match(/class="flag"/g)).toHaveLength(1)
+    expect(fin).toContain('<span class="flag">too many attempts</span>')
+    expect(fin).toContain('>' + line.replace(/"/g, '&quot;') + '</span>')
+    expect(fin).toContain('mkvid said: probe: yt-dlp exit 1')
+    // The header counts real failures only.
+    expect(get('mk-tiles').innerHTML).toContain('<div class="s">1 failed</div>')
+    const summary = get('mk-summary').innerHTML as string
+    expect(summary).toContain('<span class="warn">1 failed</span>')
+    expect(summary).toContain('>1 without a usable recording</span>')
+    // A chip per outcome, with the whole list's count; it filters on the server.
+    const chips = get('fin-chips').innerHTML as string
+    expect(chips).toMatch(/data-chip="removed"[^>]*>Recording removed<span class="tkt-count">1</)
+    expect(chips).toMatch(/data-chip="failed"[^>]*>Failed<span class="tkt-count">1</)
+    expect(chips).toMatch(/data-chip="short"[^>]*>Recording too short<span class="tkt-count">0</)
+    get('mk-settled').on.click(ctlClick({ 'data-tkt': 'chip', 'data-chip': 'removed' }))
+    await settle()
+    expect(gets(calls).at(-1)).toBe('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.status=in:recording_removed')
+    get('mk-settled').on.click(ctlClick({ 'data-tkt': 'chip', 'data-chip': 'superseded' }))
+    await settle()
+    expect(gets(calls).at(-1)).toBe('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.status=in:has_recording|duplicate|superseded')
+    // The details say it in plain words and keep mkvid's own text.
+    get('mk-settled').on.click(rowClick(0))
+    const body = get('tk-drawer-body').innerHTML as string
+    expect(body).toContain('>recording removed</span> ' + line.replace(/"/g, '&quot;'))
+    expect(body).toContain('<dt>mkvid said</dt><dd><span class="when">probe: yt-dlp exit 1')
+    expect(body).toContain('It only helps if the recording is back.')
+  })
+
+  it('the queue has a Status column and a chip per waiting state, filtered on the server', async () => {
+    const counts = { unverified: 4, untimed: 1, waiting_ids: 2, backoff: 0, ready: 3 }
+    const { get, calls } = page((url) => (url.startsWith('/ui/api/mkvid/queue?')
+      ? Response.json({ ...tableOf([WAITING('r3', 7), WAITING('r4', 8, { readiness: { state: 'unverified' }, error: 'yt-dlp exit 1' })]), counts })
+      : answers(url)))
+    await settle()
+    expect(get('q-head').innerHTML).toContain('Status')
+    const q = get('q-body').innerHTML as string
+    expect(q).toContain('waiting for IDs until')
+    expect(q).toContain('>not verified</span>')
+    expect(q).toContain('<span class="flag">last attempt: yt-dlp exit 1</span>')
+    const chips = get('q-chips').innerHTML as string
+    expect(chips).toMatch(/data-chip="all"[^>]*>All<span class="tkt-count">10</)
+    expect(chips).toMatch(/data-chip="unverified"[^>]*>Not verified<span class="tkt-count">4</)
+    expect(chips).toMatch(/data-chip="ids"[^>]*>Waiting for IDs<span class="tkt-count">2</)
+    get('mk-queue').on.click(ctlClick({ 'data-tkt': 'chip', 'data-chip': 'ids' }))
+    await settle()
+    expect(gets(calls).at(-1)).toBe('/ui/api/mkvid/queue?page=1&size=25&sort=position&f.status=in:waiting_ids')
+  })
 })
 
 describe('mkvid page: a filter that empties one tab', () => {

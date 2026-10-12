@@ -3,7 +3,8 @@
  * subscriptionsApp, so behind its cfAccess gate and the /ui/api/* same-origin
  * guard. The actions (retry, move, ban, ...) stay in routes/subscriptions.ts.
  *
- *   GET /api/mkvid            the header: status line inputs, caps, counts, last poll,
+ *   GET /api/mkvid            the header: status line inputs, caps, counts (by stored status)
+ *                             and `outcomes` (the finished requests by outcome), last poll,
  *                             the DJ list, old-style count, replaced videos, and the
  *                             requests rendering now (`rendering`). Home and Settings read
  *                             it too (they send `?limit=1`, which is ignored).
@@ -17,16 +18,25 @@
  * Every request row is `requestSummary` plus `readiness` (why a waiting set is or is
  * not next) and, in the queue, `position`. `q` matches the set title, the DJ (stored
  * name or slug), the set URL and the error.
+ *
+ * The `status` column of both tables is derived, not the stored status (which every
+ * row still carries as `status`): in the queue it is the readiness state
+ * (lib/mkvid-readiness.ts: ready, unverified, untimed, waiting_ids, backoff), in the
+ * finished list the outcome (lib/mkvid-outcome.ts: `failed` split into real failures
+ * and the two no-recording kinds, `superseded` by its cause). Both are SQL, so a
+ * filter or sort on it covers every page; each answer adds `counts`, the whole
+ * list by that column, whatever the filters.
  */
 import { Hono, type Context } from 'hono'
 import type { Env } from '../types'
 import {
+  countMkvidOutcomes,
   countMkvidRequests,
   getMkvidLastPoll,
   listMkvidDjs,
   MKVID_ACCOUNTS,
+  MKVID_FINISHED_SQL,
   MKVID_SOURCES,
-  MKVID_STATUSES,
   mkvidAccountUsage,
   quotaDayEnd,
   requestSummary,
@@ -34,7 +44,8 @@ import {
   type MkvidRequest,
   type MkvidRow,
 } from '../lib/mkvid'
-import { readinessFor } from '../lib/mkvid-readiness'
+import { MKVID_READINESS_STATES, readinessFor, readinessStateSql } from '../lib/mkvid-readiness'
+import { MKVID_OUTCOMES, mkvidOutcomeSql } from '../lib/mkvid-outcome'
 import { countOldStyleVideos, listUndeletedOldVideos } from '../lib/mkvid-recreate'
 import { parseTableQuery, runTableQuery, tableErrorBody, TableQueryError, type TableColumn, type TableDef, type TableQuery } from '../lib/table-query'
 import { dbOf } from '../lib/db'
@@ -43,7 +54,7 @@ export const mkvidUiApp = new Hono<{ Bindings: Env; Variables: { cfAccessEmail: 
 
 type QueueDbRow = MkvidRow & { position?: number | null }
 
-/** The columns both lists share (stored seconds; filters take unix ms like every datetime). */
+/** The columns both lists share (stored seconds; filters take unix ms like every datetime). Each list adds its own `status`. */
 const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
   id: { type: 'text', filterable: false },
   setDate: { sql: 'set_date', type: 'date' },
@@ -54,7 +65,6 @@ const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
   dj: { sql: 'slug', type: 'text', searchable: true },
   source: { type: 'enum', options: MKVID_SOURCES },
   account: { type: 'enum', options: MKVID_ACCOUNTS },
-  status: { type: 'enum', options: MKVID_STATUSES },
   attempts: { type: 'number' },
   createdAt: { sql: 'created_at', type: 'datetime', storage: 's' },
   updatedAt: { sql: 'updated_at', type: 'datetime', storage: 's' },
@@ -65,26 +75,32 @@ const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
   error: { type: 'text', sortable: false, searchable: true },
 }
 
-/** Claim order (lib/mkvid.ts QUEUE_ORDER): newest set first, undated last, ties by most recently queued. */
-export const MKVID_QUEUE_TABLE: TableDef<QueueDbRow> = {
-  from: "(SELECT *, ROW_NUMBER() OVER (ORDER BY sort_key DESC, created_at DESC, rowid ASC) AS position FROM mkvid_requests WHERE status = 'pending')",
-  primaryKey: 'id',
-  defaultSort: 'position',
-  columns: { ...COLUMNS, position: { type: 'number' } },
+/**
+ * Claim order (lib/mkvid.ts QUEUE_ORDER): newest set first, undated last, ties by most recently queued.
+ * Each row also gets its readiness state at `now` as `ready_state`: the list's `status` column.
+ */
+export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
+  return {
+    from: `(SELECT r.*, ROW_NUMBER() OVER (ORDER BY r.sort_key DESC, r.created_at DESC, r.rowid ASC) AS position, ${readinessStateSql(now)} AS ready_state
+      FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id WHERE r.status = 'pending')`,
+    primaryKey: 'id',
+    defaultSort: 'position',
+    columns: { ...COLUMNS, status: { sql: 'ready_state', type: 'enum', options: MKVID_READINESS_STATES }, position: { type: 'number' } },
+  }
 }
 
 export const MKVID_FINISHED_TABLE: TableDef<QueueDbRow> = {
   from: 'mkvid_requests',
-  where: "status IN ('done', 'failed', 'superseded', 'banned')",
+  where: MKVID_FINISHED_SQL,
   primaryKey: 'id',
   defaultSort: '-updatedAt',
-  columns: COLUMNS,
+  columns: { ...COLUMNS, status: { sql: mkvidOutcomeSql('status', 'error'), type: 'enum', options: MKVID_OUTCOMES } },
 }
 
 type Ctx = Context<{ Bindings: Env; Variables: { cfAccessEmail: string } }>
 
-/** A table answer whose rows are requestSummary + readiness (+ position in the queue). */
-async function requestTable(c: Ctx, def: TableDef<QueueDbRow>): Promise<Response> {
+/** A table answer whose rows are requestSummary + readiness (+ position in the queue), plus `counts`. */
+async function requestTable(c: Ctx, def: TableDef<QueueDbRow>, now: number, counts: () => Promise<Record<string, number>>): Promise<Response> {
   let query: TableQuery
   try {
     query = parseTableQuery(new URL(c.req.url).searchParams, def)
@@ -94,17 +110,30 @@ async function requestTable(c: Ctx, def: TableDef<QueueDbRow>): Promise<Response
   }
   const result = await runTableQuery<QueueDbRow>(dbOf(c.env), def, query)
   const reqs = result.rows.map((r) => ({ req: rowToRequest(r), position: r.position == null ? null : Number(r.position) }))
-  const readiness = await readinessFor(c.env, reqs.map((x) => x.req).filter((r) => r.status !== 'done' && r.status !== 'superseded'))
+  const readiness = await readinessFor(c.env, reqs.map((x) => x.req).filter((r) => r.status !== 'done' && r.status !== 'superseded'), now)
   return c.json({
     ...result,
     rows: reqs.map((x) => ({ ...summaryOf(x.req, readiness.get(x.req.id) ?? null), ...(x.position != null ? { position: x.position } : {}) })),
+    counts: await counts(),
   })
 }
 
 const summaryOf = (r: MkvidRequest, readiness: unknown) => ({ ...requestSummary(r), readiness })
 
-mkvidUiApp.get('/api/mkvid/queue', (c) => requestTable(c, MKVID_QUEUE_TABLE))
-mkvidUiApp.get('/api/mkvid/finished', (c) => requestTable(c, MKVID_FINISHED_TABLE))
+/** The whole queue by readiness state. */
+async function countQueueStates(env: Env, def: TableDef<QueueDbRow>): Promise<Record<string, number>> {
+  const res = await dbOf(env).prepare(`SELECT ready_state AS k, COUNT(*) AS n FROM ${def.from} GROUP BY k`).all<{ k: string; n: number }>()
+  const out: Record<string, number> = Object.fromEntries(MKVID_READINESS_STATES.map((k) => [k, 0]))
+  for (const r of res.results) if (r.k in out) out[r.k] = Number(r.n)
+  return out
+}
+
+mkvidUiApp.get('/api/mkvid/queue', (c) => {
+  const now = Math.floor(Date.now() / 1000)
+  const def = mkvidQueueTable(now)
+  return requestTable(c, def, now, () => countQueueStates(c.env, def))
+})
+mkvidUiApp.get('/api/mkvid/finished', (c) => requestTable(c, MKVID_FINISHED_TABLE, Math.floor(Date.now() / 1000), () => countMkvidOutcomes(c.env)))
 
 /**
  * The mkvid header: the three things that decide whether anything moves (the
@@ -112,8 +141,9 @@ mkvidUiApp.get('/api/mkvid/finished', (c) => requestTable(c, MKVID_FINISHED_TABL
  * and the requests rendering now. The lists are the two table endpoints above.
  */
 mkvidUiApp.get('/api/mkvid', async (c) => {
-  const [counts, accounts, lastPoll, djs, oldStyleCount, oldVideos, claimed] = await Promise.all([
+  const [counts, outcomes, accounts, lastPoll, djs, oldStyleCount, oldVideos, claimed] = await Promise.all([
     countMkvidRequests(c.env),
+    countMkvidOutcomes(c.env),
     mkvidAccountUsage(c.env),
     getMkvidLastPoll(c.env),
     listMkvidDjs(c.env),
@@ -126,6 +156,8 @@ mkvidUiApp.get('/api/mkvid', async (c) => {
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
     counts,
+    /** The finished requests by outcome: `failed` is real failures only, the no-recording kinds are their own. */
+    outcomes,
     /** Done videos made with a style other than scene (unknown counts): what "Recreate all old-style videos" would queue. */
     oldStyleCount,
     /** Videos a recreation replaced that are not deleted from YouTube yet (pending retry, or refused by mkvid). */

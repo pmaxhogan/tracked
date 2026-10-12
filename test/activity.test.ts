@@ -125,6 +125,9 @@ describe('activity feed (data-table contract)', () => {
         .bind(id, 'https://x/tracklist/' + id, status, error).run()
     await mk('m-banned', 'banned', 'banned from the panel')
     await mk('m-failed', 'failed', 'probe: yt-dlp exit 1')
+    // A set with no usable recording is nobody's to fix: its own status, not a failure.
+    await mk('m-gone', 'failed', 'probe: yt-dlp exit 1: ERROR: [soundcloud] 77: Unable to download JSON metadata: HTTP Error 404: Not Found')
+    await mk('m-short', 'failed', "incomplete_recording: source is 1824s but the tracklist's last cue is at 7009s")
     // A sync the pool stopped is waiting; one recorded as last_error is an error.
     const stop = JSON.stringify({ stop: { reason: 'pool busy: waited 20 s for a free browser (other fetches were running)', code: 'timeout', level: 'retry', runs: 2, since: 6000 } })
     await env.DB.prepare("INSERT INTO sub_sync (slug, artist_name, last_run_at, last_error, last_run_stats) VALUES ('dj-wait', 'DJ Wait', 7000, NULL, ?)").bind(stop).run()
@@ -134,12 +137,18 @@ describe('activity feed (data-table contract)', () => {
     expect(flags).toEqual({
       'addition:1': ['failed', false], 'addition:2': ['abandoned', true],
       'mkvid:m-banned': ['banned', false], 'mkvid:m-failed': ['failed', true],
+      'mkvid:m-gone': ['recording_removed', false], 'mkvid:m-short': ['recording_short', false],
       'sync:dj-wait': ['waiting', false], 'sync:dj-err': ['error', true],
     })
     expect(all.rows.find((r) => r.ref.key === 'dj-wait')!.detail).toBe('pool busy: waited 20 s for a free browser (other fetches were running) · 2 runs in a row · tried again by the scheduler')
     expect(all.rows.find((r) => r.ref.key === 'dj-err')!.detail).toBe('pool: challenge_pending')
     expect((await page(env, '?f.problem=eq:1')).rows.map((r) => r.ref.key).sort()).toEqual(['2', 'dj-err', 'm-failed'])
     expect((await page(env, '?f.status=in:waiting')).rows.map((r) => r.ref.key)).toEqual(['dj-wait'])
+    expect((await page(env, '?f.status=in:failed&f.kind=in:mkvid')).rows.map((r) => r.ref.key)).toEqual(['m-failed'])
+    expect((await page(env, '?f.status=in:recording_removed|recording_short')).rows.map((r) => r.ref.key).sort()).toEqual(['m-gone', 'm-short'])
+    expect(all.rows.find((r) => r.ref.key === 'm-gone')!.detail).toBe('The recording is gone from SoundCloud (the link answers "not found").')
+    expect(all.rows.find((r) => r.ref.key === 'm-short')!.detail).toBe('The recording is 30:24 long, but the last track starts at 1:56:49.')
+    expect(all.rows.find((r) => r.ref.key === 'm-failed')!.detail).toBe('probe: yt-dlp exit 1')
     expect((await page(env, '?q=pool busy')).rows.map((r) => r.ref.key).sort()).toEqual(['dj-err', 'dj-wait'])
   })
 

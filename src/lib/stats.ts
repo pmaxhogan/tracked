@@ -17,6 +17,7 @@ import { dbOf } from './db'
 import { errorFields, type Logger } from './log'
 import { createPoolAdminClient } from './pool-admin-client'
 import { CANDIDATE_PRESAVE_SQL } from './presave-candidates'
+import { mkvidFailureKindSql, mkvidNoRecordingSql } from './mkvid-outcome'
 
 export const DAYS = 60
 export const STATS_CACHE_KEY = 'stats:v1'
@@ -118,11 +119,12 @@ export async function computeStats(env: Env, nowSec = Math.floor(Date.now() / 10
     ['addStatus', db.prepare('SELECT status AS k, COUNT(*) AS n FROM playlist_additions WHERE ts >= ? GROUP BY status').bind(since * 1000)],
     ['removals', db.prepare(`SELECT ${day('at')} AS d, COUNT(*) AS n FROM playlist_removals WHERE at >= ? AND status = 'removed' GROUP BY d`).bind(since)],
     ['removedReasons', db.prepare('SELECT reason AS k, COUNT(*) AS n FROM removed_videos GROUP BY reason')],
-    ['mkvidStatus', db.prepare('SELECT status AS k, COUNT(*) AS n FROM mkvid_requests GROUP BY status')],
+    // `failed` is real failures only: a request that ended for want of a usable recording is its own kind (lib/mkvid-outcome.ts).
+    ['mkvidStatus', db.prepare(`SELECT ${mkvidFailureKindSql('status', 'error')} AS k, COUNT(*) AS n FROM mkvid_requests GROUP BY k`)],
     ['mkvidSource', db.prepare("SELECT source AS k, COUNT(*) AS n FROM mkvid_requests WHERE status = 'done' GROUP BY source")],
     ['mkvidAccount', db.prepare("SELECT account AS k, COUNT(*) AS n FROM mkvid_requests WHERE status = 'done' GROUP BY account")],
     ['mkvidDone', db.prepare(`SELECT ${day('updated_at')} AS d, COUNT(*) AS n FROM mkvid_requests WHERE updated_at >= ? AND status = 'done' GROUP BY d`).bind(since)],
-    ['mkvidFailed', db.prepare(`SELECT ${day('updated_at')} AS d, COUNT(*) AS n FROM mkvid_requests WHERE updated_at >= ? AND status = 'failed' GROUP BY d`).bind(since)],
+    ['mkvidFailed', db.prepare(`SELECT ${day('updated_at')} AS d, COUNT(*) AS n FROM mkvid_requests WHERE updated_at >= ? AND status = 'failed' AND NOT ${mkvidNoRecordingSql('error')} GROUP BY d`).bind(since)],
     ['mkvidQueued', db.prepare(`SELECT ${day('created_at')} AS d, COUNT(*) AS n FROM mkvid_requests WHERE created_at >= ? GROUP BY d`).bind(since)],
     ['presaveStages', db.prepare('SELECT stage AS k, COUNT(*) AS n FROM presaves GROUP BY stage')],
     ['presaveLinks', db.prepare("SELECT link_sources AS s FROM presaves WHERE stage IN ('identify', 'links')")],
@@ -245,6 +247,7 @@ export async function computeStats(env: Env, nowSec = Math.floor(Date.now() / 10
     mkvidDone: sumOf(mkvidStatus, 'done'),
     mkvidPending: sumOf(mkvidStatus, 'pending', 'claimed'),
     mkvidFailed: sumOf(mkvidStatus, 'failed'),
+    mkvidNoRecording: sumOf(mkvidStatus, 'recording_removed', 'recording_short'),
     mkvidBanned: sumOf(mkvidStatus, 'banned'),
     presavesWatching: sumOf(presaveStages, 'identify', 'links'),
     presavesFound: sumOf(presaveStages, 'found'),

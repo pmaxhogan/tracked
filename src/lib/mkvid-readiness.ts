@@ -152,6 +152,26 @@ export const CLAIM_READY_SQL = `t.track_count > 0 AND t.trusted = 1 AND ${TIMED_
        OR (CASE WHEN r.set_date IS NOT NULL AND r.set_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
                 THEN CAST(strftime('%s', r.set_date) AS INTEGER) ELSE ${DISCOVERED_SQL} END) <= ?)`
 
+/** The states mkvidReadiness answers, in the order it tests them. */
+export const MKVID_READINESS_STATES: ReadonlyArray<MkvidReadiness['state']> = ['unverified', 'untimed', 'waiting_ids', 'backoff', 'ready']
+
+/**
+ * mkvidReadiness's state as an SQL expression over `mkvid_requests r LEFT JOIN
+ * mkvid_request_tracks t` (the same inputs readinessFor reads), so the panel's
+ * queue can filter, sort and count by it across all its pages. `now` is
+ * written into the SQL as a whole number.
+ */
+export function readinessStateSql(now: number): string {
+  const n = Math.floor(now)
+  const setDay = "(CASE WHEN r.set_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' THEN CAST(strftime('%s', r.set_date) AS INTEGER) END)"
+  return `(CASE
+    WHEN COALESCE(t.trusted, 0) != 1 OR COALESCE(t.track_count, 0) <= 0 THEN 'unverified'
+    WHEN NOT COALESCE(${TIMED_SQL}, 0) THEN 'untimed'
+    WHEN COALESCE(t.id_rows, 1) > 0 AND COALESCE(r.skip_id_wait, 0) != 1 AND ${n} < COALESCE(${setDay}, ${DISCOVERED_SQL}) + ${ID_WAIT_SECONDS} THEN 'waiting_ids'
+    WHEN r.status = 'pending' AND r.not_before IS NOT NULL AND r.not_before > ${n} THEN 'backoff'
+    ELSE 'ready' END)`
+}
+
 /**
  * Panel "Render now": this request skips the wait for IDs (it still needs a
  * verified list, and keeps its place in the queue). Any request that has not

@@ -7,7 +7,13 @@
 // default, with the whole-queue position and the reorder/ban buttons), Finished
 // (GET /ui/api/mkvid/finished, server-side) and Old videos (local, over the
 // header's list). Actions are the POST /ui/api/mkvid/* routes.
+//
+// Both request tables have a Status column filtered on the server: why a
+// waiting set is or is not next (Queue), how a request ended (Finished). Red is
+// for a real failure only: a set whose recording was removed or is too short
+// (lib/mkvid-outcome.ts) is neutral and not counted as failed.
 import { shell } from '../shell'
+import { MKVID_OUTCOMES, MKVID_OUTCOME_LABELS } from '../../lib/mkvid-outcome'
 import { tipAttr, tipTerm } from '../tip'
 import { MKVID_STATE_JS } from './mkvid-state'
 
@@ -126,9 +132,12 @@ ${MKVID_STATE_JS}
   const $panels = { queue: $('mk-p-queue'), settled: $('mk-p-settled'), old: $('mk-p-old') };
 
   const TABS = [['queue', 'Queue'], ['settled', 'Finished'], ['old', 'Old videos']];
-  const TAB_TIPS = { queue: 'Sets waiting for mkvid, in the order it will take them, and the ones it is working on.', settled: 'Requests that are over: uploaded, failed, superseded or banned.', old: 'Videos that a recreation replaced and that still have to be deleted from YouTube.' };
-  const BADGE = { pending: 'info', claimed: 'warn', done: 'ok', failed: 'bad', superseded: 'neutral', banned: 'bad' };
-  const STATUS_WORDS = { pending: 'waiting', claimed: 'rendering', done: 'uploaded', failed: 'failed', superseded: 'superseded', banned: 'banned' };
+  const TAB_TIPS = { queue: 'Sets waiting for mkvid, in the order it will take them, and the ones it is working on.', settled: 'Requests that are over: uploaded, failed, without a usable recording, superseded or banned.', old: 'Videos that a recreation replaced and that still have to be deleted from YouTube.' };
+  // A request's state: how it ended once it has left the queue (outcome), else its stored status.
+  const stateOf = (r) => r.outcome || r.status;
+  const noRecording = (r) => r.outcome === 'recording_removed' || r.outcome === 'recording_short';
+  const BADGE = { pending: 'info', claimed: 'warn', done: 'ok', failed: 'bad', recording_removed: 'neutral', recording_short: 'neutral', has_recording: 'neutral', duplicate: 'neutral', superseded: 'neutral', banned: 'bad' };
+  const STATUS_WORDS = Object.assign({ pending: 'waiting', claimed: 'rendering' }, ${JSON.stringify(MKVID_OUTCOME_LABELS)});
 
   // Old links (?status=failed&tab=settled, ?source=, ?account=, ?dj=, ?q=) become the tables' filters.
   (function legacy() {
@@ -264,11 +273,15 @@ ${MKVID_STATE_JS}
     const perDay = eff.cap || d.dailyClaimCap;
     tiles.push('<div class="tk-tile"' + TK.tip('Sets queued for mkvid. The backlog estimate divides them by the uploads allowed per day.') + '><div class="k">Waiting</div><div class="v">' + esc(c.pending || 0) + '</div><div class="s">' +
       (perDay > 0 && c.pending ? 'backlog ≈ ' + esc(Math.ceil(c.pending / perDay)) + ' day' + (c.pending > perDay ? 's' : '') : 'nothing queued') + '</div></div>');
-    tiles.push('<div class="tk-tile"' + TK.tip('Videos mkvid has rendered and uploaded, and put in the playlists.') + '><div class="k">Uploaded</div><div class="v">' + esc(c.done || 0) + '</div><div class="s">' + (c.failed ? esc(c.failed) + ' failed' : 'none failed') + '</div></div>');
+    // Failed = real failures only; a set without a usable recording is not one.
+    const o = d.outcomes || { failed: c.failed || 0 };
+    const noRec = (o.recording_removed || 0) + (o.recording_short || 0);
+    tiles.push('<div class="tk-tile"' + TK.tip('Videos mkvid has rendered and uploaded, and put in the playlists.') + '><div class="k">Uploaded</div><div class="v">' + esc(c.done || 0) + '</div><div class="s">' + (o.failed ? esc(o.failed) + ' failed' : 'none failed') + '</div></div>');
     $tiles.innerHTML = tiles.join('');
 
     const bits = [esc(c.done || 0) + ' uploaded', esc(c.pending || 0) + ' waiting'];
-    if (c.failed) bits.push('<span class="warn">' + esc(c.failed) + ' failed</span>');
+    if (o.failed) bits.push('<span class="warn">' + esc(o.failed) + ' failed</span>');
+    if (noRec) bits.push('<span' + TK.tip('Sets whose recording was removed from its source, or is shorter than the tracklist. No video can be made from them, and there is nothing to do.') + '>' + esc(noRec) + ' without a usable recording</span>');
     if (c.superseded) bits.push(esc(c.superseded) + ' superseded');
     if (c.banned) bits.push(esc(c.banned) + ' banned');
     for (const a of d.accounts || []) bits.push('<span' + TK.tip('Uploads through the ' + a.label + ' Google project today, out of its daily cap.') + '>' + esc(a.label) + ' ' + esc(a.used) + '/' + esc(a.cap) + '</span>');
@@ -287,17 +300,29 @@ ${MKVID_STATE_JS}
   // positions stay honest.
   const ACTS = [['top', '⤒', 'Move to the top'], ['up', '↑', 'Move up one'], ['down', '↓', 'Move down one'], ['bottom', '⤓', 'Move to the bottom'], ['ban', '✕', 'Never upload this set via mkvid']];
   const ACT_TIPS = { top: 'Moves this set to the front of the queue, ahead of everything dated up to today.', up: 'Moves this set up one place.', down: 'Moves this set down one place.', bottom: 'Moves this set to the back of the queue.', ban: 'Bans this set: it is never rendered by mkvid and the sync cannot queue it again. Unban it from its details.' };
-  const STATUS_TIPS = { pending: 'Waiting in the queue for its turn.', claimed: 'mkvid took this set and is rendering and uploading it.', done: 'Uploaded and added to the playlists.', failed: 'Rendering or uploading failed. Retry it from its details.', superseded: 'The set gained a real recording, or the video was replaced, so no render is needed.', banned: 'Never rendered. Unban it from its details.' };
+  const STATUS_TIPS = { pending: 'Waiting in the queue for its turn.', claimed: 'mkvid took this set and is rendering and uploading it.', done: 'Uploaded and added to the playlists.', failed: 'Rendering or uploading failed. Retry it from its details.',
+    recording_removed: 'The recording is gone from its source, so no video can be made. Nothing to do.', recording_short: 'The recording ends before the tracklist does, so no video is made. Nothing to do.',
+    has_recording: 'The set gained a real recording on 1001tracklists, so no render is needed.', duplicate: 'The same tracklist is listed under another URL, and that one has the video.',
+    superseded: 'The set gained a real recording, or the video was replaced, so no render is needed.', banned: 'Never rendered. Unban it from its details.' };
   // A waiting or running request keeps the error its last attempt ended with: say so, or it reads as the current state.
   function errorLabel(r) {
     return r.status === 'pending' || r.status === 'claimed' ? 'last attempt: ' + r.error : r.error;
   }
-  // A refusal made before any render (the recording is gone, or ends before the tracklist does) will fail again on Retry.
+  // A no-recording outcome comes with its own explanation (the durations, what the source answered).
   function statusTip(r) {
-    if (r.status !== 'failed') return STATUS_TIPS[r.status];
-    if (/^incomplete_recording/.test(r.error || '')) return 'The recording ends before the tracklist does, so mkvid refused it. Retry fails the same way; a recheck that finds a longer recording on the page queues it again by itself.';
-    if (/^probe:/.test(r.error || '')) return 'mkvid could not open the recording (deleted or private), so nothing was rendered. Retry only helps if the recording comes back.';
-    return STATUS_TIPS.failed;
+    return r.outcomeDetail || STATUS_TIPS[stateOf(r)];
+  }
+  function badgeHtml(r) {
+    const st = stateOf(r);
+    return '<span class="badge ' + (BADGE[st] || 'neutral') + '"' + TK.tip(statusTip(r)) + '>' + esc(STATUS_WORDS[st] || st) + '</span>';
+  }
+  // The stored error under a row. Red is for a failure and for a last attempt's error; a no-recording
+  // outcome reads in plain words (mkvid's own text in the tip), and a superseded or banned note is plain.
+  function errorHtml(r) {
+    if (!r.error) return '';
+    if (noRecording(r)) return '<span' + TK.tip('mkvid said: ' + r.error) + '>' + esc(r.outcomeLine || r.error) + '</span>';
+    if (r.status === 'superseded' || r.status === 'banned') return esc(r.error);
+    return '<span class="flag">' + esc(errorLabel(r)) + '</span>';
   }
   // The moves act on whole-queue positions, so they are offered only while the
   // table shows the queue in claim order (sorted by #, ascending); ban always.
@@ -313,11 +338,11 @@ ${MKVID_STATE_JS}
     else if (r.status !== 'pending') meta.push(esc(rel(r.updatedAt)));
     if (r.replacesVideoId) meta.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
     if (r.status === 'done' && r.oldStyle) meta.push('<span' + TK.tip('Rendered in an older visual style than the current scene style. It can be recreated.') + '>old style</span>');
-    if (r.error && (r.status !== 'pending' || backoff)) meta.push('<span class="flag">' + esc(errorLabel(r)) + '</span>');
+    if (r.error && (r.status !== 'pending' || backoff)) meta.push(errorHtml(r));
     const lead = withPos && r.position != null
       ? '<span class="mk-pos"' + TK.tip('Place in the whole queue: the newest set goes first, undated sets last.') + '>#' + esc(r.position) + '</span>'
-      : '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(statusTip(r)) + '>' + esc(r.status === 'claimed' ? 'rendering' : r.status) + '</span>';
-    return '<div class="mk-row' + (r.status === 'failed' ? ' err' : '') + '" data-id="' + esc(r.id) + '">' + lead +
+      : badgeHtml(r);
+    return '<div class="mk-row' + (stateOf(r) === 'failed' ? ' err' : '') + '" data-id="' + esc(r.id) + '">' + lead +
       '<div class="mk-main"><button type="button" class="mk-title" data-open="' + esc(r.id) + '">' + esc(titleOf(r)) + '</button>' +
       '<div class="mk-meta">' + meta.join(' · ') + '</div></div>' +
       (r.videoId ? link(videoHref(r), 'watch', 'mk-watch', 'Opens the uploaded video on YouTube.') : '') +
@@ -358,15 +383,20 @@ ${MKVID_STATE_JS}
     attempts: { key: 'attempts', label: 'Tries', type: 'number', hideOn: 'phone', tip: 'Render attempts so far.' },
   };
 
+  // The Queue's Status cell: why this set is or is not next (mkWhy), as the server's readiness says.
+  const Q_STATES = [{ value: 'ready', label: 'ready' }, { value: 'unverified', label: 'not verified' }, { value: 'untimed', label: 'too few cue times' }, { value: 'waiting_ids', label: 'waiting for IDs' }, { value: 'backoff', label: 'retrying' }];
+  function queueState(r) {
+    if (r.readiness) return mkWhy(r.readiness, true, capped);
+    return r.notBefore && r.notBefore > Date.now() / 1000 ? 'retry ' + untilTime(r.notBefore) : nil;
+  }
   function queueMeta(r) {
-    const backoff = r.notBefore && r.notBefore > Date.now() / 1000;
     const bits = [];
-    if (r.readiness) bits.push(mkWhy(r.readiness, true, capped));
-    else if (backoff) bits.push('retry ' + untilTime(r.notBefore));
     if (r.replacesVideoId) bits.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
-    if (r.error) bits.push('<span class="flag">' + esc(errorLabel(r)) + '</span>');
+    if (r.error) bits.push(errorHtml(r));
     return bits.join(' · ');
   }
+  // A chip's number: the whole list by Status (the answer's counts), whatever else is filtered.
+  const countOf = (keys) => (resp) => (resp && resp.counts ? keys.reduce((n, k) => n + (Number(resp.counts[k]) || 0), 0) : null);
   const queueSorted = () => {
     const s = queueTable ? queueTable.state().effectiveSort : [];
     return s.length === 1 && s[0].col === 'position' && s[0].dir === 'asc';
@@ -419,6 +449,7 @@ ${MKVID_STATE_JS}
     columns: [
       { key: 'position', label: '#', type: 'number', width: '4.5em', tip: 'Place in the whole queue (claim order): the newest set goes first, undated sets last. No filter or sort changes it. Sort by # to reorder.', render: (r) => '<span class="mk-pos">#' + esc(r.position) + '</span>' },
       { key: 'setTitle', label: 'Set', type: 'text', render: (r) => titleCell(r, queueMeta(r)) },
+      { key: 'status', label: 'Status', type: 'enum', options: Q_STATES, tip: 'Why this set is or is not next: ready, not verified yet, waiting for track IDs, too few cue times, or pausing before another try.', render: queueState },
       common.dj,
       common.setDate,
       common.source,
@@ -427,7 +458,11 @@ ${MKVID_STATE_JS}
       { key: 'createdAt', label: 'Queued', type: 'datetime', storage: 's', hideOn: 'phone', render: (r) => when(r.createdAt) },
     ],
     chips: [
-      { id: 'all', label: 'All', group: 'q', on: true },
+      { id: 'all', label: 'All', group: 'q', on: true, count: countOf(Q_STATES.map((s) => s.value)) },
+      { id: 'ready', label: 'Ready', group: 'q', filters: [{ col: 'status', op: 'in', value: 'ready' }], count: countOf(['ready']), tip: 'Verified and allowed to render: mkvid takes them in order, as the daily caps allow.' },
+      { id: 'unverified', label: 'Not verified', group: 'q', filters: [{ col: 'status', op: 'in', value: 'unverified' }], count: countOf(['unverified']), tip: 'Sets whose track list still needs a second matching fetch.' },
+      { id: 'ids', label: 'Waiting for IDs', group: 'q', filters: [{ col: 'status', op: 'in', value: 'waiting_ids' }], count: countOf(['waiting_ids']), tip: 'Sets with unidentified tracks, held until they are 7 days old.' },
+      { id: 'untimed', label: 'Too few cue times', group: 'q', filters: [{ col: 'status', op: 'in', value: 'untimed' }], count: countOf(['untimed']), tip: 'Sets with under 90% of their tracks timed. Rechecked weekly.' },
       { id: 'retry', label: 'Retrying', group: 'q', filters: [{ col: 'error', op: 'nempty', value: '' }], tip: 'Sets whose last attempt failed and that are waiting to be tried again.' },
       { id: 'undated', label: 'Undated', group: 'q', filters: [{ col: 'setDate', op: 'empty', value: '' }], tip: 'Sets without a date: they wait at the back of the queue.' },
     ],
@@ -446,7 +481,10 @@ ${MKVID_STATE_JS}
     onRowClick: (r) => openDetail(r),
   });
 
-  const FIN_STATUSES = ['done', 'failed', 'superseded', 'banned'].map((v) => ({ value: v, label: STATUS_WORDS[v] }));
+  const FIN_STATUSES = ${JSON.stringify(MKVID_OUTCOMES)}.map((v) => ({ value: v, label: STATUS_WORDS[v] }));
+  function finishedMeta(r) {
+    return r.error ? errorHtml(r) : (r.status === 'done' && r.oldStyle ? 'old style' : '');
+  }
   finTable = TKTable.create($('mk-settled'), {
     id: 'fin',
     source: { url: '/ui/api/mkvid/finished' },
@@ -457,8 +495,8 @@ ${MKVID_STATE_JS}
     empty: 'Nothing has finished yet.',
     rowKey: 'id',
     columns: [
-      { key: 'status', label: 'Status', type: 'enum', options: FIN_STATUSES, render: (r) => '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(statusTip(r)) + '>' + esc(STATUS_WORDS[r.status] || r.status) + '</span>' },
-      { key: 'setTitle', label: 'Set', type: 'text', render: (r) => titleCell(r, r.error ? '<span class="flag">' + esc(errorLabel(r)) + '</span>' : (r.status === 'done' && r.oldStyle ? 'old style' : '')) },
+      { key: 'status', label: 'Status', type: 'enum', options: FIN_STATUSES, tip: 'How the request ended. Failed is a real failure; a set whose recording was removed or is too short is its own status, and nothing to act on.', render: badgeHtml },
+      { key: 'setTitle', label: 'Set', type: 'text', render: (r) => titleCell(r, finishedMeta(r)) },
       common.dj,
       common.setDate,
       common.source,
@@ -469,14 +507,16 @@ ${MKVID_STATE_JS}
       common.attempts,
     ],
     chips: [
-      { id: 'all', label: 'All', group: 'st', on: true },
-      { id: 'done', label: 'Uploaded', group: 'st', filters: [{ col: 'status', op: 'in', value: 'done' }] },
-      { id: 'problems', label: 'Problems', group: 'st', filters: [{ col: 'status', op: 'in', value: 'failed|banned' }], tip: 'Failed or banned requests.' },
-      { id: 'failed', label: 'Failed', group: 'st', filters: [{ col: 'status', op: 'in', value: 'failed' }] },
-      { id: 'superseded', label: 'Superseded', group: 'st', filters: [{ col: 'status', op: 'in', value: 'superseded' }] },
-      { id: 'banned', label: 'Banned', group: 'st', filters: [{ col: 'status', op: 'in', value: 'banned' }] },
+      { id: 'all', label: 'All', group: 'st', on: true, count: countOf(FIN_STATUSES.map((s) => s.value)) },
+      { id: 'done', label: 'Uploaded', group: 'st', filters: [{ col: 'status', op: 'in', value: 'done' }], count: countOf(['done']) },
+      { id: 'problems', label: 'Problems', group: 'st', filters: [{ col: 'status', op: 'in', value: 'failed|banned' }], count: countOf(['failed', 'banned']), tip: 'Failed or banned requests. A set without a usable recording is not one.' },
+      { id: 'failed', label: 'Failed', group: 'st', filters: [{ col: 'status', op: 'in', value: 'failed' }], count: countOf(['failed']), tip: 'Rendering or uploading failed: these can be retried.' },
+      { id: 'removed', label: 'Recording removed', group: 'st', filters: [{ col: 'status', op: 'in', value: 'recording_removed' }], count: countOf(['recording_removed']), tip: 'The recording is gone from SoundCloud or hearthis.at (deleted, private or blocked). Nothing to do.' },
+      { id: 'short', label: 'Recording too short', group: 'st', filters: [{ col: 'status', op: 'in', value: 'recording_short' }], count: countOf(['recording_short']), tip: 'The recording ends before the tracklist does: a part of the set. Nothing to do.' },
+      { id: 'superseded', label: 'Superseded', group: 'st', filters: [{ col: 'status', op: 'in', value: 'has_recording|duplicate|superseded' }], count: countOf(['has_recording', 'duplicate', 'superseded']), tip: 'No render needed: the set gained a real recording, or it is a duplicate of another URL. The Status filter tells them apart.' },
+      { id: 'banned', label: 'Banned', group: 'st', filters: [{ col: 'status', op: 'in', value: 'banned' }], count: countOf(['banned']) },
     ],
-    rowAttrs: (r) => (r.status === 'failed' ? { class: 'mk-failed' } : null),
+    rowAttrs: (r) => (stateOf(r) === 'failed' ? { class: 'mk-failed' } : null),
     onRowClick: (r) => openDetail(r),
   });
 
@@ -608,7 +648,8 @@ ${MKVID_STATE_JS}
     ]));
     out.push('<div class="mk-dgrp">Upload</div>');
     out.push(dl([
-      ['status', '<span class="badge ' + (BADGE[r.status] || 'neutral') + '"' + TK.tip(STATUS_TIPS[r.status]) + '>' + esc(r.status) + '</span>' + (r.error ? ' <span class="warn">' + esc(errorLabel(r)) + '</span>' : '')],
+      ['status', badgeHtml(r) + (r.outcomeDetail ? ' ' + esc(r.outcomeDetail) : r.error ? (r.status === 'superseded' || r.status === 'banned' ? ' <span class="when">' + esc(r.error) + '</span>' : ' <span class="warn">' + esc(errorLabel(r)) + '</span>') : '')],
+      r.outcomeDetail && r.error ? ['mkvid said', '<span class="when">' + esc(r.error) + '</span>'] : null,
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '—'],
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy === 'private' ? ' <span class="warn">(an unverified OAuth app forces private whatever was requested)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + esc(rel(r.notBefore)) : '')],
@@ -623,7 +664,7 @@ ${MKVID_STATE_JS}
     ]));
     const btns = [];
     if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed' || r.status === 'banned') {
-      btns.push('<button type="button" class="btn" data-do="retry"' + TK.tip(r.status === 'banned' ? 'Lifts the ban: the set goes back in the queue.' : r.status === 'claimed' ? 'Gives the job back, whatever mkvid is doing with it, so it can be claimed again. Use it when mkvid died mid-job.' : 'Puts the request back in the queue with a fresh start.') + '>' + (r.status === 'claimed' ? 'Release &amp; retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
+      btns.push('<button type="button" class="btn" data-do="retry"' + TK.tip(r.status === 'banned' ? 'Lifts the ban: the set goes back in the queue.' : noRecording(r) ? 'Tries the same recording again. It only helps if the recording is back.' : r.status === 'claimed' ? 'Gives the job back, whatever mkvid is doing with it, so it can be claimed again. Use it when mkvid died mid-job.' : 'Puts the request back in the queue with a fresh start.') + '>' + (r.status === 'claimed' ? 'Release &amp; retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
     }
     if (r.readiness && r.readiness.state === 'waiting_ids' && !r.skipIdWait) {
       btns.push('<button type="button" class="btn" data-do="render-now"' + TK.tip('Renders now with ID shown for the unidentified tracks, instead of waiting until the set is 7 days old. The track list must still be verified.') + '>Render now</button>');
