@@ -71,12 +71,49 @@ describe('Removed videos page script', () => {
     expect(body).toContain('data-act="undo"')
     expect(body).toContain('Keep it')
     expect(body).toContain('Undo (re-add)')
-    expect(body.match(/data-act="undo"/g)).toHaveLength(2) // the dead video has no action
+    expect(body.match(/data-act="undo"/g)).toHaveLength(3)
+    // The recorded dead video: nothing red about it, and its undo only lets the sync add it again.
+    expect(body).toContain('Allow again')
+    expect(body).toContain('<span class="badge neutral"')
+    expect(body.match(/class="badge bad"/g)).toHaveLength(1) // the owner-removed row keeps the colour it had
     expect(t.els.get('rm-pager').innerHTML).toContain('1–50 of 230')
     expect(t.els.get('bar').innerHTML).toContain('DRY RUN')
     expect(t.els.get('bar').innerHTML).toContain('deletes today 3 / 40')
     expect(t.els.get('holds').innerHTML).toContain('5 of 40 missing')
     expect(t.els.get('dj').innerHTML).toContain('<option value="dj-b">dj-b</option>')
+  })
+
+  it('a dead video is shown as handled by itself: waiting in blue, removed in grey, never red; many dead at once is a card with a way through', async () => {
+    const saved = { rows: answer.rows, more: (answer as any).deadHolds }
+    ;(answer as any).rows = [
+      { id: 5, at: 1_790_000_500, source: 'dead', status: 'would_remove', slug: 'dj-a', set_url: null, video_id: 'vid00000005', playlist_id: 'PL1', playlist_kind: 'artist', reason: 'dead', detail: 'looks deleted or private since 2026-09-21; removed after 3 days if it stays that way' },
+      { id: 4, at: 1_790_000_400, source: 'dead', status: 'removed', slug: 'dj-a', set_url: null, video_id: 'vid00000004', playlist_id: 'PL1', playlist_kind: 'artist', reason: 'dead', detail: 'deleted or private since 2026-09-18; taken out of the playlist' },
+    ]
+    ;(answer as any).deadHolds = [{ kind: 'artist', slug: XSS, playlistId: 'PL9', items: 12, dead: 6, deadIds: [], at: 1_790_000_000 }]
+    try {
+      const t = await boot()
+      const body = t.els.get('rm-body').innerHTML as string
+      expect(body).not.toContain('badge bad')
+      expect(body).not.toContain('badge warn')
+      expect(body).toContain('<span class="badge info"')
+      expect(body).toContain('>waiting</span>')
+      expect(body).toContain('<span class="badge neutral"')
+      expect(body).toContain('removed after 3 days if it stays that way')
+      expect(body).toContain('Keep it')
+      expect(body).toContain('Allow again')
+      expect(body).not.toContain('Undo (re-add)')
+      const card = t.els.get('dead-holds').innerHTML as string
+      expect(card).toContain('6 of 12 videos')
+      expect(card).not.toContain('<img')
+      const btn: any = { getAttribute: (k: string) => (k === 'data-dead-hold' ? '0' : null), disabled: false, textContent: '' }
+      await t.els.get('dead-holds').ls.click[0]({ target: { closest: (sel: string) => (sel === 'button[data-dead-hold]' ? btn : null) } })
+      await settle()
+      expect(t.posts).toEqual(['/ui/api/removals/dead-holds/PL9/approve'])
+      expect(btn.textContent).toContain('Approved')
+    } finally {
+      answer.rows = saved.rows
+      ;(answer as any).deadHolds = saved.more
+    }
   })
 
   it('source chips and the DJ select are server-side filters; Undo posts and reloads', async () => {

@@ -56,7 +56,7 @@ export const ACTIVITY_ROW_JS = /* js */ `
     claimed: 'mkvid took this job.', done: 'Finished.', verified: 'Two fetches by different accounts agreed on the track list.',
     open: 'The block is still active.', ended: 'The block is over.', refunded: 'mkvid gave the job back without uploading, so it does not count against the daily cap.',
     recording_removed: 'The recording is gone from its source, so mkvid cannot make a video. Nothing to do.', recording_short: 'The recording ends before the tracklist does, so mkvid makes no video. Nothing to do.',
-    pending: 'Waiting its turn.', banned: 'Excluded from mkvid.', removed: 'Taken out of the playlists.', would_remove: 'Dry run: would be removed, nothing was deleted.', recorded: 'Found missing from a playlist and noted; it is never re-added.', undone: 'You undid this.',
+    pending: 'Waiting its turn.', banned: 'Excluded from mkvid.', removed: 'Taken out of the playlists.', would_remove: 'Not removed (yet): a dry run, or a deleted or private video waiting out its days. Nothing was deleted.', recorded: 'Found missing from a playlist and noted; it is never re-added.', undone: 'You undid this.',
   };
   // The statuses the Status filter offers (the server takes any).
   const ACTIVITY_STATUSES = ['ok', 'no_video', 'no_tracklist', 'upstream_error', 'added', 'duplicate', 'replaced', 'no_youtube', 'failed', 'quota', 'rate_limited', 'abandoned', 'removed', 'would_remove', 'recorded', 'undone',

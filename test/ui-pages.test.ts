@@ -360,12 +360,13 @@ describe('Playlists page script', () => {
       fetches.push(u)
       if (u === '/ui/api/youtube/status') return Response.json({ connected: true, channelTitle: 'My channel', scope: 'youtube' })
       if (u === '/ui/api/combined') return Response.json({ connected: true, title: 'All DJs', playlistId: 'PLc', playlistUrl: 'https://www.youtube.com/playlist?list=PLc', videoCount: 12, missingTotal: 3, sources: [{}], dailyInsertCap: 100, dailyInsertsUsed: 25 })
-      if (u === '/ui/api/removals?limit=1') return Response.json({ settings: { dryRun: true, dailyRemovals: 20 }, deletesUsedToday: 2, holds: [{}] })
+      if (u === '/ui/api/removals?limit=1') return Response.json({ settings: { dryRun: true, dailyRemovals: 20 }, deletesUsedToday: 2, holds: [{}], deadHolds: [{}, {}] })
       if (u === '/ui/api/playlist-order') return Response.json({
         connected: true, fresh: false, unitsSpent: 0, dailyUnits: 0, movesPerRun: 10, unitsUsedToday: 0, estimate: { moves: 40, units: 2060, days: null }, quotaStoppedUntil: 1790000000, lastRun: null,
         daysAt: [{ dailyUnits: 1000, days: 3 }, { dailyUnits: 2000, days: 2 }, { dailyUnits: 4000, days: 1 }],
-        totals: { playlists: 3, unread: 0, items: 80, undated: 1, moves: 45, units: 2250 },
+        totals: { playlists: 3, unread: 0, items: 80, undated: 1, moves: 45, units: 2250, unmovable: 1 },
         playlists: [
+          { playlistId: 'PL4', slug: 'dj-4', title: 'DJ 4', items: 9, undated: 0, moves: 0, units: 0, checkedAt: 1789990000, moved: 0, unmovable: [{ id: 'item-x', at: 1789990000 }] },
           { playlistId: 'PL1', slug: 'dj-1', title: 'DJ 1 <b>', items: 50, undated: 1, moves: 40, units: 2000, checkedAt: 1789990000, moved: 3 },
           { playlistId: 'PL2', slug: 'dj-2', title: 'DJ 2', items: 10, undated: 0, moves: 0, units: 0, checkedAt: 1789990000, moved: 0, problem: 'manual_sort' },
           { playlistId: 'PL3', slug: 'dj-3', title: 'DJ 3', items: 20, undated: 0, moves: 5, units: 250, checkedAt: 1789990000, moved: 1, problem: 'unexpected_position', detail: 'a video moved to index 4 is at index 3' },
@@ -409,6 +410,13 @@ describe('Playlists page script', () => {
     expect(table).toContain('data-ord-retry="PL2"')
     expect(table).not.toContain('data-ord-retry="PL1"')
     expect((table.match(/badge bad/g) || []).length).toBe(1)
+    // A video YouTube no longer finds cannot be moved: said as plain information, with a way to try again, never as a fault.
+    expect(ord).toContain('1 video could not be moved and is left where it is')
+    expect(table).toContain('<span class="badge neutral"')
+    expect(table).toContain('1 not movable')
+    expect(table).toContain('data-ord-retry="PL4"')
+    expect(els.get('hygiene').innerHTML).toContain('<span class="badge info"')
+    expect(els.get('hygiene').innerHTML).toContain('2 with many dead videos')
     expect(ord).toContain('1 with no set date')
     expect(ord).toContain('badge info')
     expect(ord).toContain('<span class="badge bad">1 cannot be ordered</span> DJ 2')
@@ -883,6 +891,16 @@ describe('Set diagnostics', () => {
     expect(rows.map((r: any) => r.key)).toEqual(['discovered', 'recording', 'verification', 'rule', 'playlist', 'hygiene', 'mkvid'])
     expect(rows.map((r: any) => r.tone)).toEqual(['warn', 'info', 'info', 'neutral', 'info', 'ok', 'neutral'])
     for (const r of rows) { expect(typeof r.label).toBe('string'); expect(typeof r.finding).toBe('string'); expect(Array.isArray(r.facts)).toBe(true) }
+  })
+  it('setDiagRows: a dead video waiting to be taken out is information, not the sweep and not a warning', async () => {
+    const ctx = await diagCtx()
+    const hy = (removals: object[]) => ctx.setDiagRows({ ...empty(), hygiene: { removed: [], removals } }).find((r: any) => r.key === 'hygiene')
+    const dead = hy([{ at: 1_790_000_000, source: 'dead', status: 'would_remove', playlistKind: 'artist', reason: 'dead', detail: 'looks deleted or private since 2026-09-21; removed after 3 days if it stays that way' }])
+    expect(dead.tone).toBe('info')
+    expect(dead.finding).toBe('Its video looks deleted or private on YouTube. It is taken out of the playlist by itself if it stays that way.')
+    const sweep = hy([{ at: 1_790_000_000, source: 'sweep', status: 'would_remove', playlistKind: 'artist', reason: 'short', detail: 'x' }])
+    expect(sweep.tone).toBe('warn')
+    expect(sweep.finding).toBe('The sweep would remove it (dry run).')
   })
   it('setDiagRows: a quota reply on a failed addition is an amber wait; other YouTube errors are one line; an abandoned quota row is red and says so', async () => {
     const ctx = await diagCtx()

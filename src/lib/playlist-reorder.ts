@@ -59,7 +59,8 @@
  *   - a move YouTube refuses with `videoNotFound` although the listing showed
  *     the video as there is remembered on the playlist (`unmovable`) and
  *     planned around from then on, instead of being paid for again every hour.
- *     Retry now forgets it;
+ *     The Playlists page says how many. It is forgotten after a week, so the
+ *     move is tried once more (the video may be back), or at once by Retry now;
  *   - the read-back never asks about a gone video by its id. When the
  *     neighbour it checks is one, or a lookup answers `videoNotFound` anyway,
  *     it reads the same two positions from a listing of the playlist (1 unit
@@ -146,6 +147,8 @@ const PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{2,64}$/
 const RECHECK_SECONDS = 24 * 60 * 60
 /** A playlist that could not be read, or refused a move, is left alone this long (a refused move costs 50 units). */
 const PROBLEM_RETRY_SECONDS = 60 * 60
+/** An item a move was refused for (`videoNotFound`) is planned around this long, then its move is tried once more. */
+const UNMOVABLE_SECONDS = 7 * 24 * 60 * 60
 /** Wall-clock ceiling of one cron pass, on top of whatever the tick already spent. */
 const PASS_DEADLINE_MS = 10_000
 /** Playlists read in one cron pass at most (each is one listing; the moves are bounded separately). */
@@ -200,8 +203,8 @@ export type OrderPlaylistState = ManagedPlaylist &
     problemAt?: number | null
     /** The last run that moved something: what the playlist needed before it and how many moves it made (the progress check). */
     lastRun?: { needed: number; applied: number } | null
-    /** Item ids a move was refused for with `videoNotFound`: planned around while they are in the playlist, until Retry now. */
-    unmovable?: string[]
+    /** Items a move was refused for with `videoNotFound`, and when: planned around while they are in the playlist, for a week or until Retry now. */
+    unmovable?: Array<{ id: string; at: number }>
   }
 
 export type OrderStop = 'paused' | 'not_connected' | 'quota' | 'rate_limit' | 'budget' | 'run' | 'deadline' | 'busy' | 'no_keys' | null
@@ -365,9 +368,14 @@ function isVideoGone(e: unknown): boolean {
   return e instanceof YouTubeApiError && e.status === 404 && e.reason === 'videoNotFound'
 }
 
-/** The `unmovable` ids that are still in the playlist (one that left needs no remembering). */
-function unmovableOf(before: OrderPlaylistState | undefined, entries: Entry[]): string[] | undefined {
-  const still = (before?.unmovable ?? []).filter((id) => entries.some((e) => e.id === id))
+/** The `unmovable` items still remembered at `now`: after UNMOVABLE_SECONDS one is forgotten, so its move is tried once more (the video may be back). */
+function unmovableNow(before: OrderPlaylistState | undefined, now: number): Array<{ id: string; at: number }> {
+  return (before?.unmovable ?? []).filter((u) => u && typeof u.id === 'string' && now - u.at < UNMOVABLE_SECONDS)
+}
+
+/** Those of them that are still in the playlist (one that left needs no remembering). */
+function unmovableOf(before: OrderPlaylistState | undefined, entries: Entry[], now: number): Array<{ id: string; at: number }> | undefined {
+  const still = unmovableNow(before, now).filter((u) => entries.some((e) => e.id === u.id))
   return still.length > 0 ? still : undefined
 }
 
@@ -556,7 +564,7 @@ async function passLocked(env: Env, opts: PassOpts & { accessToken: string }, li
     }
     let entries: Entry[]
     try {
-      const r = await readPlaylistOrder(p.playlistId, keys, accessToken, opts.fetcher, new Set(before?.unmovable ?? []))
+      const r = await readPlaylistOrder(p.playlistId, keys, accessToken, opts.fetcher, new Set(unmovableNow(before, now).map((u) => u.id)))
       entries = r.entries
       units += r.pages
       read += 1
@@ -576,7 +584,7 @@ async function passLocked(env: Env, opts: PassOpts & { accessToken: string }, li
       continue
     }
     const plan = planMoves(entries)
-    const next: OrderPlaylistState = { ...p, ...needOf(entries, plan.moves), checkedAt: now, moved: before?.moved ?? 0, problem: null, detail: null, problemAt: null, lastRun: null, unmovable: unmovableOf(before, entries) }
+    const next: OrderPlaylistState = { ...p, ...needOf(entries, plan.moves), checkedAt: now, moved: before?.moved ?? 0, problem: null, detail: null, problemAt: null, lastRun: null, unmovable: unmovableOf(before, entries, now) }
     state.playlists[p.playlistId] = next
     touched.add(p.playlistId)
     const stop = (problem: OrderProblem, detail: string) => {
@@ -619,7 +627,7 @@ async function passLocked(env: Env, opts: PassOpts & { accessToken: string }, li
         // Every later move of the plan assumed this one happened: the next run plans afresh.
         if (isVideoGone(e)) {
           // Gone though the listing did not show it: no stop and nothing to retry, the next plan goes around it.
-          next.unmovable = [...(next.unmovable ?? []), m.id]
+          next.unmovable = [...(next.unmovable ?? []), { id: m.id, at: now }]
           dropped = 1
           log.info('playlist_order.video_gone', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, videoId: videoOf.get(m.id) })
           break
@@ -726,7 +734,12 @@ export type OrderReport = {
   unitsSpent: number
   playlists: OrderReportRow[]
   /** Every artist playlist read, whether or not it is stopped. The combined playlist is not in here: it is not ordered. */
-  totals: OrderNeed & { playlists: number; unread: number }
+  totals: OrderNeed & {
+    playlists: number
+    unread: number
+    /** Videos a move was refused for because YouTube no longer finds them: left where they are (`unmovable`). */
+    unmovable: number
+  }
   /** 0 = paused: the pass makes no YouTube call until a budget is saved. */
   dailyUnits: number
   movesPerRun: number
@@ -787,7 +800,8 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
           const kept = before?.problem && STOPPING.includes(before.problem) ? { problem: before.problem, detail: before.detail ?? null, problemAt: before.problemAt ?? before.checkedAt } : { problem: null, detail: null, problemAt: null }
           const next: OrderPlaylistState = { ...p, items: before?.items ?? 0, undated: before?.undated ?? 0, moves: before?.moves ?? 0, units: before?.units ?? 0, checkedAt: now, moved: before?.moved ?? 0, lastRun: before?.lastRun ?? null, unmovable: before?.unmovable, ...kept }
           try {
-            const r = await readPlaylistOrder(p.playlistId, keys, accessToken, opts.fetcher, new Set(before?.unmovable ?? []))
+            const r = await readPlaylistOrder(p.playlistId, keys, accessToken, opts.fetcher, new Set(unmovableNow(before, now).map((u) => u.id)))
+            next.unmovable = unmovableOf(before, r.entries, now)
             unitsSpent += r.pages
             Object.assign(next, needOf(r.entries, planMoves(r.entries).moves))
             await clearNotManual(env, p.playlistId).catch(() => {})
@@ -832,7 +846,7 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
     partial,
     unitsSpent,
     playlists: rows,
-    totals: { playlists: rows.length, unread: rows.length - read.length, items: sum(read, (r) => r.items), undated: sum(read, (r) => r.undated), moves: sum(read, (r) => r.moves), units: sum(read, (r) => r.units) },
+    totals: { playlists: rows.length, unread: rows.length - read.length, items: sum(read, (r) => r.items), undated: sum(read, (r) => r.undated), moves: sum(read, (r) => r.moves), units: sum(read, (r) => r.units), unmovable: sum(read, (r) => unmovableNow(r, nowSeconds()).length) },
     dailyUnits: settings.orderDailyUnits,
     movesPerRun: settings.orderMovesPerRun,
     unitsUsedToday: await orderUnitsUsedToday(env),

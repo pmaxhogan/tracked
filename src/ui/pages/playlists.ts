@@ -164,6 +164,7 @@ ${YOUTUBE_CARD_JS}
       '<span' + TK.tip('The combined playlist is the one for shuffling: its videos stay in the order they were added and none of these numbers count it.') + '>combined playlist not ordered</span>',
     ];
     if (t.undated) bits.push('<span' + TK.tip('Videos no tracked set resolves to (added by hand, for instance). They stay after the dated sets, in the order they have.') + '>' + t.undated + ' with no set date</span>');
+    if (t.unmovable) bits.push('<span' + TK.tip('YouTube no longer finds these videos, so they cannot be moved. They stay where they are and the others are ordered around them. Each is tried once more after a week, or now with Retry now on its playlist.') + '>' + (t.unmovable === 1 ? '1 video could not be moved and is left where it is' : t.unmovable + ' videos could not be moved and are left where they are') + '</span>');
     if (d.quotaStoppedUntil) bits.push('<span class="badge info"' + TK.tip('YouTube answered that the quota of today is used. Moving continues by itself after the quota resets at midnight Pacific.') + '>waiting for quota · ' + esc(TK.fmt.rel(new Date(d.quotaStoppedUntil * 1000).toISOString())) + '</span>');
     if (d.lastRun && d.lastRun.moved) bits.push('last moved ' + d.lastRun.moved + ' ' + esc(TK.fmt.rel(new Date(d.lastRun.at * 1000).toISOString())));
     if (d.fresh) bits.push('read from YouTube just now (' + d.unitsSpent + ' units)');
@@ -189,6 +190,8 @@ ${YOUTUBE_CARD_JS}
       rows.map((p) => '<tr><td>' + link('https://www.youtube.com/playlist?list=' + encodeURIComponent(p.playlistId), p.title) +
         (p.problem === 'manual_sort' || p.problem === 'unexpected_position' || p.problem === 'no_progress' ? ' <span class="badge ' + (p.problem === 'manual_sort' ? 'bad' : 'warn') + '"' + TK.tip(p.detail || '') + '>' + (p.problem === 'manual_sort' ? 'not on manual order' : 'stopped for a day') + '</span>' +
           ' <button type="button" class="btn small" data-ord-retry="' + esc(p.playlistId) + '"' + TK.tip('Clears the stop so the next run reads this playlist again and tries. Moves nothing itself.') + '>Retry now</button>' : p.problem ? ' <span class="badge info"' + TK.tip(p.detail || '') + '>' + (p.problem === 'unreadable' ? 'not read' : 'retrying') + '</span>' : '') +
+        (p.unmovable && p.unmovable.length ? ' <span class="badge neutral"' + TK.tip('YouTube no longer finds ' + (p.unmovable.length === 1 ? 'this video' : 'these videos') + ', so a move was refused. Left in place; tried once more after a week.') + '>' + p.unmovable.length + ' not movable</span>' +
+          (p.problem === 'manual_sort' || p.problem === 'unexpected_position' || p.problem === 'no_progress' ? '' : ' <button type="button" class="btn small" data-ord-retry="' + esc(p.playlistId) + '"' + TK.tip('Forgets the refused move so the next run tries it again. Moves nothing itself.') + '>Retry now</button>') : '') +
         '</td><td>' + esc(p.items) + '</td><td>' + esc(p.undated || '') + '</td><td>' + esc(p.moves || '') + '</td><td>' + (p.units ? p.units.toLocaleString() : '') + '</td><td>' + esc(TK.fmt.rel(new Date(p.checkedAt * 1000).toISOString())) + '</td></tr>').join('') +
       '</tbody></table>';
   }
@@ -258,6 +261,8 @@ ${YOUTUBE_CARD_JS}
     $hygiene.innerHTML = '<span class="badge ' + (s.dryRun ? 'warn' : 'bad') + '"' + TK.tip(s.dryRun ? 'The sweep only reports which videos it would remove (videos that are not a full recording, for instance); it deletes nothing yet.' : 'The sweep really removes videos that fail the full-recording check, from the artist and combined playlists.') + '>' + (s.dryRun ? 'DRY RUN' : 'LIVE') + '</span>' +
       '<span class="badge neutral"' + TK.tip('Videos the sweep has removed from playlists today, out of its daily limit.') + '>deletes today ' + (d.deletesUsedToday || 0) + ' / ' + (s.dailyRemovals || 0) + '</span>' +
       '<span class="badge ' + (held ? 'bad' : 'neutral') + '"' + TK.tip(held ? 'Playlists that lost many videos at once and are waiting for you to approve or undo on the Removed videos page.' : 'No playlist is waiting for your approval.') + '>' + held + ' held</span>' +
+      // Many dead videos at once in one playlist: none is taken out until you say so. Nothing is lost meanwhile, so it is not red.
+      ((d.deadHolds || []).length ? '<span class="badge info"' + TK.tip('Playlists where many videos look deleted or private at once. None of them is taken out until you confirm it on the Removed videos page.') + '>' + d.deadHolds.length + ' with many dead videos</span>' : '') +
       '<a href="/ui/removed">Removed videos →</a>';
   }
 

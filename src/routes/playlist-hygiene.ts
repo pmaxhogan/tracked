@@ -7,6 +7,7 @@
  *                                        page/size/sort/q/f.<col>), plus counts, DJs, settings, holds
  *   POST /ui/api/removals/:id/undo       re-add (or, for a dry-run row, keep) one video
  *   POST /ui/api/removals/holds/:playlistId/approve   apply a held comparison once
+ *   POST /ui/api/removals/dead-holds/:playlistId/approve   let a playlist's many dead videos be taken out
  *   POST /ui/api/hygiene/run?what=compare|sweep       run one step now
  *   POST /ui/api/set/remove-replace      the set card's "remove and replace" button
  */
@@ -17,7 +18,10 @@ import type { Env } from '../types'
 import { getAccessToken } from '../lib/google-oauth'
 import { makeLogger } from '../lib/log'
 import {
+  approveDeadHold,
   approveHold,
+  DEAD_GRACE_DAYS,
+  listDeadHolds,
   listHolds,
   REMOVALS_TABLE,
   removalDjs,
@@ -47,14 +51,15 @@ hygieneApp.get('/removed', (c) => servePage(c, REMOVED_PAGE_HTML))
 hygieneApp.get('/api/removals', async (c) =>
   tableResponse(c, REMOVALS_TABLE, c.env.DB, {
     extra: async () => {
-      const [counts, settings, deletesUsedToday, holds, djs] = await Promise.all([
+      const [counts, settings, deletesUsedToday, holds, deadHolds, djs] = await Promise.all([
         removalCounts(c.env),
         getAppSettings(c.env).then((app) => sweepSettings(c.env, app)),
         sweepDeletesUsed(c.env),
         listHolds(c.env),
+        listDeadHolds(c.env),
         removalDjs(c.env),
       ])
-      return { counts, settings, deletesUsedToday, holds, djs, reasonLabels: REASON_LABELS }
+      return { counts, settings, deletesUsedToday, holds, deadHolds, deadGraceDays: DEAD_GRACE_DAYS, djs, reasonLabels: REASON_LABELS }
     },
   }),
 )
@@ -72,6 +77,11 @@ hygieneApp.post('/api/removals/:id/undo', async (c) => {
 
 hygieneApp.post('/api/removals/holds/:playlistId/approve', async (c) => {
   const ok = await approveHold(c.env, c.req.param('playlistId'))
+  return ok ? c.json({ ok: true }) : c.json({ error: 'not_held' }, 404)
+})
+
+hygieneApp.post('/api/removals/dead-holds/:playlistId/approve', async (c) => {
+  const ok = await approveDeadHold(c.env, c.req.param('playlistId'))
   return ok ? c.json({ ok: true }) : c.json({ error: 'not_held' }, 404)
 })
 

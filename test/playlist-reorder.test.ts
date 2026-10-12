@@ -569,19 +569,49 @@ describe('a video that is gone from YouTube (deleted, or made private by its upl
     const r = await run(env, yt)
     expect(r).toMatchObject({ moved: 0, units: 52, stoppedBy: null })
     expect(yt.moves).toEqual([])
-    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, unmovable: ['item-v3'] })
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, unmovable: [{ id: 'item-v3', at: Math.floor(T0 / 1000) }] })
     // Hours and days later it is read (1 unit a day) and never tried again.
     at(T0 + 2 * HOUR)
     expect(await run(env, yt)).toMatchObject({ read: 0, units: 0 })
     at(T0 + 25 * HOUR)
     expect(await run(env, yt)).toMatchObject({ read: 2, moved: 0, units: 2 })
-    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, unmovable: ['item-v3'] })
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, unmovable: [{ id: 'item-v3', at: Math.floor(T0 / 1000) }] })
     // The video is back; the owner asks for another try.
     yt.hiddenGone.clear()
     expect(await retryOrderPlaylist(env, 'PLdj')).toEqual({ ok: true })
     expect(await run(env, yt)).toMatchObject({ moved: 1 })
     expect(yt.playlists.PLdj).toEqual(['v1', 'v2', 'v3'])
     expect((await loadOrderState(env)).playlists.PLdj!.unmovable).toBeUndefined()
+  })
+
+  it('the report counts the videos that could not be moved, and one is forgotten after a week so its move is tried once more', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: ['v3', 'v1', 'v2'], PLdj2: W_SORTED })
+    yt.hiddenGone.add('v3')
+    await run(env, yt)
+    const report = await orderReport(env, { log })
+    expect(report.totals).toMatchObject({ unmovable: 1, moves: 0 })
+    expect(report.playlists.find((p) => p.playlistId === 'PLdj')).toMatchObject({ unmovable: [{ id: 'item-v3' }] })
+    // Six days of daily readings: left alone, 1 unit each for this playlist, no move paid for.
+    for (let d = 1; d <= 6; d++) {
+      at(T0 + d * 24 * HOUR + d * 60_000)
+      expect(await run(env, yt)).toMatchObject({ moved: 0 })
+    }
+    expect(yt.units).toBe(52 + 6 * 2)
+    expect((await orderReport(env, { log })).totals.unmovable).toBe(1)
+    // A week on it is no longer counted, and the next reading tries the move again: still refused, remembered anew.
+    at(T0 + 7 * 24 * HOUR + 10 * 60_000)
+    expect((await orderReport(env, { log })).totals.unmovable).toBe(0)
+    const before = yt.units
+    expect(await run(env, yt)).toMatchObject({ moved: 0 })
+    expect(yt.units - before).toBe(52)
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, unmovable: [{ id: 'item-v3', at: Math.floor((T0 + 7 * 24 * HOUR + 10 * 60_000) / 1000) }] })
+    // Or the video is back by then: the move is made and nothing is remembered.
+    yt.hiddenGone.clear()
+    at(T0 + 15 * 24 * HOUR)
+    expect(await run(env, yt)).toMatchObject({ moved: 1 })
+    expect(yt.playlists.PLdj).toEqual(['v1', 'v2', 'v3'])
+    expect((await orderReport(env, { log })).totals.unmovable).toBe(0)
   })
 
   it('the state production has for FISHER (move_failed after a read-back that got videoNotFound, no moves left) clears on the next reading, with no move', async () => {
@@ -867,7 +897,7 @@ describe('orderReport (the dry run)', () => {
       ['PLdj', 7, 1, 5, 250],
       ['PLdj2', 3, 0, 1, 50],
     ])
-    expect(r.totals).toEqual({ playlists: 2, unread: 0, items: 10, undated: 1, moves: 6, units: 300 })
+    expect(r.totals).toEqual({ playlists: 2, unread: 0, items: 10, undated: 1, moves: 6, units: 300, unmovable: 0 })
     // 300 for the moves, and for each playlist one listing and one read-back: 306 units, 3 days at 150 a day.
     expect(r.estimate).toEqual({ moves: 6, units: 306, days: 3 })
 

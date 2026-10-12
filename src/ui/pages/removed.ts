@@ -12,6 +12,7 @@ import { REASON_LABELS } from '../../lib/playlist-hygiene'
 const BODY = /* html */ `
   <div id="bar" class="tk-row rm-bar"></div>
   <div id="holds"></div>
+  <div id="dead-holds"></div>
   <div id="error" class="error" role="alert"></div>
   <div class="rm-filters">
     <div class="field rm-dj"><label for="dj">DJ</label><select id="dj"><option value="">All DJs</option></select></div>
@@ -22,6 +23,7 @@ const BODY = /* html */ `
 const CSS = /* css */ `
   .rm-bar { flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
   .rm-holds { margin-bottom: var(--sp-3); border-color: var(--danger); }
+  .rm-dead-holds { margin-bottom: var(--sp-3); }
   .rm-hold { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: var(--sp-2) 0 0; }
   .rm-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-3); margin-bottom: var(--sp-2); }
   .rm-dj { min-width: 12rem; margin: 0; }
@@ -36,16 +38,26 @@ const CSS = /* css */ `
 const JS = (labels: Record<string, string>) => /* js */ `
 (() => {
   const $ = TK.$, esc = TK.esc;
-  const $bar = $('bar'), $holds = $('holds'), $err = $('error'), $dj = $('dj');
+  const $bar = $('bar'), $holds = $('holds'), $deadHolds = $('dead-holds'), $err = $('error'), $dj = $('dj');
   const LABELS = ${JSON.stringify(labels).replace(/</g, '\\u003c')};
 
   const STATUS_TIPS = {
-    would_remove: 'Dry run: the sweep would remove this video, but nothing was deleted.',
+    would_remove: 'Not removed (yet): a video the sweep would remove in a dry run, or a deleted or private video waiting out its days. Nothing was deleted.',
     removed: 'The video was taken out of the playlists.',
     recorded: 'The video was found missing from a playlist. tracked noted it and will never add it back.',
     failed: 'YouTube refused the removal. It is tried again on a later sweep.',
     undone: 'You undid this: the video was put back (or will never be judged again).',
   };
+  // A dead video's rows are written by the playlist comparison, not the sweep, and none of them needs anything from you.
+  const DEAD_STATUS_TIPS = {
+    would_remove: 'The video looks deleted or private on YouTube and is still in the playlist. It is taken out by itself once it has stayed that way for a few days (never while the sweep is a dry run). If it comes back, this row goes away.',
+    removed: 'The video stayed deleted or private, so it was taken out of the playlist.',
+    recorded: 'The video was found deleted or private. tracked noted it and will not add it back.',
+    undone: 'You undid this: the video is kept, or may be added again if it comes back.',
+  };
+  const statusView = (r) => r.source === 'dead'
+    ? { cls: r.status === 'would_remove' ? 'info' : 'neutral', text: r.status === 'would_remove' ? 'waiting' : String(r.status).replace('_', ' '), tip: DEAD_STATUS_TIPS[r.status] || STATUS_TIPS[r.status] || 'The state of this removal.' }
+    : { cls: r.status === 'would_remove' ? 'warn' : r.status === 'undone' ? 'neutral' : 'bad', text: String(r.status).replace('_', ' '), tip: STATUS_TIPS[r.status] || 'The state of this removal.' };
   const SOURCE_TIPS = {
     sweep: 'The automatic sweep: the video is not a full recording of the set.',
     owner: 'You removed it from the playlist by hand on YouTube.',
@@ -82,6 +94,23 @@ const JS = (labels: Record<string, string>) => /* js */ `
       holds.map((h, i) => '<p class="rm-hold">' + esc((h.kind === 'combined' ? 'Combined playlist' : (h.slug || h.playlistId)) + ': ' + h.missing + ' of ' + h.expected + ' missing (since ' + TK.fmt.time(isoOf(h.at)) + ')') +
         ' <button type="button" class="btn" data-hold="' + i + '"' + TK.tip('Confirms that you removed these videos on purpose. They are recorded as removed once, at the next comparison, and not re-added. Valid for 24 hours.') + '>They really are removed: apply once</button></p>').join('') + '</div>';
   }
+  // A playlist where a listing called many videos dead at once. Nothing is lost by waiting, so this is information with a way through, not an alarm.
+  let deadHolds = [];
+  function renderDeadHolds() {
+    if (!deadHolds.length) { $deadHolds.innerHTML = ''; return; }
+    $deadHolds.innerHTML = '<div class="tk-card rm-dead-holds"><strong>Waiting for you: many videos of these playlists look deleted or private at once, so none of them is taken out.</strong>' +
+      deadHolds.map((h, i) => '<p class="rm-hold">' + esc((h.kind === 'combined' ? 'Combined playlist' : (h.slug || h.playlistId)) + ': ' + h.dead + ' of ' + h.items + ' videos (since ' + TK.fmt.time(isoOf(h.at)) + ')') +
+        ' <button type="button" class="btn" data-dead-hold="' + i + '"' + TK.tip('Confirms that these videos really are gone. Each is then taken out once it has stayed deleted or private for its days, within the daily limit. Covers these videos only, for 14 days.') + '>They really are gone: take them out</button></p>').join('') + '</div>';
+  }
+  $deadHolds.addEventListener('click', async (e) => {
+    const b = e.target && e.target.closest ? e.target.closest('button[data-dead-hold]') : null;
+    const h = b && deadHolds[Number(b.getAttribute('data-dead-hold'))];
+    if (!h) return;
+    b.disabled = true;
+    const res = await TK.api.post('/ui/api/removals/dead-holds/' + encodeURIComponent(h.playlistId) + '/approve', {});
+    if (res.ok) b.textContent = 'Approved: applies from the next comparison';
+    else { fail(res, 'failed (' + res.status + ')'); b.disabled = false; }
+  });
   $holds.addEventListener('click', async (e) => {
     const b = e.target && e.target.closest ? e.target.closest('button[data-hold]') : null;
     const h = b && holds[Number(b.getAttribute('data-hold'))];
@@ -104,7 +133,15 @@ const JS = (labels: Record<string, string>) => /* js */ `
   }
   $dj.addEventListener('change', () => { if (table) table.setFilter('slug', $dj.value ? 'eq' : null, $dj.value); });
 
-  const undoable = (r) => r.source !== 'dead' && (r.status === 'removed' || r.status === 'recorded' || r.status === 'would_remove');
+  const undoable = (r) => r.status === 'removed' || r.status === 'recorded' || r.status === 'would_remove';
+  // A dead video cannot be put back: its undo only lets the sync add it again, and "Keep it" leaves a waiting one in the playlist.
+  const undoButton = (r) => r.source === 'dead'
+    ? (r.status === 'would_remove'
+      ? { label: 'Keep it', tip: 'Leaves this video in the playlist even though it looks deleted or private. It is never taken out by itself.' }
+      : { label: 'Allow again', tip: 'Takes the video off the never-add list, so the sync adds it again if it comes back on YouTube. Nothing is added now and no quota is spent.' })
+    : (r.status === 'would_remove'
+      ? { label: 'Keep it', tip: 'Marks this video as an exception so the sweep never removes it.' }
+      : { label: 'Undo (re-add)', tip: 'Puts the video back in the playlist and never judges it again. Costs 50 YouTube quota units.' });
   table = TKTable.create($('rm-table'), {
     id: 'rm',
     source: { url: '/ui/api/removals' },
@@ -118,7 +155,7 @@ const JS = (labels: Record<string, string>) => /* js */ `
       { key: 'source', label: 'Source', type: 'enum', options: SOURCES, tip: 'What removed the video: the sweep, you on YouTube, a dead video, or the Remove & replace button.',
         render: (r) => '<span' + TK.tip(SOURCE_TIPS[r.source] || 'What removed the video.') + '>' + esc((SOURCES.find((o) => o.value === r.source) || { label: r.source }).label) + '</span>' },
       { key: 'status', label: 'Status', type: 'enum', options: STATUSES, tip: 'Whether the removal happened (removed), only would happen (would remove), was only noted (recorded), failed, or was undone.',
-        render: (r) => badge(r.status === 'would_remove' ? 'warn' : r.status === 'undone' ? 'neutral' : 'bad', String(r.status).replace('_', ' '), STATUS_TIPS[r.status] || 'The state of this removal.') },
+        render: (r) => { const v = statusView(r); return badge(v.cls, v.text, v.tip); } },
       { key: 'slug', label: 'DJ', type: 'text', render: (r) => r.slug ? '<a href="/ui/dj/' + encodeURIComponent(r.slug) + '">' + esc(r.slug) + '</a>' : nil },
       { key: 'set_url', label: 'Set', type: 'text', render: (r) => r.set_url ? '<span class="rm-stack"><a href="/ui/set?url=' + encodeURIComponent(r.set_url) + '">' + esc(TK.fmt.setLabel(r.set_url)) + '</a></span>' : nil },
       { key: 'video_id', label: 'Video', type: 'text', render: (r) => ext('https://www.youtube.com/watch?v=' + encodeURIComponent(r.video_id), r.video_id, 'Opens the video on YouTube.') },
@@ -135,7 +172,7 @@ const JS = (labels: Record<string, string>) => /* js */ `
       { id: 'button', label: 'Replace', group: 'source', filters: [{ col: 'source', op: 'in', value: 'button' }], tip: SOURCE_TIPS.button },
     ],
     actions: (r) => undoable(r)
-      ? '<button type="button" class="btn sm" data-act="undo"' + TK.tip(r.status === 'would_remove' ? 'Marks this video as an exception so the sweep never removes it.' : 'Puts the video back in the playlist and never judges it again. Costs 50 YouTube quota units.') + '>' + (r.status === 'would_remove' ? 'Keep it' : 'Undo (re-add)') + '</button>'
+      ? '<button type="button" class="btn sm" data-act="undo"' + TK.tip(undoButton(r).tip) + '>' + undoButton(r).label + '</button>'
       : '',
     onAction: (act, r, btn) => {
       if (act !== 'undo') return;
@@ -150,6 +187,8 @@ const JS = (labels: Record<string, string>) => /* js */ `
       renderBar(d);
       holds = Array.isArray(d.holds) ? d.holds : [];
       renderHolds();
+      deadHolds = Array.isArray(d.deadHolds) ? d.deadHolds : [];
+      renderDeadHolds();
       renderDjs(d.djs);
     },
   });

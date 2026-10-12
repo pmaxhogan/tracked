@@ -26,6 +26,8 @@ import { getQuotaOut } from '../src/lib/youtube-quota'
 import { getVideoMeta } from '../src/lib/video-meta'
 import { getAccessToken } from '../src/lib/google-oauth'
 import {
+  approveDeadHold,
+  listDeadHolds,
   comparePlaylists,
   extractSetFacts,
   hasGoodVideo,
@@ -452,30 +454,140 @@ describe('comparePlaylists', () => {
 describe('dead videos still in a playlist (deleted, or made private by their uploader)', () => {
   const LIVE = { PLAYLIST_SWEEP_DRY_RUN: '0' }
   const GONE = 'gone0000001'
+  const DAYS = 86400
+  const T = Math.floor(Date.parse('2026-10-01T12:00:00Z') / 1000)
+  const TEN = ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
   const deleted = () => vi.mocked(deletePlaylistItem).mock.calls.map((c) => c[0])
+  const seen = async (env: Env) => ((await env.SUBS.get('hygiene:dead:seen', 'json')) ?? {}) as Record<string, number>
+  /** These videos were first seen dead long ago and have stayed so: their wait is over. */
+  const waited = (env: Env, videoIds: string[], playlists = [PL]) =>
+    env.SUBS.put('hygiene:dead:seen', JSON.stringify(Object.fromEntries(playlists.flatMap((pl) => videoIds.map((id) => [`${pl} ${id}`, 1])))))
 
-  it('dry run (the default): a private video nobody added through tracked is reported once and nothing is deleted', async () => {
-    const env = makeEnv()
-    await seedFive(env)
-    // The FISHER case: in the playlist, in no table of tracked's.
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), GONE] }, { as: { [GONE]: 'private' } })
-    metaAnswer({ [GONE]: { alive: false } })
-    const [r] = await comparePlaylists(env, 'tok', { log, now: 1000 })
-    expect(r).toMatchObject({ status: 'ok', missing: 0, owner: 0, dead: 0, deadReported: 1, deadRemoved: 0 })
-    expect(deletePlaylistItem).not.toHaveBeenCalled()
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect(await removals(env)).toMatchObject([{ source: 'dead', status: 'would_remove', reason: 'dead', slug: SLUG, set_url: null, video_id: GONE, playlist_id: PL, playlist_kind: 'artist', at: 1000 }])
-    expect(await isBlocked(env, PL, GONE)).toBe(false)
-    expect(await sweepDeletesUsed(env, 1000_000)).toBe(0)
-    // Six hours later it is still there: the row is not written again.
-    await comparePlaylists(env, 'tok', { log, now: 1000 + 6 * 3600 })
-    expect(await removals(env)).toMatchObject([{ status: 'would_remove', at: 1000 }])
+  describe('the wait: a video must stay dead for three days before it is taken out', () => {
+    it('live: a private video nobody added through tracked waits, shown once as waiting, and is taken out after three days', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      // The FISHER case: in the playlist, in no table of tracked's.
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      const [r] = await comparePlaylists(env, 'tok', { log, now: T })
+      expect(r).toMatchObject({ status: 'ok', missing: 0, owner: 0, dead: 0, deadReported: 1, deadRemoved: 0 })
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect(await removals(env)).toMatchObject([
+        { source: 'dead', status: 'would_remove', reason: 'dead', slug: SLUG, set_url: null, video_id: GONE, playlist_id: PL, playlist_kind: 'artist', at: T, detail: 'looks deleted or private since 2026-10-01; removed after 3 days if it stays that way' },
+      ])
+      expect(await isBlocked(env, PL, GONE)).toBe(false)
+      expect(await seen(env)).toEqual({ [`${PL} ${GONE}`]: T })
+      // Every later comparison inside the wait: nothing deleted, and the row keeps the time it was first seen.
+      for (const later of [6 * 3600, DAYS, 3 * DAYS - 60]) {
+        expect((await comparePlaylists(env, 'tok', { log, now: T + later }))[0]).toMatchObject({ deadReported: 1, deadRemoved: 0 })
+        expect(deletePlaylistItem).not.toHaveBeenCalled()
+        expect(await removals(env)).toMatchObject([{ status: 'would_remove', at: T }])
+      }
+      // Three days on, still dead.
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 3 * DAYS }))[0]).toMatchObject({ deadRemoved: 1, deadReported: 0 })
+      expect(deleted()).toEqual([`item-${GONE}`])
+      expect(await removals(env)).toMatchObject([{ source: 'dead', status: 'removed', video_id: GONE, at: T + 3 * DAYS, detail: 'deleted or private since 2026-10-01; taken out of the playlist' }])
+      expect(await isBlocked(env, PL, GONE)).toBe(true)
+      expect(await seen(env)).toEqual({})
+    })
+
+    it('a video that is back restarts the wait: its waiting row goes, and dying again later starts from that day', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      expect(await removals(env)).toHaveLength(1)
+      // Two days later the uploader has made it public again.
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'public' } })
+      metaAnswer({})
+      await comparePlaylists(env, 'tok', { log, now: T + 2 * DAYS })
+      expect(await removals(env)).toEqual([])
+      expect(await seen(env)).toEqual({})
+      // Private again on day 4: four days after the first sighting, but only now dead again.
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T + 4 * DAYS })
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect(await removals(env)).toMatchObject([{ status: 'would_remove', at: T + 4 * DAYS }])
+      await comparePlaylists(env, 'tok', { log, now: T + 6 * DAYS })
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      await comparePlaylists(env, 'tok', { log, now: T + 7 * DAYS })
+      expect(deleted()).toEqual([`item-${GONE}`])
+    })
+
+    it('the wait also restarts when videos.list returns the video again, or the owner takes it out of the playlist', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      listing({ [PL]: [...TEN, 'gone000000a', 'gone000000b'] }, { as: { gone000000a: 'private', gone000000b: 'private' } })
+      metaAnswer({ gone000000a: { alive: false }, gone000000b: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      expect(Object.keys(await seen(env))).toHaveLength(2)
+      // a: the listing still calls it private, videos.list returns it. b: gone from the playlist.
+      listing({ [PL]: [...TEN, 'gone000000a'] }, { as: { gone000000a: 'private' } })
+      metaAnswer({})
+      await comparePlaylists(env, 'tok', { log, now: T + DAYS })
+      expect(await seen(env)).toEqual({})
+      expect(await removals(env)).toEqual([])
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+    })
+
+    it('a comparison that learns nothing (lookup failed, incomplete or held listing, quota out) neither starts nor ends a wait', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      const before = await seen(env)
+      vi.mocked(getVideoMeta).mockRejectedValue(new Error('youtube videos.list 500'))
+      await comparePlaylists(env, 'tok', { log, now: T + DAYS })
+      metaAnswer({ [GONE]: { alive: false } })
+      listing({ [PL]: TEN }, { incomplete: [PL] })
+      await comparePlaylists(env, 'tok', { log, now: T + DAYS })
+      listing({ [PL]: ids([1, 2, 3, 4, 5, 6]) })
+      expect((await comparePlaylists(env, 'tok', { log, now: T + DAYS }))[0]).toMatchObject({ status: 'held' })
+      expect(await seen(env)).toEqual(before)
+      expect(await removals(env)).toMatchObject([{ status: 'would_remove', at: T }])
+    })
+
+    it('dry run: reported once as staying, nothing deleted however long it is dead; going live later takes it out, the days already counted', async () => {
+      const env = makeEnv()
+      await seedFive(env)
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      for (const later of [0, 4 * DAYS, 30 * DAYS]) {
+        expect((await comparePlaylists(env, 'tok', { log, now: T + later }))[0]).toMatchObject({ deadReported: 1, deadRemoved: 0 })
+      }
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect(await removals(env)).toMatchObject([{ source: 'dead', status: 'would_remove', at: T, detail: 'looks deleted or private since 2026-10-01; dry run: it stays in the playlist' }])
+      expect(await sweepDeletesUsed(env, (T + 30 * DAYS) * 1000)).toBe(0)
+      env.PLAYLIST_SWEEP_DRY_RUN = '0'
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 31 * DAYS }))[0]).toMatchObject({ deadRemoved: 1 })
+      expect(deleted()).toEqual([`item-${GONE}`])
+    })
+
+    it('a row the comparison already recorded for a dead video is left as it is while it waits (no burst of re-dated rows), then becomes removed', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      listing({ [PL]: TEN }, { as: { vid00000003: 'deleted' } })
+      metaAnswer({ vid00000003: { alive: false } })
+      const [r] = await comparePlaylists(env, 'tok', { log, now: T })
+      expect(r).toMatchObject({ dead: 1, deadReported: 1, deadRemoved: 0 })
+      const first = await removals(env)
+      expect(first).toMatchObject([{ source: 'dead', status: 'recorded', video_id: 'vid00000003' }])
+      await comparePlaylists(env, 'tok', { log, now: T + DAYS })
+      expect(await removals(env)).toEqual(first)
+      await comparePlaylists(env, 'tok', { log, now: T + 3 * DAYS })
+      expect(await removals(env)).toMatchObject([{ source: 'dead', status: 'removed', video_id: 'vid00000003', at: T + 3 * DAYS }])
+    })
   })
 
   it('live: takes it out by the item id of the listing, logs it as removed, never re-adds it, and counts the delete against the sweep budget', async () => {
     const env = makeEnv(LIVE)
     await seedFive(env)
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), GONE] }, { as: { [GONE]: 'private' } })
+    await waited(env, [GONE])
+    listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
     metaAnswer({ [GONE]: { alive: false } })
     const [r] = await comparePlaylists(env, 'tok', { log })
     expect(r).toMatchObject({ status: 'ok', missing: 0, deadRemoved: 1, deadReported: 0 })
@@ -492,7 +604,7 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
     // No set lost anything.
     for (let i = 1; i <= 10; i++) expect((await row(env, setUrl(i)))!.video_id).toBe(ids([i])[0])
     // Gone from the playlist: the next comparison has nothing to say about it.
-    listing({ [PL]: ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) })
+    listing({ [PL]: TEN })
     expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ status: 'ok', missing: 0, owner: 0, dead: 0 })
     expect(deleted()).toHaveLength(1)
   })
@@ -501,9 +613,9 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
     const env = makeEnv(LIVE)
     await seedFive(env)
     await seedCombined(env)
-    await savePlaylistMembers(env, PLC, new Set(ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])), 1)
-    const all = ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-    listing({ [PL]: all, [PLC]: all }, { as: { vid00000003: 'deleted' } })
+    await savePlaylistMembers(env, PLC, new Set(TEN), 1)
+    await waited(env, ['vid00000003'], [PL, PLC])
+    listing({ [PL]: TEN, [PLC]: TEN }, { as: { vid00000003: 'deleted' } })
     metaAnswer({ vid00000003: { alive: false } })
     const r = await comparePlaylists(env, 'tok', { log })
     expect(r[0]).toMatchObject({ kind: 'artist', status: 'ok', dead: 1, deadRemoved: 1 })
@@ -517,18 +629,19 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
     ])
     expect(await sweepDeletesUsed(env)).toBe(2)
     // Its absence afterwards is tracked's own doing, never the owner's.
-    listing({ [PL]: all.filter((id) => id !== 'vid00000003'), [PLC]: all.filter((id) => id !== 'vid00000003') })
+    listing({ [PL]: TEN.filter((id) => id !== 'vid00000003'), [PLC]: TEN.filter((id) => id !== 'vid00000003') })
     const again = await comparePlaylists(env, 'tok', { log })
     expect(again[0]).toMatchObject({ missing: 0, owner: 0, dead: 0 })
     expect(again[1]).toMatchObject({ missing: 0, owner: 0, dead: 0 })
     expect((await removals(env)).filter((x) => x.source === 'owner')).toEqual([])
   })
 
-  it('never takes out a video that is public or unlisted, the owner\'s own private upload, or one videos.list still returns', async () => {
+  it("never takes out a video that is public or unlisted, the owner's own private upload, or one videos.list still returns", async () => {
     const env = makeEnv(LIVE)
     await seedFive(env)
+    await waited(env, ['vid00000001', 'own00000001', 'unl00000001', 'back0000001'])
     listing(
-      { [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 'own00000001', 'unl00000001', 'back0000001'] },
+      { [PL]: [...TEN, 'own00000001', 'unl00000001', 'back0000001'] },
       { as: { vid00000001: 'public', own00000001: 'ownPrivate', unl00000001: 'unlistedNamedPrivate', back0000001: 'private' } },
     )
     // `back…` lists as private and videos.list returns it: the two do not agree, so it stays.
@@ -543,7 +656,8 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
   it('removes nothing when the second look fails, and nothing from an incomplete, failed or held listing', async () => {
     const env = makeEnv(LIVE)
     await seedFive(env)
-    const withGone = [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), GONE]
+    await waited(env, [GONE])
+    const withGone = [...TEN, GONE]
     listing({ [PL]: withGone }, { as: { [GONE]: 'private' } })
     vi.mocked(getVideoMeta).mockRejectedValue(new Error('youtube videos.list 500'))
     await comparePlaylists(env, 'tok', { log })
@@ -559,47 +673,181 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
     expect(await removals(env)).toEqual([])
   })
 
-  it('does not believe a listing that calls five or more videos, and over 30% of the playlist, dead', async () => {
-    const env = makeEnv(LIVE)
-    await seedSub(env)
+  describe('many dead at once', () => {
     const many = ['a', 'b', 'c', 'd', 'e'].map((x) => `gone000000${x}`)
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5]), ...many] }, { as: Object.fromEntries(many.map((id) => [id, 'private' as const])) })
-    metaAnswer(Object.fromEntries(many.map((id) => [id, { alive: false }])))
-    await comparePlaylists(env, 'tok', { log })
-    expect(deletePlaylistItem).not.toHaveBeenCalled()
-    expect(await removals(env)).toEqual([])
-    // Five of twenty is believed (25%), and so are two of three: a small playlist is not stuck with its husks.
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]), ...many] }, { as: Object.fromEntries(many.map((id) => [id, 'private' as const])) })
-    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ deadRemoved: 5 })
-    vi.mocked(deletePlaylistItem).mockClear()
-    listing({ [PL]: ['vid00000001', 'gone000000x', 'gone000000y'] }, { as: { gone000000x: 'deleted', gone000000y: 'private' } })
-    metaAnswer({ gone000000x: { alive: false }, gone000000y: { alive: false } })
-    expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ deadRemoved: 2 })
-    expect(deleted()).toEqual(['item-gone000000x', 'item-gone000000y'])
+    const allPrivate = Object.fromEntries(many.map((id) => [id, 'private' as const]))
+    const allDead = Object.fromEntries(many.map((id) => [id, { alive: false }]))
+
+    it('five or more that are over 30% of a playlist are not taken out: the playlist is held, shown on the Removed page, until the owner approves those videos', async () => {
+      const env = makeEnv(LIVE)
+      await seedSub(env)
+      await waited(env, many)
+      listing({ [PL]: [...ids([1, 2, 3, 4, 5]), ...many] }, { as: allPrivate })
+      metaAnswer(allDead)
+      expect((await comparePlaylists(env, 'tok', { log, now: T }))[0]).toMatchObject({ deadRemoved: 0, deadReported: 5 })
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect(await listDeadHolds(env)).toEqual([{ playlistId: PL, kind: 'artist', slug: SLUG, items: 10, dead: 5, deadIds: [...many].sort(), at: T }])
+      // Held again six hours on: the same hold, not a new one.
+      await comparePlaylists(env, 'tok', { log, now: T + 6 * 3600 })
+      expect(await listDeadHolds(env)).toMatchObject([{ at: T }])
+      // The page gets it, and its button approves it.
+      const { app } = await import('../src/index')
+      const before = await app.request('http://x/ui/api/removals', {}, env)
+      expect(((await before.json()) as any).deadHolds).toMatchObject([{ playlistId: PL, dead: 5, items: 10 }])
+      const approve = () => app.request(`http://x/ui/api/removals/dead-holds/${PL}/approve`, { method: 'POST', headers: { origin: 'http://x', 'content-type': 'application/json' }, body: '{}' }, env)
+      expect((await approve()).status).toBe(200)
+      expect((await approve()).status).toBe(404)
+      expect(await listDeadHolds(env)).toEqual([])
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 12 * 3600 }))[0]).toMatchObject({ deadRemoved: 5 })
+      expect(deleted()).toEqual(many.map((id) => `item-${id}`))
+      expect(await listDeadHolds(env)).toEqual([])
+    })
+
+    it('an approval covers the videos it showed, some or all of them, and no others', async () => {
+      const env = makeEnv({ ...LIVE, PLAYLIST_SWEEP_DAILY_REMOVALS: '2' })
+      await seedSub(env)
+      const more = [...many, 'gone000000f']
+      await waited(env, more)
+      listing({ [PL]: [...ids([1, 2, 3, 4, 5]), ...many] }, { as: allPrivate })
+      metaAnswer({ ...allDead, gone000000f: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      expect(await approveDeadHold(env, PL, T)).toBe(true)
+      // The budget lets two go today; the three left are still covered tomorrow, though they are no longer five.
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 3600 }))[0]).toMatchObject({ deadRemoved: 2 })
+      // A sixth dead video that the owner never saw: held again, nothing more goes.
+      listing({ [PL]: [...ids([1, 2, 3, 4, 5]), ...many.slice(2), 'gone000000f', 'gone000000g', 'gone000000h'] }, { as: { ...allPrivate, gone000000f: 'private', gone000000g: 'private', gone000000h: 'private' } })
+      metaAnswer({ ...allDead, gone000000f: { alive: false }, gone000000g: { alive: false }, gone000000h: { alive: false } })
+      expect((await comparePlaylists(env, 'tok', { log, now: T + DAYS }))[0]!.deadRemoved ?? 0).toBe(0)
+      expect(await listDeadHolds(env)).toMatchObject([{ dead: 6 }])
+      expect(deleted()).toHaveLength(2)
+    })
+
+    it('five of twenty are believed, and so are two of three: a small playlist is not stuck with its husks', async () => {
+      const env = makeEnv(LIVE)
+      await seedSub(env)
+      await waited(env, [...many, 'gone000000x', 'gone000000y'])
+      listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]), ...many] }, { as: allPrivate })
+      metaAnswer(allDead)
+      expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ deadRemoved: 5 })
+      expect(await listDeadHolds(env)).toEqual([])
+      vi.mocked(deletePlaylistItem).mockClear()
+      await waited(env, ['gone000000x', 'gone000000y'])
+      listing({ [PL]: ['vid00000001', 'gone000000x', 'gone000000y'] }, { as: { gone000000x: 'deleted', gone000000y: 'private' } })
+      metaAnswer({ gone000000x: { alive: false }, gone000000y: { alive: false } })
+      expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ deadRemoved: 2 })
+      expect(deleted()).toEqual(['item-gone000000x', 'item-gone000000y'])
+    })
   })
 
-  it('stops at the sweep\'s daily budget, which the sweep in the same tick shares, and carries on the next day', async () => {
-    const env = makeEnv({ ...LIVE, PLAYLIST_SWEEP_DAILY_REMOVALS: '1' })
-    await seedFive(env)
+  describe('the daily budget', () => {
     const two = ['gone000000a', 'gone000000b']
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), ...two] }, { as: { gone000000a: 'private', gone000000b: 'deleted' } })
-    metaAnswer({ gone000000a: { alive: false }, gone000000b: { alive: false } })
-    const day1 = Math.floor(Date.parse('2026-10-01T12:00:00Z') / 1000)
-    expect((await comparePlaylists(env, 'tok', { log, now: day1 }))[0]).toMatchObject({ deadRemoved: 1 })
-    expect(deleted()).toEqual(['item-gone000000a'])
-    expect(await sweepDeletesUsed(env, day1 * 1000)).toBe(1)
-    // The sweep that follows finds the day's budget spent.
-    expect(await runRemovalSweep(env, 'tok', { log, nowMs: day1 * 1000 })).toMatchObject({ dryRun: false, budget: 1, budgetLeft: 0 })
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 'gone000000b'] }, { as: { gone000000b: 'deleted' } })
-    expect((await comparePlaylists(env, 'tok', { log, now: day1 + 6 * 3600 }))[0]!.deadRemoved ?? 0).toBe(0)
-    expect((await comparePlaylists(env, 'tok', { log, now: day1 + 86400 }))[0]).toMatchObject({ deadRemoved: 1 })
-    expect(deleted()).toEqual(['item-gone000000a', 'item-gone000000b'])
+    const twoDead = { gone000000a: { alive: false }, gone000000b: { alive: false } }
+
+    it("stops at the sweep's daily budget, which the sweep in the same tick shares, and carries on the next day", async () => {
+      const env = makeEnv({ ...LIVE, PLAYLIST_SWEEP_DAILY_REMOVALS: '1' })
+      await seedFive(env)
+      await waited(env, two)
+      listing({ [PL]: [...TEN, ...two] }, { as: { gone000000a: 'private', gone000000b: 'deleted' } })
+      metaAnswer(twoDead)
+      expect((await comparePlaylists(env, 'tok', { log, now: T }))[0]).toMatchObject({ deadRemoved: 1 })
+      expect(deleted()).toEqual(['item-gone000000a'])
+      expect(await sweepDeletesUsed(env, T * 1000)).toBe(1)
+      // The sweep that follows finds the day's budget spent.
+      expect(await runRemovalSweep(env, 'tok', { log, nowMs: T * 1000 })).toMatchObject({ dryRun: false, budget: 1, budgetLeft: 0 })
+      listing({ [PL]: [...TEN, 'gone000000b'] }, { as: { gone000000b: 'deleted' } })
+      expect((await comparePlaylists(env, 'tok', { log, now: T + 6 * 3600 }))[0]!.deadRemoved ?? 0).toBe(0)
+      expect((await comparePlaylists(env, 'tok', { log, now: T + DAYS }))[0]).toMatchObject({ deadRemoved: 1 })
+      expect(deleted()).toEqual(['item-gone000000a', 'item-gone000000b'])
+    })
+
+    it('is charged once, before the first delete, for everything the run takes out: one write to the counter, not one per delete', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await waited(env, two)
+      listing({ [PL]: [...TEN, ...two] }, { as: { gone000000a: 'private', gone000000b: 'private' } })
+      metaAnswer(twoDead)
+      const put = vi.spyOn(env.CACHE, 'put')
+      const order: string[] = []
+      put.mockImplementation(async (key: string) => void order.push(`put ${key.startsWith('hygiene:sweep:deletes:') ? 'counter' : 'other'}`))
+      vi.mocked(deletePlaylistItem).mockImplementation(async (itemId: string) => void order.push(`delete ${itemId}`))
+      expect((await comparePlaylists(env, 'tok', { log, now: T }))[0]).toMatchObject({ deadRemoved: 2 })
+      expect(order.filter((x) => x !== 'put other')).toEqual(['put counter', 'delete item-gone000000a', 'delete item-gone000000b'])
+    })
+
+    it('when the counter cannot be written nothing is deleted: the budget is never overspent', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await waited(env, two)
+      listing({ [PL]: [...TEN, ...two] }, { as: { gone000000a: 'private', gone000000b: 'private' } })
+      metaAnswer(twoDead)
+      const realPut = env.CACHE.put.bind(env.CACHE)
+      vi.spyOn(env.CACHE, 'put').mockImplementation(async (key: string, ...rest: any[]) => {
+        if (key.startsWith('hygiene:sweep:deletes:')) throw new Error('KV PUT failed: 429 Too Many Requests')
+        return (realPut as any)(key, ...rest)
+      })
+      expect((await comparePlaylists(env, 'tok', { log, now: T }))[0]!.deadRemoved ?? 0).toBe(0)
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect((await removals(env)).filter((x) => x.status === 'removed')).toEqual([])
+      // Still waiting, with their days: the next comparison takes them.
+      expect(Object.keys(await seen(env))).toHaveLength(2)
+    })
+
+    it('a KV write that throws after YouTube deleted (the refund of a delete that did not happen) costs no bookkeeping: what was deleted is recorded in full', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await waited(env, ['vid00000003', 'gone000000b'])
+      listing({ [PL]: [...TEN, 'gone000000b'] }, { as: { vid00000003: 'deleted', gone000000b: 'private' } })
+      metaAnswer({ vid00000003: { alive: false }, gone000000b: { alive: false } })
+      // The first delete works, the second is refused; then KV refuses the second write to the counter key (the refund).
+      vi.mocked(deletePlaylistItem).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new YouTubeApiError('playlistItems.delete', 500, null, 'oops'))
+      const realPut = env.CACHE.put.bind(env.CACHE)
+      let counterWrites = 0
+      vi.spyOn(env.CACHE, 'put').mockImplementation(async (key: string, ...rest: any[]) => {
+        if (key.startsWith('hygiene:sweep:deletes:') && ++counterWrites > 1) throw new Error('KV PUT failed: 429 Too Many Requests')
+        return (realPut as any)(key, ...rest)
+      })
+      expect((await comparePlaylists(env, 'tok', { log, now: T }))[0]).toMatchObject({ deadRemoved: 1 })
+      expect(counterWrites).toBe(2)
+      expect((await removals(env)).map((x) => [x.video_id, x.status])).toEqual([['vid00000003', 'removed']])
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(true)
+      expect((await confirmedMembership(env, PL)).get('vid00000003')).toBe('out')
+      expect(await row(env, setUrl(3))).toMatchObject({ video_id: null, checked_at: 0 })
+      // The counter stays at what was charged (2), one more than was deleted: short, never over.
+      expect(await sweepDeletesUsed(env, T * 1000)).toBe(2)
+      // The refused one still waits and goes at the next comparison.
+      expect(await seen(env)).toEqual({ [`${PL} gone000000b`]: 1 })
+    })
+
+    it('one step of the bookkeeping failing does not cost the others', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      listing({ [PL]: TEN }, { as: { vid00000003: 'deleted' } })
+      metaAnswer({ vid00000003: { alive: false } })
+      // The comparison's own record of it comes first (it blocks the video and clears the set); the block is then lost,
+      // so the removal has to write it again, and that write fails.
+      await comparePlaylists(env, 'tok', { log, now: T - DAYS })
+      await env.DB.prepare('DELETE FROM removed_videos').run()
+      await env.SUBS.put('hygiene:dead:seen', JSON.stringify({ [`${PL} vid00000003`]: 1 }))
+      const realPrepare = env.DB.prepare.bind(env.DB)
+      const spy = vi.spyOn(env.DB, 'prepare').mockImplementation((sql: string) => {
+        if (/INSERT INTO removed_videos/.test(sql)) throw new Error('D1_ERROR: boom')
+        return realPrepare(sql)
+      })
+      expect((await comparePlaylists(env, 'tok', { log, now: T }))[0]).toMatchObject({ deadRemoved: 1 })
+      spy.mockRestore()
+      expect(deleted()).toEqual(['item-vid00000003'])
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(false)
+      // The steps after the one that failed were still made.
+      expect(await removals(env)).toMatchObject([{ source: 'dead', status: 'removed', video_id: 'vid00000003', at: T }])
+      expect((await confirmedMembership(env, PL)).get('vid00000003')).toBe('out')
+    })
   })
 
   it('asks and deletes nothing while the quota is out, and a daily-quota reply to a delete sets the hold', async () => {
     const env = makeEnv(LIVE)
     await seedFive(env)
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), GONE] }, { as: { [GONE]: 'private' } })
+    await waited(env, [GONE])
+    listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
     metaAnswer({ [GONE]: { alive: false } })
     const nowS = Math.floor(Date.now() / 1000)
     await env.CACHE.put('yt:quota:out', JSON.stringify({ since: nowS, until: nowS + 3600 }))
@@ -610,21 +858,23 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
     vi.mocked(deletePlaylistItem).mockRejectedValue(new YouTubeApiError('playlistItems.delete', 403, 'quotaExceeded', '{}'))
     expect((await comparePlaylists(env, 'tok', { log }))[0]!.deadRemoved ?? 0).toBe(0)
     expect(await getQuotaOut(env)).not.toBeNull()
-    // A refused delete is not logged as anything: the video is still there, and the next comparison tries again.
-    expect(await removals(env)).toEqual([])
+    // A refused delete is not logged as removed or failed: the video is still there, and the next comparison tries again.
+    expect((await removals(env)).filter((x) => x.status !== 'would_remove')).toEqual([])
     expect(await isBlocked(env, PL, GONE)).toBe(false)
+    // What was charged ahead for it was given back.
     expect(await sweepDeletesUsed(env)).toBe(0)
   })
 
   it('a delete YouTube refuses for another reason is tried again at the next comparison, and the others go on', async () => {
     const env = makeEnv(LIVE)
     await seedFive(env)
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 'gone000000a', 'gone000000b'] }, { as: { gone000000a: 'private', gone000000b: 'private' } })
+    await waited(env, ['gone000000a', 'gone000000b'])
+    listing({ [PL]: [...TEN, 'gone000000a', 'gone000000b'] }, { as: { gone000000a: 'private', gone000000b: 'private' } })
     metaAnswer({ gone000000a: { alive: false }, gone000000b: { alive: false } })
     vi.mocked(deletePlaylistItem).mockRejectedValueOnce(new YouTubeApiError('playlistItems.delete', 500, null, 'oops'))
     expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ deadRemoved: 1 })
     expect((await removals(env)).map((x) => [x.video_id, x.status])).toEqual([['gone000000b', 'removed']])
-    listing({ [PL]: [...ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 'gone000000a'] }, { as: { gone000000a: 'private' } })
+    listing({ [PL]: [...TEN, 'gone000000a'] }, { as: { gone000000a: 'private' } })
     expect((await comparePlaylists(env, 'tok', { log }))[0]).toMatchObject({ deadRemoved: 1 })
     expect((await removals(env)).map((x) => [x.video_id, x.status])).toEqual([['gone000000b', 'removed'], ['gone000000a', 'removed']])
   })
@@ -636,11 +886,54 @@ describe('dead videos still in a playlist (deleted, or made private by their upl
     await env.DB.prepare(
       "INSERT INTO mkvid_requests (id, slug, set_url, source, source_url, status, video_id, created_at, updated_at) VALUES ('r1', ?, ?, 'soundcloud', 'u', 'done', 'mkUp0000001', 0, 0)",
     ).bind(SLUG, setUrl(1)).run()
+    await waited(env, ['mkUp0000001'])
     listing({ [PL]: ['mkUp0000001'] }, { as: { mkUp0000001: 'deleted' } })
     metaAnswer({ mkUp0000001: { alive: false } })
     await comparePlaylists(env, 'tok', { log })
     expect(deletePlaylistItem).not.toHaveBeenCalled()
     expect((await removals(env)).filter((x) => x.status === 'removed' || x.status === 'would_remove')).toEqual([])
+  })
+
+  describe('the owner can undo', () => {
+    it('Keep it on a waiting video: it is never taken out, however long it stays dead', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      listing({ [PL]: [...TEN, GONE] }, { as: { [GONE]: 'private' } })
+      metaAnswer({ [GONE]: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      const [waiting] = await removals(env)
+      expect(await undoRemoval(env, 'tok', waiting!.id, log)).toEqual({ ok: true, readded: false })
+      expect(addVideoToPlaylist).not.toHaveBeenCalled()
+      expect((await removals(env))[0]).toMatchObject({ status: 'undone' })
+      for (const later of [DAYS, 5 * DAYS, 40 * DAYS]) expect((await comparePlaylists(env, 'tok', { log, now: T + later }))[0]!.deadRemoved ?? 0).toBe(0)
+      expect(deletePlaylistItem).not.toHaveBeenCalled()
+      expect(await removals(env)).toMatchObject([{ status: 'undone' }])
+      expect(await seen(env)).toEqual({})
+    })
+
+    it('a removed dead video can be allowed again: it leaves the never-add list, nothing is inserted now, and the sync may add it if it comes back', async () => {
+      const env = makeEnv(LIVE)
+      await seedFive(env)
+      await waited(env, ['vid00000003'])
+      listing({ [PL]: TEN }, { as: { vid00000003: 'deleted' } })
+      metaAnswer({ vid00000003: { alive: false } })
+      await comparePlaylists(env, 'tok', { log, now: T })
+      const [removedRow] = await removals(env)
+      expect(removedRow).toMatchObject({ source: 'dead', status: 'removed' })
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(true)
+      expect(await undoRemoval(env, 'tok', removedRow!.id, log)).toEqual({ ok: true, readded: false })
+      // A dead video cannot be inserted, so none is tried; and it gets no exemption that would let the sync try it while dead.
+      expect(addVideoToPlaylist).not.toHaveBeenCalled()
+      expect(await isBlocked(env, PL, 'vid00000003')).toBe(false)
+      expect(await env.DB.prepare('SELECT * FROM video_overrides').all()).toMatchObject({ results: [] })
+      expect((await removals(env))[0]).toMatchObject({ status: 'undone' })
+      // Back on YouTube: the sync's gate lets it through again.
+      metaAnswer({})
+      const pick = await pickSetVideo(env, { slug: SLUG, setUrl: setUrl(3), html: '<html></html>', rawVideoId: 'vid00000003', playlistId: PL, accessToken: 'tok', log })
+      expect(pick.videoId).toBe('vid00000003')
+      // A second press does nothing.
+      expect(await undoRemoval(env, 'tok', removedRow!.id, log)).toEqual({ ok: false, error: 'not_undoable' })
+    })
   })
 })
 
@@ -700,7 +993,7 @@ describe('undoRemoval', () => {
     expect(await undoRemoval(env, 'tok', rec!.id, log)).toEqual({ ok: false, error: 'not_undoable' })
   })
 
-  it('a dry-run row is kept by override alone; dead rows cannot be undone', async () => {
+  it('a dry-run row is kept by override alone; a recorded dead row is undone by lifting its block, with no re-add', async () => {
     const env = makeEnv()
     await seedSub(env)
     await seedSet(env, setUrl(1), 'notc0000001')
@@ -719,7 +1012,10 @@ describe('undoRemoval', () => {
     expect(await approveHold(env, PL)).toBe(true)
     await comparePlaylists(env, 'tok', { log })
     const dead = (await removals(env)).find((x) => x.source === 'dead')!
-    expect(await undoRemoval(env, 'tok', dead.id, log)).toEqual({ ok: false, error: 'not_undoable' })
+    expect(await isBlocked(env, PL, 'dead0000001')).toBe(true)
+    expect(await undoRemoval(env, 'tok', dead.id, log)).toEqual({ ok: true, readded: false })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect(await isBlocked(env, PL, 'dead0000001')).toBe(false)
     expect(await undoRemoval(env, 'tok', 9999, log)).toEqual({ ok: false, error: 'not_found' })
   })
 })

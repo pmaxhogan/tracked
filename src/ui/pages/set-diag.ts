@@ -117,7 +117,9 @@ export const SET_DIAG_JS = /* js */ `
       tone = 'bad'; finding = 'Blocked from ' + removed.length + ' playlist(s): ' + reasons.join(', ') + '.';
     }
     else if (failed) { tone = 'bad'; finding = 'A removal failed: ' + (failed.detail || 'no detail') + '.'; }
-    else if (removals.some((r) => r.status === 'would_remove')) { tone = 'warn'; finding = 'The sweep would remove it (dry run).'; }
+    else if (removals.some((r) => r.status === 'would_remove' && r.source !== 'dead')) { tone = 'warn'; finding = 'The sweep would remove it (dry run).'; }
+    // Written by the playlist comparison, and handled by itself: the video goes once it has stayed dead for a few days.
+    else if (removals.some((r) => r.status === 'would_remove')) { tone = 'info'; finding = 'Its video looks deleted or private on YouTube. It is taken out of the playlist by itself if it stays that way.'; }
     else { tone = 'ok'; finding = 'Nothing removed.'; }
     const facts = removed.map((r) => ['Blocked', r.playlistId + ' (' + (DIAG_REMOVED[r.reason] || r.reason) + ', ' + diagRel(r.at) + ')'])
       .concat(removals.map((r) => [r.source, r.status + ', ' + r.reason + ', ' + diagRel(r.at) + (r.detail ? ': ' + r.detail : '')]));
