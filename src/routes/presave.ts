@@ -103,6 +103,7 @@ export const PresaveOutSchema = z
     dismissedAt: ms('When it was dismissed'),
     likedAt: ms('When its video was liked on the connected YouTube account'),
     likeError: z.string().nullable().openapi({ description: 'Why the last try did not like it: `<kind>: <detail>`, kind = quota | budget | rate_limit | transient | not_connected | gone (tried again) | rating_disabled | purchase_required | email_not_verified | forbidden | rejected | disliked (not tried again).' }),
+    likeErrorText: z.string().nullable().openapi({ description: "likeError's detail as one readable line." }),
     likeNextAt: ms('When the like is due; null when it is made or not tried again'),
     uploadEligibleAt: z.number().int().openapi({ description: 'createdAt + trackUploads.minWatchDays (unix ms).' }),
   })

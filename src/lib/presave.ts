@@ -46,7 +46,7 @@ import { poolCodeOf } from './pool'
 import { presaveFoundPayload, sendPushToAll } from './web-push'
 import { labelFromSetUrl } from './activity'
 import { maybeQueueTrackUpload, supersedeTrackUploadsForPresave } from './track-uploads'
-import { onPresaveResolved } from './presave-like'
+import { likeErrorLine, onPresaveResolved } from './presave-like'
 
 const HOUR_MS = 3600_000
 const DAY_MS = 24 * HOUR_MS
@@ -159,6 +159,8 @@ export type PresaveOut = {
   likedAt: number | null
   /** Why the last try did not like it (`<kind>: <detail>`), and when it is tried again (null = it is not). */
   likeError: string | null
+  /** likeError's detail as one readable line (a YouTube reply by its reason and message, a quota wait in plain words). */
+  likeErrorText: string | null
   likeNextAt: number | null
   /** createdAt + trackUploads.minWatchDays: when mkvid may rip it. */
   uploadEligibleAt: number
@@ -229,6 +231,7 @@ export function presaveOut(r: PresaveRow, settings: Pick<AppSettings, 'trackUplo
     dismissedAt: r.dismissed_at,
     likedAt: r.liked_at ?? null,
     likeError: r.like_error ?? null,
+    likeErrorText: likeErrorLine(r.like_error),
     likeNextAt: r.like_next_at ?? null,
     uploadEligibleAt: r.created_at + Math.round(settings.trackUploads.minWatchDays * DAY_MS),
   }

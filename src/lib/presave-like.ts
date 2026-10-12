@@ -24,6 +24,11 @@
  * fails never touches the pre-save itself: the failure is kept in like_error
  * as `<kind>: <detail>` (LikeFailKind) and tried again, or not, by its kind.
  *
+ * Out of the day's quota is the shared hold's (lib/youtube-quota.ts, KV
+ * `yt:quota:out`): a like that is told so sets it like any other YouTube
+ * write, and while it is set the hook's like and the cron ask YouTube nothing;
+ * the likes stay due and go as soon as it expires or the owner clears it.
+ *
  * Quota: videos.getRating 1 unit, videos.rate 50. The hook and the cron spend
  * at most presave.likeDailyUnitCap units a quota day (a KV counter in CACHE,
  * approximate by design); the backfill is the owner's own run and is bounded
@@ -40,6 +45,8 @@ import { fetchWithTimeout } from './fetch'
 import { getAccessToken } from './google-oauth'
 import { getRatings, rateVideo, type Rating } from './youtube-likes'
 import { isQuotaError, YouTubeApiError } from './youtube-playlists'
+import { errorOneLine, quotaKind } from './youtube-error'
+import { getQuotaOut, noteQuotaOut } from './youtube-quota'
 import { quotaDayEnd, quotaDayStart } from './mkvid'
 
 /** One request to Google is cut off after this. Likes run in the background, so nothing a person waits for is behind it. */
@@ -72,8 +79,9 @@ const UNCLAIMED_SQL = '(like_claimed_at IS NULL OR like_claimed_at <= ?)'
 
 /**
  * Why a like was not made.
- *   tried again:  quota (the day's quota is used: at the roll-over, and every other waiting like with it)
- *                 budget (presave.likeDailyUnitCap is used: likewise)
+ *   tried again:  quota (the day's quota is used: it stays due and the quota hold, lib/youtube-quota.ts,
+ *                        keeps every like from being tried until it expires or the owner clears it)
+ *                 budget (presave.likeDailyUnitCap is used: at the quota day's roll-over, every other waiting like with it)
  *                 rate_limit, transient, not_connected (backoff, this row only)
  *                 gone (a 404: a few tries, then final)
  *   final:        rating_disabled, purchase_required, email_not_verified, forbidden, rejected, disliked
@@ -99,20 +107,12 @@ export type PresaveLikeFields = { liked_at: number | null; like_attempts: number
 
 type LikeRow = PresaveLikeFields & { id: number; stage: string; youtube_video_id: string | null }
 
-/**
- * The one place a YouTube error is read as "out of quota" for likes: `quota`
- * for the day's quota (quotaExceeded, dailyLimitExceeded), `rate_limit` for
- * the per-minute limits, null for anything else.
- * At merge: lib/youtube-error.ts `quotaKind(reason)` gives the same two answers; use it here.
- */
-export function likeQuotaKind(e: unknown): 'quota' | 'rate_limit' | null {
-  if (!isQuotaError(e)) return null
-  return /^(rateLimitExceeded|userRateLimitExceeded)$/.test((e as YouTubeApiError).reason ?? '') ? 'rate_limit' : 'quota'
-}
+/** The shared decision (isQuotaError, youtube-error.ts quotaKind) for a caught error: the day's quota, a per-minute limit, or neither. */
+const quotaKindOf = (e: unknown): 'quota' | 'rate_limit' | null => (isQuotaError(e) ? quotaKind((e as YouTubeApiError).reason) : null)
 
 /** What a failed videos.rate / videos.getRating means, by the API's reason first. 5xx, a timeout and a persisting 401 are transient. */
 export function likeFailKind(e: unknown): LikeFailKind {
-  const q = likeQuotaKind(e)
+  const q = quotaKindOf(e)
   if (q) return q
   if (e instanceof YouTubeApiError) {
     const reason = e.reason ?? ''
@@ -128,7 +128,10 @@ export function likeFailKind(e: unknown): LikeFailKind {
 
 /** When a like that was not made is tried again (unix ms); null = it is not. `attempts` counts this try. */
 export function likeRetryAt(kind: LikeFailKind, attempts: number, now: number): number | null {
-  if (kind === 'quota' || kind === 'budget') return quotaDayEnd(now) * 1000
+  // Out of the day's quota: it stays due. The quota hold (lib/youtube-quota.ts) is what keeps it from being
+  // tried, so it goes again as soon as the hold expires or the owner clears it.
+  if (kind === 'quota') return now
+  if (kind === 'budget') return quotaDayEnd(now) * 1000
   const backoff = now + Math.min(RETRY_MS * 2 ** Math.min(Math.max(0, attempts - 1), 20), RETRY_MAX_MS)
   if (kind === 'rate_limit' || kind === 'transient' || kind === 'not_connected') return backoff
   if (kind === 'gone') return attempts < GONE_TRIES ? backoff : null
@@ -136,6 +139,17 @@ export function likeRetryAt(kind: LikeFailKind, attempts: number, now: number): 
 }
 
 const errText = (kind: LikeFailKind, detail: string): string => `${kind}: ${detail}`.slice(0, 500)
+
+/**
+ * A stored like_error's detail as one readable line, for display: a YouTube
+ * API error by its shared reading (lib/youtube-error.ts: "videos.rate 403
+ * videoRatingDisabled: …", or the plain sentence for a quota wait), anything
+ * else as it is. Not escaped: the page escapes it.
+ */
+export function likeErrorLine(likeError: string | null | undefined): string | null {
+  if (!likeError) return null
+  return errorOneLine(likeError.replace(/^[a-z_]+: /, ''))
+}
 
 async function likeFields(env: Env, id: number): Promise<PresaveLikeFields | null> {
   return dbOf(env).prepare('SELECT liked_at, like_attempts, like_error, like_next_at FROM presaves WHERE id = ?').bind(id).first<PresaveLikeFields>()
@@ -195,8 +209,8 @@ export async function likePresaveVideo(env: Env, presaveId: number, opts: LikeOp
     const error = errText(kind, detail)
     // Before the claim (the budget) another run's hold on the try is not this one's to release.
     await db.prepare(`UPDATE presaves SET like_error = ?, like_next_at = ?${claimed ? ', like_claimed_at = NULL' : ''} WHERE id = ? AND youtube_video_id = ? AND liked_at IS NULL`).bind(error, next, p.id, videoId).run()
-    // The day's quota or budget is used: every other like waiting for its try would end the same way today.
-    if (kind === 'quota' || kind === 'budget') await db.prepare('UPDATE presaves SET like_next_at = ? WHERE liked_at IS NULL AND like_next_at IS NOT NULL AND like_next_at < ?').bind(next, next).run()
+    // The day's budget for likes is used: every other like waiting for its try would end the same way today.
+    if (kind === 'budget') await db.prepare('UPDATE presaves SET like_next_at = ? WHERE liked_at IS NULL AND like_next_at IS NOT NULL AND like_next_at < ?').bind(next, next).run()
     log[kind === 'budget' || kind === 'disliked' ? 'info' : 'warn']('presave.like_not_made', { id: p.id, videoId, kind, attempts: tries, retryAt: next, detail: detail.slice(0, 300) })
     return { outcome: kind, videoId, error, units }
   }
@@ -206,8 +220,24 @@ export async function likePresaveVideo(env: Env, presaveId: number, opts: LikeOp
     return { outcome, videoId, units }
   }
 
+  /** YouTube answered: when it was the day's quota the shared hold is set, as every other YouTube write does. */
+  const refused = async (e: unknown): Promise<LikeResult> => {
+    const kind = likeFailKind(e)
+    if (kind === 'quota') await noteQuotaOut(env, e, log, now)
+    return park(kind, e instanceof Error ? e.message : String(e))
+  }
+
   if (opts.budgeted) {
-    const cap = (await getAppSettings(env)).presave.likeDailyUnitCap
+    // The quota hold is set (a YouTube write was told the day's quota is used): no call at all. The like
+    // stays due, so the first tick after the hold expires, or the owner clears it, makes it.
+    const hold = await getQuotaOut(env, now)
+    if (hold) {
+      if (!p.like_error?.startsWith('quota:')) {
+        await db.prepare('UPDATE presaves SET like_error = ? WHERE id = ? AND youtube_video_id = ? AND liked_at IS NULL').bind(errText('quota', "YouTube's daily quota is used up; waiting for it"), p.id, videoId).run()
+      }
+      return { outcome: 'quota', videoId, units: 0 }
+    }
+    const cap =(await getAppSettings(env)).presave.likeDailyUnitCap
     if ((await likeUnitsSpent(env, now)) + LIKE_UNITS > cap) return park('budget', `the ${cap} units a day for likes are used`, false)
   }
 
@@ -236,7 +266,7 @@ export async function likePresaveVideo(env: Env, presaveId: number, opts: LikeOp
         rating = (await getRatings([videoId], accessToken, fetcher)).get(videoId) ?? 'unknown'
         units += 1
       } catch (e) {
-        return await park(likeFailKind(e), e instanceof Error ? e.message : String(e))
+        return await refused(e)
       }
     }
     if (rating === 'like') return await done('already_liked')
@@ -246,8 +276,8 @@ export async function likePresaveVideo(env: Env, presaveId: number, opts: LikeOp
       units += 50
     } catch (e) {
       // A call YouTube answered with an error other than its limits is counted as spent (the upper bound).
-      if (!likeQuotaKind(e)) units += 50
-      return await park(likeFailKind(e), e instanceof Error ? e.message : String(e))
+      if (!quotaKindOf(e)) units += 50
+      return await refused(e)
     }
     return await done('liked')
   } finally {
@@ -314,6 +344,8 @@ export async function retryDuePresaveLikes(env: Env, log: Logger, opts: { now?: 
   try {
     if (!env.DB) return out
     const now = opts.now ?? Date.now()
+    // The quota hold: nothing is asked of YouTube, and the due likes stay due.
+    if (await getQuotaOut(env, now)) return { ...out, stoppedBy: 'quota' }
     const due = (
       await dbOf(env)
         .prepare(`SELECT id FROM presaves WHERE like_next_at IS NOT NULL AND like_next_at <= ? AND ${RESOLVED_UNLIKED_SQL} AND ${UNCLAIMED_SQL} ORDER BY like_next_at, id LIMIT ?`)
@@ -430,6 +462,12 @@ export async function backfillPresaveLikes(env: Env, input: LikeBackfillInput = 
     return out
   }
 
+  // A live run while the quota hold is set would only be refused by YouTube: it is refused here, before any call.
+  if (!dryRun) {
+    const hold = await getQuotaOut(env, now)
+    if (hold) return blind('quota', `YouTube's daily quota is used up (held until ${new Date(hold.until * 1000).toISOString()}). Run it again after that, or clear the hold on the Scheduler page if the quota was raised.`)
+  }
+
   let accessToken: string
   try {
     const tok = await getAccessToken(env, fetcher)
@@ -443,8 +481,8 @@ export async function backfillPresaveLikes(env: Env, input: LikeBackfillInput = 
     ratings = await getRatings(page.map((r) => r.youtube_video_id), accessToken, fetcher)
     out.units.getRating = 1
   } catch (e) {
-    log.warn('presave.like_backfill_ratings_failed', { quota: likeQuotaKind(e), ...errorFields(e) })
-    return blind(likeQuotaKind(e) ?? 'error', `videos.getRating failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`)
+    log.warn('presave.like_backfill_ratings_failed', { quota: quotaKindOf(e), ...errorFields(e) })
+    return blind(quotaKindOf(e) ?? 'error', `videos.getRating failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`)
   }
 
   let rated = 0

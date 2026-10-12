@@ -144,7 +144,10 @@ ${PRESAVE_UI_JS}
     const next = p.likeNextAt ? (p.likeNextAt <= Date.now() ? 'next try soon' : 'next try ' + esc(rel(p.likeNextAt))) : '';
     if (!p.likeError) return dt('Like', '<span class="sub">on its way</span>', next);
     const kind = String(p.likeError).split(':')[0], why = LIKE_WHY[kind] || ['Not liked yet'];
-    return dt('Like', '<span class="' + (why[1] ? 'bad' : 'sub') + '"' + TK.tip(p.likeError) + '>' + esc(why[0]) + '</span>', next);
+    // Out of quota it is not on a timer: it goes when the quota hold ends (midnight Pacific, or cleared on the Scheduler page).
+    const when = kind === 'quota' ? 'next try when YouTube has quota again' : next;
+    // The tooltip is the reply in one readable line (TK.tip escapes it).
+    return dt('Like', '<span class="' + (why[1] ? 'bad' : 'sub') + '"' + TK.tip(p.likeErrorText || p.likeError) + '>' + esc(why[0]) + '</span>', when);
   }
 
   function timeline(p, up) {

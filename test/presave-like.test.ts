@@ -14,8 +14,9 @@ import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
 import type { Env } from '../src/types'
 import { addPresave, dismissPresave, getPresaveRow, markPresaveUploaded, presaveOut, recheckPresave, restorePresave, runScheduledPresave } from '../src/lib/presave'
-import { backfillPresaveLikes, drainPresaveLikes, likeFailKind, likePresaveVideo, likeQuotaKind, likeRetryAt, likeUnitsSpent, retryDuePresaveLikes } from '../src/lib/presave-like'
+import { backfillPresaveLikes, drainPresaveLikes, likeErrorLine, likeFailKind, likePresaveVideo, likeRetryAt, likeUnitsSpent, retryDuePresaveLikes } from '../src/lib/presave-like'
 import { YouTubeApiError } from '../src/lib/youtube-playlists'
+import { clearQuotaOut, getQuotaOut, QUOTA_OUT_KEY } from '../src/lib/youtube-quota'
 import { quotaDayEnd } from '../src/lib/mkvid'
 import { DEFAULT_APP_SETTINGS, updateAppSettings } from '../src/lib/app-settings'
 import { makeLogger } from '../src/lib/log'
@@ -37,7 +38,9 @@ async function makeEnv(opts: { connected?: boolean } = {}): Promise<Env> {
   return env
 }
 
-const ytError = (status: number, reason: string) => new Response(JSON.stringify({ error: { code: status, errors: [{ reason }] } }), { status, headers: { 'Content-Type': 'application/json' } })
+/** A YouTube error reply as Google sends it: a message (with markup, for the quota one) and the reason. */
+const ytError = (status: number, reason: string, message = reason === 'quotaExceeded' ? 'The request cannot be completed because you have exceeded your <a href="/youtube/v3/getting-started#quota">quota</a>.' : `Refused <b>because</b> of ${reason}.`) =>
+  new Response(JSON.stringify({ error: { code: status, message, errors: [{ message, domain: 'youtube.video', reason }] } }), { status, headers: { 'Content-Type': 'application/json' } })
 
 type Yt = { rate: string[]; getRating: string[][] }
 /**
@@ -282,37 +285,63 @@ describe('a like that fails does not touch the pre-save', () => {
     return id
   }
 
-  it('out of the day\'s quota: still found, tried again when the quota day rolls over, and every other waiting like moves there', async () => {
+  it('out of the day\'s quota: still found, the shared quota hold is set, and the like stays due behind it until the hold expires', async () => {
     const env = await makeEnv()
     const other = await waiting(env, '2', 'VIDEOBBBBB2', NOW + 60_000)
-    const yt = stub({ rate: () => ytError(403, 'quotaExceeded') })
+    let yt = stub({ rate: () => ytError(403, 'quotaExceeded') })
     const r = await addPresave(env, { trackId: '909720' }, 'tasker', { now: NOW })
     await drainPresaveLikes()
     const dayEnd = quotaDayEnd(NOW) * 1000
-    expect(await getPresaveRow(env, r.presave.id)).toMatchObject({ stage: 'found', youtube_video_id: VIDEO, next_check_at: null, last_result: 'found', last_error: null, liked_at: null, like_attempts: 1, like_next_at: dayEnd })
+    expect(await getPresaveRow(env, r.presave.id)).toMatchObject({ stage: 'found', youtube_video_id: VIDEO, next_check_at: null, last_result: 'found', last_error: null, liked_at: null, like_attempts: 1, like_next_at: NOW })
     expect((await likeCols(env, r.presave.id)).like_error).toMatch(/^quota: /)
-    expect(await likeCols(env, other)).toMatchObject({ like_next_at: dayEnd })
+    expect(await getQuotaOut(env, NOW)).toEqual({ since: NOW / 1000, until: dayEnd / 1000 })
+    // The other waiting like keeps its own time: the hold, not a pushed-out retry, is what stops it.
+    expect(await likeCols(env, other)).toMatchObject({ like_next_at: NOW + 60_000 })
     expect(yt.rate).toEqual([VIDEO])
     // The rating was read (1 unit); the refused videos.rate is not counted.
     expect(await likeUnitsSpent(env, NOW)).toBe(1)
 
-    // Not due before the roll-over; due after it, and liked then.
-    yt.rate.length = 0
-    expect(await retryDuePresaveLikes(env, log, { now: dayEnd - 1 })).toEqual({ tried: 0, liked: 0, stoppedBy: null })
+    // While the hold is set the cron asks YouTube nothing, however due the likes are.
+    yt = stub()
+    expect(await retryDuePresaveLikes(env, log, { now: dayEnd - 1 })).toEqual({ tried: 0, liked: 0, stoppedBy: 'quota' })
+    expect(yt.getRating).toEqual([])
     expect(yt.rate).toEqual([])
-    stub()
+    // It expired at midnight Pacific: both go.
     expect(await retryDuePresaveLikes(env, log, { now: dayEnd + 1 })).toEqual({ tried: 2, liked: 2, stoppedBy: null })
     expect(await likeCols(env, r.presave.id)).toMatchObject({ liked_at: dayEnd + 1, like_attempts: 2, like_error: null, like_next_at: null })
   })
 
-  it('a retry that is out of quota stops the sweep after one call', async () => {
+  it('a hold the owner clears early lets the likes go at the next tick, not at midnight', async () => {
     const env = await makeEnv()
-    await waiting(env, '1', 'VIDEOAAAAA1', NOW - 1)
-    await waiting(env, '2', 'VIDEOBBBBB2', NOW - 1)
-    const yt = stub({ rate: () => ytError(403, 'dailyLimitExceeded') })
+    const a = await waiting(env, '1', 'VIDEOAAAAA1', NOW - 1)
+    const b = await waiting(env, '2', 'VIDEOBBBBB2', NOW - 1)
+    let yt = stub({ rate: () => ytError(403, 'dailyLimitExceeded') })
+    // The first reply stops the sweep and sets the hold; the second like is not tried.
     expect(await retryDuePresaveLikes(env, log, { now: NOW })).toEqual({ tried: 1, liked: 0, stoppedBy: 'quota' })
-    expect(yt.rate).toHaveLength(1)
-    expect((await env.DB.prepare('SELECT like_next_at FROM presaves').all<{ like_next_at: number }>()).results.map((r) => r.like_next_at)).toEqual([quotaDayEnd(NOW) * 1000, quotaDayEnd(NOW) * 1000])
+    expect(yt.rate).toEqual(['VIDEOAAAAA1'])
+    expect(await getQuotaOut(env, NOW)).not.toBeNull()
+    expect(await likeCols(env, a)).toMatchObject({ like_next_at: NOW })
+    expect(await likeCols(env, b)).toMatchObject({ like_next_at: NOW - 1, like_attempts: 1 })
+    yt = stub()
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 5 * 60_000 })).toEqual({ tried: 0, liked: 0, stoppedBy: 'quota' })
+    expect(yt.getRating).toEqual([])
+    await clearQuotaOut(env)
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 10 * 60_000 })).toEqual({ tried: 2, liked: 2, stoppedBy: null })
+    expect(yt.rate.sort()).toEqual(['VIDEOAAAAA1', 'VIDEOBBBBB2'])
+  })
+
+  it('a pre-save found while the hold is set asks YouTube nothing; its like is due and says why it waits', async () => {
+    const env = await makeEnv()
+    await env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW / 1000 - 60, until: quotaDayEnd(NOW) }))
+    const yt = stub()
+    const r = await addPresave(env, { trackId: '909720' }, 'tasker', { now: NOW })
+    await drainPresaveLikes()
+    expect(await getPresaveRow(env, r.presave.id)).toMatchObject({ stage: 'found', liked_at: null, like_attempts: 0, like_next_at: NOW, like_error: "quota: YouTube's daily quota is used up; waiting for it" })
+    expect(yt.getRating).toEqual([])
+    expect(yt.rate).toEqual([])
+    await clearQuotaOut(env)
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 5 * 60_000 })).toEqual({ tried: 1, liked: 1, stoppedBy: null })
+    expect(await likeCols(env, r.presave.id)).toMatchObject({ liked_at: NOW + 5 * 60_000, like_error: null })
   })
 
   it('a per-minute limit backs off that one like for a short while and parks nothing else', async () => {
@@ -326,9 +355,25 @@ describe('a like that fails does not touch the pre-save', () => {
     expect(la).toMatchObject({ like_attempts: 2, like_next_at: NOW + 30 * 60_000 })
     expect(la.like_error).toMatch(/^rate_limit: /)
     expect(await likeCols(env, b)).toMatchObject({ like_attempts: 1, like_next_at: NOW - 1 })
-    expect(likeQuotaKind(new YouTubeApiError('videos.rate', 403, 'userRateLimitExceeded', ''))).toBe('rate_limit')
-    expect(likeQuotaKind(new YouTubeApiError('videos.rate', 403, 'quotaExceeded', ''))).toBe('quota')
-    expect(likeQuotaKind(new YouTubeApiError('videos.rate', 403, 'forbidden', ''))).toBeNull()
+    // A per-minute limit is no reason for the quota hold.
+    expect(await getQuotaOut(env, NOW)).toBeNull()
+  })
+
+  it('what is stored and shown: the kind, then YouTube\'s reply; one readable line for the page', async () => {
+    const env = await makeEnv()
+    stub({ rate: () => ytError(403, 'videoRatingDisabled', 'The owner of the video has <b>disabled</b> ratings.') })
+    const r = await addPresave(env, { trackId: '909720' }, 'ui', { now: NOW })
+    await drainPresaveLikes()
+    const p = (await getPresaveRow(env, r.presave.id))!
+    expect(p.like_error).toMatch(/^rating_disabled: youtube videos\.rate 403 videoRatingDisabled: /)
+    const out = presaveOut(p, DEFAULT_APP_SETTINGS)
+    expect(out.likeError).toBe(p.like_error)
+    // Markup dropped, raw body left out; the page escapes it (TK.tip).
+    expect(out.likeErrorText).toBe('videos.rate 403 videoRatingDisabled: The owner of the video has disabled ratings.')
+    expect(likeErrorLine('quota: youtube videos.rate 403 quotaExceeded: The request cannot be completed because you have exceeded your quota.\n{"error":{}}')).toBe("YouTube's daily quota is used up. It resets at midnight Pacific time, and tracked will try again.")
+    expect(likeErrorLine('not_connected: no YouTube account is connected')).toBe('no YouTube account is connected')
+    expect(likeErrorLine('disliked: disliked on YouTube; left alone')).toBe('disliked on YouTube; left alone')
+    expect(likeErrorLine(null)).toBeNull()
   })
 
   it('the daily budget: once presave.likeDailyUnitCap is used the rest wait for the next quota day, without a call', async () => {
@@ -525,7 +570,7 @@ describe('the backfill', () => {
     expect(yt.rate).toEqual(['VIDEOAAAAA1', 'VIDEOBBBBB2'])
   })
 
-  it('live: out of quota stops the page; what was liked stays liked and the rest is picked up by a rerun', async () => {
+  it('live: out of quota stops the page and sets the quota hold; a live rerun is refused while it is set, a dry run is not', async () => {
     const env = await makeEnv()
     const a = await seedResolved(env, '1', 'VIDEOAAAAA1')
     const b = await seedResolved(env, '2', 'VIDEOBBBBB2')
@@ -535,10 +580,20 @@ describe('the backfill', () => {
     expect(r).toMatchObject({ liked: 1, failed: 1, stoppedBy: 'quota', nextAfterId: null, units: { getRating: 1, rate: 50 } })
     expect(yt.rate).toEqual(['VIDEOAAAAA1', 'VIDEOBBBBB2'])
     expect(await likeCols(env, a)).toMatchObject({ liked_at: NOW })
-    expect(await likeCols(env, b)).toMatchObject({ liked_at: null, like_next_at: quotaDayEnd(NOW) * 1000 })
+    expect(await likeCols(env, b)).toMatchObject({ liked_at: null, like_next_at: NOW })
     expect(await likeCols(env, c)).toMatchObject({ liked_at: null, like_attempts: 0 })
-    stub()
-    expect(await backfillPresaveLikes(env, { dryRun: false }, { now: NOW + 1 })).toMatchObject({ total: 2, liked: 2, stoppedBy: null })
+    expect(await getQuotaOut(env, NOW)).not.toBeNull()
+    // Live while the hold is set: refused before any call, and it says how to go on.
+    const yt2 = stub({ ratings: { VIDEOBBBBB2: 'none', VIDEOCCCCC3: 'none' } })
+    const held = await backfillPresaveLikes(env, { dryRun: false }, { now: NOW + 1 })
+    expect(held).toMatchObject({ total: 2, liked: 0, failed: 0, stoppedBy: 'quota', units: { getRating: 0, rate: 0 }, items: [{ id: b, action: 'not_tried' }, { id: c, action: 'not_tried' }] })
+    expect(held.message).toMatch(/Scheduler page/)
+    expect(yt2.getRating).toEqual([])
+    // A dry run still lists them.
+    expect(await backfillPresaveLikes(env, {}, { now: NOW + 1 })).toMatchObject({ dryRun: true, wouldLike: 2, stoppedBy: null, units: { getRating: 1, rate: 100 } })
+    expect(yt2.rate).toEqual([])
+    await clearQuotaOut(env)
+    expect(await backfillPresaveLikes(env, { dryRun: false }, { now: NOW + 2 })).toMatchObject({ total: 2, liked: 2, stoppedBy: null })
   })
 
   it('out of quota already at videos.getRating: a live run likes nothing, a dry run lists everything as not liked yet', async () => {
