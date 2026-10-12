@@ -3,7 +3,7 @@ import { app } from '../src/index'
 import type { Env } from '../src/types'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeD1 } from './helpers/fake-d1'
-import { parseActivityQuery, labelFromSetUrl, supersededReason, UNION_FROM, COMPOUND_MAX } from '../src/lib/activity'
+import { activityTable, parseActivityQuery, labelFromSetUrl, supersededReason, UNION_FROM, COMPOUND_MAX } from '../src/lib/activity'
 
 function makeEnv(): Env {
   return { CACHE: fakeKV(), DB: fakeD1(), SUBS: fakeKV(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', DEV_BYPASS_CF_ACCESS: '1' } as Env
@@ -60,16 +60,26 @@ describe('activity feed (data-table contract)', () => {
 
   it('keeps every compound SELECT within the D1 term limit (plain SQLite allows 500)', () => {
     // The UNION ALL count of each parenthesised level of the union.
-    const counts: number[] = []
-    const stack: number[] = [0]
-    for (const tok of UNION_FROM.match(/\(|\)|UNION ALL/g) ?? []) {
-      if (tok === '(') stack.push(0)
-      else if (tok === ')') counts.push(stack.pop()!)
-      else stack[stack.length - 1]!++
+    const levels = (from: string) => {
+      const counts: number[] = []
+      const stack: number[] = [0]
+      for (const tok of from.match(/\(|\)|UNION ALL/g) ?? []) {
+        if (tok === '(') stack.push(0)
+        else if (tok === ')') counts.push(stack.pop()!)
+        else stack[stack.length - 1]!++
+      }
+      counts.push(stack.pop()!)
+      return counts
     }
-    counts.push(stack.pop()!)
+    const counts = levels(UNION_FROM)
     expect(Math.max(...counts) + 1).toBeLessThanOrEqual(COMPOUND_MAX)
     expect(counts.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(7) // eight sources, still all there
+    // With a removed-recordings burst open (lib/mkvid-removed-burst.ts) the mkvid arm reads one more CASE; the union is the same shape.
+    const open = activityTable(1_790_000_000).from!
+    expect(open).not.toBe(UNION_FROM)
+    expect(open).toContain("'removed_unconfirmed'")
+    expect(levels(open).filter((n) => n > 0)).toEqual(counts.filter((n) => n > 0))
+    expect(activityTable(null).from).toBe(UNION_FROM)
   })
 
   it('labels a set URL like the client does', () => {
