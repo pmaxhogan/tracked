@@ -168,6 +168,7 @@ ${YOUTUBE_CARD_JS}
     if (d.lastRun && d.lastRun.moved) bits.push('last moved ' + d.lastRun.moved + ' ' + esc(TK.fmt.rel(new Date(d.lastRun.at * 1000).toISOString())));
     if (d.fresh) bits.push('read from YouTube just now (' + d.unitsSpent + ' units)');
     if (d.busy) bits.push('a run is moving videos right now, these are the numbers from before it');
+    if (d.partial) bits.push('the reading ran out of time (' + d.unitsSpent + ' units): the playlists it did not reach show their earlier numbers, Check now reads again');
     const manual = (d.playlists || []).filter((p) => p.problem === 'manual_sort');
     const stopped = (d.playlists || []).filter((p) => p.problem === 'unexpected_position' || p.problem === 'no_progress');
     let html = '<div class="headline">' + head + '</div><div class="bits">' + bits.join(' · ') + '</div>';

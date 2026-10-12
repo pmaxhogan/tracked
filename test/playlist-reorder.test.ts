@@ -486,8 +486,188 @@ describe('one run at a time', () => {
     expect(await run(env, yt)).toMatchObject({ read: 0, moved: 0, units: 0, stoppedBy: 'busy' })
     const rep = await orderReport(env, { log, fresh: true, fetcher: yt.fetch, accessToken: 'tok' })
     expect(rep).toMatchObject({ fresh: false, busy: true, unitsSpent: 0 })
-    expect(await retryOrderPlaylist(env, 'PLdj')).toEqual({ ok: false, reason: 'busy' })
     expect(yt.calls).toEqual([])
+  })
+
+  /** Every write and delete a KV sees, in order. */
+  const watch = (kv: KVNamespace) => {
+    const ops: string[] = []
+    const put = kv.put.bind(kv)
+    const del = kv.delete.bind(kv)
+    kv.put = (async (k: string, ...rest: unknown[]) => (ops.push(`put ${k}`), (put as (...a: unknown[]) => Promise<void>)(k, ...rest))) as typeof kv.put
+    kv.delete = (async (k: string) => (ops.push(`delete ${k}`), del(k))) as typeof kv.delete
+    return ops
+  }
+
+  it('an enabled pass with nothing due takes no lock and writes nothing', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: SORTED, PLdj2: W_SORTED })
+    expect(await run(env, yt)).toMatchObject({ read: 2, moved: 0 })
+    const cache = watch(env.CACHE)
+    const subs = watch(env.SUBS)
+    yt.calls.length = 0
+    // Every tick of the next hours: both playlists are sorted and were read today.
+    for (const min of [5, 10, 300]) {
+      at(T0 + min * 60_000)
+      expect(await run(env, yt)).toMatchObject({ read: 0, moved: 0, units: 0, stoppedBy: null })
+    }
+    expect(cache).toEqual([])
+    expect(subs).toEqual([])
+    expect(yt.calls).toEqual([])
+    // The daily look still happens, under the lock, and gives it back.
+    at(T0 + 25 * HOUR)
+    expect(await run(env, yt)).toMatchObject({ read: 2 })
+    expect(cache.filter((o) => o.endsWith('yt:order:lock'))).toEqual(['put yt:order:lock', 'delete yt:order:lock'])
+  })
+
+  it('a paused pass writes nothing to KV either', async () => {
+    const env = await makeEnv({ budget: 0 })
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
+    const cache = watch(env.CACHE)
+    const subs = watch(env.SUBS)
+    await runOrderPass(env, { log, fetcher: yt.fetch, trigger: 'test' })
+    expect(cache).toEqual([])
+    expect(subs).toEqual([])
+  })
+
+  it('Retry now takes no lock, so a Move now right after it is not shut out, and it works while a run holds the lock', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
+    yt.semantics = 'before'
+    await run(env, yt)
+    yt.semantics = 'documented'
+    const cache = watch(env.CACHE)
+    expect(await retryOrderPlaylist(env, 'PLdj')).toEqual({ ok: true })
+    expect(cache.filter((o) => o.endsWith('yt:order:lock'))).toEqual([])
+    expect(await run(env, yt)).toMatchObject({ stoppedBy: null })
+    expect(yt.playlists.PLdj).toEqual(SORTED)
+    // Another run's lock does not turn a retry away.
+    await env.CACHE.put('yt:order:lock', JSON.stringify({ token: 'someone', at: Date.now() }))
+    expect(await retryOrderPlaylist(env, 'PLdj')).toEqual({ ok: true })
+  })
+
+  it('a run that saves after a Retry now keeps what the retry cleared on a playlist it did not read', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: ['w3', 'w2', 'w1'] })
+    yt.semantics = 'before'
+    await run(env, yt)
+    expect((await loadOrderState(env)).playlists.PLdj!.problem).toBe('unexpected_position')
+    expect((await loadOrderState(env)).playlists.PLdj2!.problem).toBe('unexpected_position')
+    yt.semantics = 'documented'
+    await retryOrderPlaylist(env, 'PLdj2')
+    // The pass works on PLdj2 (PLdj is still stopped); the owner retries PLdj while its moves are being made.
+    let retried: Promise<unknown> | null = null
+    const fetcher = (async (...a: Parameters<typeof fetch>) => {
+      if ((a[1]?.method ?? 'GET') !== 'GET') retried ??= retryOrderPlaylist(env, 'PLdj')
+      return yt.fetch(...a)
+    }) as typeof fetch
+    await runOrderPass(env, { log, fetcher, accessToken: 'tok', trigger: 'test', sleep: async () => {} })
+    expect(await retried).toEqual({ ok: true })
+    const st = await loadOrderState(env)
+    expect(st.playlists.PLdj2).toMatchObject({ problem: null, moves: 0 })
+    expect(st.playlists.PLdj!.problem).toBeNull()
+  })
+
+  it('Check now keeps a stop that Retry now cleared while it was reading cleared', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
+    yt.semantics = 'before'
+    await run(env, yt)
+    let retried: Promise<unknown> | null = null
+    const fetcher = (async (...a: Parameters<typeof fetch>) => {
+      retried ??= retryOrderPlaylist(env, 'PLdj')
+      return yt.fetch(...a)
+    }) as typeof fetch
+    await orderReport(env, { log, fresh: true, fetcher, accessToken: 'tok' })
+    expect(await retried).toEqual({ ok: true })
+    expect((await loadOrderState(env)).playlists.PLdj!.problem).toBeNull()
+  })
+
+  it('release deletes only its own lock, and a lapsed lock is taken over and said so', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
+    // The lock changes hands in the middle of the run (it lapsed and another run took it).
+    const other = JSON.stringify({ token: 'other-run', at: T0 })
+    const fetcher = (async (...a: Parameters<typeof fetch>) => {
+      if ((a[1]?.method ?? 'GET') !== 'GET') await env.CACHE.put('yt:order:lock', other)
+      return yt.fetch(...a)
+    }) as typeof fetch
+    const warn = vi.spyOn(log, 'warn')
+    await runOrderPass(env, { log, fetcher, accessToken: 'tok', trigger: 'test', sleep: async () => {} })
+    // Not deleted by the run that lost it, and that run's reading is not written over the newer one.
+    expect(await env.CACHE.get('yt:order:lock')).toBe(other)
+    expect(warn.mock.calls.map((c) => c[0])).toContain('playlist_order.lock_lost')
+    expect((await loadOrderState(env)).playlists.PLdj).toBeUndefined()
+    // Still inside its minute it holds; a minute and more after it was taken it has lapsed.
+    at(T0 + 30_000)
+    expect(await run(env, yt)).toMatchObject({ stoppedBy: 'busy' })
+    at(T0 + 61_000)
+    warn.mockClear()
+    expect(await run(env, yt)).toMatchObject({ read: 2 })
+    expect(warn.mock.calls.map((c) => c[0])).toContain('playlist_order.lock_lapsed')
+    expect(await env.CACHE.get('yt:order:lock')).toBeNull()
+    warn.mockRestore()
+  })
+})
+
+describe('Retry now only takes a playlist that is ordered', () => {
+  it('refuses an id that is no playlist id, an inherited key, and a playlist that is not managed', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
+    await run(env, yt)
+    const before = JSON.stringify(await loadOrderState(env))
+    for (const id of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'PLall', 'PLnope', '', 'PL dj', 'a'.repeat(65), '../x']) {
+      expect(await retryOrderPlaylist(env, id)).toEqual({ ok: false, reason: 'not_found' })
+    }
+    expect(JSON.stringify(await loadOrderState(env))).toBe(before)
+    // A playlist of a DJ that is gone from sub_sync is no longer managed, even with an entry left in the state.
+    await env.DB.prepare('DELETE FROM sub_sync WHERE slug = ?').bind('dj2').run()
+    expect(await retryOrderPlaylist(env, 'PLdj2')).toEqual({ ok: false, reason: 'not_found' })
+  })
+})
+
+describe('the dry run ends inside the lock', () => {
+  it('stops at its deadline, keeps what it read, and says the reading is partial', async () => {
+    const env = await makeEnv({ budget: 0 })
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: ['w3', 'w1', 'w2'] })
+    // Each listing takes 30 s: the second playlist is not reached within 40.
+    const slow = (async (...a: Parameters<typeof fetch>) => {
+      at(Date.now() + 30_000)
+      return yt.fetch(...a)
+    }) as typeof fetch
+    const r = await orderReport(env, { log, fresh: true, fetcher: slow, accessToken: 'tok', deadlineMs: 20_000 })
+    expect(r).toMatchObject({ fresh: false, partial: true, busy: false, unitsSpent: 1 })
+    expect(r.playlists[0]).toMatchObject({ playlistId: 'PLdj', moves: 5 })
+    expect(r.playlists[1]).toMatchObject({ playlistId: 'PLdj2', checkedAt: null })
+    expect(r.totals).toMatchObject({ playlists: 2, unread: 1 })
+    expect(await env.CACHE.get('yt:order:lock')).toBeNull()
+    // With time enough it is a whole reading.
+    const full = await orderReport(env, { log, fresh: true, fetcher: yt.fetch, accessToken: 'tok' })
+    expect(full).toMatchObject({ fresh: true, partial: false })
+  })
+})
+
+describe('what a failed read-back is charged', () => {
+  it('charges every lookup made before the one that threw, not a flat 1', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
+    // The first look disagrees at its first lookup (lag), and the second look's second lookup fails: 1 listing + 50 + 3 lookups.
+    yt.staleLookups = 1
+    let lookups = 0
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).searchParams.get('videoId') && ++lookups === 3) {
+        yt.units += 1
+        return new Response(JSON.stringify({ error: { code: 400, errors: [{ reason: 'badRequest' }] } }), { status: 400, headers: { 'content-type': 'application/json' } })
+      }
+      return yt.fetch(input, init)
+    }) as typeof fetch
+    const r = await runOrderPass(env, { log, fetcher, accessToken: 'tok', trigger: 'test', sleep: async () => {} })
+    expect(r).toMatchObject({ moved: 1 })
+    expect(r.units).toBe(yt.units)
+    // ...and the other playlist's listing: 1 + 50 + 3 + 1 (the flat charge made it 53).
+    expect(r.units).toBe(55)
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ problem: 'move_failed' })
+    expect(await orderUnitsUsedToday(env)).toBe(yt.units)
   })
 
   it('a second caller arriving in the middle of a run plans nothing from the stale listing', async () => {

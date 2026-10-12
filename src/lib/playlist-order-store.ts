@@ -43,20 +43,38 @@ export async function clearNotManual(env: Env, playlistId: string): Promise<void
   await env.CACHE.delete(`${NOT_MANUAL_PREFIX}${playlistId}`)
 }
 
-/** Positions are never sent for the combined playlist (it is not ordered), nor for one YouTube refuses them for. Unreadable = position as usual. */
-async function positioningOff(env: Env, playlistId: string): Promise<'combined' | 'not_manual' | null> {
+export type OrderKeys = Map<string, OrderKey>
+
+/**
+ * Holds what an insert has to look up for the length of one run, so a run with
+ * several inserts reads each once: the keys (D1), the combined playlist's id
+ * (SUBS) and, per playlist, whether YouTube refuses positions for it (CACHE).
+ */
+export type OrderKeyCache = { keys?: OrderKeys; combinedId?: string | null; notManual?: Map<string, boolean> }
+
+/**
+ * Positions are never sent for the combined playlist (it is not ordered), nor
+ * for one YouTube refuses them for. Unreadable = position as usual (and not
+ * remembered in `cache`, so the next insert asks again).
+ */
+async function positioningOff(env: Env, playlistId: string, cache?: OrderKeyCache): Promise<'combined' | 'not_manual' | null> {
   try {
-    if ((await loadCombinedState(env)).playlistId === playlistId) return 'combined'
-    return (await isNotManual(env, playlistId)) ? 'not_manual' : null
+    let combinedId = cache?.combinedId
+    if (combinedId === undefined) {
+      combinedId = (await loadCombinedState(env)).playlistId ?? null
+      if (cache) cache.combinedId = combinedId
+    }
+    if (combinedId === playlistId) return 'combined'
+    let notManual = cache?.notManual?.get(playlistId)
+    if (notManual === undefined) {
+      notManual = await isNotManual(env, playlistId)
+      if (cache) (cache.notManual ??= new Map()).set(playlistId, notManual)
+    }
+    return notManual ? 'not_manual' : null
   } catch {
     return null
   }
 }
-
-export type OrderKeys = Map<string, OrderKey>
-
-/** Holds the keys for the length of one run, so a run with several inserts reads D1 once. */
-export type OrderKeyCache = { keys?: OrderKeys }
 
 /** Order key of every video a tracked set resolves to (one D1 read, about 1 300 rows in October 2026). */
 export async function loadOrderKeys(env: Env): Promise<OrderKeys> {
@@ -119,7 +137,7 @@ export async function insertInOrder(
   }
   // An append is the call exactly as it was before ordering existed.
   const append = () => (a.fetcher ? addVideoToPlaylist(a.playlistId, a.videoId, a.accessToken, a.fetcher) : addVideoToPlaylist(a.playlistId, a.videoId, a.accessToken))
-  if (position !== null && (await positioningOff(env, a.playlistId))) position = null
+  if (position !== null && (await positioningOff(env, a.playlistId, a.cache))) position = null
   if (position === null) {
     await append()
     return { position: null, attempts: 1 }
@@ -130,7 +148,11 @@ export async function insertInOrder(
   } catch (e) {
     if (!(e instanceof YouTubeApiError) || e.status !== 400) throw e
     a.log.warn('playlist_order.position_refused', { playlistId: a.playlistId, videoId: a.videoId, position, reason: e.reason })
-    if (e.reason === 'manualSortRequired') await noteNotManual(env, a.playlistId).catch(() => {})
+    if (e.reason === 'manualSortRequired') {
+      await noteNotManual(env, a.playlistId).catch(() => {})
+      // The run's own memory too: its next insert into this playlist is appended without asking.
+      if (a.cache) (a.cache.notManual ??= new Map()).set(a.playlistId, true)
+    }
     await append()
     return { position: null, attempts: 2 }
   }

@@ -124,7 +124,7 @@ subscriptionsApp.route('/', activityApp)
 // Search over the SEARCH_DB index (routes/search.ts). Behind cfAccess above.
 subscriptionsApp.route('/', searchApp)
 
-// Scheduler tick history and DJ due times, read-only (routes/scheduler-ui.ts). Behind cfAccess above.
+// Scheduler tick history and DJ due times, and the POST that clears the YouTube quota hold (routes/scheduler-ui.ts). Behind cfAccess above.
 subscriptionsApp.route('/', schedulerUiApp)
 subscriptionsApp.route('/', trackUploadsUiApp) // /ui/api/track-uploads* (routes/track-uploads-ui.ts), behind cfAccess above
 subscriptionsApp.route('/', mkvidUiApp) // GET /ui/api/mkvid, /mkvid/queue, /mkvid/finished (routes/mkvid-ui.ts), behind cfAccess above
@@ -647,11 +647,14 @@ subscriptionsApp.post('/api/playlist-order/run', async (c) => {
   }
 })
 
-/** "Retry now" for a playlist the pass stopped: clears the stop so the next run tries it again. Moves nothing itself. */
+/**
+ * "Retry now" for a playlist the pass stopped: clears the stop so the next run tries it again. Moves nothing itself.
+ * 404 for anything but the id of an artist playlist the pass has read (retryOrderPlaylist checks the format and that it is managed).
+ */
 subscriptionsApp.post('/api/playlist-order/retry/:playlistId', async (c) => {
   const r = await retryOrderPlaylist(c.env, c.req.param('playlistId'))
   if (r.ok) return c.json(r)
-  return c.json({ error: r.reason, message: r.reason === 'busy' ? 'A run is moving videos right now; try again in a minute.' : 'No such playlist.' }, r.reason === 'busy' ? 409 : 404)
+  return c.json({ error: r.reason, message: 'No such playlist.' }, 404)
 })
 
 subscriptionsApp.get('/api/state/:slug', async (c) => {

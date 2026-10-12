@@ -22,7 +22,7 @@ vi.mock('../src/lib/youtube-playlists', async () => {
   return { ...actual, addVideoToPlaylist: vi.fn() }
 })
 import { addVideoToPlaylist, YouTubeApiError } from '../src/lib/youtube-playlists'
-import { insertInOrder, isNotManual, loadOrderKeys, orderKeyFor } from '../src/lib/playlist-order-store'
+import { insertInOrder, isNotManual, loadOrderKeys, orderKeyFor, type OrderKeyCache } from '../src/lib/playlist-order-store'
 import { saveCombinedState } from '../src/lib/combined-playlist'
 
 const T = 'https://www.1001tracklists.com/tracklist'
@@ -304,6 +304,31 @@ describe('insertInOrder', () => {
     await env.CACHE.delete('yt:order:notmanual:PL')
     add.mockClear()
     expect((await insertInOrder(env, older(4))).position).toBe(0)
+  })
+
+  it('a run with several inserts asks KV once: the combined id and the not-manual memory are kept in the run cache', async () => {
+    const env = await envWithSets(rows)
+    await saveCombinedState(env, { playlistId: 'PLcombined' })
+    const subsGet = vi.spyOn(env.SUBS, 'get')
+    const cacheGet = vi.spyOn(env.CACHE, 'get')
+    const cache: OrderKeyCache = {}
+    const older = (n: number, playlistId = 'PL') => ({ playlistId, videoId: `vNew${n}`, existing: ['v2022', 'v2023', 'v2024'], accessToken: 'tok', log, setUrl: set(`9${n}`, 'dj-club-2021-01-01'), cache })
+    for (let n = 1; n <= 4; n++) expect((await insertInOrder(env, older(n))).position).toBe(0)
+    expect(subsGet).toHaveBeenCalledTimes(1)
+    expect(cacheGet.mock.calls.filter((c) => String(c[0]).startsWith('yt:order:notmanual:'))).toHaveLength(1)
+    // Another playlist is its own question; the combined one needs none.
+    await insertInOrder(env, older(5, 'PLother'))
+    expect((await insertInOrder(env, older(6, 'PLcombined'))).position).toBeNull()
+    expect(subsGet).toHaveBeenCalledTimes(1)
+    expect(cacheGet.mock.calls.filter((c) => String(c[0]).startsWith('yt:order:notmanual:'))).toHaveLength(2)
+    // A refusal learnt in this run is remembered in it: the next insert is appended without asking KV again.
+    add.mockClear()
+    add.mockRejectedValueOnce(new YouTubeApiError('playlistItems.insert', 400, 'manualSortRequired', '{}'))
+    expect(await insertInOrder(env, older(7))).toEqual({ position: null, attempts: 2 })
+    add.mockClear()
+    expect(await insertInOrder(env, older(8))).toEqual({ position: null, attempts: 1 })
+    expect(add.mock.calls).toEqual([['PL', 'vNew8', 'tok']])
+    expect(cacheGet.mock.calls.filter((c) => String(c[0]).startsWith('yt:order:notmanual:'))).toHaveLength(2)
   })
 
   it('never sends a position for the combined playlist, whoever calls', async () => {

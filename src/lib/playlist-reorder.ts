@@ -55,10 +55,13 @@
  * the pass until the quota day rolls over; a per-minute rate limit ends the
  * run only. See `quotaStop` and `youtubeQuotaOut` below.
  *
- * **One at a time.** The cron pass, Move now, a fresh dry run and Retry now
- * all read and write the same state and the same playlists, so each holds a
- * short lock (`yt:order:lock`); whoever comes second skips and says so. A
- * run therefore never plans from a listing taken before another run's moves.
+ * **One at a time.** The cron pass, Move now and a fresh dry run read the same
+ * playlists, so each holds a short lock (`yt:order:lock`) while it works;
+ * whoever comes second skips and says so. A run therefore never plans from a
+ * listing taken before another run's moves. The lock is only taken once there
+ * is something to read (an enabled pass with nothing due writes nothing), it
+ * names its holder, and a run writes back only the playlists it read, so
+ * Retry now needs no lock (see `takeLock`, `saveTouched`).
  *
  * **Order of work.** Playlists never read first (reading is what the dry run
  * needs), then playlists with moves left, fewest first, so whole playlists
@@ -117,6 +120,10 @@ const DAILY_UNITS_TTL = 60 * 60 * 48
 /** Held by whoever is reading or moving (see "One at a time"). KV's shortest expiry; a run is bounded well below it. */
 const LOCK_KEY = 'yt:order:lock'
 const LOCK_TTL = 60
+/** A fresh dry run reads every playlist; it stops here and reports what it has, so it ends inside the lock's time. */
+const REPORT_DEADLINE_MS = 40_000
+/** A YouTube playlist id as a route may hand it over (the real ones are `PL` + 16 to 32 of these). */
+const PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{2,64}$/
 /** A playlist with nothing left to move is looked at again this often; so is one that stopped for a reason someone has to look at. */
 const RECHECK_SECONDS = 24 * 60 * 60
 /** A playlist that could not be read, or refused a move, is left alone this long (a refused move costs 50 units). */
@@ -187,19 +194,76 @@ async function saveOrderState(env: Env, state: OrderState): Promise<void> {
   await env.SUBS.put(ORDER_STATE_KEY, JSON.stringify(state))
 }
 
+/** A playlist's entry, as an own key only (`constructor` is no playlist). */
+const own = (state: OrderState, playlistId: string): OrderPlaylistState | undefined =>
+  Object.prototype.hasOwnProperty.call(state.playlists, playlistId) ? state.playlists[playlistId] : undefined
+
 /**
- * Take the lock, or learn that someone holds it. Get-then-put like the DJ
- * set-list refresh lock (lib/dj-sets.ts): KV has no compare-and-set, and the
- * two callers here are a 5-minute cron and one person's button.
+ * Write back what this run read, and nothing else: the playlists in `touched`
+ * and `lastRun`, over the state as it is now. Retry now changes the state
+ * without the lock, so a run must not put back the whole document it loaded
+ * when it started. `carried` = playlists whose stop this run only copied from
+ * that earlier load (the dry run): one Retry now cleared meanwhile stays cleared.
  */
-async function takeLock(env: Env): Promise<boolean> {
-  if (await env.CACHE.get(LOCK_KEY)) return false
-  await env.CACHE.put(LOCK_KEY, String(Date.now()), { expirationTtl: LOCK_TTL })
-  return true
+async function saveTouched(env: Env, state: OrderState, touched: Iterable<string>, carried?: ReadonlySet<string>): Promise<void> {
+  const latest = await loadOrderState(env)
+  for (const id of touched) {
+    const mine = own(state, id)
+    if (!mine) continue
+    const theirs = own(latest, id)
+    const cleared = !!carried?.has(id) && !!theirs && !theirs.problem
+    latest.playlists[id] = cleared ? { ...mine, problem: null, detail: null, problemAt: null, lastRun: null, checkedAt: mine.moves > 0 ? mine.checkedAt : 0 } : mine
+  }
+  if (state.lastRun !== undefined) latest.lastRun = state.lastRun
+  await saveOrderState(env, latest)
 }
 
-async function releaseLock(env: Env): Promise<void> {
-  await env.CACHE.delete(LOCK_KEY).catch(() => {})
+type Lock = { token: string; at: number }
+
+function parseLock(raw: string): Lock | null {
+  try {
+    const v = JSON.parse(raw) as Partial<Lock> | null
+    return v && typeof v.token === 'string' && typeof v.at === 'number' ? { token: v.token, at: v.at } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Take the lock, or learn that someone holds it: the holder's token, or null.
+ * Get-then-put like the DJ set-list refresh lock (lib/dj-sets.ts): KV has no
+ * compare-and-set, and the two callers here are a 5-minute cron and one
+ * person's button. The value names its holder and when it was taken, so
+ * `releaseLock` deletes only its own lock, and a lock older than its time
+ * (KV is late expiring a key now and then) is seen as lapsed, said so, and
+ * replaced; its former holder then finds out in `holdsLock`.
+ */
+async function takeLock(env: Env, log?: Logger): Promise<string | null> {
+  const raw = await env.CACHE.get(LOCK_KEY)
+  if (raw) {
+    const held = parseLock(raw)
+    // A value this code did not write counts as held until KV expires it.
+    if (!held || Date.now() - held.at < LOCK_TTL * 1000) return null
+    log?.warn('playlist_order.lock_lapsed', { heldForMs: Date.now() - held.at })
+  }
+  const token = crypto.randomUUID()
+  await env.CACHE.put(LOCK_KEY, JSON.stringify({ token, at: Date.now() } satisfies Lock), { expirationTtl: LOCK_TTL })
+  return token
+}
+
+/** Is the lock still this run's? False once it lapsed and someone else took it (or KV dropped it). */
+async function holdsLock(env: Env, token: string): Promise<boolean> {
+  const raw = await env.CACHE.get(LOCK_KEY)
+  return !!raw && parseLock(raw)?.token === token
+}
+
+/** Deletes the lock only while it is this run's: one that lapsed and was taken by another run is theirs. */
+async function releaseLock(env: Env, token: string): Promise<void> {
+  try {
+    if (await holdsLock(env, token)) await env.CACHE.delete(LOCK_KEY)
+  } catch {
+    // It expires by itself.
+  }
 }
 
 function dailyKey(nowMs = Date.now()): string {
@@ -264,7 +328,7 @@ function needOf(entries: Entry[], moves: Move[]): OrderNeed {
 /** Which playlists a pass looks at, in order (see the file comment). */
 export function orderQueue(playlists: ManagedPlaylist[], state: OrderState, now: number): ManagedPlaylist[] {
   const rank = (p: ManagedPlaylist): [number, number] | null => {
-    const s = state.playlists[p.playlistId]
+    const s = own(state, p.playlistId)
     if (!s) return [0, 0]
     // A playlist with a problem waits (a day when it stopped), timed from when the pass ran into it, not from the last dry run.
     if (s.problem) {
@@ -281,38 +345,38 @@ export function orderQueue(playlists: ManagedPlaylist[], state: OrderState, now:
     .map((x) => x.p)
 }
 
-type Confirmed = { ok: true; units: number } | { ok: false; units: number; detail: string }
+type Confirmed = { ok: true } | { ok: false; detail: string }
 
 /**
  * Read back the first move of a run: is the moved item at the index it was
  * sent to, and is the item the plan puts beside it (after it, or before it
  * when it went last) where the plan has it? Two lookups, 1 unit each, and
- * once more after `sleep` when they disagree. Throws what a lookup throws.
+ * once more after `sleep` when they disagree. Throws what a lookup throws;
+ * `spent.units` counts every lookup made, the one that threw included.
  */
 async function confirmMove(
-  a: { playlistId: string; before: Entry[]; move: Move; accessToken: string; fetcher?: typeof fetch; sleep: (ms: number) => Promise<void> },
+  a: { playlistId: string; before: Entry[]; move: Move; accessToken: string; fetcher?: typeof fetch; sleep: (ms: number) => Promise<void>; spent: { units: number } },
 ): Promise<Confirmed> {
   const expected = applyMoves(a.before.map((e) => e.id), [a.move])
   const byId = new Map(a.before.map((e) => [e.id, e]))
   const neighbourAt = a.move.position + 1 < expected.length ? a.move.position + 1 : a.move.position - 1
   const checks = [{ id: a.move.id, at: a.move.position, what: 'the moved video' }]
   if (neighbourAt >= 0) checks.push({ id: expected[neighbourAt]!, at: neighbourAt, what: neighbourAt > a.move.position ? 'the video after it' : 'the video before it' })
-  let units = 0
   let detail = ''
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await a.sleep(CONFIRM_RETRY_MS)
     detail = ''
     for (const c of checks) {
-      units += 1
+      a.spent.units += 1
       const got = await getPlaylistItemPosition(a.playlistId, byId.get(c.id)!.videoId, c.id, a.accessToken, a.fetcher)
       if (got !== c.at) {
         detail = `${c.what} should be at index ${c.at} after a move to index ${a.move.position} and is ${got === null ? 'not found' : `at index ${got}`}`
         break
       }
     }
-    if (!detail) return { ok: true, units }
+    if (!detail) return { ok: true }
   }
-  return { ok: false, units, detail }
+  return { ok: false, detail }
 }
 
 export type OrderPassResult = {
@@ -332,8 +396,10 @@ type PassOpts = { log: Logger; trigger?: string; fetcher?: typeof fetch; deadlin
 /**
  * One bounded pass. Never throws for a YouTube or D1 failure it can name; a
  * daily-quota reply ends it and is remembered for the rest of the quota day.
- * Paused (budget 0) it returns before any YouTube call. `busy` = another run
- * holds the lock; nothing was read or moved.
+ * Paused (budget 0) it returns before any YouTube call and any KV write.
+ * `busy` = another run holds the lock; nothing was read or moved. The queue is
+ * worked out before the lock is taken (reads only), so a pass with nothing due
+ * writes nothing either; the pass itself reads the state again under the lock.
  */
 export async function runOrderPass(env: Env, opts: PassOpts): Promise<OrderPassResult> {
   const settings = (await getAppSettings(env)).playlists
@@ -344,16 +410,20 @@ export async function runOrderPass(env: Env, opts: PassOpts): Promise<OrderPassR
   if (await youtubeQuotaOut(env)) return skipped('quota')
   // Not worth a listing when what is left cannot pay for one move.
   if (dailyUnits - used < UNITS_PER_MOVE + 1) return skipped('budget')
-  if (!(await takeLock(env))) return skipped('busy')
+  if (orderQueue(await managedPlaylists(env), await loadOrderState(env), nowSeconds()).length === 0) return skipped(null)
+  const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken
+  if (!accessToken) return skipped('not_connected')
+  const token = await takeLock(env, opts.log)
+  if (!token) return skipped('busy')
   try {
-    return await passLocked(env, opts, { dailyUnits, movesPerRun: settings.orderMovesPerRun, used })
+    return await passLocked(env, { ...opts, accessToken }, { dailyUnits, movesPerRun: settings.orderMovesPerRun, used, token })
   } finally {
-    await releaseLock(env)
+    await releaseLock(env, token)
   }
 }
 
 /** The pass itself; the caller holds the lock, so the state read here is the one this run writes back. */
-async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; movesPerRun: number; used: number }): Promise<OrderPassResult> {
+async function passLocked(env: Env, opts: PassOpts & { accessToken: string }, lim: { dailyUnits: number; movesPerRun: number; used: number; token: string }): Promise<OrderPassResult> {
   const log = opts.log
   const { dailyUnits, used } = lim
   const done = (stoppedBy: OrderStop, read = 0, moved = 0, units = 0): OrderPassResult => ({ ok: true, read, moved, units, stoppedBy, unitsUsedToday: used + units, dailyUnits })
@@ -361,8 +431,9 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
   const now = nowSeconds()
   const queue = orderQueue(await managedPlaylists(env), state, now)
   if (queue.length === 0) return done(null)
-  const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken
-  if (!accessToken) return done('not_connected')
+  const accessToken = opts.accessToken
+  /** Playlists this run read: the only ones it writes back (`saveTouched`). */
+  const touched = new Set<string>()
   // Without the set dates nothing can be planned. That is D1's failure, not a playlist's: nothing is read, nothing is spent.
   let keys: OrderKeys
   try {
@@ -393,7 +464,7 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
       stoppedBy = 'deadline'
       break
     }
-    const before = state.playlists[p.playlistId]
+    const before = own(state, p.playlistId)
     // A listing of the size last seen, and at least one move after it, must fit in what is left.
     if (left() < listUnits(before?.items ?? 0) + (before && before.moves === 0 ? 0 : UNITS_PER_MOVE)) {
       stoppedBy = 'budget'
@@ -410,6 +481,7 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
       units += 1
       stoppedBy = await passStop(e)
       if (stoppedBy) break
+      touched.add(p.playlistId)
       state.playlists[p.playlistId] = {
         ...p, items: before?.items ?? 0, undated: before?.undated ?? 0, moves: before?.moves ?? 0, units: before?.units ?? 0, checkedAt: now, moved: before?.moved ?? 0, lastRun: before?.lastRun ?? null,
         problem: 'unreadable',
@@ -422,6 +494,7 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
     const plan = planMoves(entries)
     const next: OrderPlaylistState = { ...p, ...needOf(entries, plan.moves), checkedAt: now, moved: before?.moved ?? 0, problem: null, detail: null, problemAt: null, lastRun: null }
     state.playlists[p.playlistId] = next
+    touched.add(p.playlistId)
     const stop = (problem: OrderProblem, detail: string) => {
       next.problem = problem
       next.detail = detail
@@ -469,9 +542,10 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
       moved += 1
       if (applied === 1) {
         // Read back before any more quota goes into this playlist.
+        const spent = { units: 0 }
         try {
-          const c = await confirmMove({ playlistId: p.playlistId, before: entries, move: m, accessToken, fetcher: opts.fetcher, sleep })
-          units += c.units
+          const c = await confirmMove({ playlistId: p.playlistId, before: entries, move: m, accessToken, fetcher: opts.fetcher, sleep, spent })
+          units += spent.units
           if (!c.ok) {
             stop('unexpected_position', c.detail)
             log.warn('playlist_order.unexpected_position', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, position: m.position, detail: c.detail })
@@ -479,7 +553,8 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
           }
           log.info('playlist_order.first_move_confirmed', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, position: m.position })
         } catch (e) {
-          units += 1
+          // Every lookup made is charged, the ones before the one that threw too (up to 3 after a second look).
+          units += spent.units
           stoppedBy = await passStop(e)
           if (stoppedBy) break
           // Not known to be wrong, only not confirmed: nothing more is moved now, and it is tried again within the hour.
@@ -502,7 +577,9 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
   state.lastRun = { at: now, trigger: opts.trigger ?? null, read, moved, units, stoppedBy }
   try {
     await chargeUnits(env, units)
-    await saveOrderState(env, state)
+    // The lock lapsed and another run took it: its reading is the newer one, so this run's is not written over it.
+    if (await holdsLock(env, lim.token)) await saveTouched(env, state, touched)
+    else log.warn('playlist_order.lock_lost', { read, moved, units })
   } catch (e) {
     // The playlists themselves hold the progress; a lost write costs a re-read.
     log.warn('playlist_order.state_write_failed', errorFields(e))
@@ -515,21 +592,28 @@ async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; m
  * is cleared (and the "positions refused" memory with it, for one the owner
  * has switched back to Manual), so the next run reads and plans it afresh and
  * its first move is read back like any other. Nothing is moved here.
+ *
+ * It takes no lock. A run holding the lock writes back only the playlists it
+ * read, over the state as it is then (`saveTouched`), so this change is not
+ * lost to one; and a lock taken and released within a second would stay held
+ * for its whole minute (KV refuses a second write to a key that soon), making
+ * the Move now that follows say a run is in progress. What is left is the
+ * moment between a run's last read of the state and its write.
+ *
+ * `not_found`: not the id of a playlist that is ordered and has been read
+ * (checked as own keys, so `constructor` is no playlist).
  */
-export async function retryOrderPlaylist(env: Env, playlistId: string): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'busy' }> {
-  if (!(await takeLock(env))) return { ok: false, reason: 'busy' }
-  try {
-    const state = await loadOrderState(env)
-    const s = state.playlists[playlistId]
-    if (!s) return { ok: false, reason: 'not_found' }
-    // Without a stop and without the last run's numbers it is an ordinary playlist with moves left (or one due a look).
-    state.playlists[playlistId] = { ...s, problem: null, detail: null, problemAt: null, lastRun: null, checkedAt: s.moves > 0 ? s.checkedAt : 0 }
-    await saveOrderState(env, state)
-    await clearNotManual(env, playlistId).catch(() => {})
-    return { ok: true }
-  } finally {
-    await releaseLock(env)
-  }
+export async function retryOrderPlaylist(env: Env, playlistId: string): Promise<{ ok: true } | { ok: false; reason: 'not_found' }> {
+  if (!PLAYLIST_ID_RE.test(playlistId)) return { ok: false, reason: 'not_found' }
+  if (!(await managedPlaylists(env)).some((p) => p.playlistId === playlistId)) return { ok: false, reason: 'not_found' }
+  const state = await loadOrderState(env)
+  const s = own(state, playlistId)
+  if (!s) return { ok: false, reason: 'not_found' }
+  // Without a stop and without the last run's numbers it is an ordinary playlist with moves left (or one due a look).
+  state.playlists[playlistId] = { ...s, problem: null, detail: null, problemAt: null, lastRun: null, checkedAt: s.moves > 0 ? s.checkedAt : 0 }
+  await saveOrderState(env, state)
+  await clearNotManual(env, playlistId).catch(() => {})
+  return { ok: true }
 }
 
 // ─── the dry run / status ───────────────────────────────────────────────────
@@ -542,6 +626,8 @@ export type OrderReport = {
   fresh: boolean
   /** A fresh reading was asked for while a run held the lock: these are the stored numbers. */
   busy: boolean
+  /** A fresh reading ran out of time before the last playlist: the ones it reached are new, the rest are the stored numbers. */
+  partial: boolean
   /** Units the fresh reading itself spent (listings only; a dry run never moves). */
   unitsSpent: number
   playlists: OrderReportRow[]
@@ -570,25 +656,39 @@ export type OrderReport = {
  * is read from YouTube now (about 35 units for 1 100 entries in 25 playlists)
  * and the stored numbers are replaced; nothing is moved either way, and it does
  * not depend on the budget. A fresh reading stops at a quota reply and reports
- * what it has. It leaves a stop and its retry time as they are, and forgets
- * "positions refused" so the next insert finds out again.
+ * what it has, and so it does after `deadlineMs` (REPORT_DEADLINE_MS, inside
+ * the lock's minute): `partial`. It leaves a stop and its retry time as they
+ * are, and forgets "positions refused" so the next insert finds out again.
  */
-export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean; fetcher?: typeof fetch; accessToken?: string }): Promise<OrderReport> {
+export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean; fetcher?: typeof fetch; accessToken?: string; deadlineMs?: number }): Promise<OrderReport> {
   const settings = (await getAppSettings(env)).playlists
   const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken ?? null
   let unitsSpent = 0
   let fresh = false
   let busy = false
+  let partial = false
   if (opts.fresh && accessToken) {
-    if (!(await takeLock(env))) busy = true
+    const token = await takeLock(env, opts.log)
+    if (!token) busy = true
     else {
       try {
+        const deadline = Date.now() + (opts.deadlineMs ?? REPORT_DEADLINE_MS)
         const state = await loadOrderState(env)
         const now = nowSeconds()
         const keys = await loadOrderKeys(env)
+        const touched = new Set<string>()
+        /** Playlists whose stop was copied from the state loaded above, not found by this reading. */
+        const carried = new Set<string>()
         fresh = true
         for (const p of await managedPlaylists(env)) {
-          const before = state.playlists[p.playlistId]
+          // Out of time: what was read is kept and the rest keep their earlier numbers, rather than outliving the lock.
+          if (Date.now() >= deadline) {
+            fresh = false
+            partial = true
+            opts.log.info('playlist_order.dry_run_partial', { read: touched.size })
+            break
+          }
+          const before = own(state, p.playlistId)
           // A reading does not clear a stop: only the pass finds out whether it still holds, at the time it would have anyway.
           const kept = before?.problem && STOPPING.includes(before.problem) ? { problem: before.problem, detail: before.detail ?? null, problemAt: before.problemAt ?? before.checkedAt } : { problem: null, detail: null, problemAt: null }
           const next: OrderPlaylistState = { ...p, items: before?.items ?? 0, undated: before?.undated ?? 0, moves: before?.moves ?? 0, units: before?.units ?? 0, checkedAt: now, moved: before?.moved ?? 0, lastRun: before?.lastRun ?? null, ...kept }
@@ -610,19 +710,22 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
             next.detail = e instanceof PlaylistNotFoundError ? 'playlist not found on YouTube' : (errorFields(e).errorMessage as string | undefined) ?? String(e)
           }
           state.playlists[p.playlistId] = next
+          touched.add(p.playlistId)
+          if (kept.problem && next.problem === kept.problem) carried.add(p.playlistId)
         }
         await chargeUnits(env, unitsSpent)
-        await saveOrderState(env, state)
+        if (await holdsLock(env, token)) await saveTouched(env, state, touched, carried)
+        else opts.log.warn('playlist_order.lock_lost', { read: touched.size, units: unitsSpent })
       } catch (e) {
         fresh = false
         opts.log.warn('playlist_order.dry_run_failed', errorFields(e))
       } finally {
-        await releaseLock(env)
+        await releaseLock(env, token)
       }
     }
   }
   const state = await loadOrderState(env)
-  const rows: OrderReportRow[] = (await managedPlaylists(env)).map((p) => state.playlists[p.playlistId] ?? { ...p, checkedAt: null })
+  const rows: OrderReportRow[] = (await managedPlaylists(env)).map((p) => own(state, p.playlistId) ?? { ...p, checkedAt: null })
   const read = rows.filter((r): r is OrderPlaylistState => r.checkedAt !== null)
   const sum = (xs: OrderPlaylistState[], f: (r: OrderPlaylistState) => number) => xs.reduce((a, r) => a + f(r), 0)
   // Moves the pass will not make are not days it will take.
@@ -632,6 +735,7 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
     connected: !!accessToken,
     fresh,
     busy,
+    partial,
     unitsSpent,
     playlists: rows,
     totals: { playlists: rows.length, unread: rows.length - read.length, items: sum(read, (r) => r.items), undated: sum(read, (r) => r.undated), moves: sum(read, (r) => r.moves), units: sum(read, (r) => r.units) },
