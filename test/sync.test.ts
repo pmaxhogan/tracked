@@ -28,7 +28,8 @@ import {
   type SubState,
 } from '../src/lib/sync'
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
-import { getQuotaOut } from '../src/lib/youtube-quota'
+import { clearQuotaOut, getQuotaOut, QUOTA_OUT_KEY } from '../src/lib/youtube-quota'
+import { quotaDayEnd } from '../src/lib/mkvid'
 import { makeLogger } from '../src/lib/log'
 import { PoolPausedError, PoolUnavailableError } from '../src/lib/pool'
 import { POOL_SETTINGS_KEY } from '../src/lib/pool-settings'
@@ -1019,7 +1020,7 @@ describe('syncOne', () => {
     expect(rows[0]!.record).toMatchObject({ status: 'failed', videoId: 'vidA1234567', failureCount: 3 })
   })
 
-  it('stops rechecking on a quota error and leaves the swap due, uncharged', async () => {
+  it('a daily-quota reply mid-swap leaves that swap due, uncharged, and the rechecks after it are read without a YouTube call', async () => {
     const env = makeEnv()
     await seedProcessed(env, {
       'https://x/tracklist/a': stale('phoneVid123'),
@@ -1033,12 +1034,21 @@ describe('syncOne', () => {
 
     const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
 
-    // /a's swap got as far as the removals, then the insert hit quota; /b was never fetched.
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(r.stats).toMatchObject({ tracklistsRechecked: 0, videosReplaced: 0, rechecksPending: 2 })
+    // /a's swap got as far as the removals, then the insert hit quota. /b's page is still read (its list is
+    // cached and verified), and its swap waits without YouTube being asked: the one insert and the two
+    // removals (artist and combined playlist) are all /a's.
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(removeVideoFromPlaylist).mock.calls.map((c) => c[1])).toEqual(['phoneVid123', 'phoneVid123'])
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 1, videosReplaced: 0, rechecksPending: 2 })
+    expect(r.quota).toEqual({ out: true, hit: true, deferred: ['https://x/tracklist/a', 'https://x/tracklist/b'] })
     const state = (await loadSubState(env, sub.slug))!
     expect(state.failureCounts).toEqual({})
     expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('phoneVid123')
+    expect(state.tracklistVideos!['https://x/tracklist/b']!.videoId).toBe('vidB1234567')
+    // Both are due again when the quota day ends, not a recheck interval later.
+    const due = (await env.DB.prepare('SELECT url, next_due_at FROM set_schedule ORDER BY url').all<{ url: string; next_due_at: number }>()).results
+    expect(due.map((d) => d.next_due_at)).toEqual([quotaDayEnd(Date.now()), quotaDayEnd(Date.now())])
     // One failed row, uncharged (no failure count), like a new set's: Activity shows it as the quota wait.
     const rows = await playlistAdditions(env)
     expect(rows).toHaveLength(1)
@@ -1963,7 +1973,7 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
     expect(state.processedTracklistUrls).toEqual(['https://x/tracklist/a'])
   })
 
-  it('a YouTube quota reply is never charged to the set and stops the run\'s further inserts', async () => {
+  it('a YouTube quota reply is never charged to the set, stops the inserts, and the videos are added later without fetching the pages again', async () => {
     const env = makeEnv()
     await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'] })
     vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
@@ -1976,17 +1986,210 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
     expect(state.failureCounts).toEqual({})
     expect(state.abandonedTracklistUrls).toEqual([])
     expect(state.processedTracklistUrls).toEqual([])
-    // One insert a run: the second set was not tried once YouTube said so.
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(4)
+    // One insert in all: the second set was not tried once YouTube said so, and the three runs after it asked nothing.
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+    // Each page was fetched once, in the first run; both sets keep the video that waits.
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('vidA1234567')
+    expect(state.tracklistVideos!['https://x/tracklist/b']!.videoId).toBe('vidA1234567')
     const rows = await playlistAdditions(env)
-    expect(rows).toHaveLength(4)
+    expect(rows).toHaveLength(1)
     for (const r of rows) {
       expect(r.record).toMatchObject({ status: 'failed', failureCount: null })
       expect(r.record.message).toMatch(/^youtube playlistItems\.insert 403 quotaExceeded: The request cannot be completed because you have exceeded your quota\.\n/)
     }
-    // The quota day rolls over: the next run adds both.
+    // The quota day rolls over: the next run adds both, from what it kept. No pool fetch is spent twice.
+    await clearQuotaOut(env)
     vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
-    await run()
+    const after = await run()
+    expect(after.quota).toBeUndefined()
+    expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual(['https://x/tracklist/a', 'https://x/tracklist/b'])
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(2)
+    expect((await playlistAdditions(env)).map((r) => r.record.status).sort()).toEqual(['added', 'duplicate', 'failed'])
+  })
+
+  describe('while the quota hold is set', () => {
+    const A = 'https://x/tracklist/a'
+    const B = 'https://x/tracklist/b'
+    const hold = (env: Env) => env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW, until: NOW + 3600 }))
+    const noYouTube = () => {
+      expect(addVideoToPlaylist).not.toHaveBeenCalled()
+      expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
+      expect(listPlaylistVideoIds).not.toHaveBeenCalled()
+      expect(findPlaylistByTitle).not.toHaveBeenCalled()
+      expect(createPlaylist).not.toHaveBeenCalled()
+      expect(getVideoMeta).not.toHaveBeenCalled()
+    }
+
+    it('a first-time set with no YouTube recording is fetched and settled as usual, with no YouTube call', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
+      await hold(env)
+      vi.mocked(parseSetYouTubeId).mockReturnValue(null)
+      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true, selection: { newUrls: [A], recheckUrls: [] } })
+      expect(fetch1001Html).toHaveBeenCalledTimes(1)
+      expect(r.stats).toMatchObject({ tracklistsProcessed: 1, tracklistsPending: 0 })
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [] })
+      expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([A])
+      expect((await playlistAdditions(env)).map((x) => x.record.status)).toEqual(['no_youtube'])
+      // The fetch was recorded like any other: the set has its next recheck.
+      expect((await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(A).first<{ next_due_at: number | null }>())!.next_due_at).toBeGreaterThan(NOW)
+      noYouTube()
+    })
+
+    it('a first-time set whose video is already in the playlist is settled as a duplicate (from the cached membership)', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
+      await env.CACHE.put('yt:plvids:PL', JSON.stringify({ videoIds: ['vidA1234567'] }))
+      await hold(env)
+      vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [] })
+      expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([A])
+      expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: 'duplicate', combinedStatus: null })
+      noYouTube()
+    })
+
+    it('a first-time set that needs an insert is deferred: no YouTube call, no failure, its video kept; the insert is made later without a second fetch', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
+      await env.CACHE.put('yt:plvids:PL', JSON.stringify({ videoIds: [] }))
+      await hold(env)
+      vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+      const run = () => syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
+      const r = await run()
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] })
+      expect(r.stats).toMatchObject({ tracklistsProcessed: 0, videoIdsAdded: 0, tracklistsPending: 1 })
+      let state = (await loadSubState(env, sub.slug))!
+      expect(state.processedTracklistUrls).toEqual([])
+      expect(state.failureCounts).toEqual({})
+      expect(state.tracklistVideos![A]!.videoId).toBe('vidA1234567')
+      expect(await playlistAdditions(env)).toEqual([])
+      noYouTube()
+      // Still held: the set is not fetched again, and nothing is asked.
+      expect((await run()).quota).toEqual({ out: true, hit: false, deferred: [A] })
+      expect(fetch1001Html).toHaveBeenCalledTimes(1)
+      noYouTube()
+      // The hold ends: the video goes in, judged again now that YouTube can be asked, and the page is not fetched again.
+      await clearQuotaOut(env)
+      const done = await run()
+      expect(done.quota).toBeUndefined()
+      expect(done.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 1, tracklistsPending: 0 })
+      expect(fetch1001Html).toHaveBeenCalledTimes(1)
+      expect(getVideoMeta).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(addVideoToPlaylist).mock.calls.map((c) => c.slice(0, 2))).toContainEqual(['PL', 'vidA1234567'])
+      state = (await loadSubState(env, sub.slug))!
+      expect(state.processedTracklistUrls).toEqual([A])
+      expect((await playlistAdditions(env)).map((x) => x.record.status)).toEqual(['added'])
+    })
+
+    it('with no cached membership nothing is called a duplicate: the video waits', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
+      await hold(env)
+      vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] })
+      noYouTube()
+    })
+
+    it('a DJ with no playlist yet gets none while it is set, and its sets without a recording are still handled', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, { artistName: 'X', discoveredTracklistUrls: [A, B], processedTracklistUrls: [] })
+      await hold(env)
+      vi.mocked(parseSetYouTubeId).mockImplementation(((html: string) => (html === '<a/>' ? 'vidA1234567' : null)) as never)
+      vi.mocked(fetch1001Html).mockImplementation((async (url: string) => ({ html: url === A ? '<a/>' : '<b/>', via: 'direct', state: { cookie: '' } })) as never)
+      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+      expect(r.playlistId).toBeUndefined()
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] })
+      const state = (await loadSubState(env, sub.slug))!
+      expect(state.playlistId).toBeUndefined()
+      expect(state.processedTracklistUrls).toEqual([B])
+      noYouTube()
+    })
+
+    it('a video kept too long is not trusted: the page is fetched again', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A], tracklistVideos: { [A]: { videoId: 'oldVid12345', checkedAt: NOW - 3 * 86400 } } })
+      vi.mocked(parseSetYouTubeId).mockReturnValue('newVid12345')
+      await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+      expect(fetch1001Html).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(addVideoToPlaylist).mock.calls.map((c) => c[1])).toEqual(['newVid12345'])
+    })
+
+    it('a kept video turned down on the second look is not inserted, and the set is settled without one', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A], tracklistVideos: { [A]: { videoId: 'vidA1234567', checkedAt: NOW - 600 } } })
+      await recordRemoved(env, { playlistId: 'PL', videoId: 'vidA1234567', slug: sub.slug, setUrl: A, reason: 'owner' })
+      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+      expect(fetch1001Html).not.toHaveBeenCalled()
+      expect(addVideoToPlaylist).not.toHaveBeenCalled()
+      expect(r.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 0 })
+      const state = (await loadSubState(env, sub.slug))!
+      expect(state.processedTracklistUrls).toEqual([A])
+      expect(state.tracklistVideos![A]!.videoId).toBeNull()
+      expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: 'no_youtube' })
+    })
+
+    it('a recheck that finds nothing to write goes on as usual; one that finds a swap leaves it waiting, due when the quota is back', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, {
+        playlistId: 'PL',
+        artistName: 'X',
+        discoveredTracklistUrls: [A, B],
+        processedTracklistUrls: [A, B],
+        tracklistVideos: { [A]: stale('sameVid1234'), [B]: stale('phoneVid123') },
+      })
+      await env.CACHE.put('yt:plvids:PL', JSON.stringify({ videoIds: ['sameVid1234', 'phoneVid123'] }))
+      await hold(env)
+      vi.mocked(parseSetYouTubeId).mockImplementation(((html: string) => (html === '<a/>' ? 'sameVid1234' : 'officialV12')) as never)
+      vi.mocked(fetch1001Html).mockImplementation((async (url: string) => ({ html: url === A ? '<a/>' : '<b/>', via: 'direct', state: { cookie: '' } })) as never)
+      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+      expect(fetch1001Html).toHaveBeenCalledTimes(2)
+      expect(r.stats).toMatchObject({ tracklistsRechecked: 2, videosReplaced: 0 })
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [B] })
+      const state = (await loadSubState(env, sub.slug))!
+      expect(state.failureCounts).toEqual({})
+      // /a is settled; /b still resolves to the old video, so its recheck redoes the swap.
+      expect(state.tracklistVideos![A]!.checkedAt).toBeGreaterThanOrEqual(NOW)
+      expect(state.tracklistVideos![B]).toMatchObject({ videoId: 'phoneVid123', checkedAt: stale('x').checkedAt })
+      const due = async (u: string) => (await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(u).first<{ next_due_at: number | null }>())!.next_due_at
+      expect(await due(B)).toBe(quotaDayEnd(Date.now()))
+      expect(await due(A)).not.toBe(quotaDayEnd(Date.now()))
+      expect(await playlistAdditions(env)).toEqual([])
+      noYouTube()
+    })
+
+    it('Resync all is not started: nothing is invalidated, nothing fetched, and the answer says why', async () => {
+      const env = makeEnv()
+      await env.DB.prepare('INSERT INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, 0, 0)').bind(sub.slug, sub.sourceUrl).run()
+      await env.SUBS.put('subs:migrated', '{}')
+      await env.SUBS.put('oauth:google', JSON.stringify({ accessToken: 'tok', refreshToken: 'r', expiresAt: NOW + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }))
+      await saveSubState(env, sub.slug, { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: [A], processedTracklistUrls: [A], tracklistVideos: { [A]: fresh('vidA1234567') } })
+      await hold(env)
+      const r = await resyncAll(env, { log: makeLogger({ task: 'test' }) })
+      expect(r).toEqual({ results: [], invalidated: [], quotaHeld: { until: NOW + 3600 } })
+      expect((await loadSubState(env, sub.slug))!.tracklistVideos![A]!.checkedAt).toBe(NOW)
+      expect(fetch1001Html).not.toHaveBeenCalled()
+      expect(crawlDjIndex).not.toHaveBeenCalled()
+      noYouTube()
+    })
+  })
+
+  it('a per-minute rate limit ends the run\'s fetches (it is over by the next tick) and sets no hold; the video is kept for the retry', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'] })
+    vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+    vi.mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'rateLimitExceeded', '{}'))
+    const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(r.quota).toEqual({ out: false, hit: true, deferred: ['https://x/tracklist/a'] })
+    expect(await getQuotaOut(env)).toBeNull()
+    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
+    await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
+    // /a from what was kept, /b fetched for the first time.
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
     expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual(['https://x/tracklist/a', 'https://x/tracklist/b'])
   })
 

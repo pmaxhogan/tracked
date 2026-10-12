@@ -4,6 +4,7 @@
 // a small concurrency pool. DJ_ACTIONS_JS is a fragment embedded inside a
 // page's own IIFE (it declares `const DJA`, nothing at top level and no
 // global); DJ_ACTIONS_CSS and FIX_DIALOG_HTML go in the page's CSS and body.
+import { QUOTA_EXPLANATION } from '../../lib/youtube-error'
 
 /** The dialog the "Fix titles" button opens: one page-level <dialog>. */
 export const FIX_DIALOG_HTML = /* html */ `
@@ -27,6 +28,14 @@ export const DJ_ACTIONS_JS = /* js */ `
   const DJA = (() => {
     const esc = TK.esc;
     const REAUTH_TEXT = TK.errText({ data: { error: 'youtube_reauth_required' } }, '');
+    // The one sentence for "out of quota" (lib/youtube-error.ts), as Activity says it.
+    const QUOTA_TEXT = ${JSON.stringify(QUOTA_EXPLANATION)};
+    // What a run that met the quota says after it: how many videos wait. '' when the quota was not in its way.
+    function quotaNote(q) {
+      const n = q && Array.isArray(q.deferred) ? q.deferred.length : 0;
+      if (!q || (!q.hit && !n)) return '';
+      return QUOTA_TEXT + (n ? ' ' + n + ' video' + (n === 1 ? ' waits' : 's wait') + ' for it.' : '');
+    }
 
     // The server cleared the stored tokens: say so, with a way back to the sign-in.
     function reauthToast() {
@@ -77,6 +86,12 @@ export const DJ_ACTIONS_JS = /* js */ `
           TK.toast((resync ? 'resync ' : 'sync ') + slug + ' stopped: ' + data.stoppedBy.reason + (needsYou ? '' : ' (the scheduler tries again by itself)') + inv + ' — ' + summary, needsYou ? 'bad' : 'warn');
           return { ok: true, stopped: true, data };
         }
+        // Out of YouTube quota is a wait, not a failure and not a plain "synced": amber, and why.
+        const quota = quotaNote(data.quota);
+        if (quota) {
+          TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ': ' + quota + ' — ' + summary, 'warn');
+          return { ok: true, quota: true, data };
+        }
         TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + summary, 'ok');
         return { ok: true, data };
       });
@@ -103,17 +118,26 @@ export const DJ_ACTIONS_JS = /* js */ `
           TK.toast('resync all: 1001tracklists fetching is paused (see the banner); nothing was fetched.', 'bad');
           return { ok: false, paused: true };
         }
+        // Not started while the quota is out: its work is replacing videos, and every page it fetched would be fetched again.
+        if (data.quotaHeld) {
+          TK.toast('resync all was not started: ' + QUOTA_TEXT + ' Nothing was invalidated or fetched; run it again after the reset.', 'warn');
+          return { ok: false, quota: true };
+        }
         const results = data.results || [];
         const sum = (f) => results.reduce((a, x) => a + (f(x.stats || {}) || 0), 0);
         const invalidated = (data.invalidated || []).reduce((a, x) => a + (x.tracklistsMarked || 0), 0);
         const pending = sum((s) => (s.rechecksPending || 0) + (s.tracklistsPending || 0));
         const failed = results.filter((x) => x.ok === false).map((x) => x.slug);
         const stopped = results.find((x) => x.stoppedBy && x.stoppedBy.reason);
+        // The quota ran out during the pass: the DJs after that had their pages read and their writes left waiting.
+        const waitingVideos = results.reduce((a, x) => a.concat(x.quota && Array.isArray(x.quota.deferred) ? x.quota.deferred : []), []);
+        const quota = quotaNote({ hit: results.some((x) => x.quota && x.quota.hit), deferred: waitingVideos });
         TK.toast('resynced ' + results.length + ' of ' + total + ' DJs this pass (invalidated ' + invalidated + ' cached videos) — rechecked ' + sum((s) => s.tracklistsRechecked) +
           ', replaced ' + sum((s) => s.videosReplaced) + ', ' + sum((s) => s.videoIdsAdded) + ' new' +
           (pending ? ' · ' + pending + ' still pending — auto-continuing every 5 min' : '') +
           (failed.length ? ' · failed: ' + failed.join(', ') : '') +
-          (stopped ? ' · stopped at ' + stopped.slug + ': ' + stopped.stoppedBy.reason : ''), !stopped ? 'ok' : !stopped.stoppedBy.level || stopped.stoppedBy.level === 'error' ? 'bad' : 'warn');
+          (stopped ? ' · stopped at ' + stopped.slug + ': ' + stopped.stoppedBy.reason : '') + (quota ? ' · ' + quota : ''),
+          stopped && (!stopped.stoppedBy.level || stopped.stoppedBy.level === 'error') ? 'bad' : stopped || quota ? 'warn' : 'ok');
         return { ok: true, data };
       });
     }

@@ -309,13 +309,28 @@ export type SetVideoPick = {
  */
 export async function pickSetVideo(
   env: Env,
-  ctx: { slug: string; setUrl: string; html: string; rawVideoId: string | null; playlistId: string | null; accessToken: string; log: Logger; fetcher?: typeof fetch },
+  ctx: {
+    slug: string
+    setUrl: string
+    /** The fetched page; null = judge from the facts an earlier fetch of this set stored (an insert that waited for quota, lib/sync.ts). */
+    html: string | null
+    rawVideoId: string | null
+    playlistId: string | null
+    accessToken: string
+    log: Logger
+    fetcher?: typeof fetch
+    /** YouTube is not asked (its quota is out): the video's cached record is used, if there is one. */
+    noLookup?: boolean
+  },
 ): Promise<SetVideoPick> {
   const { log } = ctx
   let facts: SetFacts | null = null
   try {
-    facts = extractSetFacts(ctx.slug, ctx.setUrl, ctx.html, ctx.rawVideoId)
-    await saveSetFacts(env, facts)
+    if (ctx.html === null) facts = (await loadSetFacts(env, [ctx.setUrl])).get(ctx.setUrl) ?? null
+    else {
+      facts = extractSetFacts(ctx.slug, ctx.setUrl, ctx.html, ctx.rawVideoId)
+      await saveSetFacts(env, facts)
+    }
   } catch (e) {
     log.warn('hygiene.facts_failed', { slug: ctx.slug, setUrl: ctx.setUrl, ...errorFields(e) })
   }
@@ -332,7 +347,9 @@ export async function pickSetVideo(
   }
   let meta: VideoMeta | null = null
   try {
-    meta = (await getVideoMeta(env, [videoId], ctx.accessToken, { fetcher: ctx.fetcher })).get(videoId) ?? null
+    meta = ctx.noLookup
+      ? ((await readCachedVideoMeta(env, [videoId])).get(videoId) ?? null)
+      : ((await getVideoMeta(env, [videoId], ctx.accessToken, { fetcher: ctx.fetcher })).get(videoId) ?? null)
   } catch (e) {
     log.warn('hygiene.video_meta_failed', { slug: ctx.slug, setUrl: ctx.setUrl, videoId, ...errorFields(e) })
     // m6: without a lookup the duration rules cannot run. A video the sweep

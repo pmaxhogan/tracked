@@ -266,6 +266,16 @@ export async function claimSetAttempt(env: Env, url: string, nowSec = nowSeconds
 const attemptOkSql = (max: number = MAX_SET_ATTEMPTS_PER_DAY) =>
   `(s.retry_at IS NULL OR s.retry_at <= ?) AND NOT (COALESCE(s.attempt_day, '') = ? AND s.attempts_today >= ${Math.max(1, Math.floor(max))})`
 
+/**
+ * Give back the attempt a tick claimed for a set whose page was fetched but
+ * whose playlist write waits for YouTube's quota (SyncOneResult.quota): that
+ * is a wait, not a failed attempt, so it neither counts toward the day's
+ * attempts nor waits out a backoff.
+ */
+export async function unclaimSetAttempt(env: Env, url: string): Promise<void> {
+  await dbOf(env).prepare('UPDATE set_schedule SET attempts_today = MAX(0, attempts_today - 1), retry_at = NULL WHERE url = ?').bind(url).run()
+}
+
 async function deferSetSchedule(env: Env, url: string, untilSec: number): Promise<void> {
   await dbOf(env).prepare('UPDATE set_schedule SET next_due_at = ? WHERE url = ? AND next_due_at IS NOT NULL AND next_due_at < ?').bind(untilSec, url, untilSec).run()
 }
@@ -663,8 +673,15 @@ export async function pickTickItems(
   dueOut?: Record<ScheduledClass, number>,
   /** Index catch-up items allowed this tick (default: indexCatchUpAllowance). */
   catchUpAllowance?: number,
-  /** YouTube's daily quota is used up: leave out first-time set additions (kind `set`), whose only next step is an insert. Everything else is picked as usual. */
+  /**
+   * YouTube's daily quota is used up: leave out the first-time sets whose page
+   * was already fetched and whose video only waits to be inserted (lib/sync.ts
+   * keeps it on the unprocessed row). Every other set is picked as usual: its
+   * page is fetched and everything that needs no YouTube write is done.
+   */
   quotaOut = false,
+  /** Filled with how many sets were left out for the quota: tick history's `quota_hold`. */
+  heldOut?: { quota: number },
 ): Promise<TickItem[]> {
   if (n <= 0) return []
   const db = dbOf(env)
@@ -685,12 +702,12 @@ export async function pickTickItems(
   const today = utcDay(nowSec)
   const pending = await db
     .prepare(
-      `SELECT t.slug AS slug, t.url AS url FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
+      `SELECT t.slug AS slug, t.url AS url, t.video_id AS video_id FROM tracklists t LEFT JOIN set_schedule s ON s.url = t.url
         WHERE t.processed = 0 AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions) AND ${attemptOkSql(settings.retry.maxSetAttemptsPerDay)}
         ORDER BY t.discovered_at DESC, t.position ASC LIMIT 1000`,
     )
     .bind(nowSec, today)
-    .all<{ slug: string; url: string }>()
+    .all<{ slug: string; url: string; video_id: string | null }>()
   const pend = pending.results
     .filter((r) => slugs.has(r.slug))
     .map((r) => ({ ...r, age: setAgeDays(setDateFromUrl(r.url), nowSec) }))
@@ -700,8 +717,13 @@ export async function pickTickItems(
   for (const r of pend) {
     if (seenUrl.has(r.url)) continue
     seenUrl.add(r.url)
+    // Its page is read and its video known; only the insert is left, and that waits for the quota.
+    if (quotaOut && r.video_id) {
+      if (heldOut) heldOut.quota += 1
+      continue
+    }
     const cls = firstFetchClass(settings, r.age)
-    if (!quotaOut) buckets[cls].push({ cls, kind: 'set', slug: r.slug, url: r.url })
+    buckets[cls].push({ cls, kind: 'set', slug: r.slug, url: r.url })
   }
 
   for (const v of await dueVerifications(env, nowSec, lim)) {
@@ -795,8 +817,12 @@ export async function pickTickItems(
 
 export type TickItemResult = { item: TickItem; outcome: string; stopReason?: string }
 
+/** What a deferred item says in tick history (the video is known; its playlist write waits). */
+export const QUOTA_DEFERRED_REASON = "YouTube's daily quota is used up: the page was read, the playlist write waits for the quota"
+
 export type TickResult = {
-  skipped?: 'paused' | 'backoff' | 'pool_not_configured' | 'youtube_not_connected' | 'nothing_due' | 'zero_draw'
+  /** `quota_hold`: nothing else was due, and sets whose only next step is a YouTube insert wait for the quota (not "nothing due"). */
+  skipped?: 'paused' | 'backoff' | 'pool_not_configured' | 'youtube_not_connected' | 'nothing_due' | 'quota_hold' | 'zero_draw'
   drawn: number
   items: TickItemResult[]
   /** Set when a pool refusal (budget, challenge, outage) ended the tick early. */
@@ -866,13 +892,26 @@ export async function runSchedulerTick(
   let due: Record<ScheduledClass, number> | undefined
   let items: TickItem[] = []
   let tokenInfo: Awaited<ReturnType<typeof getAccessToken>> = null
+  /**
+   * "YouTube's daily quota is out", for this tick: read from KV once, here, and
+   * set in memory the moment an item is told so. Not read again per item: KV
+   * may go on answering "not set" for a key it was just asked about, for
+   * longer than the tick spreads its items.
+   */
+  let quotaOut = false
   if (drawn <= 0) {
     log.info('scheduler.zero_draw')
     skipped = 'zero_draw'
   } else {
     due = { new: 0, verify: 0, recheck: 0, backfill: 0 } as Record<ScheduledClass, number>
-    items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec, undefined, due, undefined, !!(await getQuotaOut(env, nowSec * 1000)))
-    if (items.length === 0) {
+    quotaOut = !!(await getQuotaOut(env, nowSec * 1000))
+    const held = { quota: 0 }
+    items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec, undefined, due, undefined, quotaOut, held)
+    if (items.length === 0 && held.quota > 0) {
+      // Not "nothing due": there is work, and it waits for YouTube.
+      log.info('scheduler.quota_hold', { drawn, held: held.quota })
+      skipped = 'quota_hold'
+    } else if (items.length === 0) {
       log.info('scheduler.nothing_due', { drawn })
       skipped = 'nothing_due'
     } else {
@@ -961,15 +1000,11 @@ export async function runSchedulerTick(
         poolCode = b.poolCode ?? null
       } else {
         let res: SyncOneResult
-        if (item.kind === 'set' && (await getQuotaOut(env, nowSec * 1000))) {
-          // Quota ran out earlier in this tick: do not fetch or claim an attempt for an insert that would fail.
-          log.info('scheduler.item_quota_skipped', { slug: item.slug, setUrl: item.url })
-          results.push({ item, outcome: 'skipped', stopReason: 'YouTube quota used up until midnight Pacific time' })
-          continue
-        }
+        // Every kind runs out of quota too: syncOne then asks YouTube nothing and defers only the playlist write.
+        const quotaHeld = quotaOut
         if (item.kind === 'discovery') {
           await setDjDue(env, 'next_discovery_at', item.slug, nowSec + settings.retry.djRetryMinutes * 60, nowSec)
-          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.discovery', priority: 'new', selection: { newUrls: [], recheckUrls: [] }, settings })
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.discovery', priority: 'new', selection: { newUrls: [], recheckUrls: [] }, settings, quotaHeld })
           if (res.crawlStopReason === 'fetch_failed' && !res.stoppedBy) {
             // The crawl swallows its fetch errors (a pool refusal included):
             // end the tick rather than ask again, and retry this DJ in an hour.
@@ -980,11 +1015,11 @@ export async function runSchedulerTick(
         } else if (item.kind === 'recheck') {
           await deferSetSchedule(env, item.url, nowSec + settings.retry.claimRecheckHours * HOUR)
           await claimSetAttempt(env, item.url, nowSec, settings)
-          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [item.url] }, settings, quotaHeld })
         } else if (item.kind === 'index_catchup') {
           // At the lowest pool priority; counted toward the day's cap unless the pool refused it.
           await claimSetAttempt(env, item.url, nowSec, settings)
-          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.index_catchup', skipDjCrawl: true, priority: 'backfill', selection: { newUrls: [], recheckUrls: [item.url] }, settings })
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.index_catchup', skipDjCrawl: true, priority: 'backfill', selection: { newUrls: [], recheckUrls: [item.url] }, settings, quotaHeld })
           if (!res.stoppedBy) {
             await countIndexCatchUp(env, nowSec)
             // A set that did not fetch (deleted, 5xx) waits the cooldown, not the attempt backoff.
@@ -1015,6 +1050,7 @@ export async function runSchedulerTick(
             priority: 'verify',
             selection: { newUrls: [], recheckUrls: [item.url] },
             settings,
+            quotaHeld,
           })
           // syncOne reports ok for the run even when this one set failed: the
           // set counts as fetched only when its recheck completed.
@@ -1030,12 +1066,22 @@ export async function runSchedulerTick(
             excludeAccounts: item.excludeAccounts,
             selection: { newUrls: [], recheckUrls: [item.url] },
             settings,
+            quotaHeld,
           })
         } else {
           await claimSetAttempt(env, item.url, nowSec, settings)
-          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: PRIORITY_OF[item.cls], selection: { newUrls: [item.url], recheckUrls: [] }, settings })
+          res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.tick', skipDjCrawl: true, priority: PRIORITY_OF[item.cls], selection: { newUrls: [item.url], recheckUrls: [] }, settings, quotaHeld })
         }
-        r = { item, outcome: res.stoppedBy ? 'stopped' : res.ok ? 'ok' : 'failed', ...(res.stoppedBy ? { stopReason: res.stoppedBy.reason } : {}) }
+        // Told the day's quota is used (or it was already): the items after this one know without asking KV.
+        if (res.quota?.out) quotaOut = true
+        // A set whose write waits for quota was not a failed attempt: the claim is given back.
+        const deferred = res.quota?.deferred ?? []
+        for (const u of deferred) await unclaimSetAttempt(env, u)
+        const waits = !res.stoppedBy && 'url' in item && deferred.includes(item.url)
+        if (waits) log.info('scheduler.item_quota_deferred', { kind: item.kind, slug: item.slug, setUrl: item.url })
+        r = waits
+          ? { item, outcome: 'deferred', stopReason: QUOTA_DEFERRED_REASON }
+          : { item, outcome: res.stoppedBy ? 'stopped' : res.ok ? 'ok' : 'failed', ...(res.stoppedBy ? { stopReason: res.stoppedBy.reason } : {}) }
         retryAfter = res.stoppedBy?.retryAfterSeconds ?? null
         poolCode = res.stoppedBy?.poolCode ?? null
       }
@@ -1048,7 +1094,7 @@ export async function runSchedulerTick(
       // Anything else was a feed fetch: settle it, a failure backing the set off.
       try {
         if (r.outcome === 'stopped') await undoRenderFeed(env, item.url, feedClaim.before)
-        else await settleRenderFeed(env, item.url, r.outcome === 'ok', nowSec, log, settings.renderFeed)
+        else await settleRenderFeed(env, item.url, r.outcome === 'ok' || r.outcome === 'deferred', nowSec, log, settings.renderFeed) // deferred: the page was fetched, only a playlist write waits
       } catch (e) {
         log.warn('scheduler.render_feed_settle_failed', { setUrl: item.url, ...errorFields(e) })
       }

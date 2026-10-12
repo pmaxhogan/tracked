@@ -1,7 +1,10 @@
 // "YouTube quota is out until midnight Pacific": one KV flag, set when any
-// YouTube write gets a daily-quota reply and read by the scheduler, so a day
-// without quota does not keep spending 1001tracklists pool fetches on sets whose
-// only next step is an insert that fails again.
+// YouTube write gets a daily-quota reply. While it is set the sync (lib/sync.ts
+// syncOne) asks YouTube nothing: set pages are still fetched, cached, verified
+// and scheduled, a set with no recording still goes to mkvid, and only a
+// playlist write waits, charged nothing. A first-time set keeps its video on
+// its row, so the insert is made later without a second pool fetch, and the
+// scheduler leaves such a set out until the quota is back.
 //
 //   - Set by `noteQuotaOut(env, e)` from every place that already tests
 //     `isQuotaError` (sync inserts and rechecks, combined playlist, hygiene sweep,

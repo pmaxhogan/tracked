@@ -53,7 +53,7 @@ import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUna
 import { isPaused } from './ban-state'
 import { poolCodeOf, PoolUnavailableError, type PoolFaultCode, type PoolPriority } from './pool'
 import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
-import { recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
+import { markSetDue, recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
 import { isVerified } from './verification'
 import { artistPlaylistTitle } from './playlist-rename'
 import { dbOf } from './db'
@@ -73,6 +73,7 @@ import {
   findOrCreatePlaylist,
   getCachedPlaylistVideoIds,
   invalidatePlaylistVideoIds,
+  peekCachedPlaylistVideoIds,
 } from './playlist-cache'
 import {
   addToCombined,
@@ -90,13 +91,14 @@ import {
   type PlaylistSource,
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
-import { noteQuotaOut } from './youtube-quota'
+import { getQuotaOut, noteQuotaOut } from './youtube-quota'
+import { quotaKind } from './youtube-error'
 import { pickSetVideo, rejectionNote } from './playlist-hygiene'
 import { combinedRefuses, markInPlaylist, markOutOfPlaylist } from './playlist-blocklist'
 import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
 import { findRenamedTracklists, mergeRenamedState, retireRenamedTracklists } from './tracklist-renames'
-import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
+import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, quotaDayEnd, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
   failureRowsSince,
   flushPlaylistAdditions,
@@ -274,6 +276,16 @@ async function pausedForRun(env: Env, log: Logger, task: string): Promise<boolea
   return true
 }
 
+/**
+ * A first-time set whose page was fetched while YouTube's quota was out keeps
+ * its picked video on its (still unprocessed) row; the run that finds the
+ * quota back inserts it from there without fetching the page again. A record
+ * older than this is fetched afresh (the hold itself lasts a day at most).
+ */
+export const DEFERRED_INSERT_MAX_AGE_SECONDS = 2 * 24 * 60 * 60
+/** A recheck whose write was refused by a per-minute limit is due again this soon (a daily one: when the quota day ends). */
+const RATE_LIMIT_RECHECK_SECONDS = 15 * 60
+
 export type SyncOpts = {
   log?: Logger
   /** Cap how many *new* tracklist pages we fetch+process for this sub. */
@@ -300,6 +312,14 @@ export type SyncOpts = {
   excludeAccounts?: string[]
   /** Settings to use (the scheduler passes the ones it read); read from KV when absent. */
   settings?: PoolSettings
+  /**
+   * YouTube's daily quota is out (lib/youtube-quota.ts): the run makes no
+   * YouTube call, does everything that needs none, and defers every playlist
+   * write (see SyncOneResult.quota). The caller passes what it knows, so a
+   * reply seen a moment ago counts although KV may still answer "not set";
+   * absent = the flag is read once here.
+   */
+  quotaHeld?: boolean
   /**
    * How long each fetch may wait for a free pool browser (lib/pool.ts
    * `queueSeconds`). Absent = `manualQueueSeconds` for a `manual.*` trigger,
@@ -377,6 +397,15 @@ export type SyncOneResult = {
   }
   /** Set when a pool refusal / pause stopped the run early (charged nothing). */
   stoppedBy?: { reason: string; retryAfterSeconds: number | null; poolCode?: PoolFaultCode | null; level?: StopLevel }
+  /**
+   * Set when YouTube's quota kept this run from writing to a playlist: `out` =
+   * the daily quota is used up (the hold was set, or this run was told so),
+   * `hit` = this run itself got a quota or rate-limit reply, `deferred` = the
+   * sets whose write waits (page fetched and recorded, no failure counted;
+   * a first-time set's video is kept for the retry, a recheck is due again
+   * when the quota is back). Not an error: it continues by itself.
+   */
+  quota?: { out: boolean; hit: boolean; deferred: string[] }
   /** Why the DJ-page crawl stopped, when this run crawled. */
   crawlStopReason?: string
 }
@@ -411,13 +440,16 @@ export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results:
   log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit })
   const results: SyncOneResult[] = []
   if (await pausedForRun(env, log, 'sync')) return { results, paused: true }
+  // Read once and carried from DJ to DJ: a quota reply one DJ's run got holds the writes of the ones after it.
+  let quotaHeld = opts.quotaHeld ?? !!(await getQuotaOut(env))
   for (const sub of subs) {
     if (fetchBudget.remaining <= 0) {
       log.info('sync.fetch_budget_exhausted', { slug: sub.slug, spent: fetchBudget.spent, limit: fetchBudget.limit, subsLeft: subs.length - results.length })
       break
     }
     try {
-      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, fetchBudget })
+      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, fetchBudget, quotaHeld })
+      if (r.quota?.out) quotaHeld = true
       results.push(r)
     } catch (e) {
       log.error('sync.sub_threw', { slug: sub.slug, ...errorFields(e) })
@@ -459,12 +491,22 @@ export async function manualFetchBudget(env: Env, log?: Logger): Promise<FetchBu
  * calls ran unpaced — ~360 fetches in 11 minutes on 2026-09-10, ~40 in 16 s
  * on 2026-09-14, a 429 on every account both times. The pass stops when the
  * budget is spent; the 5-minute cron drains the remaining rechecks.
+ *
+ * Not started while YouTube's quota is out (`quotaHeld`: nothing invalidated,
+ * nothing fetched). Its point is replacing swapped recordings, which is all
+ * playlist writes: it would mark every set due and then spend its pool
+ * fetches on swaps that have to wait and be fetched again.
  */
 export async function resyncAll(
   env: Env,
   opts: SyncOpts = {},
-): Promise<{ results: SyncOneResult[]; paused?: boolean; invalidated: InvalidateResult[] }> {
+): Promise<{ results: SyncOneResult[]; paused?: boolean; invalidated: InvalidateResult[]; quotaHeld?: { until: number } }> {
   const log = opts.log ?? makeLogger({ task: 'sync.resync_all' })
+  const hold = await getQuotaOut(env)
+  if (hold) {
+    log.info('sync.resync_all.quota_held', { until: new Date(hold.until * 1000).toISOString() })
+    return { results: [], invalidated: [], quotaHeld: { until: hold.until } }
+  }
   const subs = await listSubscriptions(env)
   const invalidated: InvalidateResult[] = []
   for (const sub of subs) invalidated.push(await invalidateVideoCache(env, sub.slug, log))
@@ -574,6 +616,16 @@ export async function syncOne(
       ? await seedTracklistVideosFromAudit(env, sub.slug, new Set(state.processedTracklistUrls), log)
       : {})
   const settings = opts.settings ?? (await getPoolSettings(env))
+  /**
+   * YouTube's daily quota is out: from the hold (lib/youtube-quota.ts) or, later
+   * in the run, a reply this run got. While it is set the run asks YouTube
+   * nothing. Pages are still fetched, cached, verified and scheduled, a set
+   * with no recording goes to mkvid and one whose video is already in the
+   * playlist is settled; only a playlist write waits (`quotaDeferred`).
+   */
+  let quotaHeld = opts.quotaHeld ?? !!(await getQuotaOut(env))
+  /** Sets whose playlist write waits for quota (SyncOneResult.quota.deferred). */
+  const quotaDeferred: string[] = []
   // A button press (manual.one / manual.all / manual.resync) may wait for a
   // free pool browser; the scheduler keeps its short waits and moves on.
   const queueSeconds = opts.queueSeconds ?? (opts.trigger?.startsWith('manual.') ? settings.manualQueueSeconds : 0)
@@ -690,7 +742,8 @@ export async function syncOne(
   // newly-created playlist is by definition empty, so the list call is also
   // unnecessary — known-empty is the right baseline.
   let justCreated = false
-  if (!playlistId) {
+  // Out of quota a DJ with no playlist yet stays without one for this run: its sets that need no write are still handled.
+  if (!playlistId && !quotaHeld) {
     const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
     playlistId = r.id
     justCreated = r.justCreated
@@ -703,7 +756,14 @@ export async function syncOne(
   // re-resolve by title (or create fresh), and retry — skipping the list
   // again if recovery created a fresh playlist.
   let existingVideoIds: Set<string>
-  if (justCreated) {
+  /** False only out of quota with no cached snapshot: what is in the playlist is not known, so no video is taken to be in it. */
+  let membershipKnown = true
+  if (quotaHeld) {
+    // The snapshot or nothing: listing the playlist is a YouTube call that would be refused.
+    const snapshot = playlistId ? await peekCachedPlaylistVideoIds(env, playlistId) : null
+    membershipKnown = snapshot !== null
+    existingVideoIds = snapshot ?? new Set()
+  } else if (justCreated) {
     existingVideoIds = new Set()
     await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
   } else {
@@ -754,8 +814,10 @@ export async function syncOne(
   let stoppedBy: SyncOneResult['stoppedBy'] = crawlStoppedBy
   let setsRechecked = 0
   let videosReplaced = 0
-  /** Set when YouTube said quota exceeded: no more YouTube writes this run (isQuotaError). */
+  /** Set when YouTube answered this run with a quota or rate-limit reply (isQuotaError). */
   let quotaHit = false
+  /** A per-minute limit: no more YouTube writes, and no more fetches, this run. (The daily one sets `quotaHeld` and the run goes on without writes.) */
+  let rateLimited = false
   /** The last YouTube 401 of this run, if any (see AUTH_ERROR_RUNS). */
   let authFailure: string | null = null
   // Artist-playlist membership changed (insert or removal) → write the
@@ -779,7 +841,9 @@ export async function syncOne(
     }
     return combined.handle
   }
-  const mirrorToCombined = async (videoId: string): Promise<CombinedAdditionStatus> => {
+  const mirrorToCombined = async (videoId: string): Promise<CombinedAdditionStatus | null> => {
+    // Out of quota nothing is mirrored: the combined backfill adds it (the combined playlist is the union of the artist playlists).
+    if (quotaHeld) return null
     const handle = await openCombinedOnce()
     if (!handle) return 'unavailable'
     try {
@@ -962,7 +1026,14 @@ export async function syncOne(
       })
       break
     }
-    if (!takeFetch(opts.fetchBudget)) {
+    // The page of this set was fetched before and only its insert waited for quota: the video is on record, the page is not fetched again.
+    const kept = tracklistVideos[setUrl]
+    const waiting = kept?.videoId && kept.source !== 'mkvid' && nowSeconds() - kept.checkedAt <= DEFERRED_INSERT_MAX_AGE_SECONDS ? { videoId: kept.videoId, checkedAt: kept.checkedAt } : null
+    if (waiting && quotaHeld) {
+      quotaDeferred.push(setUrl)
+      continue
+    }
+    if (!waiting && !takeFetch(opts.fetchBudget)) {
       log.info('sync.set_budget_exhausted', { slug: sub.slug, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed })
       break
     }
@@ -971,28 +1042,50 @@ export async function syncOne(
     // (typically YouTube rejecting the insert) can still name the video.
     let foundVideoId: string | null = null
     let foundVia: string | null = null
+    // When the page was read: now, or when the earlier run fetched it.
+    const checkedAt = waiting?.checkedAt ?? nowSeconds()
     try {
-      const fetchOpts = setFetchOpts(setUrl, 'new')
-      const setFetched = await fetch1001Html(setUrl, fetchOpts)
-      viaSeen.add(setFetched.via)
-      // Write-through: the phone button then serves this list from cache.
-      const parsedPage = parsePage(setUrl, setFetched.html)
-      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new', parsedPage)
-      foundVia = setFetched.via
-      // Full-recording rule + never-re-add list (lib/playlist-hygiene.ts): a turned-down video counts as none.
-      const pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
+      let setFetched: Awaited<ReturnType<typeof fetch1001Html>> | null = null
+      let parsedPage: ScrapedTracklist | null = null
+      let pick: Awaited<ReturnType<typeof pickSetVideo>>
+      if (waiting) {
+        // Judged again from the stored page facts now that YouTube can be asked: the first look, out of quota, had the cached record at most.
+        foundVideoId = waiting.videoId
+        pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: null, rawVideoId: waiting.videoId, playlistId, accessToken, log })
+        log.info('sync.deferred_insert_resumed', { slug: sub.slug, setUrl, videoId: waiting.videoId, kept: pick.videoId !== null })
+      } else {
+        const fetchOpts = setFetchOpts(setUrl, 'new')
+        setFetched = await fetch1001Html(setUrl, fetchOpts)
+        viaSeen.add(setFetched.via)
+        // Write-through: the phone button then serves this list from cache.
+        parsedPage = parsePage(setUrl, setFetched.html)
+        await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new', parsedPage)
+        foundVia = setFetched.via
+        // Full-recording rule + never-re-add list (lib/playlist-hygiene.ts): a turned-down video counts as none.
+        pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log, noLookup: quotaHeld })
+      }
       const videoId = pick.videoId
       foundVideoId = videoId
-      await noteFetched(setUrl, setFetched, videoId, parsedPage)
+      if (setFetched) await noteFetched(setUrl, setFetched, videoId, parsedPage)
+      const via = setFetched ? { via: setFetched.via } : {}
       if (videoId) {
+        const present = membershipKnown && existingVideoIds.has(videoId)
+        if (!present && quotaHeld) {
+          // Everything but the insert is done (cached, verified, scheduled). The set stays unprocessed with its
+          // video on record, charged nothing; the run that finds the quota back inserts it without another fetch.
+          tracklistVideos[setUrl] = { videoId, checkedAt }
+          quotaDeferred.push(setUrl)
+          log.info('sync.insert_deferred_quota', { slug: sub.slug, setUrl, videoId })
+          continue
+        }
         videoIdsFound += 1
-        if (!existingVideoIds.has(videoId)) {
+        if (!present) {
           await addToArtistPlaylist(videoId, setUrl)
           log.info('sync.added', { slug: sub.slug, setUrl, videoId, playlistId })
           auditSet('added', setUrl, {
             videoId,
             videoUrl: watchUrl(videoId),
-            via: setFetched.via,
+            ...via,
             meta: { ms: Date.now() - tSet },
             combinedStatus: await mirrorToCombined(videoId),
           })
@@ -1004,11 +1097,16 @@ export async function syncOne(
           auditSet('duplicate', setUrl, {
             videoId,
             videoUrl: watchUrl(videoId),
-            via: setFetched.via,
+            ...via,
             meta: { ms: Date.now() - tSet },
             combinedStatus: await mirrorToCombined(videoId),
           })
         }
+      } else if (!setFetched) {
+        // The video that waited for quota was turned down on the second look. There is no page here to
+        // look for an audio source in: the set's first recheck queues it for mkvid, as for any set without one.
+        const note = pick.rejected ? rejectionNote(pick.rejected) : null
+        auditSet('no_youtube', setUrl, { meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
       } else {
         // Diagnostic fingerprint so we can tell at a glance whether the page
         // truly has no YT or whether the parser missed an embed shape.
@@ -1021,7 +1119,7 @@ export async function syncOne(
         auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
       }
       processed.add(setUrl)
-      tracklistVideos[setUrl] = { videoId, checkedAt: nowSeconds() }
+      tracklistVideos[setUrl] = { videoId, checkedAt }
       delete failureCounts[setUrl]
       setsProcessed += 1
     } catch (e) {
@@ -1061,8 +1159,8 @@ export async function syncOne(
         // YouTube is out of quota (or rate limiting): the whole project is, not
         // this set, so nothing is charged to it (it can never be abandoned for
         // this) and every further write this run would fail the same way. Record
-        // the row (no failure count) and stop the writes; the set stays in the
-        // window for a later tick, and the recheck window is skipped below.
+        // the row (no failure count); the set stays in the window with its video
+        // on record, so the run that inserts it does not fetch the page again.
         quotaHit = true
         await noteQuotaOut(env, e, log)
         log.warn('sync.quota_exhausted', { slug: sub.slug, setUrl, ...errorFields(e) })
@@ -1072,6 +1170,17 @@ export async function syncOne(
           ...(foundVia ? { via: foundVia } : {}),
           meta: { ms: Date.now() - tSet },
         })
+        if (foundVideoId) {
+          tracklistVideos[setUrl] = { videoId: foundVideoId, checkedAt }
+          quotaDeferred.push(setUrl)
+        }
+        // The day's quota: the rest of the window is still fetched, and whatever needs no write is settled.
+        if (quotaKind((e as YouTubeApiError).reason) === 'quota') {
+          quotaHeld = true
+          continue
+        }
+        // A per-minute limit: it is over by the next tick, so nothing more is fetched for writes that would wait.
+        rateLimited = true
         break
       }
       // Bump per-URL failure count. After ABANDON_AFTER_FAILURES, give up
@@ -1108,7 +1217,24 @@ export async function syncOne(
   const rechecksDue = opts.selection
     ? opts.selection.recheckUrls.filter((u) => processed.has(u) && !abandoned.has(u))
     : dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings, await idRowSets(env, log))
-  const rechecks = stopReason || quotaHit ? [] : rechecksDue.slice(0, maxRechecks)
+  const rechecks = stopReason || rateLimited ? [] : rechecksDue.slice(0, maxRechecks)
+  /**
+   * Out of quota a recheck's write (a first video, a swap) waits: the page was
+   * read and recorded, what the set resolved to is left as it was, so the
+   * recheck that redoes it starts from the top, and the set is made due for
+   * the time the quota is back (the fetch just scheduled it a whole interval
+   * out, up to 30 days). That recheck fetches the page again: a swap is rare,
+   * and there is nowhere to keep a second video for a processed set.
+   */
+  const deferRecheck = async (setUrl: string, videoId: string, atSec: number): Promise<void> => {
+    quotaDeferred.push(setUrl)
+    try {
+      await markSetDue(env, setUrl, atSec)
+    } catch (e) {
+      log.warn('sync.recheck_defer_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+    }
+    log.info('sync.recheck_deferred_quota', { slug: sub.slug, setUrl, videoId, dueAt: atSec })
+  }
   if (rechecksDue.length > 0) {
     log.info('sync.recheck_window', {
       slug: sub.slug,
@@ -1137,7 +1263,7 @@ export async function syncOne(
       viaSeen.add(setFetched.via)
       const parsedPage = parsePage(setUrl, setFetched.html)
       await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck', parsedPage)
-      const { videoId } = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log })
+      const { videoId } = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log, noLookup: quotaHeld })
       const checkedAt = nowSeconds()
       await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null, parsedPage)
       if (!prev || prev.videoId === undefined) {
@@ -1157,6 +1283,9 @@ export async function syncOne(
       } else if (videoId === prev.videoId) {
         tracklistVideos[setUrl] = { videoId, checkedAt }
         log.info('sync.recheck_unchanged', { slug: sub.slug, setUrl, videoId })
+      } else if (quotaHeld && !(prev.videoId === null && membershipKnown && existingVideoIds.has(videoId))) {
+        // A first video to insert, or a swap, while the quota is out.
+        await deferRecheck(setUrl, videoId, quotaDayEnd(Date.now()))
       } else if (prev.videoId === null) {
         // The set gained a recording since we last looked: same as a first-time add.
         videoIdsFound += 1
@@ -1237,10 +1366,9 @@ export async function syncOne(
         break
       }
       if (isQuotaError(e)) {
-        // Out of YouTube quota mid-swap. Nothing else will succeed today and
-        // the set is still due, so stop here without charging it a failure —
-        // a later tick redoes the swap from the top (every completed step is
-        // a no-op on retry).
+        // Out of YouTube quota mid-swap. No failure is charged to the set; a
+        // later tick redoes the swap from the top (every completed step is a
+        // no-op on retry), and the set is made due for it (see deferRecheck).
         quotaHit = true
         await noteQuotaOut(env, e, log)
         log.warn('sync.recheck_quota_exhausted', { slug: sub.slug, setUrl, ...errorFields(e) })
@@ -1251,6 +1379,14 @@ export async function syncOne(
           message: `recheck: ${e instanceof Error ? e.message : String(e)}`,
           meta: { ms: Date.now() - tSet },
         })
+        const daily = quotaKind((e as YouTubeApiError).reason) === 'quota'
+        await deferRecheck(setUrl, prev?.videoId ?? '', daily ? quotaDayEnd(Date.now()) : nowSeconds() + RATE_LIMIT_RECHECK_SECONDS)
+        // The day's quota: the other rechecks are still read, and those that need no write are settled.
+        if (daily) {
+          quotaHeld = true
+          continue
+        }
+        rateLimited = true
         break
       }
       // Same counter as first-time processing, but a set that already has a
@@ -1297,7 +1433,8 @@ export async function syncOne(
         ? `${stop.reason} (${stop.runs} runs in a row since ${new Date(stop.since * 1000).toISOString()})`
         : null
   const next: SubState = {
-    playlistId,
+    // Empty only when the quota was out before this DJ had a playlist: nothing is stored then.
+    ...(playlistId ? { playlistId } : {}),
     artistName,
     discoveredTracklistUrls: [...discovered],
     processedTracklistUrls: [...processed],
@@ -1327,7 +1464,7 @@ export async function syncOne(
   // Write the post-insert/removal video set back so the next cron tick reads
   // it from KV instead of paying YT quota to re-fetch. Only on actual change —
   // a no-op run shouldn't re-extend the TTL on a cache the API already populated.
-  if (playlistChanged) {
+  if (playlistChanged && membershipKnown) {
     await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
   }
   if (combined.handle) await flushCombined(env, combined.handle, log)
@@ -1337,7 +1474,7 @@ export async function syncOne(
     slug: sub.slug,
     ok: true,
     artistName,
-    playlistId,
+    ...(playlistId ? { playlistId } : {}),
     combinedPlaylistId: combined.handle?.playlistId,
     stats: {
       tracklistsSeen: discovered.size,
@@ -1353,6 +1490,7 @@ export async function syncOne(
     },
     ...(stoppedBy ? { stoppedBy } : {}),
     ...(crawlStopReason ? { crawlStopReason } : {}),
+    ...(quotaHeld || quotaHit ? { quota: { out: quotaHeld, hit: quotaHit, deferred: [...new Set(quotaDeferred)] } } : {}),
   }
 }
 

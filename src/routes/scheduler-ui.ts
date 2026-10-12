@@ -26,7 +26,7 @@ schedulerUiApp.get(SCHEDULER_PAGE.path, (c) => servePage(c, SCHEDULER_PAGE.html)
 schedulerUiApp.get('/api/scheduler', async (c) => {
   const now = Math.floor(Date.now() / 1000)
   const [summary, djs] = await Promise.all([schedulerSummary(c.env, now), djStarvation(c.env, now)])
-  // quotaOut: YouTube's daily quota is used up until `until` (unix s); the scheduler skips first-time set additions meanwhile.
+  // quotaOut: YouTube's daily quota is used up until `until` (unix s); playlist writes wait meanwhile, everything else goes on.
   return c.json({ summary, djs, quotaOut: await getQuotaOut(c.env) })
 })
 

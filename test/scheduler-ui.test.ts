@@ -213,6 +213,9 @@ describe('Scheduler page script', () => {
     tick(10, { items: [{ kind: 'recheck', cls: 'recheck', slug: 'dj<x>', url: SET('a') + '?q="><script>', label: `set ${XSS}`, outcome: 'failed', stopReason: XSS }, { kind: 'presave', cls: 'recheck', slug: '', url: null, label: null, outcome: 'ok', stopReason: null }], stoppedBy: XSS, error: XSS }),
     tick(9, { items: [{ kind: 'discovery', cls: 'new', slug: 'ok-dj', url: null, label: null, outcome: 'ok', stopReason: null }] }),
     tick(8, { skipped: 'nothing_due', ran: 0, due: null }),
+    // Sets wait for YouTube quota: not "nothing due", and not a problem (it continues by itself).
+    tick(7, { skipped: 'quota_hold', ran: 0, due: null }),
+    tick(6, { items: [{ kind: 'set', cls: 'new', slug: 'ok-dj', url: SET('q'), label: null, outcome: 'deferred', stopReason: "YouTube's daily quota is used up: the page was read, the playlist write waits for the quota" }] }),
   ]
   const page = { rows, total: 120, page: 1, size: 50, pageCount: 3, sort: [{ col: 'at', dir: 'desc' }], filters: [], q: '' }
 
@@ -261,6 +264,10 @@ describe('Scheduler page script', () => {
     expect(tk).toContain('+1')
     expect(tk).toContain('1.5 s')
     expect(tk).toContain('Nothing due')
+    // The quota wait is shown as information, both as a tick's skip reason and as an item's outcome.
+    expect(tk).toMatch(/<span class="badge sm info"[^>]*>Waiting for YouTube quota<\/span>/)
+    expect(tk).toMatch(/<span class="badge sm info"[^>]*>deferred 1<\/span>/)
+    expect(tk).not.toMatch(/badge sm (bad|warn)"[^>]*>(deferred|Waiting for YouTube quota)/)
     expect(els.get('ticks-pager').innerHTML).toContain('1–50 of 120')
 
     // The "Errors" chip filters on the server.

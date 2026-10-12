@@ -321,6 +321,36 @@ describe('DJs page ?focus=filter and bulk actions', () => {
     expect(els.get('resync-all').disabled).toBe(false)
     expect(els.get('djs-body').innerHTML).not.toContain('disabled')
   })
+
+  it('a sync that met the YouTube quota toasts amber with the plain sentence and how many videos wait; one that did not toasts as before', async () => {
+    const { ctx } = richStub(async (u: string) => {
+      if (u.startsWith('/ui/api/djs?')) return Response.json(djsAnswer([djRow(1)]))
+      if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-1', sourceUrl: 'https://x', addedAt: 1 }, { slug: 'dj-2', sourceUrl: 'https://x', addedAt: 2 }, { slug: 'dj-3', sourceUrl: 'https://x', addedAt: 3 }] })
+      // dj-1: two videos wait for the quota. dj-2: the hold was set but nothing needed a write. dj-3: quota not in the way.
+      if (u === '/ui/api/sync/dj-1') return Response.json({ ok: true, stats: { tracklistsProcessed: 1 }, quota: { out: true, hit: false, deferred: ['https://x/a', 'https://x/b'] } })
+      if (u === '/ui/api/sync/dj-2') return Response.json({ ok: true, stats: {}, quota: { out: true, hit: false, deferred: [] } })
+      if (u === '/ui/api/sync/dj-3') return Response.json({ ok: true, stats: {} })
+      return new Response('{}', { status: 404 })
+    }, '/ui/djs')
+    const doc = (ctx as any).document
+    const mk = (): any => ({ innerHTML: '', textContent: '', className: '', children: [] as any[], appendChild(c: any) { this.children.push(c) }, setAttribute() {} })
+    doc.createElement = mk
+    const toasts: Array<{ kind: string; text: string }> = []
+    doc.getElementById('tk-toasts').appendChild = (t: any) => { toasts.push({ kind: t.className, text: t.children[0]?.textContent ?? '' }) }
+    const handlers: Record<string, () => void> = {}
+    doc.getElementById('sync-all').addEventListener = (_t: string, fn: () => void) => { handlers.syncAll = fn }
+    const html = await (await app.request('https://tracked.example/ui/djs', {}, env())).text()
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
+    for (let i = 0; i < 15; i++) await new Promise((res) => setTimeout(res, 0))
+    handlers.syncAll!()
+    await new Promise((res) => setTimeout(res, 60))
+    const of = (slug: string) => toasts.find((t) => t.text.includes(slug))!
+    expect(of('dj-1').kind).toBe('toast warn')
+    expect(of('dj-1').text).toContain("YouTube's daily quota is used up. It resets at midnight Pacific time, and tracked will try again. 2 videos wait for it.")
+    expect(of('dj-2')).toMatchObject({ kind: 'toast ok' })
+    expect(of('dj-3')).toMatchObject({ kind: 'toast ok' })
+    expect(toasts.some((t) => t.kind === 'toast bad')).toBe(false)
+  })
 })
 
 describe('Playlists page script', () => {

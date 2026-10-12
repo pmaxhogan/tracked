@@ -133,7 +133,8 @@ export type YouTubeErrorView = {
   wait: boolean
 }
 
-const QUOTA_EXPLANATION = "YouTube's daily quota is used up. It resets at midnight Pacific time, and tracked will try again."
+/** The plain sentence for "out of quota", wherever the owner is told (Activity, the sync toasts). */
+export const QUOTA_EXPLANATION = "YouTube's daily quota is used up. It resets at midnight Pacific time, and tracked will try again."
 const RATE_LIMIT_EXPLANATION = 'YouTube is limiting requests for the moment. tracked will try again.'
 
 /** The row statuses a quota reply is still a wait for: the item is tried again (an `abandoned` one is not). */

@@ -87,7 +87,7 @@ const JS = /* js */ `
   const CLASSES = ['new', 'verify', 'recheck', 'backfill'];
   const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'index_catchup', 'dj_backfill', 'presave'];
   const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', index_catchup: 'Search index catch-up', dj_backfill: 'DJ backfill', presave: 'Pre-save recheck' };
-  const SKIP_WORDS = { paused: 'Paused (IP block)', backoff: 'Pool backoff', pool_not_configured: 'Pool not configured', youtube_not_connected: 'YouTube not connected', nothing_due: 'Nothing due', zero_draw: 'Drew zero' };
+  const SKIP_WORDS = { paused: 'Paused (IP block)', backoff: 'Pool backoff', pool_not_configured: 'Pool not configured', youtube_not_connected: 'YouTube not connected', nothing_due: 'Nothing due', quota_hold: 'Waiting for YouTube quota', zero_draw: 'Drew zero' };
   const GOOD = new Set(['ok', 'stepped', 'done', 'no_cursor']);
   const OVERDUE_BAD = 6 * 3600;
 
@@ -102,7 +102,8 @@ const JS = /* js */ `
   }
   const when = (sec) => sec ? '<span' + TK.tip(iso(sec)) + '>' + esc(TK.fmt.rel(iso(sec)) || '—') + '</span>' : '<span class="muted">never</span>';
   const took = (ms) => ms == null ? '—' : ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
-  const outCls = (o) => GOOD.has(o) ? 'ok' : o === 'stopped' || o === 'skipped' || o === 'soft_failed' ? 'warn' : 'bad';
+  // deferred = the page was read and a playlist write waits for YouTube's quota: it continues by itself, so info.
+  const outCls = (o) => GOOD.has(o) ? 'ok' : o === 'deferred' ? 'info' : o === 'stopped' || o === 'skipped' || o === 'soft_failed' ? 'warn' : 'bad';
   const badge = (cls, text, tip) => '<span class="badge sm ' + cls + '"' + TK.tip(tip) + '>' + esc(text) + '</span>';
   const OUT_TIPS = {
     ok: 'The fetch worked.',
@@ -111,6 +112,7 @@ const JS = /* js */ `
     no_cursor: 'The DJ had no backfill position to continue from.',
     stopped: 'Stopped by a refusal (paused, no healthy account, captcha, timeout); the tick ended there.',
     skipped: 'Left alone this time (for instance a cooldown).',
+    deferred: 'The page was read and recorded. Its video waits for YouTube quota and is added when the quota is back, without another page fetch for a new set.',
     soft_failed: 'Failed in a way that is retried later without counting against the item.',
     failed: 'The fetch failed and counts against the item (three strikes and it is abandoned).',
     threw: 'An unexpected error. See the tick row for the message.',
@@ -121,6 +123,7 @@ const JS = /* js */ `
     pool_not_configured: 'No tlpool is set up, so nothing can be fetched.',
     youtube_not_connected: 'YouTube is not connected, so the sync cannot add videos.',
     nothing_due: 'Nothing was due at this tick.',
+    quota_hold: 'Nothing else was due. New sets whose video is already known wait for YouTube quota and are added when it is back.',
     zero_draw: 'The random draw picked zero items (the tick size allows 0).',
   };
   const djLink = (slug, name) => slug ? '<a href="/ui/dj/' + encodeURIComponent(slug) + '">' + esc(name || slug) + '</a>' : '';
@@ -216,7 +219,7 @@ const JS = /* js */ `
     const el = $('sc-quota');
     el.hidden = !q;
     if (!q) { el.innerHTML = ''; return; }
-    el.innerHTML = '<span class="badge warn"' + TK.tip('YouTube said the daily quota is used up. First-time set additions are paused until it resets; everything that does not add a video goes on.') + '>YouTube quota used up</span> New sets are not fetched until it resets at midnight Pacific time (' + esc(TK.fmt.time(iso(q.until)) || '') + '). Rechecks, verification, discovery and pre-save checks go on.<button type="button" class="btn" id="sc-quota-clear"' + TK.tip('Use this when you raised the quota or it reset early. It is set again if YouTube still refuses.') + '>Clear now</button>';
+    el.innerHTML = '<span class="badge warn"' + TK.tip('YouTube said the daily quota is used up. Videos are added to the playlists when it resets; set pages are still read, and everything that does not write to YouTube goes on.') + '>YouTube quota used up</span> New sets are not fetched until it resets at midnight Pacific time (' + esc(TK.fmt.time(iso(q.until)) || '') + '). Rechecks, verification, discovery and pre-save checks go on.<button type="button" class="btn" id="sc-quota-clear"' + TK.tip('Use this when you raised the quota or it reset early. It is set again if YouTube still refuses.') + '>Clear now</button>';
     $('sc-quota-clear').addEventListener('click', (ev) => TK.busy(ev.currentTarget, 'Clearing…', async () => {
       const res = await TK.api.post('/ui/api/scheduler/quota-clear', {});
       TK.toast(res.ok ? 'Quota flag cleared.' : TK.errText(res, 'Could not clear it (' + res.status + ')'), res.ok ? 'ok' : 'bad');
@@ -249,7 +252,7 @@ const JS = /* js */ `
   function resultHtml(t) {
     const items = Array.isArray(t.items) ? t.items : [];
     let res = '';
-    if (t.skipped) res += badge('neutral', SKIP_WORDS[t.skipped] || t.skipped, SKIP_TIPS[t.skipped] || 'The tick did not run.');
+    if (t.skipped) res += badge(t.skipped === 'quota_hold' ? 'info' : 'neutral', SKIP_WORDS[t.skipped] || t.skipped, SKIP_TIPS[t.skipped] || 'The tick did not run.');
     if (t.stoppedBy) res += badge('warn', 'stopped', 'The tick ended early because of this refusal; the items left are drawn again later.') + ' <span>' + esc(t.stoppedBy) + '</span>';
     if (t.error) res += '<span class="error">' + esc(t.error) + '</span>';
     if (!res) res = items.length ? badge('ok', 'done', 'Every drawn item ran.') : '<span class="muted">—</span>';

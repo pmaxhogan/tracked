@@ -241,7 +241,7 @@ describe('runSchedulerTick', () => {
     expect(fetch1001Html).toHaveBeenCalledTimes(1)
   })
 
-  it('a daily-quota reply stands the first-time set additions down until midnight Pacific, without costing a set an attempt or stopping the tick; clearing it resumes', async () => {
+  it('a daily-quota reply holds the inserts until midnight Pacific without costing a set an attempt or stopping the tick; the pages are read once, and clearing it adds the videos', async () => {
     const env = makeEnv()
     await subscribe(env, 'a')
     await quietDjs(env, 'a')
@@ -250,26 +250,74 @@ describe('runSchedulerTick', () => {
     mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
     mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'))
     const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
-    // The first set got the reply; the other two were not fetched, claimed or failed.
-    expect(r.items.map((i) => i.outcome)).toEqual(['ok', 'skipped', 'skipped'])
+    // The first set got the reply. The other two had their pages read too (cached, verified, scheduled) and
+    // their insert left waiting, without YouTube being asked again.
+    expect(r.items.map((i) => i.outcome)).toEqual(['deferred', 'deferred', 'deferred'])
+    expect(r.items[1]!.stopReason).toMatch(/daily quota is used up/)
     expect(r.stoppedBy).toBeUndefined()
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(fetch1001Html).toHaveBeenCalledTimes(3)
     expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
     const flag = await getQuotaOut(env, NOW * 1000)
     expect(flag!.until).toBe(quotaDayEnd(NOW * 1000))
-    const attempts = (await env.DB.prepare('SELECT url, attempts_today FROM set_schedule').all<{ url: string; attempts_today: number }>()).results
-    expect(attempts.map((a) => [a.url, a.attempts_today])).toEqual([[urls[0], 1]])
+    // No attempt is counted and no backoff runs: the wait is YouTube's, not the set's.
+    const attempts = (await env.DB.prepare('SELECT url, attempts_today, retry_at FROM set_schedule ORDER BY url').all<{ url: string; attempts_today: number; retry_at: number | null }>()).results
+    expect(attempts.map((a) => [a.url, a.attempts_today, a.retry_at])).toEqual(urls.map((u) => [u, 0, null]))
     const state = (await loadSubState(env, 'a'))!
     expect(state.failureCounts).toEqual({})
     expect(state.abandonedTracklistUrls).toEqual([])
-    // While it holds, later ticks do not even pick those sets: nothing is fetched.
-    expect(await runSchedulerTick(env, { random: always(0.99), now: NOW + 600 })).toMatchObject({ skipped: 'nothing_due' })
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    // The owner clears it (the quota was raised): the sets are picked again.
+    expect(state.processedTracklistUrls).toEqual([])
+    // While it holds, later ticks leave those sets alone, and say that they wait rather than "nothing due".
+    expect(await runSchedulerTick(env, { random: always(0.99), now: NOW + 600 })).toMatchObject({ skipped: 'quota_hold', items: [] })
+    expect(fetch1001Html).toHaveBeenCalledTimes(3)
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+    // The owner clears it (the quota was raised): the videos go in from what was kept, with no page fetched again.
     await clearQuotaOut(env)
     mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
     const again = await runSchedulerTick(env, { random: always(0.99), now: NOW + 1200 })
-    expect(again.items.filter((i) => i.outcome === 'ok').length).toBeGreaterThanOrEqual(2)
+    expect(again.items.map((i) => i.outcome)).toEqual(['ok', 'ok', 'ok'])
+    expect(fetch1001Html).toHaveBeenCalledTimes(3)
+    expect((await loadSubState(env, 'a'))!.processedTracklistUrls.sort()).toEqual([...urls].sort())
+  })
+
+  it('the quota reply is carried in memory for the rest of the tick: KV still answering "not set" does not send the next sets into the wall', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const urls = [1, 2, 3].map((i) => setUrl(`m${i}`, 1))
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: urls, processedTracklistUrls: [] })
+    // A key read as null is served as null for a while, whatever was written since.
+    const get = env.CACHE.get.bind(env.CACHE)
+    env.CACHE.get = (async (key: string, ...rest: unknown[]) => (key === QUOTA_OUT_KEY ? null : (get as (...a: unknown[]) => Promise<unknown>)(key, ...rest))) as typeof env.CACHE.get
+    mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+    mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'))
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(r.items.map((i) => i.outcome)).toEqual(['deferred', 'deferred', 'deferred'])
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+  })
+
+  it('while the hold is set a first-time set with no recording is still fetched and settled, and a recheck that finds a swap is deferred, uncharged', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const fresh = setUrl('nv1', 1)
+    const old = setUrl('sw1', 3)
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [fresh, old], processedTracklistUrls: [old], tracklistVideos: { [old]: { videoId: 'phoneVid123', checkedAt: NOW - 10 * D } } })
+    await markSetDue(env, old, NOW - 60)
+    await env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW, until: quotaDayEnd(NOW * 1000) }))
+    mocked(parseSetYouTubeId).mockImplementation((html: string) => (html === '<old/>' ? 'officialV12' : null))
+    mocked(fetch1001Html).mockImplementation(async (url: string) => ({ html: url === old ? '<old/>' : '<set/>', via: 'pool', state: { cookie: '' }, accountId: 'acct-9', fetchedAt: new Date().toISOString() }))
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(r.skipped).toBeUndefined()
+    expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([['set', 'ok'], ['recheck', 'deferred']])
+    expect(addVideoToPlaylist).not.toHaveBeenCalled()
+    expect(listPlaylistVideoIds).not.toHaveBeenCalled()
+    const state = (await loadSubState(env, 'a'))!
+    expect(state.processedTracklistUrls.sort()).toEqual([fresh, old].sort())
+    expect(state.tracklistVideos![old]!.videoId).toBe('phoneVid123')
+    expect(state.failureCounts).toEqual({})
+    // The recheck is due again when the quota day ends, with its attempt given back.
+    const row = (await env.DB.prepare('SELECT next_due_at, attempts_today, retry_at FROM set_schedule WHERE url = ?').bind(old).first<{ next_due_at: number; attempts_today: number; retry_at: number | null }>())!
+    expect(row).toEqual({ next_due_at: quotaDayEnd(NOW * 1000), attempts_today: 0, retry_at: null })
   })
 
   it('work that adds no video goes on while quota is out: a discovery item still runs', async () => {
