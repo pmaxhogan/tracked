@@ -312,7 +312,7 @@ describe('runSchedulerTick', () => {
     expect((await loadSubState(env, 'a'))!.processedTracklistUrls).toEqual([url])
   })
 
-  it('while the hold is set a first-time set with no recording is still fetched and settled, and a recheck that finds a swap is deferred, uncharged', async () => {
+  it('while the hold is set a first-time set with no recording is still fetched and settled, and a recheck that finds a swap is deferred and held out', async () => {
     const env = makeEnv()
     await subscribe(env, 'a')
     await quietDjs(env, 'a')
@@ -332,9 +332,102 @@ describe('runSchedulerTick', () => {
     expect(state.processedTracklistUrls.sort()).toEqual([fresh, old].sort())
     expect(state.tracklistVideos![old]!.videoId).toBe('phoneVid123')
     expect(state.failureCounts).toEqual({})
-    // The recheck is due again when the quota day ends, with its attempt given back.
+    // The recheck is due again when the quota day ends and is not picked before it. Its attempt stays counted:
+    // its retry is another page fetch, so it keeps the day's cap as its backstop.
     const row = (await env.DB.prepare('SELECT next_due_at, attempts_today, retry_at FROM set_schedule WHERE url = ?').bind(old).first<{ next_due_at: number; attempts_today: number; retry_at: number | null }>())!
-    expect(row).toEqual({ next_due_at: quotaDayEnd(NOW * 1000), attempts_today: 0, retry_at: null })
+    expect(row).toEqual({ next_due_at: quotaDayEnd(NOW * 1000), attempts_today: 1, retry_at: quotaDayEnd(NOW * 1000) })
+  })
+
+  describe('a deferred write never costs more page views than the attempt cap', () => {
+    /** How often each set page was fetched. */
+    const fetchesBy = () => {
+      const by = new Map<string, number>()
+      for (const c of mocked(fetch1001Html).mock.calls) by.set(String(c[0]), (by.get(String(c[0])) ?? 0) + 1)
+      return by
+    }
+    /** `n` ticks, 5 minutes apart, each drawing the most it can. */
+    const ticks = async (env: Env, n: number) => {
+      for (let i = 0; i < n; i++) await runSchedulerTick(env, { random: always(0.99), now: NOW + i * 300 })
+    }
+    const holdFor = (env: Env, seconds: number) => env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW, until: NOW + seconds }))
+
+    it('a set marked due by hand (checked_at = 0) whose page now has a video is fetched once under the hold, not on every tick (was 40 in 40 ticks)', async () => {
+      const env = makeEnv()
+      await subscribe(env, 'a')
+      await quietDjs(env, 'a')
+      const url = setUrl('hm1', 3)
+      // As a sweep / owner removal / dead video / Invalidate & resync leaves it: processed, no video, due by hand.
+      await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [url], processedTracklistUrls: [url], tracklistVideos: { [url]: { videoId: null, checkedAt: 0 } } })
+      await holdFor(env, 2 * D)
+      mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+      await ticks(env, 40)
+      expect(addVideoToPlaylist).not.toHaveBeenCalled()
+      // One fetch, then held out until the quota day ends; never more than the day's attempts whatever the clock.
+      expect(fetchesBy().get(url)).toBeLessThanOrEqual(MAX_SET_ATTEMPTS_PER_DAY)
+      const row = (await env.DB.prepare('SELECT attempts_today, retry_at FROM set_schedule WHERE url = ?').bind(url).first<{ attempts_today: number; retry_at: number }>())!
+      expect(row.attempts_today).toBe(fetchesBy().get(url))
+      expect(row.retry_at).toBeGreaterThan(NOW)
+      // The first of them alone, in the same quota day: exactly one.
+      if (NOW + 40 * 300 < quotaDayEnd(NOW * 1000)) expect(fetchesBy().get(url)).toBe(1)
+      const state = (await loadSubState(env, 'a'))!
+      expect(state.failureCounts).toEqual({})
+      expect(state.tracklistVideos![url]).toMatchObject({ videoId: null, checkedAt: 0 })
+    })
+
+    it('the same set under a per-minute limit that does not go away: at most the day\'s attempts, not 4 an hour', async () => {
+      const env = makeEnv()
+      await subscribe(env, 'a')
+      await quietDjs(env, 'a')
+      const url = setUrl('hm2', 3)
+      await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [url], processedTracklistUrls: [url], tracklistVideos: { [url]: { videoId: null, checkedAt: 0 } } })
+      mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+      mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'rateLimitExceeded', '{}'))
+      await ticks(env, 40)
+      expect(await getQuotaOut(env, NOW * 1000)).toBeNull()
+      expect(fetchesBy().get(url)).toBeLessThanOrEqual(MAX_SET_ATTEMPTS_PER_DAY)
+      expect(mocked(addVideoToPlaylist).mock.calls.length).toBeLessThanOrEqual(MAX_SET_ATTEMPTS_PER_DAY)
+      expect((await loadSubState(env, 'a'))!.failureCounts).toEqual({})
+    })
+
+    it('under the hold, over many ticks, no first-time set is fetched more than once and no recheck more than its daily attempts', async () => {
+      const env = makeEnv()
+      await subscribe(env, 'a')
+      await quietDjs(env, 'a')
+      const firstVideo = [1, 2, 3].map((i) => setUrl(`fv${i}`, 1))
+      const firstNone = [1, 2].map((i) => setUrl(`fn${i}`, 1))
+      const gained = setUrl('rg', 3)
+      const swapped = setUrl('rs', 3)
+      const same = setUrl('rq', 3)
+      const rechecks = [gained, swapped, same]
+      await saveSubState(env, 'a', {
+        playlistId: 'PL',
+        artistName: 'A',
+        discoveredTracklistUrls: [...firstVideo, ...firstNone, ...rechecks],
+        processedTracklistUrls: rechecks,
+        // All three marked due by hand, the case that slipped through.
+        tracklistVideos: { [gained]: { videoId: null, checkedAt: 0 }, [swapped]: { videoId: 'phoneVid123', checkedAt: 0 }, [same]: { videoId: 'sameVid1234', checkedAt: 0 } },
+      })
+      await holdFor(env, 2 * D)
+      const videoOf = (url: string) => (firstNone.includes(url) ? null : url === same ? 'sameVid1234' : url === swapped ? 'officialV12' : `v${url.split('/')[4]!.padEnd(10, '0')}`)
+      mocked(fetch1001Html).mockImplementation(async (url: string) => ({ html: url, via: 'pool', state: { cookie: '' }, accountId: 'acct-9', fetchedAt: new Date().toISOString() }))
+      mocked(parseSetYouTubeId).mockImplementation((html: string) => videoOf(html))
+      await ticks(env, 40)
+      const by = fetchesBy()
+      for (const u of [...firstVideo, ...firstNone]) expect([u, by.get(u)]).toEqual([u, 1])
+      for (const u of rechecks) expect(by.get(u) ?? 0).toBeLessThanOrEqual(MAX_SET_ATTEMPTS_PER_DAY)
+      expect(by.get(same)).toBe(1)
+      // 8 sets, 8 to 10 page views in 40 ticks; without the hold-out it was one per recheck per tick.
+      expect(mocked(fetch1001Html).mock.calls.length).toBeLessThanOrEqual(5 + 3 * MAX_SET_ATTEMPTS_PER_DAY)
+      expect(addVideoToPlaylist).not.toHaveBeenCalled()
+      expect(listPlaylistVideoIds).not.toHaveBeenCalled()
+      const state = (await loadSubState(env, 'a'))!
+      expect(state.failureCounts).toEqual({})
+      expect(state.processedTracklistUrls.sort()).toEqual([...firstNone, ...rechecks].sort())
+      // Only the first-time deferrals had their attempt given back.
+      const attempts = new Map((await env.DB.prepare('SELECT url, attempts_today FROM set_schedule').all<{ url: string; attempts_today: number }>()).results.map((r) => [r.url, r.attempts_today]))
+      for (const u of firstVideo) expect(attempts.get(u)).toBe(0)
+      for (const u of [gained, swapped]) expect(attempts.get(u)).toBe(by.get(u))
+    })
   })
 
   it('work that adds no video goes on while quota is out: a discovery item still runs', async () => {

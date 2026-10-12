@@ -1020,7 +1020,7 @@ describe('syncOne', () => {
     expect(rows[0]!.record).toMatchObject({ status: 'failed', videoId: 'vidA1234567', failureCount: 3 })
   })
 
-  it('a daily-quota reply mid-swap leaves that swap due, uncharged, and the rechecks after it are read without a YouTube call', async () => {
+  it('a daily-quota reply mid-swap leaves that swap due, uncharged and held out until the quota is back; a manual run fetches no further recheck', async () => {
     const env = makeEnv()
     await seedProcessed(env, {
       'https://x/tracklist/a': stale('phoneVid123'),
@@ -1034,21 +1034,18 @@ describe('syncOne', () => {
 
     const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
 
-    // /a's swap got as far as the removals, then the insert hit quota. /b's page is still read (its list is
-    // cached and verified), and its swap waits without YouTube being asked: the one insert and the two
-    // removals (artist and combined playlist) are all /a's.
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    // /a's swap got as far as the removals, then the insert hit quota; /b was never fetched (a button press
+    // does not spend a fetch on a recheck that could only be left waiting).
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
     expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(removeVideoFromPlaylist).mock.calls.map((c) => c[1])).toEqual(['phoneVid123', 'phoneVid123'])
-    expect(r.stats).toMatchObject({ tracklistsRechecked: 1, videosReplaced: 0, rechecksPending: 2 })
-    expect(r.quota).toEqual({ out: true, hit: true, deferred: ['https://x/tracklist/a', 'https://x/tracklist/b'] })
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 0, videosReplaced: 0, rechecksPending: 2 })
+    expect(r.quota).toEqual({ out: true, hit: true, deferred: ['https://x/tracklist/a'] })
     const state = (await loadSubState(env, sub.slug))!
     expect(state.failureCounts).toEqual({})
     expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('phoneVid123')
-    expect(state.tracklistVideos!['https://x/tracklist/b']!.videoId).toBe('vidB1234567')
-    // Both are due again when the quota day ends, not a recheck interval later.
-    const due = (await env.DB.prepare('SELECT url, next_due_at FROM set_schedule ORDER BY url').all<{ url: string; next_due_at: number }>()).results
-    expect(due.map((d) => d.next_due_at)).toEqual([quotaDayEnd(Date.now()), quotaDayEnd(Date.now())])
+    // Due again when the quota day ends, not a recheck interval later, and not picked before that.
+    const due = (await env.DB.prepare('SELECT url, next_due_at, retry_at FROM set_schedule ORDER BY url').all<{ url: string; next_due_at: number; retry_at: number }>()).results
+    expect(due).toEqual([{ url: 'https://x/tracklist/a', next_due_at: quotaDayEnd(Date.now()), retry_at: quotaDayEnd(Date.now()) }])
     // One failed row, uncharged (no failure count), like a new set's: Activity shows it as the quota wait.
     const rows = await playlistAdditions(env)
     expect(rows).toHaveLength(1)
@@ -2126,6 +2123,8 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
       expect(fetch1001Html).not.toHaveBeenCalled()
       expect(addVideoToPlaylist).not.toHaveBeenCalled()
       expect(r.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 0 })
+      // No page was at hand to look for an audio source in: the set is due now, so its first recheck queues it for mkvid.
+      expect((await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(A).first<{ next_due_at: number }>())!.next_due_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
       const state = (await loadSubState(env, sub.slug))!
       expect(state.processedTracklistUrls).toEqual([A])
       expect(state.tracklistVideos![A]!.videoId).toBeNull()
@@ -2145,7 +2144,8 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
       await hold(env)
       vi.mocked(parseSetYouTubeId).mockImplementation(((html: string) => (html === '<a/>' ? 'sameVid1234' : 'officialV12')) as never)
       vi.mocked(fetch1001Html).mockImplementation((async (url: string) => ({ html: url === A ? '<a/>' : '<b/>', via: 'direct', state: { cookie: '' } })) as never)
-      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
+      // As the scheduler hands rechecks over: named, one run.
+      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true, selection: { newUrls: [], recheckUrls: [A, B] } })
       expect(fetch1001Html).toHaveBeenCalledTimes(2)
       expect(r.stats).toMatchObject({ tracklistsRechecked: 2, videosReplaced: 0 })
       expect(r.quota).toEqual({ out: true, hit: false, deferred: [B] })
@@ -2154,10 +2154,30 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
       // /a is settled; /b still resolves to the old video, so its recheck redoes the swap.
       expect(state.tracklistVideos![A]!.checkedAt).toBeGreaterThanOrEqual(NOW)
       expect(state.tracklistVideos![B]).toMatchObject({ videoId: 'phoneVid123', checkedAt: stale('x').checkedAt })
-      const due = async (u: string) => (await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(u).first<{ next_due_at: number | null }>())!.next_due_at
-      expect(await due(B)).toBe(quotaDayEnd(Date.now()))
-      expect(await due(A)).not.toBe(quotaDayEnd(Date.now()))
+      const sched = async (u: string) => (await env.DB.prepare('SELECT next_due_at, retry_at FROM set_schedule WHERE url = ?').bind(u).first<{ next_due_at: number | null; retry_at: number | null }>())!
+      // /b is held out until the quota is back (retry_at, which also holds out a set marked due by hand); /a is not.
+      expect(await sched(B)).toEqual({ next_due_at: quotaDayEnd(Date.now()), retry_at: quotaDayEnd(Date.now()) })
+      expect((await sched(A)).retry_at).toBeNull()
       expect(await playlistAdditions(env)).toEqual([])
+      noYouTube()
+    })
+
+    it('a manual run makes no rechecks at all: a button press does not spend its fetches on what could only be left waiting', async () => {
+      const env = makeEnv()
+      await saveSubState(env, sub.slug, {
+        playlistId: 'PL',
+        artistName: 'X',
+        discoveredTracklistUrls: [A, B],
+        processedTracklistUrls: [A, B],
+        tracklistVideos: { [A]: { videoId: null, checkedAt: 0 }, [B]: stale('phoneVid123') },
+      })
+      await hold(env)
+      vi.mocked(parseSetYouTubeId).mockReturnValue('officialV12')
+      const budget = newFetchBudget(10)
+      const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true, fetchBudget: budget })
+      expect(fetch1001Html).not.toHaveBeenCalled()
+      expect(budget.spent).toBe(0)
+      expect(r.stats).toMatchObject({ tracklistsRechecked: 0, rechecksPending: 2 })
       noYouTube()
     })
 

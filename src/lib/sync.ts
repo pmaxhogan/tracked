@@ -53,7 +53,7 @@ import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUna
 import { isPaused } from './ban-state'
 import { poolCodeOf, PoolUnavailableError, type PoolFaultCode, type PoolPriority } from './pool'
 import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
-import { markSetDue, recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
+import { holdSetOut, markSetDue, recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
 import { isVerified } from './verification'
 import { artistPlaylistTitle } from './playlist-rename'
 import { dbOf } from './db'
@@ -1107,6 +1107,8 @@ export async function syncOne(
         // look for an audio source in: the set's first recheck queues it for mkvid, as for any set without one.
         const note = pick.rejected ? rejectionNote(pick.rejected) : null
         auditSet('no_youtube', setUrl, { meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
+        // Its schedule was written when the page still counted as having a video (a recheck up to 30 days out): due now instead.
+        await markSetDue(env, setUrl).catch((e) => log.warn('sync.mark_due_failed', { slug: sub.slug, setUrl, ...errorFields(e) }))
       } else {
         // Diagnostic fingerprint so we can tell at a glance whether the page
         // truly has no YT or whether the parser missed an embed shape.
@@ -1217,19 +1219,28 @@ export async function syncOne(
   const rechecksDue = opts.selection
     ? opts.selection.recheckUrls.filter((u) => processed.has(u) && !abandoned.has(u))
     : dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings, await idRowSets(env, log))
-  const rechecks = stopReason || rateLimited ? [] : rechecksDue.slice(0, maxRechecks)
+  /**
+   * A manual run (no selection) makes no rechecks while the quota is out: a
+   * recheck that finds something can only be deferred and fetched again, and a
+   * button press has a handful of fetches to spend. The scheduler still hands
+   * them over one at a time, each held to its daily attempts.
+   */
+  const noManualRechecks = () => quotaHeld && !opts.selection
+  const rechecks = stopReason || rateLimited || noManualRechecks() ? [] : rechecksDue.slice(0, maxRechecks)
   /**
    * Out of quota a recheck's write (a first video, a swap) waits: the page was
    * read and recorded, what the set resolved to is left as it was, so the
-   * recheck that redoes it starts from the top, and the set is made due for
-   * the time the quota is back (the fetch just scheduled it a whole interval
-   * out, up to 30 days). That recheck fetches the page again: a swap is rare,
-   * and there is nowhere to keep a second video for a processed set.
+   * recheck that redoes it starts from the top, and the set is due again when
+   * the quota is back (the fetch just scheduled it a whole interval out, up to
+   * 30 days) and held out until then (`holdSetOut`: a set marked due by hand
+   * would otherwise be fetched on every tick). That recheck fetches the page
+   * again: a swap is rare, and there is nowhere to keep a second video for a
+   * processed set. Its attempt is not given back.
    */
   const deferRecheck = async (setUrl: string, videoId: string, atSec: number): Promise<void> => {
     quotaDeferred.push(setUrl)
     try {
-      await markSetDue(env, setUrl, atSec)
+      await holdSetOut(env, setUrl, atSec)
     } catch (e) {
       log.warn('sync.recheck_defer_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
     }
@@ -1243,6 +1254,8 @@ export async function syncOne(
     })
   }
   for (const setUrl of rechecks) {
+    // The day's quota ran out during this manual run: the rechecks left are not fetched (see noManualRechecks).
+    if (noManualRechecks()) break
     if (Date.now() >= deadline) {
       log.warn('sync.deadline_hit_during_recheck_loop', {
         slug: sub.slug,

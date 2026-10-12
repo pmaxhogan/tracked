@@ -100,13 +100,13 @@ export async function computeStats(env: Env, nowSec = Math.floor(Date.now() / 10
     ['djsAdded', db.prepare(`SELECT ${day('added_at')} AS d, COUNT(*) AS n FROM subscriptions GROUP BY d ORDER BY d`)],
     ['sets', db.prepare(
       `SELECT COUNT(DISTINCT url) AS total, COUNT(DISTINCT CASE WHEN processed = 1 THEN url END) AS processed,
-              COUNT(DISTINCT CASE WHEN video_id IS NOT NULL THEN url END) AS with_video,
-              COUNT(DISTINCT CASE WHEN video_source = 'mkvid' THEN url END) AS mkvid,
-              COUNT(DISTINCT CASE WHEN video_source = '1001tl' THEN url END) AS tl,
+              COUNT(DISTINCT CASE WHEN processed = 1 AND video_id IS NOT NULL THEN url END) AS with_video,
+              COUNT(DISTINCT CASE WHEN processed = 1 AND video_source = 'mkvid' THEN url END) AS mkvid,
+              COUNT(DISTINCT CASE WHEN processed = 1 AND video_source = '1001tl' THEN url END) AS tl,
               COUNT(DISTINCT CASE WHEN abandoned = 1 THEN url END) AS abandoned
          FROM tracklists`)],
     ['perDj', db.prepare(
-      `SELECT t.slug AS slug, MAX(s.artist_name) AS name, COUNT(DISTINCT t.url) AS sets, COUNT(DISTINCT CASE WHEN t.video_id IS NOT NULL THEN t.url END) AS wv
+      `SELECT t.slug AS slug, MAX(s.artist_name) AS name, COUNT(DISTINCT t.url) AS sets, COUNT(DISTINCT CASE WHEN t.processed = 1 AND t.video_id IS NOT NULL THEN t.url END) AS wv
          FROM tracklists t LEFT JOIN sub_sync s ON s.slug = t.slug GROUP BY t.slug`)],
     ['setYears', db.prepare("SELECT substr(set_date, 1, 4) AS k, COUNT(*) AS n FROM set_schedule WHERE set_date IS NOT NULL GROUP BY k")],
     ['discovered', db.prepare(`SELECT ${day('discovered_at')} AS d, COUNT(DISTINCT url) AS n FROM tracklists WHERE discovered_at >= ? GROUP BY d`).bind(since)],

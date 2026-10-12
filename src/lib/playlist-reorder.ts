@@ -236,7 +236,7 @@ function parseLock(raw: string): Lock | null {
  * person's button. The value names its holder and when it was taken, so
  * `releaseLock` deletes only its own lock, and a lock older than its time
  * (KV is late expiring a key now and then) is seen as lapsed, said so, and
- * replaced; its former holder then finds out in `holdsLock`.
+ * replaced; its former holder then finds out in `lockTakenOver`.
  */
 async function takeLock(env: Env, log?: Logger): Promise<string | null> {
   const raw = await env.CACHE.get(LOCK_KEY)
@@ -251,16 +251,24 @@ async function takeLock(env: Env, log?: Logger): Promise<string | null> {
   return token
 }
 
-/** Is the lock still this run's? False once it lapsed and someone else took it (or KV dropped it). */
-async function holdsLock(env: Env, token: string): Promise<boolean> {
+/**
+ * Has another run taken the lock from this one? Only a read that returns a
+ * DIFFERENT holder says so. "Not set" says nothing: `takeLock` read the key as
+ * absent a moment before writing it, and KV may go on answering that for a
+ * key it was just asked about. The run took the lock and keeps its token in
+ * memory; taking a missing key for a lost lock would make an enabled pass skip
+ * its state save every time, so a stop (`unexpected_position`) would never be
+ * remembered and the same move would be paid for on every tick.
+ */
+async function lockTakenOver(env: Env, token: string): Promise<boolean> {
   const raw = await env.CACHE.get(LOCK_KEY)
-  return !!raw && parseLock(raw)?.token === token
+  return !!raw && parseLock(raw)?.token !== token
 }
 
-/** Deletes the lock only while it is this run's: one that lapsed and was taken by another run is theirs. */
+/** Deletes the lock unless another run is seen to hold it: one that lapsed and was taken over is theirs. */
 async function releaseLock(env: Env, token: string): Promise<void> {
   try {
-    if (await holdsLock(env, token)) await env.CACHE.delete(LOCK_KEY)
+    if (!(await lockTakenOver(env, token))) await env.CACHE.delete(LOCK_KEY)
   } catch {
     // It expires by itself.
   }
@@ -578,8 +586,8 @@ async function passLocked(env: Env, opts: PassOpts & { accessToken: string }, li
   try {
     await chargeUnits(env, units)
     // The lock lapsed and another run took it: its reading is the newer one, so this run's is not written over it.
-    if (await holdsLock(env, lim.token)) await saveTouched(env, state, touched)
-    else log.warn('playlist_order.lock_lost', { read, moved, units })
+    if (await lockTakenOver(env, lim.token)) log.warn('playlist_order.lock_lost', { read, moved, units })
+    else await saveTouched(env, state, touched)
   } catch (e) {
     // The playlists themselves hold the progress; a lost write costs a re-read.
     log.warn('playlist_order.state_write_failed', errorFields(e))
@@ -714,8 +722,8 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
           if (kept.problem && next.problem === kept.problem) carried.add(p.playlistId)
         }
         await chargeUnits(env, unitsSpent)
-        if (await holdsLock(env, token)) await saveTouched(env, state, touched, carried)
-        else opts.log.warn('playlist_order.lock_lost', { read: touched.size, units: unitsSpent })
+        if (await lockTakenOver(env, token)) opts.log.warn('playlist_order.lock_lost', { read: touched.size, units: unitsSpent })
+        else await saveTouched(env, state, touched, carried)
       } catch (e) {
         fresh = false
         opts.log.warn('playlist_order.dry_run_failed', errorFields(e))

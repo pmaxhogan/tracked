@@ -46,6 +46,22 @@ describe('the "YouTube quota is out" flag', () => {
     expect(await getQuotaOut(env)).toBeNull()
   })
 
+  it('Invalidate & resync for one DJ is not started while it is set: nothing is marked due, nothing fetched', async () => {
+    const env = makeEnv()
+    const url = 'https://www.1001tracklists.com/tracklist/a1/dj-set-2026-10-01.html'
+    await env.DB.prepare('INSERT INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, 0, 0)').bind('dj', 'https://www.1001tracklists.com/dj/dj/').run()
+    await env.SUBS.put('subs:migrated', '{}')
+    await env.SUBS.put('oauth:google', JSON.stringify({ accessToken: 'tok', refreshToken: 'r', expiresAt: Math.floor(Date.now() / 1000) + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }))
+    await env.DB.prepare("INSERT INTO tracklists (slug, url, position, discovered_at, processed, video_known, video_id, video_source, checked_at) VALUES ('dj', ?, 0, 0, 1, 1, 'vid00000001', '1001tl', 1900000000)").bind(url).run()
+    await env.CACHE.put('yt:plvids:PL', JSON.stringify({ videoIds: ['vid00000001'] }))
+    await noteQuotaOut(env, new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', body))
+    const r = await app.request('http://x/ui/api/resync/dj', { method: 'POST', headers: { origin: 'http://x', 'content-type': 'application/json' }, body: '{}' }, env)
+    expect(r.status).toBe(200)
+    expect(await r.json()).toEqual({ slug: 'dj', quotaHeld: { until: (await getQuotaOut(env))!.until } })
+    expect((await env.DB.prepare('SELECT checked_at FROM tracklists WHERE url = ?').bind(url).first<{ checked_at: number }>())!.checked_at).toBe(1900000000)
+    expect(await env.CACHE.get('yt:plvids:PL')).not.toBeNull()
+  })
+
   it('shows on the scheduler endpoint and the owner clears it early', async () => {
     const env = makeEnv()
     await noteQuotaOut(env, new YouTubeApiError('playlistItems.insert', 403, 'dailyLimitExceeded', body))

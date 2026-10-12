@@ -58,6 +58,7 @@ import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { fixPlaylistTitles } from '../lib/playlist-rename'
 import { orderReport, retryOrderPlaylist, runOrderPass } from '../lib/playlist-reorder'
+import { getQuotaOut } from '../lib/youtube-quota'
 import { purgeAndRefetch, resolvePurgeTarget } from '../lib/tracklist-purge'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
@@ -490,6 +491,14 @@ subscriptionsApp.post('/api/resync/:slug', async (c) => {
     if (!sub) return c.json({ error: 'not_subscribed', slug }, 404)
     const tokenInfo = await getAccessToken(c.env)
     if (!tokenInfo) return c.json({ error: 'youtube_not_connected' }, 412)
+    // Not started while YouTube's quota is out, like the all-DJ one (lib/sync.ts resyncAll): it would mark
+    // every set of the DJ due by hand for swaps that cannot be made, and drop the cached playlist membership
+    // the hold relies on. Nothing is invalidated, nothing fetched.
+    const hold = await getQuotaOut(c.env)
+    if (hold) {
+      log.info('subs.resync_one_quota_held', { slug, until: new Date(hold.until * 1000).toISOString() })
+      return c.json({ slug, quotaHeld: { until: hold.until } })
+    }
     const invalidated = await invalidateVideoCache(c.env, slug, log)
     const fetchBudget = await manualFetchBudget(c.env, log)
     const result = await syncOne(c.env, sub, tokenInfo.accessToken, { log, trigger: 'manual.resync', fetchBudget })

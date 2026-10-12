@@ -13,7 +13,8 @@ import type { TableDef } from './table-query'
  * Counts follow the old client-side summary (dj-actions summarize()):
  * `sets` = every tracklist row of the DJ, `processed` = resolved (with or
  * without a video; abandoned sets are moved to processed by the sync),
- * `pending` = not processed yet, `videos` = rows with a video, `mkvid` = those
+ * `pending` = not processed yet, `videos` = processed rows with a video (one
+ * still waiting for its insert, lib/sync.ts, is pending, not a video), `mkvid` = those
  * rendered by mkvid.
  *
  * Also `djSetFacts`: what D1 knows about each of one DJ's sets (video,
@@ -80,8 +81,8 @@ export type DjTableRow = {
 
 const AGG = `(SELECT slug, COUNT(*) AS sets, SUM(processed) AS processed,
     SUM(CASE WHEN processed = 0 THEN 1 ELSE 0 END) AS pending, SUM(abandoned) AS abandoned,
-    SUM(CASE WHEN video_id IS NOT NULL THEN 1 ELSE 0 END) AS videos,
-    SUM(CASE WHEN video_id IS NOT NULL AND video_source = 'mkvid' THEN 1 ELSE 0 END) AS mkvid,
+    SUM(CASE WHEN processed = 1 AND video_id IS NOT NULL THEN 1 ELSE 0 END) AS videos,
+    SUM(CASE WHEN processed = 1 AND video_id IS NOT NULL AND video_source = 'mkvid' THEN 1 ELSE 0 END) AS mkvid,
     MAX(discovered_at) AS last_discovered_at
   FROM tracklists GROUP BY slug)`
 

@@ -219,7 +219,7 @@ const JS = /* js */ `
     const el = $('sc-quota');
     el.hidden = !q;
     if (!q) { el.innerHTML = ''; return; }
-    el.innerHTML = '<span class="badge warn"' + TK.tip('YouTube said the daily quota is used up. Videos are added to the playlists when it resets; set pages are still read, and everything that does not write to YouTube goes on.') + '>YouTube quota used up</span> New sets are not fetched until it resets at midnight Pacific time (' + esc(TK.fmt.time(iso(q.until)) || '') + '). Rechecks, verification, discovery and pre-save checks go on.<button type="button" class="btn" id="sc-quota-clear"' + TK.tip('Use this when you raised the quota or it reset early. It is set again if YouTube still refuses.') + '>Clear now</button>';
+    el.innerHTML = '<span class="badge warn"' + TK.tip('YouTube said the daily quota is used up. Videos are added to the playlists when it resets; set pages are still read, and everything that does not write to YouTube goes on.') + '>YouTube quota used up</span> Videos are added to the playlists once it resets at midnight Pacific time (' + esc(TK.fmt.time(iso(q.until)) || '') + '). Set pages are still read meanwhile (a new set keeps its video for then), and rechecks, verification, discovery and pre-save checks go on.<button type="button" class="btn" id="sc-quota-clear"' + TK.tip('Use this when you raised the quota or it reset early. It is set again if YouTube still refuses.') + '>Clear now</button>';
     $('sc-quota-clear').addEventListener('click', (ev) => TK.busy(ev.currentTarget, 'Clearing…', async () => {
       const res = await TK.api.post('/ui/api/scheduler/quota-clear', {});
       TK.toast(res.ok ? 'Quota flag cleared.' : TK.errText(res, 'Could not clear it (' + res.status + ')'), res.ok ? 'ok' : 'bad');

@@ -267,10 +267,34 @@ const attemptOkSql = (max: number = MAX_SET_ATTEMPTS_PER_DAY) =>
   `(s.retry_at IS NULL OR s.retry_at <= ?) AND NOT (COALESCE(s.attempt_day, '') = ? AND s.attempts_today >= ${Math.max(1, Math.floor(max))})`
 
 /**
- * Give back the attempt a tick claimed for a set whose page was fetched but
- * whose playlist write waits for YouTube's quota (SyncOneResult.quota): that
- * is a wait, not a failed attempt, so it neither counts toward the day's
- * attempts nor waits out a backoff.
+ * A recheck whose page was read but whose playlist write waits for YouTube
+ * (lib/sync.ts deferRecheck): due again at `untilSec`, and not picked before
+ * it. The hold-out is `retry_at`, which every recheck-class query honours
+ * (attemptOkSql), the "marked due by hand" branch (`checked_at = 0`) included:
+ * `next_due_at` alone would not keep such a row out, and it would be fetched
+ * again on every tick. The attempt the tick claimed stays counted, so if
+ * something clears `retry_at` meanwhile (another hand mark) the set still
+ * meets the day's attempt cap, as it did before deferrals existed.
+ */
+export async function holdSetOut(env: Env, url: string, untilSec: number): Promise<void> {
+  const now = nowSeconds()
+  await dbOf(env)
+    .prepare(
+      `INSERT INTO set_schedule (url, set_date, next_due_at, last_fetched_at, has_id_rows, no_good_video, updated_at, retry_at)
+       VALUES (?, ?, ?, NULL, 0, 0, ?, ?)
+       ON CONFLICT(url) DO UPDATE SET next_due_at = excluded.next_due_at, retry_at = excluded.retry_at, updated_at = excluded.updated_at`,
+    )
+    .bind(url, setDateFromUrl(url), untilSec, now, untilSec)
+    .run()
+}
+
+/**
+ * Give back the attempt a tick claimed for a FIRST-TIME set whose page was
+ * fetched but whose insert waits for YouTube's quota (SyncOneResult.quota):
+ * that is a wait, not a failed attempt, and the retry fetches nothing (the
+ * video is kept on the row), so it neither counts toward the day's attempts
+ * nor waits out a backoff. Never for a recheck: its retry does fetch the page
+ * again, so it keeps its attempt and is held out instead (`holdSetOut`).
  */
 export async function unclaimSetAttempt(env: Env, url: string): Promise<void> {
   await dbOf(env).prepare('UPDATE set_schedule SET attempts_today = MAX(0, attempts_today - 1), retry_at = NULL WHERE url = ?').bind(url).run()
@@ -1075,9 +1099,10 @@ export async function runSchedulerTick(
         }
         // Told the day's quota is used (or it was already): the items after this one know without asking KV.
         if (res.quota?.out) quotaOut = true
-        // A set whose write waits for quota was not a failed attempt: the claim is given back.
+        // A first-time set whose insert waits for quota was not a failed attempt, and its retry fetches nothing:
+        // the claim is given back. A recheck-class item keeps its attempt (its retry is another page fetch).
         const deferred = res.quota?.deferred ?? []
-        for (const u of deferred) await unclaimSetAttempt(env, u)
+        if (item.kind === 'set') for (const u of deferred) await unclaimSetAttempt(env, u)
         const waits = !res.stoppedBy && 'url' in item && deferred.includes(item.url)
         if (waits) log.info('scheduler.item_quota_deferred', { kind: item.kind, slug: item.slug, setUrl: item.url })
         r = waits

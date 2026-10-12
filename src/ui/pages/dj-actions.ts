@@ -66,6 +66,11 @@ export const DJ_ACTIONS_JS = /* js */ `
           TK.toast('sync failed: ' + msg, 'bad', detail);
           return { ok: false };
         }
+        // Invalidate & resync is not started while the quota is out: its work is replacing videos.
+        if (data.quotaHeld) {
+          TK.toast('resync ' + slug + ' was not started: ' + QUOTA_TEXT + ' Nothing was invalidated or fetched; run it again after the reset.', 'warn');
+          return { ok: false, quota: true };
+        }
         const stats = data.stats || {};
         const pending = stats.tracklistsPending || 0;
         const rechecksPending = stats.rechecksPending || 0;

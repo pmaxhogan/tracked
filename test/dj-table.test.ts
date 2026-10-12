@@ -47,6 +47,13 @@ describe('GET /ui/api/djs', () => {
     expect(body.rows[2]).toMatchObject({ slug: 'charlie', name: 'charlie', sets: 0, lastRunAt: null, hasError: false })
     expect(body.counts).toEqual({ total: 3, errors: 1, waiting: 0, pending: 1, neverSynced: 1, noPlaylist: 2, mkvid: 1 })
   })
+  it('a video still waiting for its insert (unprocessed row, YouTube quota) counts as pending, not as a video', async () => {
+    const env = await seeded()
+    await env.DB.prepare("INSERT INTO tracklists (slug, url, position, discovered_at, processed, abandoned, failure_count, video_known, video_id, video_source, checked_at) VALUES ('alpha', 'https://www.1001tracklists.com/tracklist/a4/alpha-four-2026-04-01.html', 3, 1, 0, 0, 0, 1, 'vid00000004', '1001tl', 1)").run()
+    const { body } = await get(env, '')
+    expect(body.rows[0]).toMatchObject({ slug: 'alpha', sets: 4, processed: 2, pending: 2, videos: 2, mkvid: 1 })
+  })
+
   it('a run the pool stopped is waiting, not an error, until it is recorded as last_error', async () => {
     const env = await seeded()
     const stop = { reason: 'pool busy: waited 20 s for a free browser (other fetches were running)', code: 'timeout', level: 'retry', runs: 2, since: T - 600 }

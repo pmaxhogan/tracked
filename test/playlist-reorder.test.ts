@@ -583,6 +583,29 @@ describe('one run at a time', () => {
     expect((await loadOrderState(env)).playlists.PLdj!.problem).toBeNull()
   })
 
+  it('a KV that keeps answering "not set" for the lock does not make a run think it lost it: the stop is saved and the move is not paid for again', async () => {
+    const env = await makeEnv()
+    await updateAppSettings(env, { playlists: { orderMovesPerRun: 1 } })
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
+    yt.semantics = 'before'
+    // The key was read as absent just before it was written; KV goes on saying so.
+    const get = env.CACHE.get.bind(env.CACHE)
+    env.CACHE.get = (async (key: string, ...rest: unknown[]) => (key === 'yt:order:lock' ? null : (get as (...a: unknown[]) => Promise<unknown>)(key, ...rest))) as typeof env.CACHE.get
+    const warn = vi.spyOn(log, 'warn')
+    expect(await run(env, yt)).toMatchObject({ moved: 1 })
+    expect(warn.mock.calls.map((c) => c[0])).not.toContain('playlist_order.lock_lost')
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ problem: 'unexpected_position' })
+    // Tick after tick: the stopped playlist is left alone, so one move was paid for, not one a tick.
+    for (const min of [5, 10, 15, 20]) {
+      at(T0 + min * 60_000)
+      await run(env, yt)
+    }
+    expect(yt.moves).toHaveLength(1)
+    // And the lock is released (the raw store, since reads of it are blind here).
+    expect((env.CACHE as ReturnType<typeof fakeKV>)._store.has('yt:order:lock')).toBe(false)
+    warn.mockRestore()
+  })
+
   it('release deletes only its own lock, and a lapsed lock is taken over and said so', async () => {
     const env = await makeEnv()
     const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED })
