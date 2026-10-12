@@ -103,7 +103,11 @@ describe('SHELL_JS', () => {
     const { RUNTIME_JS } = await import('../src/ui/runtime')
     const { SHELL_JS } = await import('../src/ui/shell')
     const els = new Map<string, any>()
-    const el = () => ({ textContent: '', className: '', title: '', hidden: true, value: '', addEventListener() {} })
+    const el = () => {
+      const handlers: Record<string, Array<(e: any) => void>> = {}
+      return { textContent: '', className: '', title: '', hidden: true, value: '', open: true, closed: 0, handlers, close() { this.closed++ }, getBoundingClientRect: () => ({ left: 100, right: 500, top: 0, bottom: 600 }),
+        addEventListener(t: string, f: (e: any) => void) { (handlers[t] ||= []).push(f) } }
+    }
     const document = { hidden: false, body, getElementById: (id: string) => (els.has(id) ? els.get(id) : (els.set(id, el()), els.get(id))), addEventListener() {} }
     const fetches: string[] = []
     const timers: number[] = []
@@ -115,6 +119,20 @@ describe('SHELL_JS', () => {
     for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0))
     return { els, fetches, timers }
   }
+  it('closes the drawer and the phone menu on a click on the backdrop, not on their content or a drag out of them', async () => {
+    const r = await runShell(undefined)
+    for (const id of ['tk-drawer', 'tk-menu']) {
+      const d = r.els.get(id)
+      const fire = (t: string, e: object) => (d.handlers[t] || []).forEach((f: (e: any) => void) => f({ target: d, ...e }))
+      const click = (down: object, up: object) => { fire('mousedown', down); fire('click', up) }
+      click({ clientX: 50, clientY: 10 }, { clientX: 50, clientY: 10 }) // backdrop
+      expect(d.closed).toBe(1)
+      click({ clientX: 300, clientY: 10 }, { clientX: 300, clientY: 10 }) // the dialog's own padding
+      click({ clientX: 300, clientY: 10 }, { clientX: 50, clientY: 10 }) // drag from inside to outside
+      fire('mousedown', { target: {}, clientX: 50, clientY: 10 }); fire('click', { target: {}, clientX: 50, clientY: 10 }) // a click on content
+      expect(d.closed).toBe(1)
+    }
+  })
   it('fetches nothing and sets no timer without a body', async () => {
     const r = await runShell(undefined)
     expect(r.fetches).toEqual([])

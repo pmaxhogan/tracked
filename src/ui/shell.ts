@@ -130,8 +130,33 @@ export const SHELL_JS = /* js */ `
   const $ = (id) => document.getElementById(id);
   const on = (el, type, fn) => { if (el && typeof el.addEventListener === 'function') el.addEventListener(type, fn); };
 
+  // ── click on the background closes a side panel ──
+  // The drawer and the phone menu are modal <dialog>s: a click on the dimmed
+  // ::backdrop is dispatched on the dialog itself, so it counts only when it
+  // lands outside the dialog's box (its own padding is inside it, and a click on
+  // its content has another target) and the press started there too, so a text
+  // selection dragged out of the panel does not close it. A confirm dialog is
+  // another <dialog> on top; this never sees the clicks that land on it.
+  const closeOnBackdrop = (dlg) => {
+    if (!dlg || typeof dlg.addEventListener !== 'function') return;
+    const outside = (e) => {
+      if (!e || e.target !== dlg || typeof dlg.getBoundingClientRect !== 'function') return false;
+      const r = dlg.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    let pressed = false;
+    dlg.addEventListener('mousedown', (e) => { pressed = outside(e); });
+    dlg.addEventListener('click', (e) => {
+      const hit = pressed && outside(e);
+      pressed = false;
+      if (hit && dlg.open && typeof dlg.close === 'function') dlg.close();
+    });
+  };
+  closeOnBackdrop($('tk-drawer'));
+
   // ── phone menu ──
   const menu = $('tk-menu');
+  closeOnBackdrop(menu);
   on($('tk-menu-btn'), 'click', () => { if (menu && !menu.open && typeof menu.showModal === 'function') { try { menu.showModal(); } catch (e) {} } });
   on($('tk-menu-close'), 'click', () => { if (menu && menu.open && typeof menu.close === 'function') menu.close(); });
 
