@@ -61,6 +61,10 @@ export const AppSettingsSchema = z.object({
     combinedDailyInsertCap: z.number().int().min(0).max(190),
     /** Combined-playlist inserts per run at most (default 20). */
     combinedMaxInsertsPerRun: z.number().int().min(0).max(100),
+    /** Quota units a quota day the reorder pass may spend putting playlists in set-date order, listings included (default 2 000; a move is 50). 0 pauses it. */
+    orderDailyUnits: z.number().int().min(0).max(10000),
+    /** Moves one reorder run makes at most (default 10). */
+    orderMovesPerRun: z.number().int().min(1).max(100),
   }),
   /** Pre-saved tracks (lib/presave.ts): watched until 1001tracklists has a YouTube link. */
   presave: z.object({
@@ -133,6 +137,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     runRemovalMax: 15,
     combinedDailyInsertCap: 80,
     combinedMaxInsertsPerRun: 20,
+    orderDailyUnits: 2000,
+    orderMovesPerRun: 10,
   },
   presave: {
     enabled: true,

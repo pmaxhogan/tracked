@@ -19,6 +19,7 @@ import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 import { backfillCombined } from './lib/sync'
 import { getQuotaOut } from './lib/youtube-quota'
+import { runOrderPass } from './lib/playlist-reorder'
 import { runSchedulerTick } from './lib/fetch-scheduler'
 import { poolEventsApp } from './routes/pool-api'
 import { runKvMigrationTickSafely } from './lib/kv-import'
@@ -190,6 +191,7 @@ app.doc('/openapi.json', {
  *                     clock by the scheduler.
  *
  * Both finish by reconciling the combined "all tracked artists" playlist
+ * and a few moves towards set-date order (lib/playlist-reorder.ts)
  * (YouTube only, no 1001tracklists traffic).
  *
  * `ctx.waitUntil` keeps the worker alive past `scheduled` returning.
@@ -255,6 +257,13 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       if (!isDaily) {
         const l = await retryDuePresaveLikes(env, log)
         if (l.tried || l.stoppedBy) log.info('cron.presave_likes', l)
+      }
+      // Playlists in set-date order: a few moves within the day's unit budget (lib/playlist-reorder.ts).
+      try {
+        const o = await runOrderPass(env, { log, trigger })
+        if (o.read > 0 || o.stoppedBy === 'quota') log.info('cron.playlist_order', o)
+      } catch (e) {
+        log.warn('cron.playlist_order_threw', errorFields(e))
       }
       // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
       await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) })

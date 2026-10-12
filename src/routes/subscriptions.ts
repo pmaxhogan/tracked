@@ -57,6 +57,7 @@ import {
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { fixPlaylistTitles } from '../lib/playlist-rename'
+import { orderReport, runOrderPass } from '../lib/playlist-reorder'
 import { purgeAndRefetch, resolvePurgeTarget } from '../lib/tracklist-purge'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
@@ -607,6 +608,42 @@ subscriptionsApp.post('/api/combined/backfill', async (c) => {
     }
     log.error('subs.combined_backfill_throw', errorFields(e))
     return c.json({ error: 'backfill_failed', ...errorFields(e) }, 500)
+  }
+})
+
+// ─── Playlists in set-date order (lib/playlist-reorder.ts) ──────────────────
+
+/**
+ * The dry run. Per playlist: entries, entries with no date, moves needed,
+ * units needed; totals; days left at the daily budget. Plain, it answers from
+ * what the pass last read (no YouTube call); `?fresh=1` reads every playlist's
+ * order from YouTube now (1 unit per 50 entries, reported as `unitsSpent`).
+ * Nothing is ever moved here.
+ */
+subscriptionsApp.get('/api/playlist-order', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.playlist_order', by: c.get('cfAccessEmail') })
+  try {
+    return c.json(await orderReport(c.env, { log, fresh: c.req.query('fresh') === '1' }))
+  } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
+    log.error('subs.playlist_order_throw', errorFields(e))
+    return c.json({ error: 'playlist_order_failed', ...errorFields(e) }, 500)
+  }
+})
+
+/** One reorder run now: the same work and the same daily budget as the cron's, so pressing it again cannot overspend. */
+subscriptionsApp.post('/api/playlist-order/run', async (c) => {
+  const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.playlist_order_run', by: c.get('cfAccessEmail') })
+  try {
+    return c.json(await runOrderPass(c.env, { log, trigger: 'manual.order' }))
+  } catch (e) {
+    if (e instanceof GoogleOAuthRefreshFailed && e.invalidGrant) {
+      return c.json({ error: 'youtube_reauth_required', message: 'YouTube refresh token rejected by Google; reconnect required.' }, 412)
+    }
+    log.error('subs.playlist_order_run_throw', errorFields(e))
+    return c.json({ error: 'playlist_order_failed', ...errorFields(e) }, 500)
   }
 })
 

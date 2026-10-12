@@ -418,7 +418,7 @@ CSRF protection: the `/oauth/start` handler sets a single-use `yt_oauth_state` c
 
 ### Auto-playlists
 
-With a YouTube account connected, the sync (`lib/sync.ts`) keeps playlists on that channel filled automatically. For each subscribed DJ it crawls their 1001tracklists index (JS infinite-scroll, driven through the same `/ajax/get_data.php` endpoint the browser uses), opens each set page, extracts the embedded YouTube video id, and inserts it into a public playlist named **`<artist> (1001tklists)`**.
+With a YouTube account connected, the sync (`lib/sync.ts`) keeps playlists on that channel filled automatically. For each subscribed DJ it crawls their 1001tracklists index (JS infinite-scroll, driven through the same `/ajax/get_data.php` endpoint the browser uses), opens each set page, extracts the embedded YouTube video id, and inserts it into a public playlist named **`<artist> (1001tklists)`**, at the place the set's date gives it (see [Playlist order](#playlist-order-by-the-date-of-the-set)).
 
 On top of those, one **combined playlist** — **`All tracked artists (1001tklists)`** — holds every video from every tracked artist, so there's a single thing to hit shuffle on. Two paths fill it (`lib/combined-playlist.ts`):
 
@@ -464,6 +464,38 @@ POST /ui/api/combined/backfill   → { ok: true, inserted, pending, cappedBy, ..
 ```
 
 Both crons (`0 6 * * *` and `*/5 * * * *`) end with a backfill pass, in their own try/catch so a per-artist sync failure can't stop the combined playlist from catching up on everything that did land.
+
+### Playlist order: by the date of the set
+
+Every playlist tracked fills with sets (each artist playlist and the combined one) is ordered by **the date the set took place, earliest first**: not the date the tracklist appeared, not the date the video was uploaded (`lib/playlist-order.ts`). The **Track uploads** playlist holds single tracks, which have no set date, and is left in the order they were added.
+
+- **The date** comes from the set's 1001tracklists URL, which ends in it (`…-lollapalooza-brazil-2023-03-24.html`); nothing is fetched for it. A radio show that airs a festival set ends in two dates (`…-ultra-music-festival-chile-2024-04-20-2024-05-22.html`: played on the first, aired on the second), so the date is the **earliest** of the dates the slug ends in. On 2026-10-11 all 2 569 known sets had one and 70 had two. `set_date` in D1 (`set_schedule`, `mkvid_requests`, `set_media_facts`) and `setDateFromUrl` still mean the *last* date; recheck ages and the mkvid queue are built on that and are unchanged.
+- **Ties.** Two sets of one day go by the set's slug (the URL without its id), then by the whole URL: fixed for a given pair, and in the combined playlist a festival day reads artist by artist. A video several sets resolve to (both halves of a b2b) takes the earliest of them.
+- **No date.** Only a video no tracked set resolves to has none (one added by hand, say). Those stay **after every dated set, in the order they already have**, and a new one is appended: nobody can say where they belong, so nothing is spent moving them.
+
+**New videos are inserted at their place** (`insertInOrder`, `lib/playlist-order-store.ts`). `playlistItems.insert` takes a `snippet.position` for the same 50 units, so every insert of a set video goes through one function: the sync's additions and swaps, the combined playlist's live mirror and backfill, mkvid's deliveries and recreations, and Undo on `/ui/removed` (which appends when it has no snapshot of the playlist). The position is the number of videos in the playlist dated on or before the new one, counted from the membership snapshot the caller already holds and the set URLs in `tracklists`: no extra YouTube call, and nothing new stored. A video that belongs last is appended exactly as before. If YouTube answers 400 to a position (it is past the end because the owner removed something, or the playlist is not on manual order) the insert is made once more without one, so ordering can never keep a video out. `playlist_confirmed`, `playlist_members` and the `yt:plvids:` snapshot record which videos are in a playlist, not where, so they stay correct through positioned inserts and moves.
+
+**Videos added before this existed are moved** by the reorder pass (`lib/playlist-reorder.ts`), which runs on the 5-minute cron after the combined backfill. A move is `playlistItems.update`, 50 units, and the sync filled each playlist newest set first, so nearly every video has to move: by the estimate below about 2 000 moves, 100 000 units, ten days of the whole quota. So the pass:
+
+- reads a playlist's **actual order** from YouTube (1 unit per 50 videos), keeps the longest run of videos already in order relative to each other where they are and moves only the others (`planMoves`: no smaller set of moves exists), each to the index it has after the moves before it;
+- is **resumable and idempotent**: nothing about progress is carried from run to run. Each run plans from what the playlist looks like now, and a plan cut short anywhere leaves a playlist that needs exactly the remaining moves. A sorted playlist plans zero moves;
+- spends at most `playlists.orderDailyUnits` a quota day (midnight Pacific), listings and refused moves included; **default 2 000** (40 moves), **0 pauses it** (new videos are still inserted in place). At most `playlists.orderMovesPerRun` (10) a run. Both on `/ui/settings`, Playlists;
+- **stops at a quota reply** (403 `quotaExceeded`) and makes no YouTube call again until the quota day rolls over. That is shown as *waiting for quota*, not as an error: it continues by itself;
+- works on playlists never read first, then the artist playlist with the fewest moves left (whole playlists finish early), and the combined playlist last. A sorted playlist is read again once a day, which is what puts right a video appended out of place or dragged by hand;
+- a playlist YouTube refuses positions for (its sort order on YouTube is not *Manual*) is the one state that needs the owner, and the only one shown in red.
+
+The **Set-date order** card on the Playlists page shows what is left, today's units, and the days to go at the budget. **Check now** is the dry run: it reads every playlist's order from YouTube (about 50 units) and lists, per playlist, videos, videos with no date, moves needed and units needed, with totals and the estimated days. It moves nothing. **Move now** runs one pass within the same budget.
+
+```
+GET  /ui/api/playlist-order           → { connected, fresh, unitsSpent, playlists: [{ playlistId, kind, slug, title, items, undated,
+                                          moves, units, checkedAt, moved, problem, detail }], totals: { playlists, unread, items,
+                                          undated, moves, units }, dailyUnits, movesPerRun, unitsUsedToday, estimate: { units, days },
+                                          quotaStoppedUntil, lastRun }        (what the pass last read; no YouTube call)
+GET  /ui/api/playlist-order?fresh=1   → the same, read from YouTube now (the dry run)
+POST /ui/api/playlist-order/run       → { ok, read, moved, units, stoppedBy: null | "run" | "budget" | "quota" | "deadline" | "paused" | "not_connected", ... }
+```
+
+When the quota is spent or nothing is deployed, `node scripts/playlist-order-estimate.mjs [--daily-units 2000] [--moves-per-run 10]` prints the same table estimated from D1 alone (read-only; the current order is inferred from insert times, because D1 stores no positions). On 2026-10-11 it gave 26 playlists, 2 191 videos, 31 with no date, 2 015 moves, 100 750 units: about 52 days at 2 000 units a day, of which the combined playlist is half.
 
 ### Playlist hygiene (`src/lib/playlist-hygiene.ts`)
 
@@ -717,7 +749,7 @@ Two kinds of state, two stores:
 
 The sync still reasons about one `SubState` object per DJ (`lib/sync-store.ts` hydrates it from `sub_sync` + `tracklists` and writes it back as row upserts, diffing against what it loaded so a tick that touched 20 sets writes 20 rows). The 5-minute scheduler tick picks its few items from `set_schedule` / `set_verification` / `dj_schedule` / pending `tracklists` rows instead of loading every DJ; "Invalidate & resync", ban-victim requeues and mkvid's deliveries are direct row updates. D1 has no TTLs, so the daily cron prunes both audit tables and `pool_events` at the 90-day horizon.
 
-**KV** keeps what is genuinely a cache or a tiny blob: every `CACHE` entry that has a TTL (YouTube resolves, 1001tl searches and parsed pages, medialinks, Apple links, playlist membership, DJ set lists, the Access JWKS), the `ban:pause` master switch and the admin banner's episodes, the scheduler settings (`pool:settings` in SUBS) and its backoff, the DJ backfill cursors, the daily combined-insert counter, `subs:combined`, the Google OAuth tokens and the Web Push subscriptions.
+**KV** keeps what is genuinely a cache or a tiny blob: every `CACHE` entry that has a TTL (YouTube resolves, 1001tl searches and parsed pages, medialinks, Apple links, playlist membership, DJ set lists, the Access JWKS), the `ban:pause` master switch and the admin banner's episodes, the scheduler settings (`pool:settings` in SUBS) and its backoff, the DJ backfill cursors, the daily combined-insert counter, `subs:combined`, what the reorder pass last read of each playlist (`subs:playlist-order`) and its daily unit counter, the Google OAuth tokens and the Web Push subscriptions.
 
 **Migration from the KV-only layout** is automatic and one-way. Before D1, the subscription list (`subs:list` / `subs:item:*`), each DJ's state (`subs:state:<slug>`, one JSON blob) and both audit trails (`np:` / `pladd:` keys with metadata summaries) lived in KV. After the deploy that introduced D1 (`lib/kv-import.ts`):
 
@@ -898,6 +930,9 @@ src/
     dj-sets.ts              cached per-DJ set list behind the /ui/dj/<slug> profile page
     combined-playlist.ts    the "All tracked artists" playlist: live mirror + bounded backfill
     playlist-cache.ts       KV-cached playlist video-id sets + find-or-create (shared by both)
+    playlist-order.ts       set-date order (pure): the date a set happened, the order, insert position, fewest moves
+    playlist-order-store.ts order keys from D1 + the positioned insert every playlist addition goes through
+    playlist-reorder.ts     the budgeted cron pass that moves existing videos into order, and its dry run
     youtube-playlists.ts    YouTube Data API v3 playlist client (OAuth)
     playlist-audit.ts       the `playlist_additions` table behind "Recent playlist additions"
     google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
@@ -920,6 +955,7 @@ src/
   routes/ban-ui.ts          shared admin-page banner / alerts row / ban history / service worker
 scripts/
   gen-vapid-keys.mjs        prints a VAPID key pair for the Web Push alerts
+  playlist-order-estimate.mjs  estimates the set-date reorder (moves, units, days) from D1, read-only
 migrations/                 D1 schema, one SQL file per change (apply with npm run d1:migrate)
 test/
   fixtures/                 saved 1001tracklists HTML and JSON

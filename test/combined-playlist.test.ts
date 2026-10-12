@@ -168,6 +168,34 @@ describe('mergeIntoCombinedPlaylist', () => {
     })
   })
 
+  it('backfills each video at the place its set date gives it, counting the ones it just inserted', async () => {
+    const env = makeEnv()
+    await saveCombinedState(env, { playlistId: 'PLcombined' })
+    const sets: Array<[string, string]> = [
+      ['v2022', '2022-05-01'],
+      ['v2023', '2023-05-01'],
+      ['v2024', '2024-05-01'],
+      ['v2025', '2025-05-01'],
+    ]
+    for (const [i, [videoId, date]] of sets.entries()) {
+      await env.DB.prepare('INSERT INTO tracklists (slug, url, position, discovered_at, processed, video_known, video_id) VALUES (?, ?, ?, 0, 1, 1, ?)')
+        .bind('a', `https://www.1001tracklists.com/tracklist/${i}/a-set-${date}.html`, i, videoId)
+        .run()
+    }
+    // The artist playlist is newest first, as the sync filled it; the combined one has the middle two.
+    seedPlaylists({ PLcombined: ['v2023', 'v2024'], PLa: ['v2025', 'v2024', 'v2023', 'v2022', 'handAdded1'] })
+
+    await mergeIntoCombinedPlaylist(env, 'tok', [source('a', 'PLa')], { log })
+
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls).toEqual([
+      // The newest set belongs last: appended, the call it always was.
+      ['PLcombined', 'v2025', 'tok'],
+      ['PLcombined', 'v2022', 'tok', undefined, { position: 0 }],
+      // No tracked set: appended.
+      ['PLcombined', 'handAdded1', 'tok'],
+    ])
+  })
+
   it('never puts back a video the owner took out (blocked, or gone since the last complete listing)', async () => {
     const env = makeEnv()
     await saveCombinedState(env, { playlistId: 'PLcombined' })

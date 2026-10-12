@@ -1,6 +1,6 @@
 // Playlists: the YouTube connection, the combined "all tracked artists" playlist
 // (with Backfill now), one playlist row per DJ, and the hygiene strip. Data:
-// GET /ui/api/youtube/status, /ui/api/combined, the DJ table GET /ui/api/djs
+// GET /ui/api/youtube/status, /ui/api/combined, /ui/api/playlist-order, the DJ table GET /ui/api/djs
 // (lib/dj-table.ts, server-sorted and paged; TKTable) and one GET /ui/api/removals.
 import { shell } from '../shell'
 import { tipAttr } from '../tip'
@@ -24,6 +24,17 @@ ${YOUTUBE_CARD_HTML}
   <div id="cmb-body"><span class="muted">Loading…</span></div>
   <div id="cmb-meter" class="tk-meter" hidden><i id="cmb-fill"></i></div>
 </div>
+<div id="ord-card" class="tk-card">
+  <div class="pl-head">
+    <h2><span class="tip-term"${tipAttr('Every playlist is kept in the order the sets took place, earliest first. A new video is inserted at its place; videos added before this existed are moved there a few a day, because each move costs 50 YouTube quota units.')}>Set-date order</span></h2>
+    <div class="tk-row">
+      <button id="ord-check" type="button" class="btn small"${tipAttr('Dry run: reads the order of every playlist from YouTube now (1 quota unit per 50 videos) and counts the moves still needed. Moves nothing.')}>Check now</button>
+      <button id="ord-run" type="button" class="btn small" disabled${tipAttr('Makes the next few moves now, within the same daily unit budget the scheduler uses.')}>Move now</button>
+    </div>
+  </div>
+  <div id="ord-body"><span class="muted">Loading…</span></div>
+  <details id="ord-details" hidden><summary>Per playlist</summary><div id="ord-table"></div></details>
+</div>
 <div class="tk-card">
   <div class="pl-head"><h2><span class="tip-term"${tipAttr('Each subscribed DJ has its own YouTube playlist, filled with one video per set.')}>DJ playlists</span></h2></div>
   <div id="pl"></div>
@@ -40,6 +51,14 @@ const CSS = /* css */ `
   #cmb-body .warn { color: var(--danger); }
   #cmb-meter { margin-top: var(--sp-3); }
   .pl-sub { display: block; color: var(--muted); font-size: var(--fs-xs); }
+  #ord-body .headline { font-weight: 600; }
+  #ord-body .bits { color: var(--muted); font-size: var(--fs-sm); margin-top: 2px; }
+  #ord-details { margin-top: var(--sp-3); }
+  #ord-details summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); }
+  #ord-table table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); margin-top: var(--sp-2); }
+  #ord-table th, #ord-table td { text-align: right; padding: 2px var(--sp-2); }
+  #ord-table th:first-child, #ord-table td:first-child { text-align: left; }
+  #ord-table th { color: var(--muted); font-weight: 500; }
 ${YOUTUBE_CARD_CSS}
 ${DJ_ACTIONS_CSS}`
 
@@ -122,6 +141,64 @@ ${YOUTUBE_CARD_JS}
     await loadCombined();
   }));
 
+  // ── set-date order: the stored numbers on load, a YouTube reading only on Check now ──
+  const $ordBody = $('ord-body'), $ordCheck = $('ord-check'), $ordRun = $('ord-run'), $ordDetails = $('ord-details'), $ordTable = $('ord-table');
+  function renderOrder(d) {
+    if (!d || !d.connected) {
+      $ordBody.textContent = 'Connect a YouTube account to order the playlists.';
+      $ordRun.disabled = true; $ordDetails.hidden = true;
+      return;
+    }
+    const t = d.totals || {};
+    const paused = !d.dailyUnits;
+    $ordRun.disabled = paused || !t.moves;
+    let head;
+    if (t.unread === t.playlists) head = 'Not read yet <span class="muted">· Check now counts the moves needed</span>';
+    else if (!t.moves) head = 'Every playlist is in set-date order' + (t.unread ? ' <span class="muted">· ' + t.unread + ' not read yet</span>' : '');
+    else head = t.moves + ' video' + (t.moves === 1 ? '' : 's') + ' still to move <span class="muted">· ' + (t.units || 0).toLocaleString() + ' quota units' +
+      (paused ? '' : d.estimate && d.estimate.days ? ' · about ' + d.estimate.days + ' day' + (d.estimate.days === 1 ? '' : 's') + ' at this budget' : '') + '</span>';
+    const bits = [
+      paused ? '<span class="badge neutral"' + TK.tip('The daily unit budget is 0 (Settings, Playlists). New videos are still inserted at their place.') + '>paused</span>'
+        : (d.unitsUsedToday || 0) + ' / ' + d.dailyUnits + ' units used today',
+      (t.items || 0) + ' videos in ' + (t.playlists || 0) + ' playlists',
+    ];
+    if (t.undated) bits.push('<span' + TK.tip('Videos no tracked set resolves to (added by hand, for instance). They stay after the dated sets, in the order they have.') + '>' + t.undated + ' with no set date</span>');
+    if (d.quotaStoppedUntil) bits.push('<span class="badge info"' + TK.tip('YouTube answered that the quota of today is used. Moving continues by itself after the quota resets at midnight Pacific.') + '>waiting for quota · ' + esc(TK.fmt.rel(new Date(d.quotaStoppedUntil * 1000).toISOString())) + '</span>');
+    if (d.lastRun && d.lastRun.moved) bits.push('last moved ' + d.lastRun.moved + ' ' + esc(TK.fmt.rel(new Date(d.lastRun.at * 1000).toISOString())));
+    if (d.fresh) bits.push('read from YouTube just now (' + d.unitsSpent + ' units)');
+    const manual = (d.playlists || []).filter((p) => p.problem === 'manual_sort');
+    let html = '<div class="headline">' + head + '</div><div class="bits">' + bits.join(' · ') + '</div>';
+    // The one state that needs the owner: YouTube refuses positions on a playlist that sorts itself.
+    if (manual.length) html += '<div class="bits"><span class="badge bad">' + manual.length + ' cannot be ordered</span> ' + manual.map((p) => esc(p.title)).join(', ') +
+      ': set the sort order of the playlist to Manual on YouTube.</div>';
+    $ordBody.innerHTML = html;
+    const rows = (d.playlists || []).filter((p) => p.checkedAt);
+    $ordDetails.hidden = !rows.length;
+    $ordTable.innerHTML = '<table><thead><tr><th>Playlist</th><th>Videos</th><th>No date</th><th>To move</th><th>Units</th><th>Read</th></tr></thead><tbody>' +
+      rows.map((p) => '<tr><td>' + link('https://www.youtube.com/playlist?list=' + encodeURIComponent(p.playlistId), p.title) +
+        (p.problem === 'manual_sort' ? ' <span class="badge bad">not on manual order</span>' : p.problem ? ' <span class="badge info"' + TK.tip(p.detail || '') + '>' + (p.problem === 'unreadable' ? 'not read' : 'retrying') + '</span>' : '') +
+        '</td><td>' + esc(p.items) + '</td><td>' + esc(p.undated || '') + '</td><td>' + esc(p.moves || '') + '</td><td>' + (p.units ? p.units.toLocaleString() : '') + '</td><td>' + esc(TK.fmt.rel(new Date(p.checkedAt * 1000).toISOString())) + '</td></tr>').join('') +
+      '</tbody></table>';
+  }
+  function applyOrder(res) {
+    if (!res.ok) { $ordBody.textContent = res.status === 412 ? TK.errText(res, 'status unavailable') : 'status unavailable (' + (res.status || 'offline') + ')'; $ordRun.disabled = true; return; }
+    renderOrder(res.data);
+  }
+  $ordCheck.addEventListener('click', () => TK.busy($ordCheck, 'Reading…', async () => applyOrder(await TK.api.get('/ui/api/playlist-order?fresh=1'))));
+  $ordRun.addEventListener('click', () => TK.busy($ordRun, 'Moving…', async () => {
+    const res = await TK.api.post('/ui/api/playlist-order/run', {});
+    const data = res.data && typeof res.data === 'object' ? res.data : {};
+    if (!res.ok) {
+      if (res.status === 412 && data.error === 'youtube_reauth_required') { DJA.reauthToast(); YT.load(); return; }
+      TK.toast(data.errorMessage || TK.errText(res, 'moving failed (' + res.status + ')'), 'bad');
+      return;
+    }
+    const why = { quota: 'YouTube quota is used for today', budget: 'the unit budget of today is used', paused: 'paused in Settings', not_connected: 'YouTube is not connected' }[data.stoppedBy];
+    // Out of quota or budget is a wait, not a failure: it continues by itself.
+    TK.toast('playlist order: moved ' + (data.moved || 0) + ' video' + (data.moved === 1 ? '' : 's') + (why ? ' · ' + why : ''), data.moved || !why ? 'ok' : 'warn');
+    applyOrder(await TK.api.get('/ui/api/playlist-order'));
+  }));
+
   // ── per-DJ playlists: one row per subscription from GET /ui/api/djs ──
   TKTable.create($('pl'), {
     id: 'pl',
@@ -167,6 +244,7 @@ ${YOUTUBE_CARD_JS}
   YT.handleReturn();
   YT.load();
   loadCombined(true);
+  TK.api.swr('/ui/api/playlist-order', applyOrder);
   loadHygiene();
 })();
 `
