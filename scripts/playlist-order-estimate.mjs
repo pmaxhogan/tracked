@@ -121,7 +121,7 @@ const line = (label, xs) => {
   const at = (u) => estimateDays(xs, u, movesPerRun)
   const e = at(dailyUnits)
   const others = [2000, 4000].filter((u) => u !== dailyUnits).map((u) => `${at(u).days} days at ${u}`)
-  console.log(`${pad(label, 10)}${sum(xs, (n) => n.moves)} moves x ${UNITS_PER_MOVE} + the listings of runs of ${movesPerRun} = ${e.units} units: ${e.days} days at ${dailyUnits} a day${others.length ? `, ${others.join(', ')}` : ''}`)
+  console.log(`${pad(label, 10)}${sum(xs, (n) => n.moves)} moves x ${UNITS_PER_MOVE} + the listings and read-backs of runs of ${movesPerRun} = ${e.units} units: ${e.days} days at ${dailyUnits} a day${others.length ? `, ${others.join(', ')}` : ''}`)
 }
 line('estimate', needs)
 line('floor', floors)

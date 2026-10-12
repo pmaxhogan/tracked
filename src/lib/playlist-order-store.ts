@@ -18,6 +18,40 @@ import { dbOf } from './db'
 import { errorFields, type Logger } from './log'
 import { compareOrder, insertPosition, orderKeyOfSet, orderKeysByVideo, UNDATED, type OrderKey } from './playlist-order'
 import { addVideoToPlaylist, YouTubeApiError } from './youtube-playlists'
+import { loadCombinedState } from './combined-playlist'
+
+/**
+ * "YouTube refuses positions for this playlist" (`manualSortRequired`: it is
+ * set to sort by date or popularity), in CACHE. While it holds, inserts into
+ * that playlist skip positioning instead of paying for a refused insert and
+ * then an append, 100 units, every time. It lapses after a day, so one insert
+ * a day finds out whether the owner has switched the playlist back to Manual;
+ * Check now and Retry now on the Playlists card clear it at once.
+ */
+const NOT_MANUAL_PREFIX = 'yt:order:notmanual:'
+const NOT_MANUAL_TTL = 24 * 60 * 60
+
+export async function isNotManual(env: Env, playlistId: string): Promise<boolean> {
+  return (await env.CACHE.get(`${NOT_MANUAL_PREFIX}${playlistId}`)) !== null
+}
+
+export async function noteNotManual(env: Env, playlistId: string): Promise<void> {
+  await env.CACHE.put(`${NOT_MANUAL_PREFIX}${playlistId}`, '1', { expirationTtl: NOT_MANUAL_TTL })
+}
+
+export async function clearNotManual(env: Env, playlistId: string): Promise<void> {
+  await env.CACHE.delete(`${NOT_MANUAL_PREFIX}${playlistId}`)
+}
+
+/** Positions are never sent for the combined playlist (it is not ordered), nor for one YouTube refuses them for. Unreadable = position as usual. */
+async function positioningOff(env: Env, playlistId: string): Promise<'combined' | 'not_manual' | null> {
+  try {
+    if ((await loadCombinedState(env)).playlistId === playlistId) return 'combined'
+    return (await isNotManual(env, playlistId)) ? 'not_manual' : null
+  } catch {
+    return null
+  }
+}
 
 export type OrderKeys = Map<string, OrderKey>
 
@@ -51,6 +85,9 @@ export function orderKeyFor(keys: OrderKeys, videoId: string, setUrl?: string | 
  *     once more without a position, so ordering can never keep a video out;
  *     the reorder pass (lib/playlist-reorder.ts) puts it right later. A 400
  *     that was about the video fails the second time too and is thrown as before.
+ *   - `manualSortRequired` is remembered for a day (`noteNotManual`): until
+ *     then inserts into that playlist are appended without trying a position.
+ *   - The combined playlist never gets a position, whoever calls.
  *   - Keys that cannot be read (a D1 error) mean an append, never a failure.
  *
  * `attempts` = insert calls made.
@@ -82,6 +119,7 @@ export async function insertInOrder(
   }
   // An append is the call exactly as it was before ordering existed.
   const append = () => (a.fetcher ? addVideoToPlaylist(a.playlistId, a.videoId, a.accessToken, a.fetcher) : addVideoToPlaylist(a.playlistId, a.videoId, a.accessToken))
+  if (position !== null && (await positioningOff(env, a.playlistId))) position = null
   if (position === null) {
     await append()
     return { position: null, attempts: 1 }
@@ -92,6 +130,7 @@ export async function insertInOrder(
   } catch (e) {
     if (!(e instanceof YouTubeApiError) || e.status !== 400) throw e
     a.log.warn('playlist_order.position_refused', { playlistId: a.playlistId, videoId: a.videoId, position, reason: e.reason })
+    if (e.reason === 'manualSortRequired') await noteNotManual(env, a.playlistId).catch(() => {})
     await append()
     return { position: null, attempts: 2 }
   }

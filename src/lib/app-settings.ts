@@ -21,6 +21,9 @@ import { mergeSettings } from './pool-settings'
 export const APP_SETTINGS_KEY = 'app:settings'
 const MEMO_MS = 30_000
 
+/** The least a day's reorder budget can usefully be: two moves (50 each) and the listings around them. Below it nothing would ever move. */
+export const ORDER_MIN_DAILY_UNITS = 110
+
 export const AppSettingsSchema = z.object({
   mkvid: z.object({
     /** Uploads a quota day through mkvid's own project; null = MKVID_DAILY_CLAIM_CAP, else 24. 0 pauses. */
@@ -62,7 +65,7 @@ export const AppSettingsSchema = z.object({
     /** Combined-playlist inserts per run at most (default 20). */
     combinedMaxInsertsPerRun: z.number().int().min(0).max(100),
     /** Quota units a quota day the reorder pass may spend moving videos already in the artist playlists into set-date order, listings included (a move is 50). Default 0: paused, no YouTube call at all, until the owner picks a budget. */
-    orderDailyUnits: z.number().int().min(0).max(10000),
+    orderDailyUnits: z.number().int().min(0).max(10000).refine((n) => n === 0 || n >= ORDER_MIN_DAILY_UNITS, { message: `0 (paused) or at least ${ORDER_MIN_DAILY_UNITS}: less cannot pay for reading a playlist and moving one video` }),
     /** Moves one reorder run makes at most (default 10). */
     orderMovesPerRun: z.number().int().min(1).max(100),
   }),

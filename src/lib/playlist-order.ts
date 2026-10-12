@@ -13,7 +13,8 @@
  * **The date.** A set URL ends in the date of the set. A radio show that airs
  * a festival set carries two (`…-ultra-music-festival-chile-2024-04-20-2024-05-22.html`:
  * played on the first, aired on the second), so the date is the EARLIEST of
- * the run of dates the slug ends in. `setDateFromUrl` (lib/pool-settings.ts)
+ * the run of dates the slug ends in (real calendar dates from 1990 on; anything
+ * else in the run is not a date). `setDateFromUrl` (lib/pool-settings.ts)
  * and `set_date` in D1 keep the last one, which is what recheck ages and the
  * mkvid queue are built on; they are not changed.
  *
@@ -37,9 +38,12 @@ export const UNDATED: OrderKey = { date: null, name: '', url: '' }
 const DATE_RUN = /(?:-\d{4}-\d{2}-\d{2})+$/
 const ONE_DATE = /\d{4}-\d{2}-\d{2}/g
 
+/** No set tracked follows is older; a stray `-1000-01-21` in a slug (a catalogue number, say) must not sort a set first. */
+const EARLIEST_YEAR = 1990
+
 function isRealDate(d: string): boolean {
   const t = Date.parse(`${d}T00:00:00Z`)
-  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d && Number(d.slice(0, 4)) >= EARLIEST_YEAR
 }
 
 /** The set's slug: the URL's last path segment, without `.html` and anything after it. */
@@ -188,6 +192,9 @@ export const UNITS_PER_MOVE = 50
 /** `playlistItems.list` returns 50 entries for 1 unit. */
 export const ITEMS_PER_LIST_PAGE = 50
 
+/** The two lookups that read back the first move of a run on a playlist (lib/playlist-reorder.ts). */
+export const UNITS_PER_READ_BACK = 2
+
 /** Units one full reading of a playlist of `items` entries costs. */
 export function listUnits(items: number): number {
   return Math.max(1, Math.ceil(items / ITEMS_PER_LIST_PAGE))
@@ -204,15 +211,15 @@ export function orderNeed(items: ReadonlyArray<{ id: string; key: OrderKey }>): 
 
 /**
  * Days the backfill takes at `dailyUnits`, spending at most `movesPerRun`
- * moves on a playlist per reading of it (each run reads the playlist again:
- * that is what makes it safe to stop). Infinity when the budget cannot pay
- * for one reading and one move.
+ * moves on a playlist per reading of it (each run reads the playlist again,
+ * which is what makes it safe to stop, and reads its first move back).
+ * Infinity when the budget cannot pay for one reading and one move.
  */
 export function estimateDays(needs: readonly OrderNeed[], dailyUnits: number, movesPerRun: number): { units: number; days: number } {
   let units = 0
   for (const n of needs) {
     if (n.moves === 0) continue
-    units += n.moves * UNITS_PER_MOVE + Math.ceil(n.moves / Math.max(1, movesPerRun)) * listUnits(n.items)
+    units += n.moves * UNITS_PER_MOVE + Math.ceil(n.moves / Math.max(1, movesPerRun)) * (listUnits(n.items) + UNITS_PER_READ_BACK)
   }
   if (units === 0) return { units: 0, days: 0 }
   return { units, days: dailyUnits >= UNITS_PER_MOVE + 1 ? Math.ceil(units / dailyUnits) : Infinity }

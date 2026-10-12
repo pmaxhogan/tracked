@@ -2,7 +2,8 @@
  * The reorder pass: puts every artist playlist in the order
  * lib/playlist-order.ts defines, a few moves at a time. The combined playlist
  * is not ordered, by the owner's decision (it is the one for shuffling and
- * would be half of all the moves): this file never reads, plans or moves it. It is both the one-off backfill of playlists filled before ordering
+ * would be half of all the moves): this file never reads, plans or moves it.
+ * The pass is both the one-off backfill of playlists filled before ordering
  * existed and the upkeep afterwards (an insert that had to be appended, a
  * video the owner dragged).
  *
@@ -32,22 +33,32 @@
  * index `position` of the playlist and everything between its old and new
  * place shifts by one. Google documents `snippet.position` as the zero-based
  * place of the item and nothing more, so the pass checks instead of trusting:
- *   - the first move of a run on a playlist is compared with where YouTube
- *     says the item now is (the update's own reply, else one 1-unit lookup of
- *     that item). A different index stops that playlist (`unexpected_position`);
+ *   - after the first move of a run on a playlist it READS BACK, with two
+ *     1-unit lookups, where the moved item is and where the item the plan
+ *     puts next to it is. The update's own reply is not used for this: it may
+ *     only repeat the request. Both must be at the index the plan gives them;
+ *     the neighbour is what tells "taken out, put back at that index" from
+ *     any other way of shifting. A read that disagrees is repeated once after
+ *     a short wait (YouTube's reads can lag its writes) before the playlist is
+ *     stopped (`unexpected_position`);
  *   - a run that made 3 or more moves must leave the playlist needing fewer
  *     moves at the next reading than before it. If it does not, the moves are
  *     not doing what the plan thinks and the playlist stops (`no_progress`).
- * Both are shown on the card and tried again a day later, so a wrong
- * assumption costs a handful of moves, not the backfill.
+ * A stopped playlist is tried again a day later, or at once with Retry now on
+ * the card, so a wrong assumption costs a move or two, not the backfill.
  *
  * **Limits.** `playlists.orderDailyUnits` is everything the pass may spend in
- * a quota day (midnight Pacific), listings included and failed moves too
- * (YouTube charges for those). `playlists.orderMovesPerRun` (default 10) and
- * a wall-clock ceiling bound one run. A daily-quota reply, to this pass or to
- * any other YouTube writer (lib/youtube-quota.ts), stops the pass until the
- * quota day rolls over; a per-minute rate limit ends the run only. See
- * `quotaStop` and `youtubeQuotaOut` below.
+ * a quota day (midnight Pacific), listings and lookups included and failed
+ * moves too (YouTube charges for those). `playlists.orderMovesPerRun`
+ * (default 10) and a wall-clock ceiling bound one run. A daily-quota reply,
+ * to this pass or to any other YouTube writer (lib/youtube-quota.ts), stops
+ * the pass until the quota day rolls over; a per-minute rate limit ends the
+ * run only. See `quotaStop` and `youtubeQuotaOut` below.
+ *
+ * **One at a time.** The cron pass, Move now, a fresh dry run and Retry now
+ * all read and write the same state and the same playlists, so each holds a
+ * short lock (`yt:order:lock`); whoever comes second skips and says so. A
+ * run therefore never plans from a listing taken before another run's moves.
  *
  * **Order of work.** Playlists never read first (reading is what the dry run
  * needs), then playlists with moves left, fewest first, so whole playlists
@@ -59,12 +70,13 @@
 
 import type { Env } from '../types'
 import { getAppSettings } from './app-settings'
+import { loadCombinedState } from './combined-playlist'
 import { dbOf } from './db'
 import { getAccessToken } from './google-oauth'
 import { errorFields, type Logger } from './log'
 import { quotaDayStart } from './mkvid'
-import { estimateDays, listUnits, planMoves, UNDATED, UNITS_PER_MOVE, type Move, type OrderKey, type OrderNeed } from './playlist-order'
-import { loadOrderKeys, type OrderKeys } from './playlist-order-store'
+import { applyMoves, estimateDays, listUnits, planMoves, UNDATED, UNITS_PER_MOVE, type Move, type OrderKey, type OrderNeed } from './playlist-order'
+import { clearNotManual, loadOrderKeys, noteNotManual, type OrderKeys } from './playlist-order-store'
 import { quotaKind } from './youtube-error'
 import { getQuotaOut, noteQuotaOut } from './youtube-quota'
 import { getPlaylistItemPosition, isQuotaError, listPlaylistItems, movePlaylistItem, PlaylistNotFoundError, YouTubeApiError } from './youtube-playlists'
@@ -102,6 +114,9 @@ const ORDER_STATE_KEY = 'subs:playlist-order'
 /** Units spent per quota day, in CACHE (a rolling budget, not state). */
 const DAILY_UNITS_PREFIX = 'yt:order:units:'
 const DAILY_UNITS_TTL = 60 * 60 * 48
+/** Held by whoever is reading or moving (see "One at a time"). KV's shortest expiry; a run is bounded well below it. */
+const LOCK_KEY = 'yt:order:lock'
+const LOCK_TTL = 60
 /** A playlist with nothing left to move is looked at again this often; so is one that stopped for a reason someone has to look at. */
 const RECHECK_SECONDS = 24 * 60 * 60
 /** A playlist that could not be read, or refused a move, is left alone this long (a refused move costs 50 units). */
@@ -112,6 +127,10 @@ const PASS_DEADLINE_MS = 10_000
 const MAX_PLAYLISTS_PER_PASS = 6
 /** A run of at least this many moves must have lowered what the playlist needs by the next reading. */
 const PROGRESS_CHECK_MIN_MOVES = 3
+/** The read-back of a first move that disagrees is repeated once after this long (read-after-write lag). */
+const CONFIRM_RETRY_MS = 1500
+/** Units the read-back of a first move costs: two lookups, and two more when it has to look again. */
+const CONFIRM_UNITS = 4
 /** Budgets the report gives a duration for, so a paused pass still says what each would mean. */
 const SAMPLE_DAILY_UNITS = [1000, 2000, 4000]
 
@@ -122,13 +141,18 @@ export type ManagedPlaylist = { playlistId: string; slug: string; title: string 
 /**
  * Why a playlist is not being worked on:
  *   - `manual_sort`          YouTube refuses positions: the playlist is set to
- *                            sort by date or popularity. Only the owner can change that.
- *   - `unexpected_position`  a move did not land on the index the plan gave it.
+ *                            sort by date or popularity. Only the owner can
+ *                            change that (the one state shown in red).
+ *   - `unexpected_position`  the read-back of a move did not find the videos
+ *                            where the plan puts them.
  *   - `no_progress`          a run of moves left the playlist needing no fewer.
- *   - `unreadable`           the playlist is gone or could not be listed; the
- *                            sync re-resolves it, nothing for the owner to do.
- *   - `move_failed`          a move was refused for another reason; tried again.
- * The first three stop the playlist for a day and are the ones to look at.
+ *   - `unreadable`           the playlist is gone, could not be listed, or its
+ *                            listing's positions are not 0..n-1; nothing for
+ *                            the owner to do.
+ *   - `move_failed`          a move was refused for another reason, or could
+ *                            not be read back; tried again.
+ * The first three stop the playlist for a day (`STOPPING`); the pass tries
+ * each again by itself then, or at once after Retry now.
  */
 export type OrderProblem = 'manual_sort' | 'unexpected_position' | 'no_progress' | 'unreadable' | 'move_failed'
 const STOPPING: readonly OrderProblem[] = ['manual_sort', 'unexpected_position', 'no_progress']
@@ -141,11 +165,13 @@ export type OrderPlaylistState = ManagedPlaylist &
     moved: number
     problem?: OrderProblem | null
     detail?: string | null
+    /** Unix seconds the pass ran into `problem`; its retry is timed from here, so a dry run in between does not put it off. */
+    problemAt?: number | null
     /** The last run that moved something: what the playlist needed before it and how many moves it made (the progress check). */
     lastRun?: { needed: number; applied: number } | null
   }
 
-export type OrderStop = 'paused' | 'not_connected' | 'quota' | 'rate_limit' | 'budget' | 'run' | 'deadline' | null
+export type OrderStop = 'paused' | 'not_connected' | 'quota' | 'rate_limit' | 'budget' | 'run' | 'deadline' | 'busy' | 'no_keys' | null
 
 export type OrderState = {
   playlists: Record<string, OrderPlaylistState>
@@ -161,6 +187,21 @@ async function saveOrderState(env: Env, state: OrderState): Promise<void> {
   await env.SUBS.put(ORDER_STATE_KEY, JSON.stringify(state))
 }
 
+/**
+ * Take the lock, or learn that someone holds it. Get-then-put like the DJ
+ * set-list refresh lock (lib/dj-sets.ts): KV has no compare-and-set, and the
+ * two callers here are a 5-minute cron and one person's button.
+ */
+async function takeLock(env: Env): Promise<boolean> {
+  if (await env.CACHE.get(LOCK_KEY)) return false
+  await env.CACHE.put(LOCK_KEY, String(Date.now()), { expirationTtl: LOCK_TTL })
+  return true
+}
+
+async function releaseLock(env: Env): Promise<void> {
+  await env.CACHE.delete(LOCK_KEY).catch(() => {})
+}
+
 function dailyKey(nowMs = Date.now()): string {
   return `${DAILY_UNITS_PREFIX}${quotaDayStart(nowMs)}`
 }
@@ -170,26 +211,32 @@ export async function orderUnitsUsedToday(env: Env): Promise<number> {
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 
-/** Read-modify-write like the combined playlist's counter: the crons do not overlap, and a lost bump is a few units. */
+/** Read-modify-write like the combined playlist's counter: runs do not overlap (the lock), and a lost bump is a few units. */
 async function chargeUnits(env: Env, units: number): Promise<void> {
   if (units <= 0) return
   await env.CACHE.put(dailyKey(), String((await orderUnitsUsedToday(env)) + units), { expirationTtl: DAILY_UNITS_TTL })
 }
 
-/** The playlists that are ordered: one per DJ (`sub_sync`, unsubscribed DJs included, their playlist stays). Not the combined one. */
+/**
+ * The playlists that are ordered: one per DJ (`sub_sync`, unsubscribed DJs
+ * included, their playlist stays). Never the combined one, by id, whatever
+ * `sub_sync` says.
+ */
 export async function managedPlaylists(env: Env): Promise<ManagedPlaylist[]> {
   const res = await dbOf(env)
     .prepare('SELECT slug, playlist_id, artist_name FROM sub_sync WHERE playlist_id IS NOT NULL ORDER BY slug')
     .all<{ slug: string; playlist_id: string; artist_name: string | null }>()
-  return res.results.map((r) => ({ playlistId: r.playlist_id, slug: r.slug, title: `${r.artist_name ?? r.slug} (1001tklists)` }))
+  const combined = (await loadCombinedState(env)).playlistId ?? null
+  return res.results.filter((r) => r.playlist_id !== combined).map((r) => ({ playlistId: r.playlist_id, slug: r.slug, title: `${r.artist_name ?? r.slug} (1001tklists)` }))
 }
 
 type Entry = { id: string; videoId: string; key: OrderKey }
 
 /**
- * The playlist's entries in the order YouTube has them (by `snippet.position`,
- * not by the order of the response). An entry without an item id or a video
- * id cannot be moved and makes every index uncertain, so the reading is refused.
+ * The playlist's entries in the order YouTube has them, by `snippet.position`
+ * (not by the order of the response). Every index the plan uses comes from
+ * this, so the listing is refused unless every entry has an item id, a video
+ * id and a position, and the positions are exactly 0..n-1, each once.
  */
 export async function readPlaylistOrder(
   playlistId: string,
@@ -198,15 +245,16 @@ export async function readPlaylistOrder(
   fetcher?: typeof fetch,
 ): Promise<{ entries: Entry[]; pages: number }> {
   const r = await listPlaylistItems(playlistId, accessToken, {}, fetcher)
-  const raw = r.items.map((it, i) => ({
+  const raw = r.items.map((it) => ({
     id: it.id,
     videoId: it.contentDetails?.videoId || it.snippet?.resourceId?.videoId,
-    position: typeof (it.snippet as { position?: unknown } | undefined)?.position === 'number' ? ((it.snippet as { position: number }).position) : i,
-    i,
+    position: (it.snippet as { position?: unknown } | undefined)?.position,
   }))
   if (raw.some((e) => !e.id || !e.videoId)) throw new Error('listing has an entry without an id')
-  raw.sort((a, b) => a.position - b.position || a.i - b.i)
-  return { entries: raw.map((e) => ({ id: e.id!, videoId: e.videoId!, key: keys.get(e.videoId!) ?? UNDATED })), pages: r.pages }
+  if (raw.some((e) => typeof e.position !== 'number')) throw new Error('listing has an entry without a position')
+  const sorted = raw.sort((a, b) => (a.position as number) - (b.position as number))
+  if (sorted.some((e, i) => e.position !== i)) throw new Error('listing positions are not 0..n-1 (a gap or a duplicate)')
+  return { entries: sorted.map((e) => ({ id: e.id!, videoId: e.videoId!, key: keys.get(e.videoId!) ?? UNDATED })), pages: r.pages }
 }
 
 function needOf(entries: Entry[], moves: Move[]): OrderNeed {
@@ -218,11 +266,13 @@ export function orderQueue(playlists: ManagedPlaylist[], state: OrderState, now:
   const rank = (p: ManagedPlaylist): [number, number] | null => {
     const s = state.playlists[p.playlistId]
     if (!s) return [0, 0]
-    const stale = now - s.checkedAt >= RECHECK_SECONDS
-    // A playlist with a problem waits (a day when someone has to look at it), it is not tried every tick.
-    if (s.problem) return (STOPPING.includes(s.problem) ? stale : now - s.checkedAt >= PROBLEM_RETRY_SECONDS) ? [2, s.checkedAt] : null
+    // A playlist with a problem waits (a day when it stopped), timed from when the pass ran into it, not from the last dry run.
+    if (s.problem) {
+      const since = s.problemAt ?? s.checkedAt
+      return now - since >= (STOPPING.includes(s.problem) ? RECHECK_SECONDS : PROBLEM_RETRY_SECONDS) ? [2, since] : null
+    }
     if (s.moves > 0) return [1, s.moves]
-    return stale ? [2, s.checkedAt] : null
+    return now - s.checkedAt >= RECHECK_SECONDS ? [2, s.checkedAt] : null
   }
   return playlists
     .map((p) => ({ p, r: rank(p) }))
@@ -231,23 +281,38 @@ export function orderQueue(playlists: ManagedPlaylist[], state: OrderState, now:
     .map((x) => x.p)
 }
 
+type Confirmed = { ok: true; units: number } | { ok: false; units: number; detail: string }
+
 /**
- * Where YouTube says a moved item is now: the update's own reply when it
- * carries a position, else one lookup of that item (`units` = what the lookup
- * cost). Null when neither says.
+ * Read back the first move of a run: is the moved item at the index it was
+ * sent to, and is the item the plan puts beside it (after it, or before it
+ * when it went last) where the plan has it? Two lookups, 1 unit each, and
+ * once more after `sleep` when they disagree. Throws what a lookup throws.
  */
-async function landedAt(
-  replied: number | null,
-  item: { itemId: string; playlistId: string; videoId: string },
-  accessToken: string,
-  fetcher?: typeof fetch,
-): Promise<{ position: number | null; units: number }> {
-  if (replied !== null) return { position: replied, units: 0 }
-  try {
-    return { position: await getPlaylistItemPosition(item.playlistId, item.videoId, item.itemId, accessToken, fetcher), units: 1 }
-  } catch {
-    return { position: null, units: 1 }
+async function confirmMove(
+  a: { playlistId: string; before: Entry[]; move: Move; accessToken: string; fetcher?: typeof fetch; sleep: (ms: number) => Promise<void> },
+): Promise<Confirmed> {
+  const expected = applyMoves(a.before.map((e) => e.id), [a.move])
+  const byId = new Map(a.before.map((e) => [e.id, e]))
+  const neighbourAt = a.move.position + 1 < expected.length ? a.move.position + 1 : a.move.position - 1
+  const checks = [{ id: a.move.id, at: a.move.position, what: 'the moved video' }]
+  if (neighbourAt >= 0) checks.push({ id: expected[neighbourAt]!, at: neighbourAt, what: neighbourAt > a.move.position ? 'the video after it' : 'the video before it' })
+  let units = 0
+  let detail = ''
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await a.sleep(CONFIRM_RETRY_MS)
+    detail = ''
+    for (const c of checks) {
+      units += 1
+      const got = await getPlaylistItemPosition(a.playlistId, byId.get(c.id)!.videoId, c.id, a.accessToken, a.fetcher)
+      if (got !== c.at) {
+        detail = `${c.what} should be at index ${c.at} after a move to index ${a.move.position} and is ${got === null ? 'not found' : `at index ${got}`}`
+        break
+      }
+    }
+    if (!detail) return { ok: true, units }
   }
+  return { ok: false, units, detail }
 }
 
 export type OrderPassResult = {
@@ -255,45 +320,64 @@ export type OrderPassResult = {
   /** Playlists read this run. */
   read: number
   moved: number
-  /** Units this run spent: listings and moves. */
+  /** Units this run spent: listings, moves and lookups. */
   units: number
   stoppedBy: OrderStop
   unitsUsedToday: number
   dailyUnits: number
 }
 
+type PassOpts = { log: Logger; trigger?: string; fetcher?: typeof fetch; deadlineMs?: number; accessToken?: string; sleep?: (ms: number) => Promise<void> }
+
 /**
  * One bounded pass. Never throws for a YouTube or D1 failure it can name; a
  * daily-quota reply ends it and is remembered for the rest of the quota day.
- * Paused (budget 0) it returns before any YouTube call.
+ * Paused (budget 0) it returns before any YouTube call. `busy` = another run
+ * holds the lock; nothing was read or moved.
  */
-export async function runOrderPass(
-  env: Env,
-  opts: { log: Logger; trigger?: string; fetcher?: typeof fetch; deadlineMs?: number; accessToken?: string },
-): Promise<OrderPassResult> {
-  const log = opts.log
+export async function runOrderPass(env: Env, opts: PassOpts): Promise<OrderPassResult> {
   const settings = (await getAppSettings(env)).playlists
   const dailyUnits = settings.orderDailyUnits
   if (dailyUnits <= 0) return { ok: true, read: 0, moved: 0, units: 0, stoppedBy: 'paused', unitsUsedToday: 0, dailyUnits: 0 }
   const used = await orderUnitsUsedToday(env)
+  const skipped = (stoppedBy: OrderStop): OrderPassResult => ({ ok: true, read: 0, moved: 0, units: 0, stoppedBy, unitsUsedToday: used, dailyUnits })
+  if (await youtubeQuotaOut(env)) return skipped('quota')
+  // Not worth a listing when what is left cannot pay for one move.
+  if (dailyUnits - used < UNITS_PER_MOVE + 1) return skipped('budget')
+  if (!(await takeLock(env))) return skipped('busy')
+  try {
+    return await passLocked(env, opts, { dailyUnits, movesPerRun: settings.orderMovesPerRun, used })
+  } finally {
+    await releaseLock(env)
+  }
+}
+
+/** The pass itself; the caller holds the lock, so the state read here is the one this run writes back. */
+async function passLocked(env: Env, opts: PassOpts, lim: { dailyUnits: number; movesPerRun: number; used: number }): Promise<OrderPassResult> {
+  const log = opts.log
+  const { dailyUnits, used } = lim
   const done = (stoppedBy: OrderStop, read = 0, moved = 0, units = 0): OrderPassResult => ({ ok: true, read, moved, units, stoppedBy, unitsUsedToday: used + units, dailyUnits })
   const state = await loadOrderState(env)
-  if (await youtubeQuotaOut(env)) return done('quota')
-  // Not worth a listing when what is left cannot pay for one move.
-  if (dailyUnits - used < UNITS_PER_MOVE + 1) return done('budget')
-
   const now = nowSeconds()
   const queue = orderQueue(await managedPlaylists(env), state, now)
   if (queue.length === 0) return done(null)
   const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken
   if (!accessToken) return done('not_connected')
+  // Without the set dates nothing can be planned. That is D1's failure, not a playlist's: nothing is read, nothing is spent.
+  let keys: OrderKeys
+  try {
+    keys = await loadOrderKeys(env)
+  } catch (e) {
+    log.warn('playlist_order.keys_unreadable', errorFields(e))
+    return done('no_keys')
+  }
 
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const deadline = Date.now() + (opts.deadlineMs ?? PASS_DEADLINE_MS)
   let units = 0
   let moved = 0
   let read = 0
   let stoppedBy: OrderStop = null
-  let keys: OrderKeys | null = null
   const left = () => dailyUnits - used - units
   /** A quota reply ends the pass: for the day (every YouTube writer is told), or for this run. */
   const passStop = async (e: unknown): Promise<OrderStop> => {
@@ -301,6 +385,7 @@ export async function runOrderPass(
     if (q === 'daily') await noteQuotaOut(env, e, log)
     return q === 'daily' ? 'quota' : q === 'rate' ? 'rate_limit' : null
   }
+  const messageOf = (e: unknown) => (errorFields(e).errorMessage as string | undefined) ?? String(e)
 
   for (const p of queue) {
     if (read >= MAX_PLAYLISTS_PER_PASS) break
@@ -316,7 +401,6 @@ export async function runOrderPass(
     }
     let entries: Entry[]
     try {
-      keys ??= await loadOrderKeys(env)
       const r = await readPlaylistOrder(p.playlistId, keys, accessToken, opts.fetcher)
       entries = r.entries
       units += r.pages
@@ -329,30 +413,36 @@ export async function runOrderPass(
       state.playlists[p.playlistId] = {
         ...p, items: before?.items ?? 0, undated: before?.undated ?? 0, moves: before?.moves ?? 0, units: before?.units ?? 0, checkedAt: now, moved: before?.moved ?? 0, lastRun: before?.lastRun ?? null,
         problem: 'unreadable',
-        detail: e instanceof PlaylistNotFoundError ? 'playlist not found on YouTube' : (errorFields(e).errorMessage as string | undefined) ?? String(e),
+        problemAt: now,
+        detail: e instanceof PlaylistNotFoundError ? 'playlist not found on YouTube' : messageOf(e),
       }
       log.warn('playlist_order.unreadable', { playlistId: p.playlistId, slug: p.slug, ...errorFields(e) })
       continue
     }
     const plan = planMoves(entries)
-    const next: OrderPlaylistState = { ...p, ...needOf(entries, plan.moves), checkedAt: now, moved: before?.moved ?? 0, problem: null, detail: null, lastRun: null }
+    const next: OrderPlaylistState = { ...p, ...needOf(entries, plan.moves), checkedAt: now, moved: before?.moved ?? 0, problem: null, detail: null, problemAt: null, lastRun: null }
     state.playlists[p.playlistId] = next
+    const stop = (problem: OrderProblem, detail: string) => {
+      next.problem = problem
+      next.detail = detail
+      next.problemAt = now
+    }
     // The last run moved videos here and the playlist needs no fewer moves than before it: the moves are not doing what the plan thinks.
     const last = before?.lastRun
     if (last && last.applied >= PROGRESS_CHECK_MIN_MOVES && plan.moves.length >= last.needed) {
-      next.problem = 'no_progress'
-      next.detail = `${last.applied} moves were made and the playlist still needs ${plan.moves.length} (it needed ${last.needed} before them)`
+      stop('no_progress', `${last.applied} moves were made and the playlist still needs ${plan.moves.length} (it needed ${last.needed} before them)`)
       log.warn('playlist_order.no_progress', { playlistId: p.playlistId, slug: p.slug, applied: last.applied, neededBefore: last.needed, neededNow: plan.moves.length })
       continue
     }
     const videoOf = new Map(entries.map((e) => [e.id, e.videoId]))
     let applied = 0
     for (const m of plan.moves) {
-      if (moved >= settings.orderMovesPerRun) {
+      if (moved >= lim.movesPerRun) {
         stoppedBy = 'run'
         break
       }
-      if (left() < UNITS_PER_MOVE) {
+      // The first move of a run brings its read-back with it.
+      if (left() < UNITS_PER_MOVE + (applied === 0 ? CONFIRM_UNITS : 0)) {
         stoppedBy = 'budget'
         break
       }
@@ -360,32 +450,41 @@ export async function runOrderPass(
         stoppedBy = 'deadline'
         break
       }
-      const item = { itemId: m.id, playlistId: p.playlistId, videoId: videoOf.get(m.id)! }
       // Charged before the call: a move YouTube refuses costs the same 50 units.
       units += UNITS_PER_MOVE
-      let replied: number | null
       try {
-        replied = await movePlaylistItem(item, m.position, accessToken, opts.fetcher)
+        await movePlaylistItem({ itemId: m.id, playlistId: p.playlistId, videoId: videoOf.get(m.id)! }, m.position, accessToken, opts.fetcher)
       } catch (e) {
         stoppedBy = await passStop(e)
         if (stoppedBy) break
         // Every later move of the plan assumed this one happened: the next run plans afresh.
         const manual = e instanceof YouTubeApiError && e.status === 400 && e.reason === 'manualSortRequired'
-        next.problem = manual ? 'manual_sort' : 'move_failed'
-        next.detail = manual ? 'the playlist is not on manual order' : (errorFields(e).errorMessage as string | undefined) ?? String(e)
+        stop(manual ? 'manual_sort' : 'move_failed', manual ? 'the playlist is not on manual order' : messageOf(e))
+        // Inserts into it stop trying a position too (lib/playlist-order-store.ts).
+        if (manual) await noteNotManual(env, p.playlistId).catch(() => {})
         log.warn('playlist_order.move_failed', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, position: m.position, ...errorFields(e) })
         break
       }
       applied += 1
       moved += 1
       if (applied === 1) {
-        // The first move of the run is checked against where YouTube says the item is before any more are spent.
-        const at = await landedAt(replied, item, accessToken, opts.fetcher)
-        units += at.units
-        if (at.position !== null && at.position !== m.position) {
-          next.problem = 'unexpected_position'
-          next.detail = `a video moved to index ${m.position} is at index ${at.position}`
-          log.warn('playlist_order.unexpected_position', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, asked: m.position, got: at.position })
+        // Read back before any more quota goes into this playlist.
+        try {
+          const c = await confirmMove({ playlistId: p.playlistId, before: entries, move: m, accessToken, fetcher: opts.fetcher, sleep })
+          units += c.units
+          if (!c.ok) {
+            stop('unexpected_position', c.detail)
+            log.warn('playlist_order.unexpected_position', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, position: m.position, detail: c.detail })
+            break
+          }
+          log.info('playlist_order.first_move_confirmed', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, position: m.position })
+        } catch (e) {
+          units += 1
+          stoppedBy = await passStop(e)
+          if (stoppedBy) break
+          // Not known to be wrong, only not confirmed: nothing more is moved now, and it is tried again within the hour.
+          stop('move_failed', `a move could not be read back: ${messageOf(e)}`)
+          log.warn('playlist_order.confirm_failed', { playlistId: p.playlistId, slug: p.slug, itemId: m.id, ...errorFields(e) })
           break
         }
       }
@@ -411,6 +510,28 @@ export async function runOrderPass(
   return done(stoppedBy, read, moved, units)
 }
 
+/**
+ * The owner's "try this one again now" for a playlist that stopped: the stop
+ * is cleared (and the "positions refused" memory with it, for one the owner
+ * has switched back to Manual), so the next run reads and plans it afresh and
+ * its first move is read back like any other. Nothing is moved here.
+ */
+export async function retryOrderPlaylist(env: Env, playlistId: string): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'busy' }> {
+  if (!(await takeLock(env))) return { ok: false, reason: 'busy' }
+  try {
+    const state = await loadOrderState(env)
+    const s = state.playlists[playlistId]
+    if (!s) return { ok: false, reason: 'not_found' }
+    // Without a stop and without the last run's numbers it is an ordinary playlist with moves left (or one due a look).
+    state.playlists[playlistId] = { ...s, problem: null, detail: null, problemAt: null, lastRun: null, checkedAt: s.moves > 0 ? s.checkedAt : 0 }
+    await saveOrderState(env, state)
+    await clearNotManual(env, playlistId).catch(() => {})
+    return { ok: true }
+  } finally {
+    await releaseLock(env)
+  }
+}
+
 // ─── the dry run / status ───────────────────────────────────────────────────
 
 export type OrderReportRow = OrderPlaylistState | (ManagedPlaylist & { checkedAt: null })
@@ -419,6 +540,8 @@ export type OrderReport = {
   connected: boolean
   /** True when every number below was read from YouTube just now (`fresh`); else each row says when it was read. */
   fresh: boolean
+  /** A fresh reading was asked for while a run held the lock: these are the stored numbers. */
+  busy: boolean
   /** Units the fresh reading itself spent (listings only; a dry run never moves). */
   unitsSpent: number
   playlists: OrderReportRow[]
@@ -444,51 +567,62 @@ export type OrderReport = {
 /**
  * Per playlist: entries, entries with no date, moves needed, units needed;
  * totals; and the days left at the current budget. With `fresh` every playlist
- * is read from YouTube now (about 35 units for 1 100 entries in 25 playlists) and the stored
- * numbers are replaced; nothing is moved either way, and it does not depend
- * on the budget. A fresh reading stops at a quota reply and reports what it has.
+ * is read from YouTube now (about 35 units for 1 100 entries in 25 playlists)
+ * and the stored numbers are replaced; nothing is moved either way, and it does
+ * not depend on the budget. A fresh reading stops at a quota reply and reports
+ * what it has. It leaves a stop and its retry time as they are, and forgets
+ * "positions refused" so the next insert finds out again.
  */
 export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean; fetcher?: typeof fetch; accessToken?: string }): Promise<OrderReport> {
   const settings = (await getAppSettings(env)).playlists
-  const state = await loadOrderState(env)
-  const managed = await managedPlaylists(env)
   const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken ?? null
   let unitsSpent = 0
   let fresh = false
+  let busy = false
   if (opts.fresh && accessToken) {
-    fresh = true
-    const now = nowSeconds()
-    const keys = await loadOrderKeys(env)
-    for (const p of managed) {
-      const before = state.playlists[p.playlistId]
-      // A reading does not clear a stop someone has to look at: only the pass finds out whether it still holds.
-      const kept = before?.problem && STOPPING.includes(before.problem) ? { problem: before.problem, detail: before.detail ?? null } : { problem: null, detail: null }
-      const next: OrderPlaylistState = { ...p, items: before?.items ?? 0, undated: before?.undated ?? 0, moves: before?.moves ?? 0, units: before?.units ?? 0, checkedAt: now, moved: before?.moved ?? 0, lastRun: before?.lastRun ?? null, ...kept }
+    if (!(await takeLock(env))) busy = true
+    else {
       try {
-        const r = await readPlaylistOrder(p.playlistId, keys, accessToken, opts.fetcher)
-        unitsSpent += r.pages
-        Object.assign(next, needOf(r.entries, planMoves(r.entries).moves))
-      } catch (e) {
-        unitsSpent += 1
-        const q = quotaStop(e)
-        if (q) {
-          if (q === 'daily') await noteQuotaOut(env, e, opts.log)
-          fresh = false
-          break
+        const state = await loadOrderState(env)
+        const now = nowSeconds()
+        const keys = await loadOrderKeys(env)
+        fresh = true
+        for (const p of await managedPlaylists(env)) {
+          const before = state.playlists[p.playlistId]
+          // A reading does not clear a stop: only the pass finds out whether it still holds, at the time it would have anyway.
+          const kept = before?.problem && STOPPING.includes(before.problem) ? { problem: before.problem, detail: before.detail ?? null, problemAt: before.problemAt ?? before.checkedAt } : { problem: null, detail: null, problemAt: null }
+          const next: OrderPlaylistState = { ...p, items: before?.items ?? 0, undated: before?.undated ?? 0, moves: before?.moves ?? 0, units: before?.units ?? 0, checkedAt: now, moved: before?.moved ?? 0, lastRun: before?.lastRun ?? null, ...kept }
+          try {
+            const r = await readPlaylistOrder(p.playlistId, keys, accessToken, opts.fetcher)
+            unitsSpent += r.pages
+            Object.assign(next, needOf(r.entries, planMoves(r.entries).moves))
+            await clearNotManual(env, p.playlistId).catch(() => {})
+          } catch (e) {
+            unitsSpent += 1
+            const q = quotaStop(e)
+            if (q) {
+              if (q === 'daily') await noteQuotaOut(env, e, opts.log)
+              fresh = false
+              break
+            }
+            next.problem = 'unreadable'
+            next.problemAt = now
+            next.detail = e instanceof PlaylistNotFoundError ? 'playlist not found on YouTube' : (errorFields(e).errorMessage as string | undefined) ?? String(e)
+          }
+          state.playlists[p.playlistId] = next
         }
-        next.problem = 'unreadable'
-        next.detail = e instanceof PlaylistNotFoundError ? 'playlist not found on YouTube' : (errorFields(e).errorMessage as string | undefined) ?? String(e)
+        await chargeUnits(env, unitsSpent)
+        await saveOrderState(env, state)
+      } catch (e) {
+        fresh = false
+        opts.log.warn('playlist_order.dry_run_failed', errorFields(e))
+      } finally {
+        await releaseLock(env)
       }
-      state.playlists[p.playlistId] = next
-    }
-    try {
-      await chargeUnits(env, unitsSpent)
-      await saveOrderState(env, state)
-    } catch (e) {
-      opts.log.warn('playlist_order.state_write_failed', errorFields(e))
     }
   }
-  const rows: OrderReportRow[] = managed.map((p) => state.playlists[p.playlistId] ?? { ...p, checkedAt: null })
+  const state = await loadOrderState(env)
+  const rows: OrderReportRow[] = (await managedPlaylists(env)).map((p) => state.playlists[p.playlistId] ?? { ...p, checkedAt: null })
   const read = rows.filter((r): r is OrderPlaylistState => r.checkedAt !== null)
   const sum = (xs: OrderPlaylistState[], f: (r: OrderPlaylistState) => number) => xs.reduce((a, r) => a + f(r), 0)
   // Moves the pass will not make are not days it will take.
@@ -497,6 +631,7 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
   return {
     connected: !!accessToken,
     fresh,
+    busy,
     unitsSpent,
     playlists: rows,
     totals: { playlists: rows.length, unread: rows.length - read.length, items: sum(read, (r) => r.items), undated: sum(read, (r) => r.undated), moves: sum(read, (r) => r.moves), units: sum(read, (r) => r.units) },

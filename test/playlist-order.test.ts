@@ -22,7 +22,8 @@ vi.mock('../src/lib/youtube-playlists', async () => {
   return { ...actual, addVideoToPlaylist: vi.fn() }
 })
 import { addVideoToPlaylist, YouTubeApiError } from '../src/lib/youtube-playlists'
-import { insertInOrder, loadOrderKeys, orderKeyFor } from '../src/lib/playlist-order-store'
+import { insertInOrder, isNotManual, loadOrderKeys, orderKeyFor } from '../src/lib/playlist-order-store'
+import { saveCombinedState } from '../src/lib/combined-playlist'
 
 const T = 'https://www.1001tracklists.com/tracklist'
 const set = (id: string, slug: string) => `${T}/${id}/${slug}.html`
@@ -46,6 +47,14 @@ describe('setHappenedOn', () => {
     expect(setHappenedOn(set('3e', 'broken-2024-13-45'))).toBeNull()
     expect(setHappenedOn(set('3f', 'half-broken-2024-02-30-2024-03-09'))).toBe('2024-03-09')
     expect(setHappenedOn('not a url')).toBeNull()
+  })
+
+  it('does not take a number that only looks like a date for one: nothing before 1990', () => {
+    // A catalogue number in front of the real date must not sort the set first.
+    expect(setHappenedOn(set('4a', 'label-night-1000-01-21-2024-03-09'))).toBe('2024-03-09')
+    expect(setHappenedOn(set('4b', 'some-show-0000-01-01'))).toBeNull()
+    expect(setHappenedOn(set('4c', 'old-tape-1989-12-31'))).toBeNull()
+    expect(setHappenedOn(set('4d', 'old-tape-1990-01-01'))).toBe('1990-01-01')
   })
 })
 
@@ -203,8 +212,8 @@ describe('orderNeed / estimateDays', () => {
   })
 
   it('adds one listing per run of moves and divides by the daily budget', () => {
-    // 25 moves, 10 a run = 3 listings of a 120-entry playlist (3 pages each) on top of 25 x 50.
-    expect(estimateDays([{ items: 120, undated: 0, moves: 25, units: 1250 }], 500, 10)).toEqual({ units: 1259, days: 3 })
+    // 25 moves, 10 a run = 3 runs, each a listing of a 120-entry playlist (3 pages) and a 2-unit read-back, on top of 25 x 50.
+    expect(estimateDays([{ items: 120, undated: 0, moves: 25, units: 1250 }], 500, 10)).toEqual({ units: 1265, days: 3 })
     expect(estimateDays([{ items: 120, undated: 0, moves: 0, units: 0 }], 500, 10)).toEqual({ units: 0, days: 0 })
     expect(estimateDays([{ items: 5, undated: 0, moves: 1, units: 50 }], 0, 10).days).toBe(Infinity)
   })
@@ -274,6 +283,35 @@ describe('insertInOrder', () => {
       ['PL', 'vNew', 'tok', undefined, { position: 0 }],
       ['PL', 'vNew', 'tok'],
     ])
+  })
+
+  it('remembers a playlist that is not on manual order: the next inserts are appended for 50 units, not 100', async () => {
+    const env = await envWithSets(rows)
+    const older = (n: number) => ({ playlistId: 'PL', videoId: `vNew${n}`, existing: ['v2022', 'v2023', 'v2024'], accessToken: 'tok', log, setUrl: set(`9${n}`, 'dj-club-2021-01-01') })
+    add.mockRejectedValueOnce(new YouTubeApiError('playlistItems.insert', 400, 'manualSortRequired', '{}'))
+    expect(await insertInOrder(env, older(1))).toEqual({ position: null, attempts: 2 })
+    expect(await isNotManual(env, 'PL')).toBe(true)
+    add.mockClear()
+    expect(await insertInOrder(env, older(2))).toEqual({ position: null, attempts: 1 })
+    expect(add.mock.calls).toEqual([['PL', 'vNew2', 'tok']])
+    // Another playlist is not affected, and a position past the end is not remembered at all.
+    add.mockClear()
+    add.mockRejectedValueOnce(new YouTubeApiError('playlistItems.insert', 400, 'invalidPlaylistItemPosition', '{}'))
+    await insertInOrder(env, { ...older(3), playlistId: 'PLother' })
+    expect(await isNotManual(env, 'PLother')).toBe(false)
+    expect(add.mock.calls[0]).toEqual(['PLother', 'vNew3', 'tok', undefined, { position: 0 }])
+    // The memory lapses (a day's TTL in KV): the insert after that tries a position again.
+    await env.CACHE.delete('yt:order:notmanual:PL')
+    add.mockClear()
+    expect((await insertInOrder(env, older(4))).position).toBe(0)
+  })
+
+  it('never sends a position for the combined playlist, whoever calls', async () => {
+    const env = await envWithSets(rows)
+    await saveCombinedState(env, { playlistId: 'PLcombined' })
+    const r = await insertInOrder(env, { playlistId: 'PLcombined', videoId: 'vNew', existing: ['v2022', 'v2023', 'v2024'], accessToken: 'tok', log, setUrl: set('9', 'dj-club-2021-01-01') })
+    expect(r).toEqual({ position: null, attempts: 1 })
+    expect(add.mock.calls).toEqual([['PLcombined', 'vNew', 'tok']])
   })
 
   it('does not retry any other failure', async () => {

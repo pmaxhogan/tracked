@@ -57,7 +57,7 @@ import {
 import { normalizeTracklistUrl } from '../lib/tracklists1001'
 import { resolveFullTracklist, resolveTrackMediaLinks } from '../lib/tracklist-resolve'
 import { fixPlaylistTitles } from '../lib/playlist-rename'
-import { orderReport, runOrderPass } from '../lib/playlist-reorder'
+import { orderReport, retryOrderPlaylist, runOrderPass } from '../lib/playlist-reorder'
 import { purgeAndRefetch, resolvePurgeTarget } from '../lib/tracklist-purge'
 import { IPBlockedError, CloudflareChallengeError } from '../lib/fetch'
 import { getPlaylistAddition, listPlaylistAdditions } from '../lib/playlist-audit'
@@ -645,6 +645,13 @@ subscriptionsApp.post('/api/playlist-order/run', async (c) => {
     log.error('subs.playlist_order_run_throw', errorFields(e))
     return c.json({ error: 'playlist_order_failed', ...errorFields(e) }, 500)
   }
+})
+
+/** "Retry now" for a playlist the pass stopped: clears the stop so the next run tries it again. Moves nothing itself. */
+subscriptionsApp.post('/api/playlist-order/retry/:playlistId', async (c) => {
+  const r = await retryOrderPlaylist(c.env, c.req.param('playlistId'))
+  if (r.ok) return c.json(r)
+  return c.json({ error: r.reason, message: r.reason === 'busy' ? 'A run is moving videos right now; try again in a minute.' : 'No such playlist.' }, r.reason === 'busy' ? 409 : 404)
 })
 
 subscriptionsApp.get('/api/state/:slug', async (c) => {

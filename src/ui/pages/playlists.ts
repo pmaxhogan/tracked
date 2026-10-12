@@ -167,24 +167,27 @@ ${YOUTUBE_CARD_JS}
     if (d.quotaStoppedUntil) bits.push('<span class="badge info"' + TK.tip('YouTube answered that the quota of today is used. Moving continues by itself after the quota resets at midnight Pacific.') + '>waiting for quota · ' + esc(TK.fmt.rel(new Date(d.quotaStoppedUntil * 1000).toISOString())) + '</span>');
     if (d.lastRun && d.lastRun.moved) bits.push('last moved ' + d.lastRun.moved + ' ' + esc(TK.fmt.rel(new Date(d.lastRun.at * 1000).toISOString())));
     if (d.fresh) bits.push('read from YouTube just now (' + d.unitsSpent + ' units)');
+    if (d.busy) bits.push('a run is moving videos right now, these are the numbers from before it');
     const manual = (d.playlists || []).filter((p) => p.problem === 'manual_sort');
     const stopped = (d.playlists || []).filter((p) => p.problem === 'unexpected_position' || p.problem === 'no_progress');
     let html = '<div class="headline">' + head + '</div><div class="bits">' + bits.join(' · ') + '</div>';
     // Paused is the owner's own setting, not a fault: say how to start, and what a budget means once the moves are counted.
     if (paused) html += '<div class="bits">To start, set <a href="/ui/settings#sf-playlists">Quota units a day for ordering playlists</a> in Settings.' +
-      (t.unread === t.playlists ? ' Check now first counts the moves.' : d.estimate && d.estimate.moves ? ' ' + (d.daysAt || []).map((x) => x.dailyUnits.toLocaleString() + ' a day: about ' + x.days + ' day' + (x.days === 1 ? '' : 's')).join(' · ') + '.' : '') + '</div>';
-    // A move that did not land where planned stops that playlist before more quota is spent: someone has to look.
-    if (stopped.length) html += '<div class="bits"><span class="badge bad">' + stopped.length + ' stopped</span> ' + stopped.map((p) => esc(p.title) + ' (' + esc(p.detail || p.problem) + ')').join(', ') +
-      ': YouTube did not move a video the way the plan expects, so no more quota is spent there. It is tried once a day.</div>';
+      (t.unread === t.playlists ? ' Check now first counts the moves.' : d.estimate && d.estimate.moves ? ' ' + (d.daysAt || []).map((x) => x.dailyUnits.toLocaleString() + ' a day: about ' + x.days + ' day' + (x.days === 1 ? '' : 's')).join(' · ') + '.' : '') +
+      ' For the first day set Playlist moves per run to 1 and a small budget (200), and watch the log for playlist_order.first_move_confirmed (a move landed where planned) before raising either.</div>';
+    // A move that was not found where planned stops that playlist before more quota is spent. It is tried again by itself: a warning, not red.
+    if (stopped.length) html += '<div class="bits"><span class="badge warn">' + stopped.length + ' stopped for a day</span> ' + stopped.map((p) => esc(p.title) + ' (' + esc(p.detail || p.problem) + ')').join(', ') +
+      ': a move was not found where the plan expects it, so no more quota is spent there. It is tried again by itself after a day, or now with Retry now in the table below.</div>';
     // The one state that needs the owner: YouTube refuses positions on a playlist that sorts itself.
     if (manual.length) html += '<div class="bits"><span class="badge bad">' + manual.length + ' cannot be ordered</span> ' + manual.map((p) => esc(p.title)).join(', ') +
-      ': set the sort order of the playlist to Manual on YouTube.</div>';
+      ': set the ordering of the playlist to Manual in its settings on YouTube, then press Retry now in the table below.</div>';
     $ordBody.innerHTML = html;
     const rows = (d.playlists || []).filter((p) => p.checkedAt);
     $ordDetails.hidden = !rows.length;
     $ordTable.innerHTML = '<table><thead><tr><th>Playlist</th><th>Videos</th><th>No date</th><th>To move</th><th>Units</th><th>Read</th></tr></thead><tbody>' +
       rows.map((p) => '<tr><td>' + link('https://www.youtube.com/playlist?list=' + encodeURIComponent(p.playlistId), p.title) +
-        (p.problem === 'manual_sort' ? ' <span class="badge bad">not on manual order</span>' : p.problem === 'unexpected_position' || p.problem === 'no_progress' ? ' <span class="badge bad"' + TK.tip(p.detail || '') + '>stopped</span>' : p.problem ? ' <span class="badge info"' + TK.tip(p.detail || '') + '>' + (p.problem === 'unreadable' ? 'not read' : 'retrying') + '</span>' : '') +
+        (p.problem === 'manual_sort' || p.problem === 'unexpected_position' || p.problem === 'no_progress' ? ' <span class="badge ' + (p.problem === 'manual_sort' ? 'bad' : 'warn') + '"' + TK.tip(p.detail || '') + '>' + (p.problem === 'manual_sort' ? 'not on manual order' : 'stopped for a day') + '</span>' +
+          ' <button type="button" class="btn small" data-ord-retry="' + esc(p.playlistId) + '"' + TK.tip('Clears the stop so the next run reads this playlist again and tries. Moves nothing itself.') + '>Retry now</button>' : p.problem ? ' <span class="badge info"' + TK.tip(p.detail || '') + '>' + (p.problem === 'unreadable' ? 'not read' : 'retrying') + '</span>' : '') +
         '</td><td>' + esc(p.items) + '</td><td>' + esc(p.undated || '') + '</td><td>' + esc(p.moves || '') + '</td><td>' + (p.units ? p.units.toLocaleString() : '') + '</td><td>' + esc(TK.fmt.rel(new Date(p.checkedAt * 1000).toISOString())) + '</td></tr>').join('') +
       '</tbody></table>';
   }
@@ -201,11 +204,21 @@ ${YOUTUBE_CARD_JS}
       TK.toast(data.errorMessage || TK.errText(res, 'moving failed (' + res.status + ')'), 'bad');
       return;
     }
-    const why = { quota: 'YouTube quota is used for today', rate_limit: 'YouTube is rate limiting, it goes on at the next tick', budget: 'the unit budget of today is used', paused: 'paused in Settings', not_connected: 'YouTube is not connected' }[data.stoppedBy];
+    const why = { quota: 'YouTube quota is used for today', rate_limit: 'YouTube is rate limiting, it goes on at the next tick', budget: 'the unit budget of today is used', paused: 'paused in Settings', not_connected: 'YouTube is not connected',
+      busy: 'another run is moving videos right now, nothing was done', no_keys: 'the set dates could not be read from the database, nothing was spent' }[data.stoppedBy];
     // Out of quota or budget is a wait, not a failure: it continues by itself.
     TK.toast('playlist order: moved ' + (data.moved || 0) + ' video' + (data.moved === 1 ? '' : 's') + (why ? ' · ' + why : ''), data.moved || !why ? 'ok' : 'warn');
     applyOrder(await TK.api.get('/ui/api/playlist-order'));
   }));
+
+  $ordTable.addEventListener('click', async (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('[data-ord-retry]') : null;
+    if (!btn) return;
+    const res = await TK.api.post('/ui/api/playlist-order/retry/' + encodeURIComponent(btn.getAttribute('data-ord-retry')), {});
+    if (!res.ok) { TK.toast(TK.errText(res, 'could not clear the stop (' + res.status + ')'), res.status === 409 ? 'warn' : 'bad'); return; }
+    TK.toast('playlist order: the next run tries this playlist again', 'ok');
+    applyOrder(await TK.api.get('/ui/api/playlist-order'));
+  });
 
   // ── per-DJ playlists: one row per subscription from GET /ui/api/djs ──
   TKTable.create($('pl'), {
