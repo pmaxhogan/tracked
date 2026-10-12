@@ -110,7 +110,7 @@ export async function setOverride(env: Env, videoId: string, at = nowSeconds()):
 
 // ─── confirmed membership (migrations/0011) ─────────────────────────────────
 
-export type MembershipSource = 'sync' | 'mkvid' | 'undo' | 'listing' | 'sweep' | 'button' | 'swap' | 'recreate'
+export type MembershipSource = 'sync' | 'mkvid' | 'undo' | 'listing' | 'sweep' | 'button' | 'swap' | 'recreate' | 'dead'
 
 /** tracked put `videoId` into `playlistId` (a confirmed insert), or saw it there in a complete listing. Best effort: never throws. */
 export async function markInPlaylist(env: Env, playlistId: string, videoId: string, source: MembershipSource, at = nowSeconds()): Promise<void> {

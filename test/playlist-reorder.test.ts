@@ -31,6 +31,10 @@ const setUrl = (n: number, date: string) => `https://www.1001tracklists.com/trac
  *     was before it (read-after-write lag)
  *   - `lookupsLie`  lookups answer as if every move had done the documented thing
  *   - `brokenPositions`  playlists whose listing repeats a position
+ *   - `dead`  videos that are gone from YouTube: the listing shows them as a
+ *     foreign private video, and both the `videoId` lookup and a move of
+ *     them answer 404 videoNotFound
+ *   - `hiddenGone`  the same refusals for videos the listing shows as there
  */
 function fakeYouTube(playlists: Record<string, string[]>) {
   const copy = (o: Record<string, string[]>) => Object.fromEntries(Object.entries(o).map(([id, vids]) => [id, [...vids]]))
@@ -52,6 +56,8 @@ function fakeYouTube(playlists: Record<string, string[]>) {
     reply: 'echo' as 'echo' | 'none',
     staleLookups: 0,
     lookupsLie: false,
+    dead: new Set<string>(),
+    hiddenGone: new Set<string>(),
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -59,7 +65,13 @@ function fakeYouTube(playlists: Record<string, string[]>) {
       const method = init?.method ?? 'GET'
       yt.calls.push(`${method} ${url.searchParams.get('playlistId') ?? ''}`)
       if (yt.units >= yt.refuseAfterUnits) return refuse(403, yt.refuseWith)
-      const items = (list: string[]) => list.map((v, i) => ({ id: `item-${v}`, snippet: { position: i, resourceId: { videoId: v } }, contentDetails: { videoId: v } }))
+      const gone = (v: string | null) => !!v && (yt.dead.has(v) || yt.hiddenGone.has(v))
+      const items = (list: string[]) =>
+        list.map((v, i) =>
+          yt.dead.has(v)
+            ? { id: `item-${v}`, snippet: { position: i, title: 'Private video', resourceId: { videoId: v } }, contentDetails: { videoId: v }, status: { privacyStatus: 'private' } }
+            : { id: `item-${v}`, snippet: { position: i, title: `Set ${v}`, videoOwnerChannelId: 'UCsomeone', resourceId: { videoId: v } }, contentDetails: { videoId: v, videoPublishedAt: '2024-01-01T00:00:00Z' }, status: { privacyStatus: 'public' } },
+        )
       if (method === 'GET') {
         yt.units += 1
         const id = url.searchParams.get('playlistId')!
@@ -67,6 +79,7 @@ function fakeYouTube(playlists: Record<string, string[]>) {
         const only = url.searchParams.get('videoId')
         if (only) {
           yt.lookups += 1
+          if (gone(only)) return refuse(404, 'videoNotFound')
           const from = yt.staleLookups > 0 ? (yt.staleLookups--, yt.previous) : yt.lookupsLie ? yt.believed : yt.playlists
           return json(200, { items: items(from[id]!).filter((it) => it.contentDetails.videoId === only) })
         }
@@ -83,6 +96,7 @@ function fakeYouTube(playlists: Record<string, string[]>) {
       const body = JSON.parse(String(init!.body)) as { id: string; snippet: { playlistId: string; position: number; resourceId: { videoId: string } } }
       const pl = body.snippet.playlistId
       if (yt.manualSortRequired.has(pl)) return refuse(400, 'manualSortRequired')
+      if (gone(body.snippet.resourceId.videoId)) return refuse(404, 'videoNotFound')
       const list = yt.playlists[pl]!
       const videoId = body.id.replace(/^item-/, '')
       const from = list.indexOf(videoId)
@@ -475,6 +489,122 @@ describe('the pass reads its first move back', () => {
     at(T0 + 24 * HOUR + 5 * 60_000)
     await run(env, yt)
     expect(yt.playlists.PLdj).toEqual(SORTED)
+  })
+})
+
+describe('a video that is gone from YouTube (deleted, or made private by its uploader)', () => {
+  it('is never moved: the others are sorted around it, and nothing asks YouTube about it by its id', async () => {
+    const env = await makeEnv()
+    // `gone` is in no set of tracked's (the owner added it); v1..v3 are out of order around it.
+    const yt = fakeYouTube({ PLdj: ['v3', 'gone', 'v2', 'v1'], PLdj2: W_SORTED })
+    yt.dead.add('gone')
+    const r = await run(env, yt)
+    expect(yt.moves.map((m) => m.videoId)).not.toContain('gone')
+    expect(yt.playlists.PLdj!.filter((v) => v !== 'gone')).toEqual(['v1', 'v2', 'v3'])
+    expect(yt.playlists.PLdj).toContain('gone')
+    expect(r).toMatchObject({ moved: 2, stoppedBy: null })
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ items: 4, moves: 0, problem: null })
+    // Every unit is accounted for, and the next tick has nothing to do.
+    expect(r.units).toBe(yt.units)
+    expect(await run(env, yt)).toMatchObject({ read: 0, moved: 0, units: 0 })
+  })
+
+  it('a playlist whose only disorder is a dead video needs no moves, wherever the video is', async () => {
+    const env = await makeEnv()
+    // v9 is a set of the DJ (dated first of all) whose video died, sitting last.
+    await env.DB.prepare('INSERT INTO tracklists (slug, url, position, discovered_at, processed, video_known, video_id) VALUES (?, ?, 9, 0, 1, 1, ?)').bind('dj', setUrl(99, '2020-01-01'), 'v9').run()
+    const yt = fakeYouTube({ PLdj: ['v1', 'v2', 'v3', 'v9'], PLdj2: W_SORTED })
+    yt.dead.add('v9')
+    expect(await run(env, yt)).toMatchObject({ read: 2, moved: 0, units: 2 })
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null })
+    expect((await orderReport(env, { log, fresh: true, fetcher: yt.fetch, accessToken: 'tok' })).totals).toMatchObject({ moves: 0 })
+  })
+
+  it('reads a move back from a listing when the neighbour it checks is the dead video', async () => {
+    const env = await makeEnv()
+    // v3 goes to the end of the dated ones, right in front of the dead video: the neighbour of the read-back.
+    const yt = fakeYouTube({ PLdj: ['v3', 'v1', 'v2', 'gone'], PLdj2: W_SORTED })
+    yt.dead.add('gone')
+    const r = await run(env, yt)
+    expect(yt.moves).toEqual([{ playlistId: 'PLdj', videoId: 'v3', position: 2 }])
+    expect(yt.playlists.PLdj).toEqual(['v1', 'v2', 'v3', 'gone'])
+    // No lookup by video id at all: listing + move + one listing as the read-back, and the other playlist's listing.
+    expect(yt.lookups).toBe(0)
+    expect(r).toMatchObject({ moved: 1, units: 53, stoppedBy: null })
+    expect(r.units).toBe(yt.units)
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null })
+  })
+
+  it('the read-back by listing still catches a move that did something else', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: ['v3', 'v1', 'v2', 'gone'], PLdj2: W_SORTED })
+    yt.dead.add('gone')
+    yt.semantics = 'ignored'
+    await run(env, yt)
+    expect(yt.moves).toHaveLength(1)
+    expect(slept).toEqual([1500])
+    const s = (await loadOrderState(env)).playlists.PLdj!
+    expect(s.problem).toBe('unexpected_position')
+    expect(s.detail).toMatch(/the moved video should be at index 2 .* and is at index 0/)
+  })
+
+  it('a lookup that answers videoNotFound for a video the listing showed as there falls back to the listing: no move_failed', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: ['v3', 'v1', 'v2', 'hand'], PLdj2: W_SORTED })
+    // `hand` (no set, so it stays last) lists like any video but is refused by id.
+    yt.hiddenGone.add('hand')
+    const r = await run(env, yt)
+    expect(yt.playlists.PLdj).toEqual(['v1', 'v2', 'v3', 'hand'])
+    // Listing + move + lookup of v3 + refused lookup of `hand` + the listing instead, and the other playlist.
+    expect(r).toMatchObject({ moved: 1, units: 55, stoppedBy: null })
+    expect(r.units).toBe(yt.units)
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null })
+  })
+
+  it('a move refused with videoNotFound is not a stop and is not paid for again: the item is planned around until Retry now', async () => {
+    const env = await makeEnv()
+    // v3 has to move and YouTube no longer finds it, though the listing shows it.
+    const yt = fakeYouTube({ PLdj: ['v3', 'v1', 'v2'], PLdj2: W_SORTED })
+    yt.hiddenGone.add('v3')
+    const r = await run(env, yt)
+    expect(r).toMatchObject({ moved: 0, units: 52, stoppedBy: null })
+    expect(yt.moves).toEqual([])
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, unmovable: ['item-v3'] })
+    // Hours and days later it is read (1 unit a day) and never tried again.
+    at(T0 + 2 * HOUR)
+    expect(await run(env, yt)).toMatchObject({ read: 0, units: 0 })
+    at(T0 + 25 * HOUR)
+    expect(await run(env, yt)).toMatchObject({ read: 2, moved: 0, units: 2 })
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, unmovable: ['item-v3'] })
+    // The video is back; the owner asks for another try.
+    yt.hiddenGone.clear()
+    expect(await retryOrderPlaylist(env, 'PLdj')).toEqual({ ok: true })
+    expect(await run(env, yt)).toMatchObject({ moved: 1 })
+    expect(yt.playlists.PLdj).toEqual(['v1', 'v2', 'v3'])
+    expect((await loadOrderState(env)).playlists.PLdj!.unmovable).toBeUndefined()
+  })
+
+  it('the state production has for FISHER (move_failed after a read-back that got videoNotFound, no moves left) clears on the next reading, with no move', async () => {
+    const env = await makeEnv()
+    const yt = fakeYouTube({ PLdj: ['v1', 'v2', 'v3', 'gone'], PLdj2: W_SORTED })
+    yt.dead.add('gone')
+    const now = Math.floor(T0 / 1000)
+    await env.SUBS.put(
+      'subs:playlist-order',
+      JSON.stringify({
+        playlists: {
+          PLdj: { playlistId: 'PLdj', slug: 'dj', title: 'DJ (1001tklists)', items: 4, undated: 1, moves: 0, units: 0, checkedAt: now, moved: 1, problem: 'move_failed', detail: 'a move could not be read back: youtube playlistItems.list 404 videoNotFound: Video not found.', problemAt: now, lastRun: { needed: 1, applied: 1 } },
+          PLdj2: { playlistId: 'PLdj2', slug: 'dj2', title: 'DJ 2 (1001tklists)', items: 3, undated: 0, moves: 0, units: 0, checkedAt: now, moved: 0 },
+        },
+      }),
+    )
+    // Inside the hour it is left alone.
+    at(T0 + HOUR / 2)
+    expect(await run(env, yt)).toMatchObject({ read: 0, units: 0 })
+    at(T0 + HOUR + 1000)
+    expect(await run(env, yt)).toMatchObject({ read: 1, moved: 0, units: 1, stoppedBy: null })
+    expect(yt.moves).toEqual([])
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ moves: 0, problem: null, detail: null, lastRun: null })
   })
 })
 

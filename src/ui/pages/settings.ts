@@ -40,8 +40,8 @@ const APP_GROUPS: FormGroup[] = [
     id: 'sf-playlists',
     title: 'Playlists',
     fields: [
-      { path: 'playlists.sweepDryRun', label: 'Removal sweep only reports', help: 'Blank = PLAYLIST_SWEEP_DRY_RUN (unset = on).', kind: 'bool', nullable: true },
-      { path: 'playlists.sweepDailyRemovals', label: 'Sweep removals a day', help: '50 quota units each. Blank = env, else 40.', min: 0, max: 500, step: 1, nullable: true },
+      { path: 'playlists.sweepDryRun', label: 'Removal sweep only reports', help: 'On: videos that are not full recordings, and deleted or private videos still in a playlist, are only listed on the Removed page. Off: they are taken out. Blank = PLAYLIST_SWEEP_DRY_RUN (unset = on).', kind: 'bool', nullable: true },
+      { path: 'playlists.sweepDailyRemovals', label: 'Sweep removals a day', help: '50 quota units each; dead videos taken out of a playlist count too. Blank = env, else 40.', min: 0, max: 500, step: 1, nullable: true },
       { path: 'playlists.rejectVertical', label: 'Turn down vertical videos', help: 'Shorts. Blank = REJECT_VERTICAL (unset = off).', kind: 'bool', nullable: true },
       { path: 'playlists.shortToleranceMinutes', label: 'Video shorter than the last cue by', help: 'More than this is not the full set. Default 5.', unit: 'min', min: 0, max: 60 },
       { path: 'playlists.audioToleranceMinutes', label: 'Audio longer than the video by', help: 'More than this means the video is a cut. Default 10.', unit: 'min', min: 0, max: 120 },

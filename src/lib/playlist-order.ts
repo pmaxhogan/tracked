@@ -132,15 +132,20 @@ export type MovePlan<T> = {
  * either one that stays or one already moved. Applying a prefix of the plan
  * and planning again later only ever finds fewer moves left, which is what
  * makes a budgeted, interrupted backfill safe.
+ *
+ * An entry marked `fixed` (a video that is gone from YouTube,
+ * lib/playlist-reorder.ts) is never moved and never asked about: the others
+ * are sorted among themselves around it and it stays where it is, shifting
+ * only as they pass it. `sorted` is then the order of the others alone.
  */
-export function planMoves<T extends { id: string; key: OrderKey }>(items: readonly T[]): MovePlan<T> {
-  const n = items.length
+export function planMoves<T extends { id: string; key: OrderKey; fixed?: boolean }>(items: readonly T[]): MovePlan<T> {
+  const movable = items.filter((it) => !it.fixed)
   // Stable sort: entries that compare equal keep their current order.
-  const sorted = items.map((it, i) => ({ it, i })).sort((a, b) => compareOrder(a.it.key, b.it.key) || a.i - b.i)
-  const stays = longestOrderedRun(items)
+  const sorted = movable.map((it, i) => ({ it, i })).sort((a, b) => compareOrder(a.it.key, b.it.key) || a.i - b.i)
+  const stays = longestOrderedRun(movable)
   const current = items.map((it) => it.id)
   const moves: Move[] = []
-  for (let t = 0; t < n; t++) {
+  for (let t = 0; t < sorted.length; t++) {
     const { it, i } = sorted[t]!
     if (stays.has(i)) continue
     current.splice(current.indexOf(it.id), 1)

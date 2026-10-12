@@ -422,6 +422,30 @@ export type RawPlaylistItem = Record<string, unknown> & {
 }
 
 /**
+ * Is this playlist item the husk of a video nobody can play any more: deleted,
+ * or made private by somebody else? Read from a listing made with the owner's
+ * OAuth token, where the owner's own private and unlisted uploads list with
+ * their real title and channel. Every sign has to agree:
+ *   - the title is YouTube's placeholder, "Deleted video" or "Private video";
+ *   - the item names no channel the video belongs to
+ *     (`snippet.videoOwnerChannelId` / `videoOwnerChannelTitle`) and no
+ *     `contentDetails.videoPublishedAt`;
+ *   - `status.privacyStatus` is `private` for a "Private video", and is not
+ *     `public` or `unlisted` for a "Deleted video".
+ * A public or unlisted video is therefore never one, whatever it is called,
+ * and neither is an item whose listing left any of this out.
+ */
+export function isUnavailableItem(it: RawPlaylistItem): boolean {
+  const snippet = it.snippet as { title?: unknown; videoOwnerChannelId?: unknown; videoOwnerChannelTitle?: unknown } | undefined
+  const privacy = (it.status as { privacyStatus?: unknown } | undefined)?.privacyStatus
+  if (privacy === 'public' || privacy === 'unlisted') return false
+  if (snippet?.videoOwnerChannelId || snippet?.videoOwnerChannelTitle) return false
+  if ((it.contentDetails as { videoPublishedAt?: unknown } | undefined)?.videoPublishedAt) return false
+  if (snippet?.title === 'Deleted video') return true
+  return snippet?.title === 'Private video' && privacy === 'private'
+}
+
+/**
  * Page through `playlistId` and return every playlistItem verbatim, asking for
  * every part (`id,snippet,contentDetails,status`) — cost is 1 unit per page of
  * 50 regardless of parts, so there is no reason to skimp. Newest-added first

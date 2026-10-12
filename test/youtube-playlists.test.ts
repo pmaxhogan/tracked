@@ -9,6 +9,7 @@ import {
   findPlaylistItemIds,
   isPermanentInsertError,
   isQuotaError,
+  isUnavailableItem,
   listPlaylistVideoIds,
   PlaylistNotFoundError,
   removeVideoFromPlaylist,
@@ -194,6 +195,44 @@ describe('findPlaylistItemIds', () => {
       .fn()
       .mockResolvedValue(new Response('{"error":{"errors":[{"reason":"playlistNotFound"}]}}', { status: 404 })) as unknown as typeof fetch
     await expect(findPlaylistItemIds('PLgone', 'vidA1234567', 'tok', fetcher)).rejects.toBeInstanceOf(PlaylistNotFoundError)
+  })
+})
+
+describe('isUnavailableItem (the husk of a deleted or foreign private video)', () => {
+  const item = (snippet: Record<string, unknown>, privacyStatus?: string, contentDetails: Record<string, unknown> = {}) => ({
+    id: 'item-1',
+    snippet: { resourceId: { videoId: 'v' }, ...snippet },
+    contentDetails: { videoId: 'v', ...contentDetails },
+    ...(privacyStatus ? { status: { privacyStatus } } : {}),
+  })
+
+  it("is one for somebody else's private video and for a deleted one", () => {
+    // What the FISHER playlist lists for its private video: the placeholder title, no channel, no publish date.
+    expect(isUnavailableItem(item({ title: 'Private video', description: 'This video is private.' }, 'private'))).toBe(true)
+    expect(isUnavailableItem(item({ title: 'Deleted video', description: 'This video is unavailable.' }, 'privacyStatusUnspecified'))).toBe(true)
+    expect(isUnavailableItem(item({ title: 'Deleted video' }))).toBe(true)
+  })
+
+  it('is never one for a public or unlisted video, whatever it is called', () => {
+    for (const title of ['Private video', 'Deleted video']) {
+      expect(isUnavailableItem(item({ title }, 'public'))).toBe(false)
+      expect(isUnavailableItem(item({ title }, 'unlisted'))).toBe(false)
+    }
+  })
+
+  it("is not one for the owner's own private upload, which lists with its channel and publish date", () => {
+    expect(isUnavailableItem(item({ title: 'My set', videoOwnerChannelId: 'UCme', videoOwnerChannelTitle: 'Me' }, 'private', { videoPublishedAt: '2026-01-01T00:00:00Z' }))).toBe(false)
+    // Even one the owner named "Private video".
+    expect(isUnavailableItem(item({ title: 'Private video', videoOwnerChannelId: 'UCme' }, 'private'))).toBe(false)
+    expect(isUnavailableItem(item({ title: 'Private video', videoOwnerChannelTitle: 'Me' }, 'private'))).toBe(false)
+    expect(isUnavailableItem(item({ title: 'Deleted video' }, 'private', { videoPublishedAt: '2026-01-01T00:00:00Z' }))).toBe(false)
+  })
+
+  it('is not one when the listing left out what it needs: a "Private video" without its status, an item without a title', () => {
+    expect(isUnavailableItem(item({ title: 'Private video' }))).toBe(false)
+    expect(isUnavailableItem(item({}, 'private'))).toBe(false)
+    expect(isUnavailableItem(item({ title: 'Some set' }, 'private'))).toBe(false)
+    expect(isUnavailableItem({ id: 'x' })).toBe(false)
   })
 })
 

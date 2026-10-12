@@ -20,6 +20,10 @@
  *     re-added there, and its set becomes due for a recheck, which queues it
  *     for mkvid. A partial or failed listing is never read as removals, and a
  *     playlist that seems to have lost more than 30% is held and reported.
+ *     The same listing shows the videos that are still in a playlist but
+ *     gone from YouTube (deleted, or made private by their uploader). Those
+ *     are taken out of it (`removeDeadVideos`), whoever put them there,
+ *     under the sweep's dry-run setting and daily delete budget.
  *  4. **Remove and replace** (`removeAndReplace`): the per-set button.
  *
  * Everything here talks to YouTube only; none of it fetches 1001tracklists.
@@ -28,7 +32,7 @@
 import type { Env } from '../types'
 import { dbOf, batchChunked } from './db'
 import { errorFields, type Logger } from './log'
-import { noteQuotaOut } from './youtube-quota'
+import { getQuotaOut, noteQuotaOut } from './youtube-quota'
 import { decideFullRecording, hasNoFullRecordingNotice, maxAudioSeconds, REJECT_REASON_LABELS, type RejectReason } from './full-recording'
 import type { TableDef } from './table-query'
 import { getVideoMeta, readCachedVideoMeta, type VideoMeta } from './video-meta'
@@ -49,7 +53,9 @@ import {
 } from './playlist-blocklist'
 import {
   addVideoToPlaylist,
+  deletePlaylistItem,
   isQuotaError,
+  isUnavailableItem,
   listPlaylistItems,
   removeVideoFromPlaylist,
   type RawPlaylistItem,
@@ -710,16 +716,18 @@ function targets(artistId: string | null, combinedId: string | null): Array<[str
 
 // ─── comparison ─────────────────────────────────────────────────────────────
 
-/** YouTube's placeholder titles for items whose video is gone. */
-const DEAD_ITEM_TITLES = new Set(['Deleted video', 'Private video'])
-
 function itemVideoId(it: RawPlaylistItem): string | null {
   return it.contentDetails?.videoId ?? it.snippet?.resourceId?.videoId ?? null
 }
 
-function itemTitle(it: RawPlaylistItem): string | null {
-  const t = (it.snippet as { title?: unknown } | undefined)?.title
-  return typeof t === 'string' ? t : null
+type Listing = {
+  present: Set<string>
+  /** Videos whose item is the husk of a deleted or private video (`isUnavailableItem`). */
+  deadPresent: Set<string>
+  /** The playlist item ids of each of those, for taking them out without another lookup. */
+  deadItems: Map<string, string[]>
+  /** Items in the playlist. */
+  items: number
 }
 
 /** A playlist's contents, or null when the listing was not complete and successful. */
@@ -728,7 +736,7 @@ async function completeListing(
   accessToken: string,
   log: Logger,
   fetcher?: typeof fetch,
-): Promise<{ present: Set<string>; deadPresent: Set<string> } | null> {
+): Promise<Listing | null> {
   try {
     const r = await listPlaylistItems(playlistId, accessToken, { maxPages: LIST_MAX_PAGES }, fetcher)
     if (r.nextPageToken) {
@@ -737,6 +745,7 @@ async function completeListing(
     }
     const present = new Set<string>()
     const deadPresent = new Set<string>()
+    const deadItems = new Map<string, string[]>()
     for (const it of r.items) {
       const id = itemVideoId(it)
       if (!id) {
@@ -745,10 +754,12 @@ async function completeListing(
         return null
       }
       present.add(id)
-      const title = itemTitle(it)
-      if (title && DEAD_ITEM_TITLES.has(title)) deadPresent.add(id)
+      if (isUnavailableItem(it)) {
+        deadPresent.add(id)
+        if (it.id) deadItems.set(id, [...(deadItems.get(id) ?? []), it.id])
+      }
     }
-    return { present, deadPresent }
+    return { present, deadPresent, deadItems, items: r.items.length }
   } catch (e) {
     log.warn('hygiene.compare.listing_failed', { playlistId, ...errorFields(e) })
     return null
@@ -856,6 +867,10 @@ export type ComparePlaylistResult = {
   missing: number
   owner: number
   dead: number
+  /** Dead videos taken out of the playlist by this run (`removeDeadVideos`). */
+  deadRemoved?: number
+  /** Dry run: dead videos it would have taken out. */
+  deadReported?: number
 }
 
 type RemovalFinding = { videoId: string; reason: 'owner' | 'dead'; setUrls: string[] }
@@ -927,9 +942,141 @@ type Pending = {
   missing: string[]
   deadHere: string[]
   deadPresent: ReadonlySet<string>
+  /** Every dead video in the playlist with its item ids, expected or not, and the size of the playlist. */
+  deadItems: ReadonlyMap<string, string[]>
+  items: number
   setUrlsOf: (id: string) => string[]
   /** Run after findings are applied (the combined playlist saves its snapshot). */
   after?: () => Promise<void>
+}
+
+// ─── dead videos still in a playlist ────────────────────────────────────────
+
+/** This many dead videos or more in one playlist, and more than DEAD_MAX_RATIO of it, is not believed: the wrong account or an API fault, not deletions (as in lib/mkvid-recreate.ts). */
+export const DEAD_ALL_MIN = 5
+export const DEAD_MAX_RATIO = 0.3
+
+/** What one comparison run shares between its playlists: the sweep's settings and what is left of its day's deletes. */
+type DeadRun = {
+  dryRun: boolean
+  budgetLeft: number
+  nowMs: number
+  /** mkvid's own uploads: its gone check takes those out and renders them again (lib/mkvid-recreate.ts). */
+  mkvidOwn: Set<string>
+  stoppedBy: 'budget' | 'quota' | null
+}
+
+async function startDeadRun(env: Env, nowMs: number, log: Logger): Promise<DeadRun> {
+  const settings = sweepSettings(env, await getAppSettings(env))
+  return {
+    dryRun: settings.dryRun,
+    budgetLeft: Math.max(0, settings.dailyRemovals - (await sweepDeletesUsed(env, nowMs))),
+    nowMs,
+    mkvidOwn: await mkvidUploadedIds(env, log),
+    // Nothing is asked or written while the day's quota is out.
+    stoppedBy: (await getQuotaOut(env, nowMs)) ? 'quota' : null,
+  }
+}
+
+/**
+ * Take the dead videos out of one playlist: items the complete listing shows
+ * as the husk of a deleted or foreign private video (`isUnavailableItem`),
+ * whether or not the sync put them there. An owner-added video that died is
+ * in no table of tracked's, so nothing else ever removes it.
+ *
+ * Believed only when YouTube says it twice: the listing, and a fresh
+ * videos.list (1 unit per 50) that does not return the video either. A lookup
+ * that fails removes nothing. `DEAD_ALL_MIN` / `DEAD_MAX_RATIO` guard against
+ * a listing that calls half a playlist dead.
+ *
+ * The sweep's rails apply: in a dry run (`playlists.sweepDryRun`, the default)
+ * each is only logged as `would_remove`, once; live, every delete counts
+ * against the sweep's daily budget (`playlists.sweepDailyRemovals`, the sweep
+ * that follows in the same tick gets what is left), and a quota reply stops
+ * the run for the day. The item id comes from the listing, so a removal is
+ * one playlistItems.delete (50 units) and no lookup: a lookup by video id is
+ * what YouTube answers `videoNotFound` to for exactly these videos.
+ *
+ * A removed video is logged like the sweep's (`playlist_removals`, source
+ * `dead`), never re-added (`removed_videos`), and marked as taken out by
+ * tracked. In an artist playlist the DJ's sets that resolve to it lose it and
+ * become due, which is what queues them for mkvid (`clearSetVideoStmt`, as for
+ * any dead or owner-removed video); a video no set resolves to is just
+ * removed. A delete YouTube refuses is logged and tried again at the next
+ * comparison. mkvid's own uploads are left to its gone check.
+ */
+async function removeDeadVideos(
+  env: Env,
+  accessToken: string,
+  p: Pending,
+  run: DeadRun,
+  opts: { log: Logger; fetcher?: typeof fetch },
+): Promise<{ removed: number; reported: number }> {
+  const { log } = opts
+  const { ctx } = p
+  const out = { removed: 0, reported: 0 }
+  if (run.stoppedBy) return out
+  const candidates = [...p.deadItems.keys()].filter((id) => !run.mkvidOwn.has(id))
+  if (candidates.length === 0) return out
+  if (candidates.length >= DEAD_ALL_MIN && candidates.length > p.items * DEAD_MAX_RATIO) {
+    log.error('hygiene.dead.too_many', { ...ctx, items: p.items, dead: candidates.length })
+    return out
+  }
+  let metas: Map<string, VideoMeta>
+  try {
+    metas = await getVideoMeta(env, candidates, accessToken, { maxAgeSeconds: 0, fetcher: opts.fetcher })
+  } catch (e) {
+    log.warn('hygiene.dead.liveness_failed', { ...ctx, count: candidates.length, ...errorFields(e) })
+    if (isQuotaError(e)) {
+      await noteQuotaOut(env, e, log)
+      run.stoppedBy = 'quota'
+    }
+    return out
+  }
+  const db = dbOf(env)
+  const base = (id: string) => ({ at: Math.floor(run.nowMs / 1000), source: 'dead' as const, slug: ctx.slug, set_url: p.setUrlsOf(id)[0] ?? null, video_id: id, playlist_id: ctx.playlistId, playlist_kind: ctx.kind, reason: 'dead' })
+  let touched = false
+  for (const id of candidates) {
+    // The listing calls it dead and videos.list still returns it: not believed.
+    if (metas.get(id)?.alive !== false) continue
+    if (run.dryRun) {
+      const had = await db.prepare("SELECT status FROM playlist_removals WHERE source = 'dead' AND video_id = ? AND playlist_id = ?").bind(id, ctx.playlistId).first<{ status: string }>()
+      // Reported once: the row keeps the time it was first seen.
+      if (had?.status !== 'would_remove') await logRemoval(env, { ...base(id), status: 'would_remove', detail: 'gone from YouTube, still in the playlist' })
+      out.reported++
+      continue
+    }
+    const itemIds = p.deadItems.get(id) ?? []
+    if (run.budgetLeft < itemIds.length) {
+      run.stoppedBy = 'budget'
+      break
+    }
+    try {
+      for (const itemId of itemIds) {
+        await deletePlaylistItem(itemId, accessToken, opts.fetcher)
+        touched = true
+        run.budgetLeft -= 1
+        // Counted per delete, like the sweep's.
+        await bumpSweepDeletes(env, 1, run.nowMs)
+      }
+    } catch (e) {
+      log.warn('hygiene.dead.remove_failed', { ...ctx, videoId: id, ...errorFields(e) })
+      if (isQuotaError(e)) {
+        await noteQuotaOut(env, e, log)
+        run.stoppedBy = 'quota'
+        break
+      }
+      continue
+    }
+    await markOutOfPlaylist(env, ctx.playlistId, id, 'dead')
+    await recordRemoved(env, { playlistId: ctx.playlistId, videoId: id, slug: ctx.slug, setUrl: p.setUrlsOf(id)[0] ?? null, reason: 'dead' })
+    await logRemoval(env, { ...base(id), status: 'removed', detail: 'gone from YouTube; taken out of the playlist' })
+    if (ctx.kind === 'artist' && ctx.slug && p.setUrlsOf(id).length > 0) await clearSetVideoStmt(db, ctx.slug, id).run()
+    out.removed++
+  }
+  if (touched) await invalidatePlaylistVideoIds(env, ctx.playlistId)
+  if (out.removed > 0 || out.reported > 0 || run.stoppedBy) log.info('hygiene.dead.done', { ...ctx, dryRun: run.dryRun, ...out, budgetLeft: run.budgetLeft, stoppedBy: run.stoppedBy })
+  return out
 }
 
 /**
@@ -996,6 +1143,8 @@ export async function comparePlaylists(
       missing: expected.filter((id) => !listing.present.has(id)),
       deadHere: expected.filter((id) => listing.deadPresent.has(id)),
       deadPresent: listing.deadPresent,
+      deadItems: listing.deadItems,
+      items: listing.items,
       setUrlsOf: (id) => referenced.get(id) ?? [],
     })
   }
@@ -1024,6 +1173,8 @@ export async function comparePlaylists(
           missing: expected.filter((id) => !listing.present.has(id)),
           deadHere: expected.filter((id) => listing.deadPresent.has(id)),
           deadPresent: listing.deadPresent,
+          deadItems: listing.deadItems,
+          items: listing.items,
           setUrlsOf: (id) => allExpected.get(id) ?? [],
           // Saved only when applied: a held playlist keeps its old snapshot, so the backfill keeps skipping the held ids.
           after: () => savePlaylistMembers(env, combinedId, listing.present, now),
@@ -1041,6 +1192,8 @@ export async function comparePlaylists(
   const breaker = runMissing > guard.runRemovalMax
   if (breaker) log.error('hygiene.compare.run_breaker', { runMissing, playlists: pending.filter((p) => p.missing.length > 0).length })
   const newHolds: PlaylistHold[] = []
+  /** Set up at the first playlist that has a dead video in it; most runs have none. */
+  let deadRun: DeadRun | null = null
 
   for (const p of pending) {
     const { ctx } = p
@@ -1070,6 +1223,12 @@ export async function comparePlaylists(
     const owner = findings.filter((f) => f.reason === 'owner').length
     results[p.slot] = { ...ctx, status: 'ok', expected: p.expected, missing: p.missing.length, owner, dead: findings.length - owner }
     if (findings.length > 0) log.warn('hygiene.compare.removals_recorded', { ...ctx, owner, dead: findings.length - owner, videoIds: ids.slice(0, 50) })
+    // After the findings: a dead video the sync added is on the blocklist, and its set cleared, before its item goes.
+    if (p.deadItems.size > 0) {
+      deadRun ??= await startDeadRun(env, now * 1000, log)
+      const d = await removeDeadVideos(env, accessToken, p, deadRun, { log, fetcher: opts.fetcher })
+      if (d.removed > 0 || d.reported > 0) results[p.slot] = { ...results[p.slot]!, deadRemoved: d.removed, deadReported: d.reported }
+    }
   }
 
   // ── notify: one push per new hold, or one for the whole run when the breaker tripped ──

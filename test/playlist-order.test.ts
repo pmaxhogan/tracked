@@ -163,6 +163,27 @@ describe('planMoves', () => {
     expect(applyMoves(ids(items), plan.moves)).toEqual(['a', 'b', 'c', 'd'])
   })
 
+  it('never moves a fixed entry: the others are sorted around it with the fewest moves, and a cut-short plan still only needs the rest', () => {
+    const fixed = (id: string, date: string | null) => ({ ...item(id, date), fixed: true })
+    // Out of place by its own date, and alone in the way of nothing: no moves.
+    expect(planMoves([item('a', '2022-01-01'), fixed('x', '2020-01-01'), item('b', '2023-01-01'), fixed('y', null), item('c', '2024-01-01')]).moves).toEqual([])
+    const items = [item('c', '2024-01-01'), fixed('x', '2020-01-01'), item('b', '2023-01-01'), fixed('y', null), item('a', '2022-01-01')]
+    const plan = planMoves(items)
+    expect(plan.moves).toHaveLength(2)
+    expect(plan.moves.map((m) => m.id)).not.toContain('x')
+    expect(plan.moves.map((m) => m.id)).not.toContain('y')
+    expect(ids(plan.sorted)).toEqual(['a', 'b', 'c'])
+    const after = applyMoves(ids(items), plan.moves)
+    expect(after.filter((id) => id !== 'x' && id !== 'y')).toEqual(['a', 'b', 'c'])
+    expect(after).toHaveLength(5)
+    // One move made, then planned again from what is there: exactly one more.
+    const partly = applyMoves(ids(items), plan.moves.slice(0, 1))
+    const byId = new Map(items.map((it) => [it.id, it]))
+    const rest = planMoves(partly.map((id) => byId.get(id)!))
+    expect(rest.moves).toHaveLength(1)
+    expect(applyMoves(partly, rest.moves).filter((id) => id !== 'x' && id !== 'y')).toEqual(['a', 'b', 'c'])
+  })
+
   it('keeps tied and undated entries in the order they have', () => {
     const items = [item('u1', null), item('x', '2024-01-01', 'same'), item('u2', null), item('y', '2024-01-01', 'same'), item('old', '2020-01-01')]
     const plan = planMoves(items)
