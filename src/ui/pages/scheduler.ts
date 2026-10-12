@@ -112,7 +112,7 @@ const JS = /* js */ `
     no_cursor: 'The DJ had no backfill position to continue from.',
     stopped: 'Stopped by a refusal (paused, no healthy account, captcha, timeout); the tick ended there.',
     skipped: 'Left alone this time (for instance a cooldown).',
-    deferred: 'The page was read and recorded. Its video waits for YouTube quota and is added when the quota is back, without another page fetch for a new set.',
+    deferred: 'The page was read and recorded. Its video waits for YouTube (the daily quota, or a per-minute limit) and is added when YouTube takes writes again, without another page fetch for a new set.',
     soft_failed: 'Failed in a way that is retried later without counting against the item.',
     failed: 'The fetch failed and counts against the item (three strikes and it is abandoned).',
     threw: 'An unexpected error. See the tick row for the message.',

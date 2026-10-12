@@ -295,6 +295,23 @@ describe('runSchedulerTick', () => {
     expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
   })
 
+  it('a per-minute limit defers the set with its own reason, sets no hold, and the next tick adds the video without fetching the page again', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const url = setUrl('rl1', 1)
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: [url], processedTracklistUrls: [] })
+    mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+    mocked(addVideoToPlaylist).mockRejectedValueOnce(new YouTubeApiError('playlistItems.insert', 403, 'rateLimitExceeded', '{}'))
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(r.items.map((i) => [i.outcome, i.stopReason])).toEqual([['deferred', 'YouTube is limiting requests: the page was read, the playlist write is tried again at the next tick']])
+    expect(await getQuotaOut(env, NOW * 1000)).toBeNull()
+    const again = await runSchedulerTick(env, { random: always(0.99), now: NOW + 300 })
+    expect(again.items.map((i) => i.outcome)).toEqual(['ok'])
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect((await loadSubState(env, 'a'))!.processedTracklistUrls).toEqual([url])
+  })
+
   it('while the hold is set a first-time set with no recording is still fetched and settled, and a recheck that finds a swap is deferred, uncharged', async () => {
     const env = makeEnv()
     await subscribe(env, 'a')

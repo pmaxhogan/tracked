@@ -232,6 +232,28 @@ describe('runRemovalSweep', () => {
     metaAnswer({ vert0000001: { embedWidth: 720, embedHeight: 1280 } })
   }
 
+  it('a set whose insert waits for YouTube quota (unprocessed, video on its row) is not swept and not expected in a playlist', async () => {
+    const env = makeEnv()
+    await seedSub(env)
+    await seedCombined(env)
+    await seedSet(env, setUrl(1), 'good0000001')
+    // As lib/sync.ts leaves a deferred set: not processed, its picked video kept, never inserted. Its page says "no full recording".
+    await env.DB.prepare("INSERT INTO tracklists (slug, url, position, discovered_at, processed, video_known, video_id, video_source, checked_at) VALUES (?, ?, 1, 0, 0, 1, 'wait0000001', '1001tl', 1900000000)").bind(SLUG, setUrl(2)).run()
+    await saveSetFacts(env, facts(setUrl(2), { noFullNotice: true }))
+    metaAnswer({})
+    const r = await runRemovalSweep(env, 'tok', { log, settings: { dryRun: false, dailyRemovals: 40 } })
+    expect(r).toMatchObject({ candidates: 1, rejected: 0, deletes: 0 })
+    expect(vi.mocked(getVideoMeta).mock.calls.flatMap((c) => c[1])).toEqual(['good0000001'])
+    expect(await removals(env)).toEqual([])
+    expect((await row(env, setUrl(2)))!.video_id).toBe('wait0000001')
+    // The comparison does not look for it in the playlist either.
+    listing({ [PL]: ['good0000001'], [PLC]: ['good0000001'] })
+    const [c] = await comparePlaylists(env, 'tok', { log })
+    expect(c).toMatchObject({ missing: 0 })
+    expect(await removals(env)).toEqual([])
+    expect((await row(env, setUrl(2)))!.video_id).toBe('wait0000001')
+  })
+
   it('dry run (the default) only reports, from facts and video meta, and never deletes', async () => {
     const env = makeEnv({ REJECT_VERTICAL: '1' })
     await seedMix(env)

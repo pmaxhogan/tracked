@@ -546,8 +546,11 @@ export async function runRemovalSweep(
   const rows = (
     await db
       .prepare(
+        // processed = 1: an unprocessed set with a video is one whose insert waits for YouTube's quota
+        // (lib/sync.ts). It was never in a playlist, so there is nothing to sweep, and clearing its video
+        // here would cost the page fetch the wait was meant to save.
         `SELECT t.slug, t.url, t.video_id, s.playlist_id FROM tracklists t LEFT JOIN sub_sync s ON s.slug = t.slug
-         WHERE t.video_id IS NOT NULL AND COALESCE(t.video_source, '1001tl') != 'mkvid'
+         WHERE t.video_id IS NOT NULL AND t.processed = 1 AND COALESCE(t.video_source, '1001tl') != 'mkvid'
          ORDER BY t.slug, t.position`,
       )
       .all<AddedRow>()
@@ -954,7 +957,8 @@ export async function comparePlaylists(
   const now = opts.now ?? nowSeconds()
   const db = dbOf(env)
   const subs = (await db.prepare('SELECT slug, playlist_id FROM sub_sync WHERE playlist_id IS NOT NULL').all<{ slug: string; playlist_id: string }>()).results
-  const rows = (await db.prepare('SELECT slug, url, video_id FROM tracklists WHERE video_id IS NOT NULL').all<{ slug: string; url: string; video_id: string }>()).results
+  // processed = 1: a video still waiting for its insert (YouTube's quota, lib/sync.ts) is not expected in any playlist yet.
+  const rows = (await db.prepare('SELECT slug, url, video_id FROM tracklists WHERE video_id IS NOT NULL AND processed = 1').all<{ slug: string; url: string; video_id: string }>()).results
   // Taken out by mkvid's delete-and-recreate itself: not the owner's doing.
   const replaced = await mkvidReplacedIds(env, log)
   const bySlug = new Map<string, Map<string, string[]>>()

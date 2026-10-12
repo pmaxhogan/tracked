@@ -817,8 +817,9 @@ export async function pickTickItems(
 
 export type TickItemResult = { item: TickItem; outcome: string; stopReason?: string }
 
-/** What a deferred item says in tick history (the video is known; its playlist write waits). */
+/** What a deferred item says in tick history (the video is known; its playlist write waits): the day's quota, or a per-minute limit. */
 export const QUOTA_DEFERRED_REASON = "YouTube's daily quota is used up: the page was read, the playlist write waits for the quota"
+export const RATE_LIMIT_DEFERRED_REASON = 'YouTube is limiting requests: the page was read, the playlist write is tried again at the next tick'
 
 export type TickResult = {
   /** `quota_hold`: nothing else was due, and sets whose only next step is a YouTube insert wait for the quota (not "nothing due"). */
@@ -1080,7 +1081,7 @@ export async function runSchedulerTick(
         const waits = !res.stoppedBy && 'url' in item && deferred.includes(item.url)
         if (waits) log.info('scheduler.item_quota_deferred', { kind: item.kind, slug: item.slug, setUrl: item.url })
         r = waits
-          ? { item, outcome: 'deferred', stopReason: QUOTA_DEFERRED_REASON }
+          ? { item, outcome: 'deferred', stopReason: res.quota?.out ? QUOTA_DEFERRED_REASON : RATE_LIMIT_DEFERRED_REASON }
           : { item, outcome: res.stoppedBy ? 'stopped' : res.ok ? 'ok' : 'failed', ...(res.stoppedBy ? { stopReason: res.stoppedBy.reason } : {}) }
         retryAfter = res.stoppedBy?.retryAfterSeconds ?? null
         poolCode = res.stoppedBy?.poolCode ?? null
