@@ -237,6 +237,102 @@ describe('the hook: a pre-save that gets its video is liked, in the background',
   })
 })
 
+describe('restoring a pre-save whose like ended for good', () => {
+  const ended = async (env: Env, trackId: string, videoId: string, likeError: string) => {
+    const id = await seedResolved(env, trackId, videoId, 'dismissed')
+    await env.DB.prepare('UPDATE presaves SET found_at = 2, dismissed_at = 3, like_attempts = 3, like_error = ?, like_next_at = NULL WHERE id = ?').bind(likeError, id).run()
+    return id
+  }
+
+  it('does not ask again about a video that was gone, has ratings disabled, needs a purchase or was rejected', async () => {
+    const env = await makeEnv()
+    const yt = stub()
+    for (const [i, kind] of ['gone', 'rating_disabled', 'purchase_required', 'rejected'].entries()) {
+      const id = await ended(env, String(i + 1), `VIDEOAAAAA${i}`, `${kind}: youtube videos.rate said so`)
+      expect(await restorePresave(env, id, NOW)).toMatchObject({ stage: 'found', liked_at: null, like_next_at: null, like_attempts: 3 })
+      await drainPresaveLikes()
+      expect((await likeCols(env, id)).like_error).toBe(`${kind}: youtube videos.rate said so`)
+    }
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 86400_000 })).toMatchObject({ tried: 0 })
+    expect(yt.getRating).toEqual([])
+    expect(yt.rate).toEqual([])
+  })
+
+  it('reads a disliked one again: still disliked is left alone, a dislike taken back is liked', async () => {
+    const env = await makeEnv()
+    let yt = stub({ ratings: { VIDEOAAAAA1: 'dislike' } })
+    const id = await ended(env, '1', 'VIDEOAAAAA1', 'disliked: disliked on YouTube; left alone')
+    expect(await restorePresave(env, id, NOW)).toMatchObject({ like_next_at: NOW })
+    await drainPresaveLikes()
+    expect(await likeCols(env, id)).toMatchObject({ liked_at: null, like_next_at: null })
+    expect(yt.getRating).toHaveLength(1)
+    expect(yt.rate).toEqual([])
+    await dismissPresave(env, id, NOW + 1)
+    yt = stub({ ratings: { VIDEOAAAAA1: 'none' } })
+    await restorePresave(env, id, NOW + 2)
+    await drainPresaveLikes()
+    expect(await likeCols(env, id)).toMatchObject({ liked_at: NOW + 2, like_error: null })
+    expect(yt.rate).toEqual(['VIDEOAAAAA1'])
+  })
+
+  it('asks again about what the owner fixes on the account, and about a like that was only waiting', async () => {
+    const env = await makeEnv()
+    const yt = stub()
+    const forbidden = await ended(env, '1', 'VIDEOAAAAA1', 'forbidden: youtube videos.rate 403')
+    const waiting = await seedResolved(env, '2', 'VIDEOBBBBB2', 'dismissed')
+    await env.DB.prepare("UPDATE presaves SET found_at = 2, dismissed_at = 3, like_attempts = 2, like_error = 'gone: x', like_next_at = ? WHERE id = ?").bind(NOW + 60_000, waiting).run()
+    await restorePresave(env, forbidden, NOW)
+    await restorePresave(env, waiting, NOW)
+    await drainPresaveLikes()
+    expect(await likeCols(env, forbidden)).toMatchObject({ liked_at: NOW })
+    expect(await likeCols(env, waiting)).toMatchObject({ liked_at: NOW })
+    expect(yt.rate.sort()).toEqual(['VIDEOAAAAA1', 'VIDEOBBBBB2'])
+  })
+
+  it('a video that was gone is asked about again once the pre-save has another video', async () => {
+    const env = await makeEnv()
+    const yt = stub({ medialink: () => ML_NO_YT })
+    const added = await addPresave(env, { trackId: '909720' }, 'ui', { now: NOW })
+    await markPresaveUploaded(env, added.presave.id, 'UPLOADED001', undefined, NOW)
+    await drainPresaveLikes()
+    await env.DB.prepare("UPDATE presaves SET liked_at = NULL, like_attempts = 3, like_error = 'gone: x', like_next_at = NULL WHERE id = ?").bind(added.presave.id).run()
+    yt.rate.length = 0
+    await markPresaveUploaded(env, added.presave.id, 'UPLOADED002', undefined, NOW + 1)
+    await drainPresaveLikes()
+    expect(await likeCols(env, added.presave.id)).toMatchObject({ liked_at: NOW + 1, like_error: null })
+    expect(yt.rate).toEqual(['UPLOADED002'])
+  })
+})
+
+describe('the drain is bounded', () => {
+  it('gives up on a like that never settles and drops it, so the next drain does not wait on it', async () => {
+    const env = await makeEnv()
+    // YouTube never answers, and the call is never cut off (a request ended in the middle of it).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url === `${POOL}/fetch`) return Response.json({ status: 200, finalUrl: (JSON.parse(String(init!.body)) as { url: string }).url, html: ML_FOUND, accountId: 'acct-1', exitLabel: 'exit-a', fetchedAt: new Date().toISOString(), bytes: ML_FOUND.length })
+        return new Promise<Response>(() => {})
+      }),
+    )
+    const r = await addPresave(env, { trackId: '909720' }, 'tasker', { now: NOW })
+    expect(r.presave).toMatchObject({ stage: 'found', like_next_at: NOW })
+    const t0 = Date.now()
+    await drainPresaveLikes(40)
+    expect(Date.now() - t0).toBeLessThan(5000)
+    // Dropped: this one has nothing to wait for, whatever its limit.
+    const t1 = Date.now()
+    await drainPresaveLikes()
+    expect(Date.now() - t1).toBeLessThan(1000)
+    // The row is as the claim left it: stale after 10 minutes, then the cron's.
+    expect(await likeCols(env, r.presave.id)).toMatchObject({ liked_at: null, like_attempts: 1, like_claimed_at: NOW, like_next_at: NOW })
+    stub()
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 5 * 60_000 })).toMatchObject({ tried: 0 })
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 11 * 60_000 })).toMatchObject({ tried: 1, liked: 1 })
+  })
+})
+
 describe('the rating is read first', () => {
   it('already liked: recorded, not rated again (1 unit)', async () => {
     const env = await makeEnv()
@@ -292,7 +388,7 @@ describe('a like that fails does not touch the pre-save', () => {
     const r = await addPresave(env, { trackId: '909720' }, 'tasker', { now: NOW })
     await drainPresaveLikes()
     const dayEnd = quotaDayEnd(NOW) * 1000
-    expect(await getPresaveRow(env, r.presave.id)).toMatchObject({ stage: 'found', youtube_video_id: VIDEO, next_check_at: null, last_result: 'found', last_error: null, liked_at: null, like_attempts: 1, like_next_at: NOW })
+    expect(await getPresaveRow(env, r.presave.id)).toMatchObject({ stage: 'found', youtube_video_id: VIDEO, next_check_at: null, last_result: 'found', last_error: null, liked_at: null, like_attempts: 0, like_next_at: NOW })
     expect((await likeCols(env, r.presave.id)).like_error).toMatch(/^quota: /)
     expect(await getQuotaOut(env, NOW)).toEqual({ since: NOW / 1000, until: dayEnd / 1000 })
     // The other waiting like keeps its own time: the hold, not a pushed-out retry, is what stops it.
@@ -308,7 +404,29 @@ describe('a like that fails does not touch the pre-save', () => {
     expect(yt.rate).toEqual([])
     // It expired at midnight Pacific: both go.
     expect(await retryDuePresaveLikes(env, log, { now: dayEnd + 1 })).toEqual({ tried: 2, liked: 2, stoppedBy: null })
-    expect(await likeCols(env, r.presave.id)).toMatchObject({ liked_at: dayEnd + 1, like_attempts: 2, like_error: null, like_next_at: null })
+    expect(await likeCols(env, r.presave.id)).toMatchObject({ liked_at: dayEnd + 1, like_attempts: 1, like_error: null, like_next_at: null })
+  })
+
+  it('a try refused for quota is not counted: a 404 after it still has its three tries, and a 5xx its shortest wait', async () => {
+    const env = await makeEnv()
+    const gone = await seedResolved(env, '1', 'VIDEOAAAAA1')
+    const flaky = await seedResolved(env, '2', 'VIDEOBBBBB2')
+    await env.DB.prepare('UPDATE presaves SET like_next_at = ? WHERE id IN (?, ?)').bind(NOW, gone, flaky).run()
+    // Three ticks in a row are told the quota is used (the owner clears the hold each time).
+    for (let i = 0; i < 3; i++) {
+      stub({ rate: () => ytError(403, 'quotaExceeded') })
+      expect(await retryDuePresaveLikes(env, log, { now: NOW + i })).toEqual({ tried: 1, liked: 0, stoppedBy: 'quota' })
+      await clearQuotaOut(env)
+    }
+    expect(await likeCols(env, gone)).toMatchObject({ like_attempts: 0, like_claimed_at: null })
+    expect(await likeCols(env, flaky)).toMatchObject({ like_attempts: 0, like_claimed_at: null })
+    stub({ rate: (id) => (id === 'VIDEOAAAAA1' ? ytError(404, 'videoNotFound') : new Response('boom', { status: 503 })) })
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 10 })).toEqual({ tried: 2, liked: 0, stoppedBy: null })
+    // Not final on first sight, and the first backoff, not the fourth.
+    const g = await likeCols(env, gone)
+    expect(g).toMatchObject({ like_attempts: 1, like_next_at: NOW + 10 + 15 * 60_000 })
+    expect(g.like_error).toMatch(/^gone: /)
+    expect(await likeCols(env, flaky)).toMatchObject({ like_attempts: 1, like_next_at: NOW + 10 + 15 * 60_000 })
   })
 
   it('a hold the owner clears early lets the likes go at the next tick, not at midnight', async () => {
@@ -389,12 +507,38 @@ describe('a like that fails does not touch the pre-save', () => {
     expect(await likeUnitsSpent(env, NOW)).toBe(51)
     expect(await likeCols(env, a)).toMatchObject({ liked_at: NOW })
     expect(await likeCols(env, b)).toMatchObject({ liked_at: null, like_attempts: 1, like_error: 'budget: the 60 units a day for likes are used', like_next_at: dayEnd })
-    expect(await likeCols(env, c)).toMatchObject({ liked_at: null, like_next_at: dayEnd })
+    // The sweep stopped there: the third keeps its own time and is parked, by name, when its turn comes.
+    expect(await likeCols(env, c)).toMatchObject({ liked_at: null, like_next_at: NOW - 1, like_error: 'transient: x' })
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 1, limit: 3 })).toEqual({ tried: 0, liked: 0, stoppedBy: 'budget' })
+    expect(await likeCols(env, c)).toMatchObject({ liked_at: null, like_attempts: 1, like_error: 'budget: the 60 units a day for likes are used', like_next_at: dayEnd })
+    expect(yt.rate).toEqual(['VIDEOAAAAA1'])
     // The next quota day has its own count.
     expect(await retryDuePresaveLikes(env, log, { now: dayEnd + 1, limit: 3 })).toEqual({ tried: 1, liked: 1, stoppedBy: 'budget' })
     expect(yt.rate).toEqual(['VIDEOAAAAA1', 'VIDEOBBBBB2'])
     // The owner's backfill is not held by it.
     expect(await backfillPresaveLikes(env, { dryRun: false }, { now: dayEnd + 2 })).toMatchObject({ liked: 1 })
+  })
+
+  it('raising presave.likeDailyUnitCap mid-day lets the likes parked for it go at the next tick, not at midnight', async () => {
+    const env = await makeEnv()
+    await updateAppSettings(env, { presave: { likeDailyUnitCap: 60 } })
+    const a = await waiting(env, '1', 'VIDEOAAAAA1', NOW - 3)
+    const b = await waiting(env, '2', 'VIDEOBBBBB2', NOW - 2)
+    // One waiting for another reason, later today: the cap has nothing to do with its time.
+    const later = await waiting(env, '3', 'VIDEOCCCCC3', NOW + 3600_000)
+    const yt = stub()
+    const dayEnd = quotaDayEnd(NOW) * 1000
+    expect(await retryDuePresaveLikes(env, log, { now: NOW })).toEqual({ tried: 1, liked: 1, stoppedBy: 'budget' })
+    expect(await likeCols(env, b)).toMatchObject({ liked_at: null, like_next_at: dayEnd })
+    // Still capped: nothing moves, nothing is asked.
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 5 * 60_000 })).toEqual({ tried: 0, liked: 0, stoppedBy: null })
+    expect(await likeCols(env, b)).toMatchObject({ like_next_at: dayEnd })
+    await updateAppSettings(env, { presave: { likeDailyUnitCap: 1000 } })
+    expect(await retryDuePresaveLikes(env, log, { now: NOW + 10 * 60_000 })).toEqual({ tried: 1, liked: 1, stoppedBy: null })
+    expect(await likeCols(env, a)).toMatchObject({ liked_at: NOW })
+    expect(await likeCols(env, b)).toMatchObject({ liked_at: NOW + 10 * 60_000, like_error: null })
+    expect(await likeCols(env, later)).toMatchObject({ liked_at: null, like_next_at: NOW + 3600_000 })
+    expect(yt.rate).toEqual(['VIDEOAAAAA1', 'VIDEOBBBBB2'])
   })
 
   it('a 5xx backs off (15 min, doubling, a day at most) and is retried by the cron', async () => {
@@ -601,6 +745,10 @@ describe('the backfill', () => {
     await seedResolved(env, '1', 'VIDEOAAAAA1')
     const yt = stub({ ratings: () => ytError(403, 'quotaExceeded') })
     expect(await backfillPresaveLikes(env, { dryRun: false }, { now: NOW })).toMatchObject({ liked: 0, stoppedBy: 'quota', units: { getRating: 0, rate: 0 }, items: [{ action: 'not_tried', rating: 'unknown' }] })
+    // The hold is set from here too, as the hook and the cron set it: the next live run is refused before any call.
+    expect(await getQuotaOut(env, NOW)).toEqual({ since: NOW / 1000, until: quotaDayEnd(NOW) })
+    expect((await backfillPresaveLikes(env, { dryRun: false }, { now: NOW + 1000 })).message).toMatch(/held until/)
+    expect(yt.getRating).toHaveLength(1)
     expect(await backfillPresaveLikes(env, {}, { now: NOW })).toMatchObject({ wouldLike: 1, stoppedBy: 'quota', units: { getRating: 0, rate: 50 }, items: [{ action: 'would_like', rating: 'unknown' }] })
     expect(yt.rate).toEqual([])
   })

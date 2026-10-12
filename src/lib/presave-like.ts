@@ -64,6 +64,18 @@ const GONE_TRIES = 3
 const RETRIES_PER_TICK = 2
 /** What one automatic like may cost: videos.getRating + videos.rate. */
 const LIKE_UNITS = 51
+/**
+ * `drainPresaveLikes` waits this long at most. A like cut off with its request
+ * (a persisting 401 with its retries can outlast what waitUntil allows) leaves
+ * a promise that never settles; without a limit the cron's `finally` and every
+ * later request's waitUntil would wait on it to their own limit.
+ */
+const DRAIN_LIMIT_MS = 25_000
+/**
+ * Final states that are about the video, not about the owner's account or
+ * rating: restoring the pre-save does not ask again while it has that video.
+ */
+const VIDEO_FINAL_KINDS: readonly LikeFailKind[] = ['gone', 'rating_disabled', 'purchase_required', 'rejected']
 /** videos.rate calls one backfill request makes at most (a Worker's subrequests are limited). */
 export const BACKFILL_MAX_LIKES = 20
 /** Pre-saves one backfill request reads: one videos.getRating call. */
@@ -80,8 +92,8 @@ const UNCLAIMED_SQL = '(like_claimed_at IS NULL OR like_claimed_at <= ?)'
 /**
  * Why a like was not made.
  *   tried again:  quota (the day's quota is used: it stays due and the quota hold, lib/youtube-quota.ts,
- *                        keeps every like from being tried until it expires or the owner clears it)
- *                 budget (presave.likeDailyUnitCap is used: at the quota day's roll-over, every other waiting like with it)
+ *                        keeps every like from being tried until it expires or the owner clears it; not counted as a try)
+ *                 budget (presave.likeDailyUnitCap is used: at the quota day's roll-over, or as soon as the cap allows one again)
  *                 rate_limit, transient, not_connected (backoff, this row only)
  *                 gone (a 404: a few tries, then final)
  *   final:        rating_disabled, purchase_required, email_not_verified, forbidden, rejected, disliked
@@ -204,13 +216,17 @@ export async function likePresaveVideo(env: Env, presaveId: number, opts: LikeOp
 
   /** Not made: the reason and the next try, on this row while it still has this video and no like. */
   const park = async (kind: LikeFailKind, detail: string, claimed = true): Promise<LikeResult> => {
-    const tries = claimed ? attempts : attempts - 1
+    // Told the day's quota is used: YouTube tried nothing, so the claim's count is taken back. Otherwise a
+    // later 404 could be final on first sight, and a later transient failure would start at a long backoff.
+    const uncount = claimed && kind === 'quota'
+    const tries = claimed && !uncount ? attempts : attempts - 1
     const next = likeRetryAt(kind, tries, now)
     const error = errText(kind, detail)
     // Before the claim (the budget) another run's hold on the try is not this one's to release.
-    await db.prepare(`UPDATE presaves SET like_error = ?, like_next_at = ?${claimed ? ', like_claimed_at = NULL' : ''} WHERE id = ? AND youtube_video_id = ? AND liked_at IS NULL`).bind(error, next, p.id, videoId).run()
-    // The day's budget for likes is used: every other like waiting for its try would end the same way today.
-    if (kind === 'budget') await db.prepare('UPDATE presaves SET like_next_at = ? WHERE liked_at IS NULL AND like_next_at IS NOT NULL AND like_next_at < ?').bind(next, next).run()
+    await db
+      .prepare(`UPDATE presaves SET like_error = ?, like_next_at = ?${claimed ? ', like_claimed_at = NULL' : ''}${uncount ? ', like_attempts = MAX(0, like_attempts - 1)' : ''} WHERE id = ? AND youtube_video_id = ? AND liked_at IS NULL`)
+      .bind(error, next, p.id, videoId)
+      .run()
     log[kind === 'budget' || kind === 'disliked' ? 'info' : 'warn']('presave.like_not_made', { id: p.id, videoId, kind, attempts: tries, retryAt: next, detail: detail.slice(0, 300) })
     return { outcome: kind, videoId, error, units }
   }
@@ -289,9 +305,29 @@ export async function likePresaveVideo(env: Env, presaveId: number, opts: LikeOp
 
 const pending = new Set<Promise<unknown>>()
 
-/** Resolves when every like started so far has finished (they swallow their own errors). */
-export async function drainPresaveLikes(): Promise<void> {
-  while (pending.size) await Promise.allSettled([...pending])
+/**
+ * Resolves when every like started so far has finished (they swallow their own
+ * errors), or after `limitMs`: the ones still running then are dropped from
+ * the set, so no later drain waits on them. A dropped like's claim goes stale
+ * after CLAIM_MS and the cron tries it again.
+ */
+export async function drainPresaveLikes(limitMs = DRAIN_LIMIT_MS): Promise<void> {
+  const deadline = Date.now() + limitMs
+  while (pending.size) {
+    const batch = [...pending]
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = await Promise.race([
+      Promise.allSettled(batch).then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), Math.max(0, deadline - Date.now()))
+      }),
+    ])
+    clearTimeout(timer)
+    if (late) {
+      for (const p of batch) pending.delete(p)
+      return
+    }
+  }
 }
 
 /**
@@ -302,10 +338,19 @@ export async function drainPresaveLikes(): Promise<void> {
  * the video it had before, when that changed; a like recorded for the old one
  * does not count for the new (the old video is not un-liked).
  *
+ * `restored`: a dismissed pre-save is watched again and still has its video.
+ * A like that was never made or is still waiting is due again. One that ended
+ * in a final state is asked again only when the answer may be different now
+ * for the same video: the owner's own rating (`disliked`: they may have taken
+ * it back) and what the owner fixes on the account (`forbidden`,
+ * `email_not_verified`). What YouTube said about the video itself (`gone`,
+ * `rating_disabled`, `purchase_required`, `rejected`: VIDEO_FINAL_KINDS) stays
+ * final until the pre-save gets another video (`replacedVideoId`).
+ *
  * Never throws and never changes anything but the like columns, which it
  * returns as they are once the like is due (null when nothing was read).
  */
-export async function onPresaveResolved(env: Env, presaveId: number, log?: Logger, opts: { now?: number; fetcher?: typeof fetch; replacedVideoId?: string | null } = {}): Promise<PresaveLikeFields | null> {
+export async function onPresaveResolved(env: Env, presaveId: number, log?: Logger, opts: { now?: number; fetcher?: typeof fetch; replacedVideoId?: string | null; restored?: boolean } = {}): Promise<PresaveLikeFields | null> {
   const lg = log ?? makeLogger({ task: 'presave.like', id: presaveId })
   try {
     if (!(await getAppSettings(env)).presave.likeOnYouTube) return null
@@ -317,7 +362,8 @@ export async function onPresaveResolved(env: Env, presaveId: number, log?: Logge
         .bind(presaveId, opts.replacedVideoId)
         .run()
     }
-    const due = await db.prepare(`UPDATE presaves SET like_next_at = ? WHERE id = ? AND ${RESOLVED_UNLIKED_SQL}`).bind(now, presaveId).run()
+    const videoFinal = opts.restored ? ` AND NOT (like_next_at IS NULL AND like_attempts > 0 AND (${VIDEO_FINAL_KINDS.map((k) => `like_error LIKE '${k}:%'`).join(' OR ')}))` : ''
+    const due = await db.prepare(`UPDATE presaves SET like_next_at = ? WHERE id = ? AND ${RESOLVED_UNLIKED_SQL}${videoFinal}`).bind(now, presaveId).run()
     const fields = await likeFields(env, presaveId)
     if ((due.meta.changes ?? 0) > 0) {
       const p: Promise<unknown> = likePresaveVideo(env, presaveId, { log: lg, now, fetcher: opts.fetcher, budgeted: true })
@@ -346,13 +392,19 @@ export async function retryDuePresaveLikes(env: Env, log: Logger, opts: { now?: 
     const now = opts.now ?? Date.now()
     // The quota hold: nothing is asked of YouTube, and the due likes stay due.
     if (await getQuotaOut(env, now)) return { ...out, stoppedBy: 'quota' }
+    const settings = (await getAppSettings(env)).presave
+    // Likes parked for the day's budget wait for the roll-over; when the cap allows one before that (the owner
+    // raised it), they are due now.
+    if ((await likeUnitsSpent(env, now)) + LIKE_UNITS <= settings.likeDailyUnitCap) {
+      await dbOf(env).prepare(`UPDATE presaves SET like_next_at = ? WHERE like_error LIKE 'budget:%' AND like_next_at > ? AND ${RESOLVED_UNLIKED_SQL}`).bind(now, now).run()
+    }
     const due = (
       await dbOf(env)
         .prepare(`SELECT id FROM presaves WHERE like_next_at IS NOT NULL AND like_next_at <= ? AND ${RESOLVED_UNLIKED_SQL} AND ${UNCLAIMED_SQL} ORDER BY like_next_at, id LIMIT ?`)
         .bind(now, now - CLAIM_MS, opts.limit ?? RETRIES_PER_TICK)
         .all<{ id: number }>()
     ).results
-    if (due.length === 0 || !(await getAppSettings(env)).presave.likeOnYouTube) return out
+    if (due.length === 0 || !settings.likeOnYouTube) return out
     for (const d of due) {
       const r = await likePresaveVideo(env, d.id, { log, now, fetcher: opts.fetcher, budgeted: true })
       if (r.outcome === 'skipped') continue
@@ -482,6 +534,8 @@ export async function backfillPresaveLikes(env: Env, input: LikeBackfillInput = 
     out.units.getRating = 1
   } catch (e) {
     log.warn('presave.like_backfill_ratings_failed', { quota: quotaKindOf(e), ...errorFields(e) })
+    // Out of the day's quota at the first call: the hold is set here too, as the hook and the cron do.
+    if (quotaKindOf(e) === 'quota') await noteQuotaOut(env, e, log, now)
     return blind(quotaKindOf(e) ?? 'error', `videos.getRating failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`)
   }
 

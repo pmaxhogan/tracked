@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { app } from '../src/index'
 import { fakeKV } from './helpers/fake-kv'
 import { fakeR2 } from './helpers/fake-r2'
-import { PAGE_DAILY_CAP, drainPageCaptures, gunzipToText, pageKey, scrubUsername, storePage, type PageCapture } from '../src/lib/page-store'
+import { PAGE_DAILY_CAP, capturePage, drainPageCaptures, gunzipToText, pageKey, scrubUsername, storePage, type PageCapture } from '../src/lib/page-store'
 import { fetch1001 } from '../src/lib/upstream1001'
 import type { Env } from '../src/types'
 
@@ -116,6 +116,26 @@ describe('fetch1001 keeps every page, in the background', () => {
     expect(r.accountId).toBe('acct-2')
     await drainPageCaptures()
     expect([...o.bucket._store.keys()]).toEqual(['flagged/2026-09-30/set/1pqq0hst/1790769600-acct-2.html'])
+  })
+})
+
+describe('drainPageCaptures is bounded', () => {
+  it('gives up on a store that never settles and drops it, so the next drain does not wait on it', async () => {
+    const o = ctx()
+    // The R2 write never answers (its request was cut off in the middle).
+    o.bucket.put = (() => new Promise(() => {})) as unknown as typeof o.bucket.put
+    capturePage(o, cap(CLEAN))
+    const t0 = Date.now()
+    await drainPageCaptures(40)
+    expect(Date.now() - t0).toBeLessThan(5000)
+    const t1 = Date.now()
+    await drainPageCaptures()
+    expect(Date.now() - t1).toBeLessThan(1000)
+    // A capture started afterwards is drained as before.
+    const ok = ctx()
+    capturePage(ok, cap(CLEAN))
+    await drainPageCaptures()
+    expect([...ok.bucket._store.keys()]).toHaveLength(1)
   })
 })
 

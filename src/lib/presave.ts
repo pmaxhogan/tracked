@@ -844,8 +844,8 @@ async function restoreRow(env: Env, p: PresaveRow, now: number): Promise<Presave
   const stage: PresaveStage = p.youtube_video_id ? (p.found_at ? 'found' : 'uploaded') : p.track_id ? 'links' : 'identify'
   const next = stage === 'links' || stage === 'identify' ? now : null
   await dbOf(env).prepare('UPDATE presaves SET stage = ?, dismissed_at = NULL, next_check_at = ?, fail_count = 0, updated_at = ? WHERE id = ?').bind(stage, next, now, p.id).run()
-  // Restored with its video: the like is due again (never throws).
-  if (stage === 'found' || stage === 'uploaded') await onPresaveResolved(env, p.id, undefined, { now })
+  // Restored with its video: the like is due again, unless it ended for a reason that is about this video (never throws).
+  if (stage === 'found' || stage === 'uploaded') await onPresaveResolved(env, p.id, undefined, { now, restored: true })
   return (await getPresaveRow(env, p.id))!
 }
 

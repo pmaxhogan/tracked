@@ -202,7 +202,30 @@ export function capturePage(opts: PageStoreOpts, c: PageCapture): void {
   pending.add(p)
 }
 
-/** Resolves when every capture started so far has finished (they swallow their own errors). */
-export async function drainPageCaptures(): Promise<void> {
-  while (pending.size) await Promise.allSettled([...pending])
+/** `drainPageCaptures` waits this long at most (a store cut off with its request never settles). */
+const DRAIN_LIMIT_MS = 25_000
+
+/**
+ * Resolves when every capture started so far has finished (they swallow their
+ * own errors), or after `limitMs`: the ones still running then are dropped
+ * from the set, so no later drain (the cron's `finally`, the next request's
+ * waitUntil) waits on them again.
+ */
+export async function drainPageCaptures(limitMs = DRAIN_LIMIT_MS): Promise<void> {
+  const deadline = Date.now() + limitMs
+  while (pending.size) {
+    const batch = [...pending]
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = await Promise.race([
+      Promise.allSettled(batch).then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), Math.max(0, deadline - Date.now()))
+      }),
+    ])
+    clearTimeout(timer)
+    if (late) {
+      for (const p of batch) pending.delete(p)
+      return
+    }
+  }
 }
