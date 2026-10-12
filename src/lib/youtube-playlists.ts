@@ -274,13 +274,15 @@ export async function addVideoToPlaylist(
  * playlistItems.update (50 units): move one item to index `position` of its
  * playlist; the items between its old and new place shift by one. The API
  * replaces the whole snippet, so the playlist and the video are sent again.
+ * Returns the position the reply reports for the item (null when it reports
+ * none), which the caller compares with what it asked for.
  */
 export async function movePlaylistItem(
   item: { itemId: string; playlistId: string; videoId: string },
   position: number,
   accessToken: string,
   fetcher: typeof fetch = fetch,
-): Promise<void> {
+): Promise<number | null> {
   const body = {
     id: item.itemId,
     snippet: { playlistId: item.playlistId, resourceId: { kind: 'youtube#video', videoId: item.videoId }, position },
@@ -292,6 +294,28 @@ export async function movePlaylistItem(
     fetcher,
   )
   await expectOk(res, 'playlistItems.update', item.playlistId)
+  const data = (await res.json().catch(() => null)) as { snippet?: { position?: unknown } } | null
+  return typeof data?.snippet?.position === 'number' ? data.snippet.position : null
+}
+
+/**
+ * playlistItems.list filtered by `videoId` (1 unit): the index YouTube has
+ * item `itemId` at now, or null when it is not in the playlist (or the reply
+ * carries no position).
+ */
+export async function getPlaylistItemPosition(
+  playlistId: string,
+  videoId: string,
+  itemId: string,
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<number | null> {
+  const params = new URLSearchParams({ part: 'snippet', playlistId, videoId, maxResults: '50' })
+  const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
+  await expectOk(res, 'playlistItems.list', playlistId)
+  const data = (await res.json()) as { items?: Array<{ id?: string; snippet?: { position?: unknown } }> }
+  const position = data.items?.find((it) => it.id === itemId)?.snippet?.position
+  return typeof position === 'number' ? position : null
 }
 
 /**

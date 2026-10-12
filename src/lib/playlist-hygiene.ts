@@ -1171,9 +1171,10 @@ export async function undoRemoval(env: Env, accessToken: string, id: number, log
   let readded = false
   try {
     if (row.status !== 'would_remove') {
-      // Back at the place its set's date gives it when the playlist's snapshot is at hand;
-      // without one it is appended and the reorder pass moves it (lib/playlist-reorder.ts).
-      const inPlaylist = await peekCachedPlaylistVideoIds(env, row.playlist_id)
+      // An artist playlist gets it back at the place its set's date gives it when the playlist's
+      // snapshot is at hand; without one it is appended and the reorder pass moves it
+      // (lib/playlist-reorder.ts). The combined playlist is not ordered: always appended.
+      const inPlaylist = row.playlist_kind === 'artist' ? await peekCachedPlaylistVideoIds(env, row.playlist_id) : null
       if (inPlaylist) await insertInOrder(env, { playlistId: row.playlist_id, videoId: row.video_id, existing: inPlaylist, accessToken, log, setUrl: row.set_url, fetcher })
       else await addVideoToPlaylist(row.playlist_id, row.video_id, accessToken, fetcher)
       readded = true

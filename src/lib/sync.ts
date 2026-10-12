@@ -779,12 +779,12 @@ export async function syncOne(
     }
     return combined.handle
   }
-  const mirrorToCombined = async (videoId: string, setUrl?: string): Promise<CombinedAdditionStatus> => {
+  const mirrorToCombined = async (videoId: string): Promise<CombinedAdditionStatus> => {
     const handle = await openCombinedOnce()
     if (!handle) return 'unavailable'
     try {
       if (await combinedRefuses(env, handle.playlistId, videoId, handle.videoIds)) return 'unavailable'
-      const status = await addToCombined(env, handle, videoId, accessToken, log, setUrl)
+      const status = await addToCombined(env, handle, videoId, accessToken, log)
       if (status === 'added') {
         log.info('sync.combined_added', { slug: sub.slug, videoId, playlistId: handle.playlistId })
       }
@@ -994,7 +994,7 @@ export async function syncOne(
             videoUrl: watchUrl(videoId),
             via: setFetched.via,
             meta: { ms: Date.now() - tSet },
-            combinedStatus: await mirrorToCombined(videoId, setUrl),
+            combinedStatus: await mirrorToCombined(videoId),
           })
         } else {
           log.info('sync.already_in_playlist', { slug: sub.slug, setUrl, videoId })
@@ -1006,7 +1006,7 @@ export async function syncOne(
             videoUrl: watchUrl(videoId),
             via: setFetched.via,
             meta: { ms: Date.now() - tSet },
-            combinedStatus: await mirrorToCombined(videoId, setUrl),
+            combinedStatus: await mirrorToCombined(videoId),
           })
         }
       } else {
@@ -1172,7 +1172,7 @@ export async function syncOne(
           videoUrl: watchUrl(videoId),
           via: setFetched.via,
           meta: { ms: Date.now() - tSet },
-          combinedStatus: await mirrorToCombined(videoId, setUrl),
+          combinedStatus: await mirrorToCombined(videoId),
         })
       } else {
         // Swapped recording. New is strictly better: out with the old (from
@@ -1205,7 +1205,7 @@ export async function syncOne(
           }
         }
         if (!existingVideoIds.has(videoId)) await addToArtistPlaylist(videoId, setUrl)
-        const combinedStatus = await mirrorToCombined(videoId, setUrl)
+        const combinedStatus = await mirrorToCombined(videoId)
         tracklistVideos[setUrl] = { videoId, checkedAt }
         videosReplaced += 1
         log.info('sync.recheck_replaced', {

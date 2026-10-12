@@ -61,7 +61,7 @@ export const AppSettingsSchema = z.object({
     combinedDailyInsertCap: z.number().int().min(0).max(190),
     /** Combined-playlist inserts per run at most (default 20). */
     combinedMaxInsertsPerRun: z.number().int().min(0).max(100),
-    /** Quota units a quota day the reorder pass may spend putting playlists in set-date order, listings included (default 2 000; a move is 50). 0 pauses it. */
+    /** Quota units a quota day the reorder pass may spend moving videos already in the artist playlists into set-date order, listings included (a move is 50). Default 0: paused, no YouTube call at all, until the owner picks a budget. */
     orderDailyUnits: z.number().int().min(0).max(10000),
     /** Moves one reorder run makes at most (default 10). */
     orderMovesPerRun: z.number().int().min(1).max(100),
@@ -137,7 +137,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     runRemovalMax: 15,
     combinedDailyInsertCap: 80,
     combinedMaxInsertsPerRun: 20,
-    orderDailyUnits: 2000,
+    orderDailyUnits: 0,
     orderMovesPerRun: 10,
   },
   presave: {

@@ -50,7 +50,7 @@ const APP_GROUPS: FormGroup[] = [
       { path: 'playlists.runRemovalMax', label: 'Hold every playlist when one run misses more than', help: 'Across all playlists. Default 15.', min: 0, max: 500, step: 1 },
       { path: 'playlists.combinedDailyInsertCap', label: 'Combined playlist inserts a day', help: '50 quota units each. Default 80.', min: 0, max: 190, step: 1 },
       { path: 'playlists.combinedMaxInsertsPerRun', label: 'Combined playlist inserts per run', help: 'Default 20.', min: 0, max: 100, step: 1 },
-      { path: 'playlists.orderDailyUnits', label: 'Quota units a day for ordering playlists', help: 'Moving a video to its set-date place costs 50. 0 pauses. Default 2000.', min: 0, max: 10000, step: 50 },
+      { path: 'playlists.orderDailyUnits', label: 'Quota units a day for ordering playlists', help: 'Moves videos already in an artist playlist to their set-date place, 50 units each. 0 = paused (the default): nothing is moved. Check now on the Playlists page says what a budget means in days.', min: 0, max: 10000, step: 50 },
       { path: 'playlists.orderMovesPerRun', label: 'Playlist moves per run', help: 'Default 10.', min: 1, max: 100, step: 1 },
     ],
   },

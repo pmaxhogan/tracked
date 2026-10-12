@@ -1253,7 +1253,7 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
   let combined: CombinedHandle | null = null
   try {
     combined = await openCombinedPlaylist(env, accessToken, log)
-    if (combined) combinedStatus = await addToCombined(env, combined, input.videoId, accessToken, log, req.setUrl)
+    if (combined) combinedStatus = await addToCombined(env, combined, input.videoId, accessToken, log)
   } catch (e) {
     combinedStatus = 'failed'
     log.warn('mkvid.combined_add_failed', { id: req.id, videoId: input.videoId, ...errorFields(e) })

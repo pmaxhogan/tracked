@@ -38,8 +38,8 @@
 
 import type { Env } from '../types'
 import { getCachedPlaylistVideoIds, cachePlaylistVideoIds, findOrCreatePlaylist } from './playlist-cache'
-import { insertInOrder, type OrderKeyCache } from './playlist-order-store'
 import {
+  addVideoToPlaylist,
   isPermanentInsertError,
   isQuotaError,
   PlaylistNotFoundError,
@@ -127,8 +127,6 @@ export type CombinedHandle = {
   attempts: number
   /** Videos removed from the playlist via `removeFromCombined` since it was opened. */
   removed: number
-  /** Order keys (lib/playlist-order-store.ts), read once per handle on the first insert. */
-  order?: OrderKeyCache
 }
 
 export async function loadCombinedState(env: Env): Promise<CombinedState> {
@@ -201,11 +199,9 @@ function resolveCombinedPlaylist(accessToken: string, log: Logger, create?: bool
 export type CombinedAdditionStatus = 'added' | 'duplicate' | 'failed' | 'unavailable'
 
 /**
- * Insert one video, unless the playlist already has it, at the place its
- * set's date gives it (lib/playlist-order.ts; `setUrl` = the set it is added
- * for, when the caller knows it). Throws on a YouTube error the caller should
- * see; recovers once from a playlist deleted mid-run (same contract as the
- * per-artist insert in lib/sync.ts).
+ * Insert one video, unless the playlist already has it. Throws on a YouTube
+ * error the caller should see; recovers once from a playlist deleted mid-run
+ * (same contract as the per-artist insert in lib/sync.ts).
  */
 export async function addToCombined(
   env: Env,
@@ -213,19 +209,11 @@ export async function addToCombined(
   videoId: string,
   accessToken: string,
   log: Logger,
-  setUrl?: string | null,
 ): Promise<'added' | 'duplicate'> {
   if (handle.videoIds.has(videoId)) return 'duplicate'
-  // Attempts are counted before the call (a failed insert costs quota too); a
-  // position YouTube refused and the insert that followed it are two.
-  const insert = async () => {
-    handle.attempts += 1
-    handle.order ??= {}
-    const r = await insertInOrder(env, { playlistId: handle.playlistId, videoId, existing: handle.videoIds, accessToken, log, setUrl, cache: handle.order })
-    handle.attempts += r.attempts - 1
-  }
   try {
-    await insert()
+    handle.attempts += 1
+    await addVideoToPlaylist(handle.playlistId, videoId, accessToken)
   } catch (e) {
     if (!(e instanceof PlaylistNotFoundError)) throw e
     log.warn('combined.playlist_stale_midrun', { stalePlaylistId: handle.playlistId })
@@ -234,7 +222,8 @@ export async function addToCombined(
     handle.playlistId = fresh.playlistId
     handle.videoIds = fresh.videoIds
     if (handle.videoIds.has(videoId)) return 'duplicate'
-    await insert()
+    handle.attempts += 1
+    await addVideoToPlaylist(handle.playlistId, videoId, accessToken)
   }
   handle.videoIds.add(videoId)
   handle.inserted += 1

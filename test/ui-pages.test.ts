@@ -332,11 +332,13 @@ describe('Playlists page script', () => {
       if (u === '/ui/api/combined') return Response.json({ connected: true, title: 'All DJs', playlistId: 'PLc', playlistUrl: 'https://www.youtube.com/playlist?list=PLc', videoCount: 12, missingTotal: 3, sources: [{}], dailyInsertCap: 100, dailyInsertsUsed: 25 })
       if (u === '/ui/api/removals?limit=1') return Response.json({ settings: { dryRun: true, dailyRemovals: 20 }, deletesUsedToday: 2, holds: [{}] })
       if (u === '/ui/api/playlist-order') return Response.json({
-        connected: true, fresh: false, unitsSpent: 0, dailyUnits: 2000, movesPerRun: 10, unitsUsedToday: 510, estimate: { units: 2060, days: 2 }, quotaStoppedUntil: 1790000000, lastRun: null,
-        totals: { playlists: 2, unread: 0, items: 60, undated: 1, moves: 40, units: 2000 },
+        connected: true, fresh: false, unitsSpent: 0, dailyUnits: 0, movesPerRun: 10, unitsUsedToday: 0, estimate: { moves: 40, units: 2060, days: null }, quotaStoppedUntil: 1790000000, lastRun: null,
+        daysAt: [{ dailyUnits: 1000, days: 3 }, { dailyUnits: 2000, days: 2 }, { dailyUnits: 4000, days: 1 }],
+        totals: { playlists: 3, unread: 0, items: 80, undated: 1, moves: 45, units: 2250 },
         playlists: [
-          { playlistId: 'PL1', kind: 'artist', slug: 'dj-1', title: 'DJ 1 <b>', items: 50, undated: 1, moves: 40, units: 2000, checkedAt: 1789990000, moved: 3 },
-          { playlistId: 'PL2', kind: 'artist', slug: 'dj-2', title: 'DJ 2', items: 10, undated: 0, moves: 0, units: 0, checkedAt: 1789990000, moved: 0, problem: 'manual_sort' },
+          { playlistId: 'PL1', slug: 'dj-1', title: 'DJ 1 <b>', items: 50, undated: 1, moves: 40, units: 2000, checkedAt: 1789990000, moved: 3 },
+          { playlistId: 'PL2', slug: 'dj-2', title: 'DJ 2', items: 10, undated: 0, moves: 0, units: 0, checkedAt: 1789990000, moved: 0, problem: 'manual_sort' },
+          { playlistId: 'PL3', slug: 'dj-3', title: 'DJ 3', items: 20, undated: 0, moves: 5, units: 250, checkedAt: 1789990000, moved: 1, problem: 'unexpected_position', detail: 'a video moved to index 4 is at index 3' },
         ],
       })
       if (u.startsWith('/ui/api/djs?')) return Response.json(djsAnswer([djRow(1, { mkvid: 1, lastAdded: 3 }), djRow(2, { playlistId: null, playlistUrl: null })]))
@@ -361,14 +363,19 @@ describe('Playlists page script', () => {
     expect(els.get('hygiene').innerHTML).toContain('1 held')
     // Set-date order: what is left, the budget, a quota wait as info (it continues by itself) and the one state the owner must fix in red.
     const ord = els.get('ord-body').innerHTML as string
-    expect(ord).toContain('40 videos still to move')
-    expect(ord).toContain('about 2 days at this budget')
-    expect(ord).toContain('510 / 2000 units used today')
+    expect(ord).toContain('45 videos still to move')
+    // It ships paused: the card says so, how to start, and what each budget would mean.
+    expect(ord).toContain('moving is paused')
+    expect(ord).toContain('href="/ui/settings#sf-playlists"')
+    expect(ord).toContain('2,000 a day: about 2 days')
+    expect(ord).toContain('combined playlist not ordered')
+    expect(ord).toContain('<span class="badge bad">1 stopped</span> DJ 3 (a video moved to index 4 is at index 3)')
     expect(ord).toContain('1 with no set date')
     expect(ord).toContain('badge info')
     expect(ord).toContain('<span class="badge bad">1 cannot be ordered</span> DJ 2')
     expect(els.get('ord-table').innerHTML).toContain('DJ 1 &lt;b&gt;')
-    expect(els.get('ord-run').disabled).toBe(false)
+    expect(els.get('ord-run').disabled).toBe(true)
+    expect(els.get('ord-check').disabled).not.toBe(true)
   })
 })
 

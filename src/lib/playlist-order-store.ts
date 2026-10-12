@@ -1,7 +1,9 @@
 /**
  * The I/O half of playlist ordering (the rules are in lib/playlist-order.ts):
- * where the order keys come from, and the one insert every playlist addition
- * goes through.
+ * where the order keys come from, and the one insert every addition to an
+ * artist playlist goes through. The combined playlist is not ordered (it is
+ * the one for shuffling): its inserts are plain appends in
+ * lib/combined-playlist.ts, untouched by any of this.
  *
  * Nothing new is stored. A video's key is derived from the URL of the set
  * that resolves to it (`tracklists.url` + `video_id`), and the position of an
@@ -51,7 +53,7 @@ export function orderKeyFor(keys: OrderKeys, videoId: string, setUrl?: string | 
  *     that was about the video fails the second time too and is thrown as before.
  *   - Keys that cannot be read (a D1 error) mean an append, never a failure.
  *
- * `attempts` = insert calls made, for callers that budget them.
+ * `attempts` = insert calls made.
  */
 export async function insertInOrder(
   env: Env,

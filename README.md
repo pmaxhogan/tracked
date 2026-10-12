@@ -467,35 +467,38 @@ Both crons (`0 6 * * *` and `*/5 * * * *`) end with a backfill pass, in their ow
 
 ### Playlist order: by the date of the set
 
-Every playlist tracked fills with sets (each artist playlist and the combined one) is ordered by **the date the set took place, earliest first**: not the date the tracklist appeared, not the date the video was uploaded (`lib/playlist-order.ts`). The **Track uploads** playlist holds single tracks, which have no set date, and is left in the order they were added.
+Each **artist playlist** is ordered by **the date the set took place, earliest first**: not the date the tracklist appeared, not the date the video was uploaded (`lib/playlist-order.ts`). **The combined playlist is not ordered**: it is the one for shuffling, it would be half of all the moves, and its inserts are plain appends as they always were (`lib/combined-playlist.ts` is untouched by any of this). The **Track uploads** playlist holds single tracks, which have no set date, and is not ordered either.
 
 - **The date** comes from the set's 1001tracklists URL, which ends in it (`…-lollapalooza-brazil-2023-03-24.html`); nothing is fetched for it. A radio show that airs a festival set ends in two dates (`…-ultra-music-festival-chile-2024-04-20-2024-05-22.html`: played on the first, aired on the second), so the date is the **earliest** of the dates the slug ends in. On 2026-10-11 all 2 569 known sets had one and 70 had two. `set_date` in D1 (`set_schedule`, `mkvid_requests`, `set_media_facts`) and `setDateFromUrl` still mean the *last* date; recheck ages and the mkvid queue are built on that and are unchanged.
-- **Ties.** Two sets of one day go by the set's slug (the URL without its id), then by the whole URL: fixed for a given pair, and in the combined playlist a festival day reads artist by artist. A video several sets resolve to (both halves of a b2b) takes the earliest of them.
+- **Ties.** Two sets of one day go by the set's slug (the URL without its id), then by the whole URL: fixed for a given pair. A video several sets resolve to (both halves of a b2b) takes the earliest of them.
 - **No date.** Only a video no tracked set resolves to has none (one added by hand, say). Those stay **after every dated set, in the order they already have**, and a new one is appended: nobody can say where they belong, so nothing is spent moving them.
 
-**New videos are inserted at their place** (`insertInOrder`, `lib/playlist-order-store.ts`). `playlistItems.insert` takes a `snippet.position` for the same 50 units, so every insert of a set video goes through one function: the sync's additions and swaps, the combined playlist's live mirror and backfill, mkvid's deliveries and recreations, and Undo on `/ui/removed` (which appends when it has no snapshot of the playlist). The position is the number of videos in the playlist dated on or before the new one, counted from the membership snapshot the caller already holds and the set URLs in `tracklists`: no extra YouTube call, and nothing new stored. A video that belongs last is appended exactly as before. If YouTube answers 400 to a position (it is past the end because the owner removed something, or the playlist is not on manual order) the insert is made once more without one, so ordering can never keep a video out. `playlist_confirmed`, `playlist_members` and the `yt:plvids:` snapshot record which videos are in a playlist, not where, so they stay correct through positioned inserts and moves.
+**New videos are inserted at their place** (`insertInOrder`, `lib/playlist-order-store.ts`). `playlistItems.insert` takes a `snippet.position` for the same 50 units, so every insert into an artist playlist goes through one function: the sync's additions and swaps, mkvid's deliveries and recreations, and Undo on `/ui/removed` (which appends when it has no snapshot of the playlist). The position is the number of videos in the playlist dated on or before the new one, counted from the membership snapshot the caller already holds and the set URLs in `tracklists`: no extra YouTube call, and nothing new stored. A video that belongs last is appended exactly as before. If YouTube answers 400 to a position (`invalidPlaylistItemPosition`: it is past the end because the owner removed something; `manualSortRequired`: the playlist is not on manual order) the insert is made once more without one, so ordering can never keep a video out. `playlist_confirmed`, `playlist_members` and the `yt:plvids:` snapshot record which videos are in a playlist, not where, so they stay correct through positioned inserts and moves.
 
-**Videos added before this existed are moved** by the reorder pass (`lib/playlist-reorder.ts`), which runs on the 5-minute cron after the combined backfill. A move is `playlistItems.update`, 50 units, and the sync filled each playlist newest set first, so nearly every video has to move: by the estimate below about 2 000 moves, 100 000 units, ten days of the whole quota. So the pass:
+**Videos added before this existed are moved** by the reorder pass (`lib/playlist-reorder.ts`), on the 5-minute cron after the combined backfill. **It ships paused**: `playlists.orderDailyUnits` defaults to **0**, and at 0 the pass returns before any YouTube call (no move, no listing, no daily look). Start it by saving a budget on `/ui/settings` (Playlists), after **Check now** has counted the moves. A move is `playlistItems.update`, 50 units, and there is no cheaper way: the API has no bulk reorder, and deleting and re-inserting (or filling a new playlist) is 50 units a video as well. Once it has a budget, the pass:
 
 - reads a playlist's **actual order** from YouTube (1 unit per 50 videos), keeps the longest run of videos already in order relative to each other where they are and moves only the others (`planMoves`: no smaller set of moves exists), each to the index it has after the moves before it;
 - is **resumable and idempotent**: nothing about progress is carried from run to run. Each run plans from what the playlist looks like now, and a plan cut short anywhere leaves a playlist that needs exactly the remaining moves. A sorted playlist plans zero moves;
-- spends at most `playlists.orderDailyUnits` a quota day (midnight Pacific), listings and refused moves included; **default 2 000** (40 moves), **0 pauses it** (new videos are still inserted in place). At most `playlists.orderMovesPerRun` (10) a run. Both on `/ui/settings`, Playlists;
-- **stops at a quota reply** (403 `quotaExceeded`) and makes no YouTube call again until the quota day rolls over. That is shown as *waiting for quota*, not as an error: it continues by itself;
-- works on playlists never read first, then the artist playlist with the fewest moves left (whole playlists finish early), and the combined playlist last. A sorted playlist is read again once a day, which is what puts right a video appended out of place or dragged by hand;
-- a playlist YouTube refuses positions for (its sort order on YouTube is not *Manual*) is the one state that needs the owner, and the only one shown in red.
+- spends at most `playlists.orderDailyUnits` a quota day (midnight Pacific), listings and refused moves included, and at most `playlists.orderMovesPerRun` (10) moves a run;
+- **stops at a daily-quota reply** (403 `quotaExceeded` / `dailyLimitExceeded`) and makes no YouTube call again until the quota day rolls over; a per-minute limit (`rateLimitExceeded` / `userRateLimitExceeded`) only ends that run. Both are shown as waiting, not as errors: it continues by itself;
+- **checks its own moves.** Google documents `snippet.position` as the item's zero-based place and does not spell out how the others shift, so the first move of a run on a playlist is compared with where YouTube says the item now is (the update's reply, else a 1-unit lookup), and a run of 3 or more moves must leave the playlist needing fewer moves at its next reading. Either failing stops that playlist for a day (`unexpected_position`, `no_progress`) instead of spending more quota;
+- works on playlists never read first, then the playlist with the fewest moves left (whole playlists finish early). A sorted playlist is read again once a day, which is what puts right a video appended out of place or dragged by hand;
+- shows in red only what needs someone: a playlist YouTube refuses positions for (its sort order on YouTube is not *Manual*), and a playlist stopped by its own check.
 
-The **Set-date order** card on the Playlists page shows what is left, today's units, and the days to go at the budget. **Check now** is the dry run: it reads every playlist's order from YouTube (about 50 units) and lists, per playlist, videos, videos with no date, moves needed and units needed, with totals and the estimated days. It moves nothing. **Move now** runs one pass within the same budget.
+The **Set-date order** card on the Playlists page shows what is left, whether moving is paused and how to start it, today's units, and the days to go (while paused: at 1 000, 2 000 and 4 000 units a day). **Check now** is the dry run and works while paused: it reads every artist playlist's order from YouTube (about 35 units) and lists, per playlist, videos, videos with no date, moves needed and units needed, with totals and the estimated days. It moves nothing. **Move now** runs one pass within the same budget.
 
 ```
-GET  /ui/api/playlist-order           → { connected, fresh, unitsSpent, playlists: [{ playlistId, kind, slug, title, items, undated,
-                                          moves, units, checkedAt, moved, problem, detail }], totals: { playlists, unread, items,
-                                          undated, moves, units }, dailyUnits, movesPerRun, unitsUsedToday, estimate: { units, days },
-                                          quotaStoppedUntil, lastRun }        (what the pass last read; no YouTube call)
+GET  /ui/api/playlist-order           → { connected, fresh, unitsSpent, playlists: [{ playlistId, slug, title, items, undated, moves,
+                                          units, checkedAt, moved, problem, detail }], totals: { playlists, unread, items, undated,
+                                          moves, units }, dailyUnits, movesPerRun, unitsUsedToday, estimate: { moves, units, days },
+                                          daysAt: [{ dailyUnits, days }], quotaStoppedUntil, lastRun }   (what was last read; no YouTube call)
 GET  /ui/api/playlist-order?fresh=1   → the same, read from YouTube now (the dry run)
-POST /ui/api/playlist-order/run       → { ok, read, moved, units, stoppedBy: null | "run" | "budget" | "quota" | "deadline" | "paused" | "not_connected", ... }
+POST /ui/api/playlist-order/run       → { ok, read, moved, units, stoppedBy: null | "run" | "budget" | "quota" | "rate_limit" | "deadline" | "paused" | "not_connected", ... }
 ```
 
-When the quota is spent or nothing is deployed, `node scripts/playlist-order-estimate.mjs [--daily-units 2000] [--moves-per-run 10]` prints the same table estimated from D1 alone (read-only; the current order is inferred from insert times, because D1 stores no positions). On 2026-10-11 it gave 26 playlists, 2 191 videos, 31 with no date, 2 015 moves, 100 750 units: about 52 days at 2 000 units a day, of which the combined playlist is half.
+`estimate` leaves out a playlist the pass cannot work on (not on manual order, or stopped by its check); `totals` does not.
+
+When the quota is spent or nothing is deployed, `node scripts/playlist-order-estimate.mjs [--daily-units 2000] [--moves-per-run 10] [--show <slug>]` prints the same table estimated from D1 alone (read-only). D1 stores no positions, so the current order is inferred from insert times; the script says how many videos have one, the rank correlation between place and set date, and a floor and a ceiling. On 2026-10-11: 25 playlists, 1 100 videos, 2 with no date, **978 moves, 48 900 units (49 096 with listings): 25 days at 2 000 units a day, 13 at 4 000**. Floor 602 moves (counting only the 695 videos with a known insert time; 16 days at 2 000), ceiling 1 075 (27 days). The playlists whose every video has an insert time are close to exactly newest-first (rank correlation −0.91 to −1.00 for Adam Beyer, Crankdat, Charlotte de Witte, John Summit, Layton Giordani, Space Laces, Dom Dolla), which is why nearly every video moves.
 
 ### Playlist hygiene (`src/lib/playlist-hygiene.ts`)
 
@@ -931,8 +934,8 @@ src/
     combined-playlist.ts    the "All tracked artists" playlist: live mirror + bounded backfill
     playlist-cache.ts       KV-cached playlist video-id sets + find-or-create (shared by both)
     playlist-order.ts       set-date order (pure): the date a set happened, the order, insert position, fewest moves
-    playlist-order-store.ts order keys from D1 + the positioned insert every playlist addition goes through
-    playlist-reorder.ts     the budgeted cron pass that moves existing videos into order, and its dry run
+    playlist-order-store.ts order keys from D1 + the positioned insert every artist-playlist addition goes through
+    playlist-reorder.ts     the budgeted cron pass (paused by default) that moves existing videos into order, and its dry run
     youtube-playlists.ts    YouTube Data API v3 playlist client (OAuth)
     playlist-audit.ts       the `playlist_additions` table behind "Recent playlist additions"
     google-oauth.ts         Google OAuth 2.0 flow + token refresh + revoke
@@ -955,7 +958,7 @@ src/
   routes/ban-ui.ts          shared admin-page banner / alerts row / ban history / service worker
 scripts/
   gen-vapid-keys.mjs        prints a VAPID key pair for the Web Push alerts
-  playlist-order-estimate.mjs  estimates the set-date reorder (moves, units, days) from D1, read-only
+  playlist-order-estimate.mjs  estimates the set-date reorder of the artist playlists (moves, units, days) from D1, read-only
 migrations/                 D1 schema, one SQL file per change (apply with npm run d1:migrate)
 test/
   fixtures/                 saved 1001tracklists HTML and JSON

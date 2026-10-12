@@ -26,9 +26,9 @@ ${YOUTUBE_CARD_HTML}
 </div>
 <div id="ord-card" class="tk-card">
   <div class="pl-head">
-    <h2><span class="tip-term"${tipAttr('Every playlist is kept in the order the sets took place, earliest first. A new video is inserted at its place; videos added before this existed are moved there a few a day, because each move costs 50 YouTube quota units.')}>Set-date order</span></h2>
+    <h2><span class="tip-term"${tipAttr('Each DJ playlist is kept in the order the sets took place, earliest first. A new video is inserted at its place. Videos added before this existed are moved there a few a day once you set a daily budget, because each move costs 50 YouTube quota units. The combined playlist is not ordered.')}>Set-date order</span></h2>
     <div class="tk-row">
-      <button id="ord-check" type="button" class="btn small"${tipAttr('Dry run: reads the order of every playlist from YouTube now (1 quota unit per 50 videos) and counts the moves still needed. Moves nothing.')}>Check now</button>
+      <button id="ord-check" type="button" class="btn small"${tipAttr('Dry run: reads the order of every DJ playlist from YouTube now (1 quota unit per 50 videos) and counts the moves still needed. Moves nothing, and works while moving is paused.')}>Check now</button>
       <button id="ord-run" type="button" class="btn small" disabled${tipAttr('Makes the next few moves now, within the same daily unit budget the scheduler uses.')}>Move now</button>
     </div>
   </div>
@@ -158,16 +158,24 @@ ${YOUTUBE_CARD_JS}
     else head = t.moves + ' video' + (t.moves === 1 ? '' : 's') + ' still to move <span class="muted">· ' + (t.units || 0).toLocaleString() + ' quota units' +
       (paused ? '' : d.estimate && d.estimate.days ? ' · about ' + d.estimate.days + ' day' + (d.estimate.days === 1 ? '' : 's') + ' at this budget' : '') + '</span>';
     const bits = [
-      paused ? '<span class="badge neutral"' + TK.tip('The daily unit budget is 0 (Settings, Playlists). New videos are still inserted at their place.') + '>paused</span>'
+      paused ? '<span class="badge neutral"' + TK.tip('Nothing is moved and the scheduler makes no YouTube call for this. New videos are still inserted at their place.') + '>moving is paused</span>'
         : (d.unitsUsedToday || 0) + ' / ' + d.dailyUnits + ' units used today',
-      (t.items || 0) + ' videos in ' + (t.playlists || 0) + ' playlists',
+      (t.items || 0) + ' videos in ' + (t.playlists || 0) + ' DJ playlists',
+      '<span' + TK.tip('The combined playlist is the one for shuffling: its videos stay in the order they were added and none of these numbers count it.') + '>combined playlist not ordered</span>',
     ];
     if (t.undated) bits.push('<span' + TK.tip('Videos no tracked set resolves to (added by hand, for instance). They stay after the dated sets, in the order they have.') + '>' + t.undated + ' with no set date</span>');
     if (d.quotaStoppedUntil) bits.push('<span class="badge info"' + TK.tip('YouTube answered that the quota of today is used. Moving continues by itself after the quota resets at midnight Pacific.') + '>waiting for quota · ' + esc(TK.fmt.rel(new Date(d.quotaStoppedUntil * 1000).toISOString())) + '</span>');
     if (d.lastRun && d.lastRun.moved) bits.push('last moved ' + d.lastRun.moved + ' ' + esc(TK.fmt.rel(new Date(d.lastRun.at * 1000).toISOString())));
     if (d.fresh) bits.push('read from YouTube just now (' + d.unitsSpent + ' units)');
     const manual = (d.playlists || []).filter((p) => p.problem === 'manual_sort');
+    const stopped = (d.playlists || []).filter((p) => p.problem === 'unexpected_position' || p.problem === 'no_progress');
     let html = '<div class="headline">' + head + '</div><div class="bits">' + bits.join(' · ') + '</div>';
+    // Paused is the owner's own setting, not a fault: say how to start, and what a budget means once the moves are counted.
+    if (paused) html += '<div class="bits">To start, set <a href="/ui/settings#sf-playlists">Quota units a day for ordering playlists</a> in Settings.' +
+      (t.unread === t.playlists ? ' Check now first counts the moves.' : d.estimate && d.estimate.moves ? ' ' + (d.daysAt || []).map((x) => x.dailyUnits.toLocaleString() + ' a day: about ' + x.days + ' day' + (x.days === 1 ? '' : 's')).join(' · ') + '.' : '') + '</div>';
+    // A move that did not land where planned stops that playlist before more quota is spent: someone has to look.
+    if (stopped.length) html += '<div class="bits"><span class="badge bad">' + stopped.length + ' stopped</span> ' + stopped.map((p) => esc(p.title) + ' (' + esc(p.detail || p.problem) + ')').join(', ') +
+      ': YouTube did not move a video the way the plan expects, so no more quota is spent there. It is tried once a day.</div>';
     // The one state that needs the owner: YouTube refuses positions on a playlist that sorts itself.
     if (manual.length) html += '<div class="bits"><span class="badge bad">' + manual.length + ' cannot be ordered</span> ' + manual.map((p) => esc(p.title)).join(', ') +
       ': set the sort order of the playlist to Manual on YouTube.</div>';
@@ -176,7 +184,7 @@ ${YOUTUBE_CARD_JS}
     $ordDetails.hidden = !rows.length;
     $ordTable.innerHTML = '<table><thead><tr><th>Playlist</th><th>Videos</th><th>No date</th><th>To move</th><th>Units</th><th>Read</th></tr></thead><tbody>' +
       rows.map((p) => '<tr><td>' + link('https://www.youtube.com/playlist?list=' + encodeURIComponent(p.playlistId), p.title) +
-        (p.problem === 'manual_sort' ? ' <span class="badge bad">not on manual order</span>' : p.problem ? ' <span class="badge info"' + TK.tip(p.detail || '') + '>' + (p.problem === 'unreadable' ? 'not read' : 'retrying') + '</span>' : '') +
+        (p.problem === 'manual_sort' ? ' <span class="badge bad">not on manual order</span>' : p.problem === 'unexpected_position' || p.problem === 'no_progress' ? ' <span class="badge bad"' + TK.tip(p.detail || '') + '>stopped</span>' : p.problem ? ' <span class="badge info"' + TK.tip(p.detail || '') + '>' + (p.problem === 'unreadable' ? 'not read' : 'retrying') + '</span>' : '') +
         '</td><td>' + esc(p.items) + '</td><td>' + esc(p.undated || '') + '</td><td>' + esc(p.moves || '') + '</td><td>' + (p.units ? p.units.toLocaleString() : '') + '</td><td>' + esc(TK.fmt.rel(new Date(p.checkedAt * 1000).toISOString())) + '</td></tr>').join('') +
       '</tbody></table>';
   }
@@ -193,7 +201,7 @@ ${YOUTUBE_CARD_JS}
       TK.toast(data.errorMessage || TK.errText(res, 'moving failed (' + res.status + ')'), 'bad');
       return;
     }
-    const why = { quota: 'YouTube quota is used for today', budget: 'the unit budget of today is used', paused: 'paused in Settings', not_connected: 'YouTube is not connected' }[data.stoppedBy];
+    const why = { quota: 'YouTube quota is used for today', rate_limit: 'YouTube is rate limiting, it goes on at the next tick', budget: 'the unit budget of today is used', paused: 'paused in Settings', not_connected: 'YouTube is not connected' }[data.stoppedBy];
     // Out of quota or budget is a wait, not a failure: it continues by itself.
     TK.toast('playlist order: moved ' + (data.moved || 0) + ' video' + (data.moved === 1 ? '' : 's') + (why ? ' · ' + why : ''), data.moved || !why ? 'ok' : 'warn');
     applyOrder(await TK.api.get('/ui/api/playlist-order'));
