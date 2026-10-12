@@ -1425,8 +1425,13 @@ export async function comparePlaylists(
     // Dead videos still in the playlist, and the ones that were waiting and are back or gone (see judgeDeadVideos).
     deadRun ??= await startDeadRun(env, now * 1000, log)
     if (p.deadItems.size > 0 || Object.keys(deadRun.seen).some((k) => k.startsWith(`${ctx.playlistId} `))) {
-      const d = await judgeDeadVideos(env, accessToken, p, deadRun, { log, fetcher: opts.fetcher })
-      if (d.reported > 0) results[p.slot] = { ...results[p.slot]!, deadRemoved: 0, deadReported: d.reported }
+      try {
+        const d = await judgeDeadVideos(env, accessToken, p, deadRun, { log, fetcher: opts.fetcher })
+        if (d.reported > 0) results[p.slot] = { ...results[p.slot]!, deadRemoved: 0, deadReported: d.reported }
+      } catch (e) {
+        // This playlist's dead videos wait for the next comparison; the others, and the comparison itself, go on.
+        log.warn('hygiene.dead.judge_failed', { ...ctx, ...errorFields(e) })
+      }
     }
   }
   // After every playlist's findings are applied: a dead video the sync added is on the blocklist, and its set cleared, before its item goes.

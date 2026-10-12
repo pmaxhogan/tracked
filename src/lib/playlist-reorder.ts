@@ -833,7 +833,13 @@ export async function orderReport(env: Env, opts: { log: Logger; fresh?: boolean
     }
   }
   const state = await loadOrderState(env)
-  const rows: OrderReportRow[] = (await managedPlaylists(env)).map((p) => own(state, p.playlistId) ?? { ...p, checkedAt: null })
+  const reportNow = nowSeconds()
+  // A remembered refusal that has lapsed is not shown: the next reading tries that move again.
+  const shown = (s: OrderPlaylistState): OrderPlaylistState => (s.unmovable ? { ...s, unmovable: unmovableNow(s, reportNow) } : s)
+  const rows: OrderReportRow[] = (await managedPlaylists(env)).map((p) => {
+    const s = own(state, p.playlistId)
+    return s ? shown(s) : { ...p, checkedAt: null }
+  })
   const read = rows.filter((r): r is OrderPlaylistState => r.checkedAt !== null)
   const sum = (xs: OrderPlaylistState[], f: (r: OrderPlaylistState) => number) => xs.reduce((a, r) => a + f(r), 0)
   // Moves the pass will not make are not days it will take.
