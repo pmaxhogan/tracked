@@ -42,8 +42,8 @@ export const AppSettingsSchema = z.object({
     privacy: z.enum(['public', 'unlisted', 'private']),
     /** Every this many hours, delivered videos that are gone from YouTube leave the playlists and are rendered again (default 6). 0 = never. */
     goneCheckHours: z.number().min(0).max(24 * 7),
-    /** This many recordings "removed" within a day are not believed until the owner confirms (lib/mkvid-removed-burst.ts; default 3). 0 = never. */
-    removedBurstCount: z.number().int().min(0).max(50),
+    /** This many recordings "removed" within a day are not believed until the owner confirms (lib/mkvid-removed-burst.ts; default 3). 0 = never; 1 is not "several". */
+    removedBurstCount: z.number().int().min(0).max(50).refine((n) => n !== 1, { message: '0 (never) or 2 to 50' }),
   }),
   playlists: z.object({
     /** The daily playlist sweep only reports; null = PLAYLIST_SWEEP_DRY_RUN (unset = true). */

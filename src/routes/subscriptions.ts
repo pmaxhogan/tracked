@@ -67,7 +67,7 @@ import { migrationStatus } from '../lib/kv-import'
 import { setSkipIdWait } from '../lib/mkvid-readiness'
 import { countOldStyleVideos, deleteOldVideo, recreateMkvidRequest, recreateOldStyleVideos, resetOldVideoDelete, unpublishMkvidRequest } from '../lib/mkvid-recreate'
 import { banMkvidRequest, MKVID_MOVES, moveMkvidRequest, retryMkvidRequest, type MkvidMove } from '../lib/mkvid'
-import { confirmRemovedBurst, retryRemovedBurst } from '../lib/mkvid-removed-burst'
+import { confirmRemovedBurst, RemovedBurstUnavailable, retryRemovedBurst } from '../lib/mkvid-removed-burst'
 import { requeueBanVictims } from '../lib/sync'
 import { getBanStatus, manualClear, simulateBan } from '../lib/ban-state'
 import { poolSettingsApp } from './pool-api'
@@ -832,12 +832,20 @@ subscriptionsApp.post('/api/mkvid/retry/:id', async (c) => {
 
 /**
  * The two answers to an open removed-recordings burst (lib/mkvid-removed-burst.ts: several recordings
- * "removed" within a day, shown red and left as they are until one of these). 409 when none is open.
+ * "removed" within a day, shown red and left as they are until one of these). 409 when none is open,
+ * 503 when the answer could not be read or stored in KV (nothing is half done: press it again).
  * "Try them again": every request in it goes back in the queue with a fresh start.
  */
 subscriptionsApp.post('/api/mkvid/removed-burst/retry', async (c) => {
   const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_removed_burst_retry', by: c.get('cfAccessEmail') })
-  const r = await retryRemovedBurst(c.env)
+  let r
+  try {
+    r = await retryRemovedBurst(c.env)
+  } catch (e) {
+    if (!(e instanceof RemovedBurstUnavailable)) throw e
+    log.warn('subs.mkvid_removed_burst_retry_unavailable', errorFields(e))
+    return c.json({ error: 'state_unavailable', message: 'The removed-recordings state could not be read. Try again in a moment.' }, 503)
+  }
   log.info('subs.mkvid_removed_burst_retry', r ? { since: r.burst.since, count: r.burst.count, requeued: r.requeued } : { ok: false })
   return r ? c.json({ ok: true, requeued: r.requeued, since: r.burst.since }) : c.json({ error: 'no_burst' }, 409)
 })
@@ -845,7 +853,13 @@ subscriptionsApp.post('/api/mkvid/removed-burst/retry', async (c) => {
 /** "They are really gone": the requests in it become ordinary removed recordings and are not counted again. */
 subscriptionsApp.post('/api/mkvid/removed-burst/confirm', async (c) => {
   const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'subs.mkvid_removed_burst_confirm', by: c.get('cfAccessEmail') })
-  const burst = await confirmRemovedBurst(c.env)
+  let burst
+  try {
+    burst = await confirmRemovedBurst(c.env)
+  } catch (e) {
+    log.warn('subs.mkvid_removed_burst_confirm_unavailable', errorFields(e))
+    return c.json({ error: 'state_unavailable', message: 'The answer could not be stored. Try again in a moment.' }, 503)
+  }
   log.info('subs.mkvid_removed_burst_confirm', burst ? { since: burst.since, count: burst.count } : { ok: false })
   return burst ? c.json({ ok: true, confirmed: burst.count, since: burst.since }) : c.json({ error: 'no_burst' }, 409)
 })
