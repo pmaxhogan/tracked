@@ -145,6 +145,8 @@ ${MKVID_STATE_JS}
     const status = g('status'), source = g('source'), account = g('account'), dj = g('dj'), q = g('q').slice(0, 120);
     if (!status && !source && !account && !dj && !q) return;
     const sts = status.split(',').filter((x) => STATUS_WORDS[x] && x !== 'pending' && x !== 'claimed');
+    // An old ?status=superseded meant every superseded request, whatever its cause.
+    if (sts.indexOf('superseded') >= 0) for (const x of ['has_recording', 'duplicate']) if (sts.indexOf(x) < 0) sts.push(x);
     const m = { status: null, source: null, account: null, dj: null, q: null };
     for (const t of ['q', 'fin']) {
       if (/^(soundcloud|hearthis)$/.test(source)) m[t + '.f.source'] = 'in:' + source;

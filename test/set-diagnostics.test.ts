@@ -166,14 +166,14 @@ describe('GET /ui/api/set', () => {
     const fail = (error: string) => env.DB.prepare("UPDATE mkvid_requests SET error = ? WHERE id = 'r1'").bind(error).run()
     await fail("incomplete_recording: source is 1824s but the tracklist's last cue is at 7009s")
     let m = (await diag(env)).mkvid!
-    expect(m).toMatchObject({ status: 'failed', outcome: 'recording_short' })
+    expect(m).toMatchObject({ status: 'failed', outcome: 'recording_short', outcomeLine: 'The recording is 30:24 long, but the last track starts at 1:56:49.' })
     expect(m.outcomeDetail).toContain('The recording is 30:24 long, but the last track starts at 1:56:49.')
     await fail('probe: yt-dlp exit 1: ERROR: HTTP Error 404: Not Found')
     m = (await diag(env)).mkvid!
     expect(m.outcome).toBe('recording_removed')
     expect(m.outcomeDetail).toContain('The recording is gone from SoundCloud')
     await fail('too many attempts')
-    expect((await diag(env)).mkvid).toMatchObject({ status: 'failed', outcome: 'failed', outcomeDetail: null })
+    expect((await diag(env)).mkvid).toMatchObject({ status: 'failed', outcome: 'failed', outcomeLine: null, outcomeDetail: null })
   })
 
   it('hides non-acct account ids', async () => {

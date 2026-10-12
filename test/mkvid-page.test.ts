@@ -198,6 +198,10 @@ describe('mkvid page tables', () => {
     expect(old.location.search).not.toMatch(/[?&](status|source|q)=/)
     expect(old.get('mk-p-settled').hidden).toBe(false)
     expect(old.get('mk-p-queue').hidden).toBe(true)
+    // An old ?status=superseded still means every superseded request, now three outcomes.
+    const sup = page((url) => answers(url), '?status=superseded&tab=settled')
+    await settle()
+    expect(gets(sup.calls)).toContain('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.status=in:superseded|has_recording|duplicate')
   })
 
   it('a set without a usable recording reads neutral and in plain words, and is not counted as failed; a real failure stays red', async () => {

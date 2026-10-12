@@ -956,10 +956,10 @@ describe('Set diagnostics', () => {
     expect(supTwin.finding).toBe('Duplicate URL: kept under another URL.')
     // A request that ended for want of a usable recording is not a failure: neutral, in plain words, mkvid's text among the facts.
     const said = 'probe: yt-dlp exit 1: ERROR: HTTP Error 404: Not Found'
-    const gone = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'failed', position: null, readiness: null, error: said, outcome: 'recording_removed', outcomeDetail: 'The recording is gone from SoundCloud. Nothing to do.' }) }).mkvid
+    const gone = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'failed', position: null, readiness: null, error: said, outcome: 'recording_removed', outcomeLine: 'The recording is gone from SoundCloud.', outcomeDetail: 'The recording is gone from SoundCloud. No video can be made without it.' }) }).mkvid
     expect([gone.tone, gone.finding]).toEqual(['neutral', 'The recording is gone from SoundCloud. Nothing to do.'])
     expect(gone.facts).toContainEqual(['mkvid said', said])
-    const broken = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'failed', position: null, readiness: null, error: 'too many attempts', outcome: 'failed', outcomeDetail: null }) }).mkvid
+    const broken = byKey({ ...empty(), mkvid: pendingMkvid({ status: 'failed', position: null, readiness: null, error: 'too many attempts', outcome: 'failed', outcomeLine: null, outcomeDetail: null }) }).mkvid
     expect([broken.tone, broken.finding]).toEqual(['bad', 'Failed: too many attempts.'])
     expect(broken.facts.map((f: string[]) => f[0])).not.toContain('mkvid said')
   })

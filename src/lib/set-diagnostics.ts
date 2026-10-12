@@ -9,7 +9,7 @@ import { loadSetFacts, judgeVideo, judgeOptions, mkvidUploadedIds, REASON_LABELS
 import { readCachedVideoMeta } from './video-meta'
 import { isOverridden } from './playlist-blocklist'
 import { getMkvidRequestForSet, mkvidQueuePosition } from './mkvid'
-import { mkvidOutcome, mkvidOutcomeDetail, type MkvidOutcome } from './mkvid-outcome'
+import { mkvidOutcome, mkvidOutcomeDetail, mkvidOutcomeLine, type MkvidOutcome } from './mkvid-outcome'
 import { readinessFor, type MkvidReadiness } from './mkvid-readiness'
 import { supersededReason } from './activity'
 import { describeYouTubeError, type YouTubeErrorView } from './youtube-error'
@@ -57,7 +57,8 @@ export type SetDiagnostics = {
     error: string | null
     /** Where a finished request ended (lib/mkvid-outcome.ts): a `failed` one may be a no-recording kind, which is not a problem. */
     outcome: MkvidOutcome | null
-    /** A no-recording outcome in plain words, else null. */
+    /** A no-recording outcome in plain words: one line, and the line plus what it means. Else null. */
+    outcomeLine: string | null
     outcomeDetail: string | null
     /** Friendly cause when status is superseded (duplicate URL vs official recording), else null. */
     supersededReason: string | null
@@ -273,6 +274,7 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
           notBefore: req.notBefore,
           error: req.error,
           outcome: mkvidOutcome(req),
+          outcomeLine: mkvidOutcomeLine(req),
           outcomeDetail: mkvidOutcomeDetail(req),
           supersededReason: req.status === 'superseded' ? supersededReason(req.error) : null,
           videoId: req.videoId,
