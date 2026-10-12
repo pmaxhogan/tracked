@@ -49,22 +49,25 @@ export const ACTIVITY_ROW_JS = /* js */ `
   const STATUS_TIPS = {
     ok: 'It worked.', added: 'The video was added to the playlist.', duplicate: 'The video was already in the playlist.',
     replaced: 'A recheck found the set recording swapped: the old video was replaced.', no_youtube: 'The set page had no YouTube recording to add.',
-    failed: 'It failed and will be tried again.', abandoned: 'Given up after repeated failures.', error: 'The last sync of this DJ ended in an error: it needs you, or it has kept being stopped for 12 hours.',
+    failed: 'It failed and will be tried again.',
+    quota: "YouTube's daily quota is used up. It resets at midnight Pacific time, and tracked will try again.",
+    rate_limited: 'YouTube is limiting requests for the moment. tracked will try again.', abandoned: 'Given up after repeated failures.', error: 'The last sync of this DJ ended in an error: it needs you, or it has kept being stopped for 12 hours.',
     waiting: 'The pool stopped the last sync of this DJ early (busy, a slow page load, the budget spent). The scheduler tries again by itself.',
     claimed: 'mkvid took this job.', done: 'Finished.', verified: 'Two fetches by different accounts agreed on the track list.',
     open: 'The block is still active.', ended: 'The block is over.', refunded: 'mkvid gave the job back without uploading, so it does not count against the daily cap.',
     pending: 'Waiting its turn.', banned: 'Excluded from mkvid.', removed: 'Taken out of the playlists.', would_remove: 'Dry run: would be removed, nothing was deleted.', recorded: 'Found missing from a playlist and noted; it is never re-added.', undone: 'You undid this.',
   };
   // The statuses the Status filter offers (the server takes any).
-  const ACTIVITY_STATUSES = ['ok', 'no_video', 'no_tracklist', 'upstream_error', 'added', 'duplicate', 'replaced', 'no_youtube', 'failed', 'abandoned', 'removed', 'would_remove', 'recorded', 'undone',
+  const ACTIVITY_STATUSES = ['ok', 'no_video', 'no_tracklist', 'upstream_error', 'added', 'duplicate', 'replaced', 'no_youtube', 'failed', 'quota', 'rate_limited', 'abandoned', 'removed', 'would_remove', 'recorded', 'undone',
     'done', 'banned', 'superseded', 'claimed', 'refunded', 'challenge.created', 'challenge.solved', 'challenge.expired', 'account.created', 'account.flagged', 'account.rested', 'account.retired', 'error', 'waiting', 'open', 'ended'];
   // Not a problem, not a success: an attempt that is tried again by itself.
-  const ACTIVITY_RETRY = new Set(['failed', 'waiting']);
+  const ACTIVITY_RETRY = new Set(['failed', 'waiting', 'quota', 'rate_limited']);
+  const STATUS_LABELS = { quota: 'quota exceeded', rate_limited: 'rate limited' };
   const activityTip = (r) => STATUS_TIPS[r.status] || (r.problem ? 'This event is flagged as a problem.' : '');
   function activityIso(ts) { try { return new Date(ts).toISOString(); } catch (e) { return ''; } }
   function activityStatusHtml(r) {
     const cls = r.problem ? 'bad' : ACTIVITY_OK.has(r.status) ? 'ok' : ACTIVITY_RETRY.has(r.status) ? 'warn' : 'neutral';
-    return '<span class="badge ' + cls + '"' + TK.tip(activityTip(r)) + '>' + esc(r.status || '?') + '</span>';
+    return '<span class="badge ' + cls + '"' + TK.tip(activityTip(r)) + '>' + esc(STATUS_LABELS[r.status] || r.status || '?') + '</span>';
   }
   function activityEventHtml(r) {
     return '<span class="a-ev"><span class="a-title">' + esc(r.title || '(untitled)') + '</span>' + (r.detail ? '<span class="a-detail muted">' + esc(r.detail) + '</span>' : '') + '</span>';
@@ -116,7 +119,7 @@ export const ACTIVITY_DRAWER_JS = /* js */ `
     return dl([
       ['When', esc(iso) + (iso ? ' <span class="when">(' + esc(TK.fmt.rel(iso)) + ')</span>' : '')],
       ['Kind', esc(r.kind)],
-      ['Status', '<span class="' + (r.problem ? 'warn' : '') + '">' + esc(r.status || '—') + '</span>'],
+      ['Status', '<span class="' + (r.problem ? 'warn' : '') + '">' + esc(STATUS_LABELS[r.status] || r.status || '—') + '</span>' + (STATUS_TIPS[r.status] && STATUS_LABELS[r.status] ? ' ' + esc(STATUS_TIPS[r.status]) : '')],
       ['Title', esc(r.title || '—')],
       r.detail ? ['Detail', esc(r.detail)] : null,
       r.dj ? ['DJ', '<a href="/ui/dj/' + encodeURIComponent(r.dj) + '">' + esc(r.dj) + '</a>'] : null,

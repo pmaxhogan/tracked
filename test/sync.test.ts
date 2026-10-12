@@ -1604,7 +1604,7 @@ describe('dead YouTube videos settle on the first strike', () => {
     expect(dead.record.message).toMatch(/rejected deadVid1234 as unavailable/)
   })
 
-  it('a quota error on insert is still a plain failure (retried, not settled)', async () => {
+  it('a quota error on insert is retried, not settled, and costs the set nothing', async () => {
     const env = makeEnv()
     await saveSubState(env, sub.slug, {
       playlistId: 'PL',
@@ -1620,7 +1620,7 @@ describe('dead YouTube videos settle on the first strike', () => {
 
     const state = (await loadSubState(env, sub.slug))!
     expect(state.processedTracklistUrls).toEqual([])
-    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 1 })
+    expect(state.failureCounts).toEqual({})
   })
 })
 
@@ -1955,6 +1955,33 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
     expect(state.lastError).toBeUndefined()
     expect(state.lastRunStats!.authFails).toBeUndefined()
     expect(state.processedTracklistUrls).toEqual(['https://x/tracklist/a'])
+  })
+
+  it('a YouTube quota reply is never charged to the set and stops the run\'s further inserts', async () => {
+    const env = makeEnv()
+    await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'] })
+    vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+    const body = JSON.stringify({ error: { code: 403, message: 'The request cannot be completed because you have exceeded your <a href="/youtube/v3/getting-started#quota">quota</a>.', errors: [{ message: '...', domain: 'youtube.quota', reason: 'quotaExceeded' }] } })
+    vi.mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', body))
+    const run = () => syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
+    // More runs than ABANDON_AFTER_FAILURES: a charged failure would have abandoned both sets by now.
+    for (let i = 0; i < 4; i++) await run()
+    const state = (await loadSubState(env, sub.slug))!
+    expect(state.failureCounts).toEqual({})
+    expect(state.abandonedTracklistUrls).toEqual([])
+    expect(state.processedTracklistUrls).toEqual([])
+    // One insert a run: the second set was not tried once YouTube said so.
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(4)
+    const rows = await playlistAdditions(env)
+    expect(rows).toHaveLength(4)
+    for (const r of rows) {
+      expect(r.record).toMatchObject({ status: 'failed', failureCount: null })
+      expect(r.record.message).toMatch(/^youtube playlistItems\.insert 403 quotaExceeded: The request cannot be completed because you have exceeded your quota\.\n/)
+    }
+    // The quota day rolls over: the next run adds both.
+    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
+    await run()
+    expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual(['https://x/tracklist/a', 'https://x/tracklist/b'])
   })
 
   it('a pool refusal on the DJ page stops the run there and is recorded (it used to say "synced, 0 sets")', async () => {

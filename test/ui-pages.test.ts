@@ -609,6 +609,11 @@ describe('Activity page', () => {
       if (u === '/ui/api/list') return Response.json({ subscriptions: [{ slug: 'dj-one', sourceUrl: 'https://x', addedAt: 1 }] })
       if (u === '/ui/api/audit-detail?key=11') return Response.json({ record: { t: 'now', reqId: 'r1', status: 'no_video', input: { videoTitle: 'Bad <img src=x onerror=1>' }, youtube: {}, search: { attempts: [] }, meta: {} } })
       if (u === '/ui/api/playlist-addition-detail?key=12') return Response.json({ record: { t: 'now', status: 'added', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', slug: 'dj-one', videoId: 'abcdefghijk', playlistId: 'PL1', playlistTitle: 'PL <one>', combinedStatus: 'added', meta: { ms: 5 } } })
+      const ytRaw = '{ "error": { "code": 403, "message": "quota <b>" } }'
+      const ytBase = { t: 'now', status: 'failed', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', slug: 'dj-one', videoId: 'abcdefghijk', playlistId: 'PL1', meta: { ms: 5 } }
+      // A quota reply (here with the failure count a pre-fix row has) and another YouTube error.
+      if (u === '/ui/api/playlist-addition-detail?key=13') return Response.json({ record: { ...ytBase, failureCount: 2, message: 'youtube playlistItems.insert 403 quotaExceeded: x\n' + ytRaw, youtubeError: { kind: 'quota', label: 'quota exceeded', headline: 'WAIT', explanation: 'YouTube daily quota is used up <i>', raw: ytRaw } } })
+      if (u === '/ui/api/playlist-addition-detail?key=14') return Response.json({ record: { ...ytBase, failureCount: 1, message: 'youtube playlistItems.insert 404 videoNotFound: Video not found.\n{}', youtubeError: { kind: 'other', label: null, headline: 'playlistItems.insert 404 videoNotFound: Video not found.', explanation: null, raw: '{}' } } })
       return new Response('{}', { status: 404 })
     }, '/ui/activity')
     const c = ctx as any
@@ -661,6 +666,30 @@ describe('Activity page', () => {
     expect(pl).toContain('Playlist') // plDetailHtml's group heading
     expect(pl).toContain('PL &lt;one&gt;')
     expect(pl).toContain('https://www.youtube.com/playlist?list=PL1')
+  })
+  it('shows a quota failure as a warn "quota exceeded" with the explanation, not "failed" and a JSON dump; other YouTube errors as one line with the raw reply folded away', async () => {
+    const quotaRow = { id: 'addition:000000000013', ts: Date.now() - 30_000, kind: 'playlist', status: 'quota', problem: false, title: 'Some set', detail: 'YouTube daily quota is used up', dj: 'dj-one', setUrl: null, videoId: 'abcdefghijk', ref: { kind: 'addition', key: '13' } }
+    const otherRow = { ...quotaRow, id: 'addition:000000000014', status: 'failed', detail: 'playlistItems.insert 404 videoNotFound: Video not found.', ref: { kind: 'addition', key: '14' } }
+    const { fetches, els, handlers } = await run('', () => answer([quotaRow, otherRow]))
+    const body = els.get('a-body').innerHTML as string
+    expect(body).toMatch(/<span class="badge warn"[^>]*>quota exceeded<\/span>/)
+    expect(body).not.toContain('data-problem="1"')
+    expect(body).toContain('YouTube daily quota is used up')
+    handlers['a-table']!(tableClick({ row: 0 }))
+    await tick()
+    expect(fetches).toContain('/ui/api/playlist-addition-detail?key=13')
+    const q = els.get('tk-drawer-body').innerHTML as string
+    expect(q).toContain('<span class="badge warn">quota exceeded</span> YouTube daily quota is used up &lt;i&gt;')
+    expect(q).toContain('<details class="h-raw"><summary>Raw reply</summary><pre>')
+    expect(q).toContain('quota &lt;b&gt;')
+    expect(q).not.toContain('failed')
+    expect(q).not.toContain('failures so far')
+    handlers['a-table']!(tableClick({ row: 1 }))
+    await tick()
+    const o = els.get('tk-drawer-body').innerHTML as string
+    expect(o).toContain('failed — <span class="warn">playlistItems.insert 404 videoNotFound: Video not found.</span>')
+    expect(o).toContain('<details class="h-raw">')
+    expect(o).toContain('failures so far')
   })
   it('a row with no detail endpoint opens its own fields without a fetch', async () => {
     const { fetches, els, handlers } = await run('', () => answer([poolRow]))

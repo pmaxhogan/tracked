@@ -753,6 +753,8 @@ export async function syncOne(
   let stoppedBy: SyncOneResult['stoppedBy'] = crawlStoppedBy
   let setsRechecked = 0
   let videosReplaced = 0
+  /** Set when YouTube said quota exceeded: no more YouTube writes this run (isQuotaError). */
+  let quotaHit = false
   /** The last YouTube 401 of this run, if any (see AUTH_ERROR_RUNS). */
   let authFailure: string | null = null
   // Artist-playlist membership changed (insert or removal) → write the
@@ -1050,6 +1052,22 @@ export async function syncOne(
         log[stoppedBy.level === 'error' ? 'error' : 'warn']('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
         break
       }
+      if (isQuotaError(e)) {
+        // YouTube is out of quota (or rate limiting): the whole project is, not
+        // this set, so nothing is charged to it (it can never be abandoned for
+        // this) and every further write this run would fail the same way. Record
+        // the row (no failure count) and stop the writes; the set stays in the
+        // window for a later tick, and the recheck window is skipped below.
+        quotaHit = true
+        log.warn('sync.quota_exhausted', { slug: sub.slug, setUrl, ...errorFields(e) })
+        auditSet('failed', setUrl, {
+          message: e instanceof Error ? e.message : String(e),
+          ...(foundVideoId ? { videoId: foundVideoId, videoUrl: watchUrl(foundVideoId) } : {}),
+          ...(foundVia ? { via: foundVia } : {}),
+          meta: { ms: Date.now() - tSet },
+        })
+        break
+      }
       // Bump per-URL failure count. After ABANDON_AFTER_FAILURES, give up
       // and mark the URL processed so the cron stops re-attempting it
       // every tick. Blocks and route faults never reach this branch (see
@@ -1084,7 +1102,7 @@ export async function syncOne(
   const rechecksDue = opts.selection
     ? opts.selection.recheckUrls.filter((u) => processed.has(u) && !abandoned.has(u))
     : dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings, await idRowSets(env, log))
-  const rechecks = stopReason ? [] : rechecksDue.slice(0, maxRechecks)
+  const rechecks = stopReason || quotaHit ? [] : rechecksDue.slice(0, maxRechecks)
   if (rechecksDue.length > 0) {
     log.info('sync.recheck_window', {
       slug: sub.slug,

@@ -88,6 +88,7 @@ import { searchApp } from './search'
 import { schedulerUiApp } from './scheduler-ui'
 import { trackUploadsUiApp } from './track-uploads-ui'
 import { mkvidUiApp } from './mkvid-ui'
+import { describeYouTubeError } from '../lib/youtube-error'
 
 const STATE_COOKIE = 'yt_oauth_state'
 
@@ -750,7 +751,9 @@ subscriptionsApp.get('/api/playlist-addition-detail', async (c) => {
   if (!/^\d+$/.test(key)) return c.json({ error: 'bad_key' }, 400)
   const record = await getPlaylistAddition(c.env, key)
   if (!record) return c.json({ error: 'not_found' }, 404)
-  return c.json({ record })
+  // `youtubeError`: the stored error read as a YouTube API reply (quota exceeded, ...), also for rows written before it was structured.
+  const youtubeError = describeYouTubeError(typeof record.message === 'string' ? record.message : null)
+  return c.json({ record: youtubeError ? { ...record, youtubeError } : record })
 })
 
 /** Progress of the one-time KV → D1 import the cron drives (lib/kv-import.ts). */

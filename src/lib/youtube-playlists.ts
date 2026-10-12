@@ -14,6 +14,8 @@
  * sites.
  */
 
+import { isQuotaReason, parseErrorBody } from './youtube-error'
+
 const API = 'https://www.googleapis.com/youtube/v3'
 
 export type Playlist = { id: string; title: string }
@@ -116,18 +118,23 @@ export class YouTubeApiError extends Error {
     public readonly reason: string | null,
     body: string,
   ) {
-    super(`youtube ${op} ${status}: ${body.slice(0, 500)}`)
+    // First line: `youtube <op> <status> <reason>: <Google's message, plain>`, what a
+    // row's one-liner shows; the raw body follows (parseYouTubeErrorText reads both).
+    const cleaned = parseErrorBody(body).message
+    super(`youtube ${op} ${status}${reason ? ` ${reason}` : ''}: ${cleaned ?? ''}
+${body.slice(0, 500)}`)
     this.name = 'YouTubeApiError'
   }
 }
 
-/** Out of quota (or per-minute rate limit) — retrying anything else this run is pointless. */
+/**
+ * Out of quota (or per-minute rate limit) — retrying anything else this run is
+ * pointless and the item is not at fault. The reason test is `isQuotaReason`
+ * (lib/youtube-error.ts), which also reads a stored error text's reason; use
+ * this one for a caught error.
+ */
 export function isQuotaError(e: unknown): boolean {
-  return (
-    e instanceof YouTubeApiError &&
-    e.status === 403 &&
-    /^(quotaExceeded|dailyLimitExceeded|rateLimitExceeded|userRateLimitExceeded)$/.test(e.reason ?? '')
-  )
+  return e instanceof YouTubeApiError && e.status === 403 && isQuotaReason(e.reason)
 }
 
 /**
@@ -148,14 +155,8 @@ export async function expectOk(res: Response, op: string, playlistIdHint?: strin
   if (res.status === 404 && /playlistNotFound/.test(body)) {
     throw new PlaylistNotFoundError(op, playlistIdHint)
   }
-  let reason: string | null = null
-  try {
-    const parsed = JSON.parse(body) as { error?: { errors?: Array<{ reason?: string }> } }
-    reason = parsed.error?.errors?.[0]?.reason ?? null
-  } catch {
-    // Non-JSON body (proxy error page etc.) — status alone still classifies.
-  }
-  throw new YouTubeApiError(op, res.status, reason, body)
+  // A non-JSON body (proxy error page etc.) has no reason: the status alone classifies.
+  throw new YouTubeApiError(op, res.status, parseErrorBody(body).reason, body)
 }
 
 /**

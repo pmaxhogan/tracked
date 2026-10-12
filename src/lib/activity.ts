@@ -26,6 +26,7 @@
 import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import { REASON_LABELS } from './playlist-hygiene'
+import { describeYouTubeError, QUOTA_LIKE, RATE_LIMIT_LIKE } from './youtube-error'
 import { buildTableSql, parseTableQuery, type TableDef, type TableQuery, type TableResult, type TableParams } from './table-query'
 
 export const ACTIVITY_KINDS = ['request', 'playlist', 'hygiene', 'mkvid', 'pool', 'sync', 'ban'] as const
@@ -78,6 +79,12 @@ const joinParts = (parts: Array<string | null | undefined | false>): string | nu
   const kept = parts.filter((p): p is string => typeof p === 'string' && p !== '')
   return kept.length ? kept.join(' · ') : null
 }
+/** A stored error as one readable line: a YouTube API error by its explanation / `op status reason: message`, anything else clipped. */
+const errorLine = (text: string | null | undefined): string | null => {
+  if (!text) return null
+  const y = describeYouTubeError(text)
+  return clip(y ? y.headline : text)
+}
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
 
 // ── the union ──
@@ -90,6 +97,21 @@ const cat = (...parts: string[]) => parts.map((p) => `COALESCE(${p}, '')`).join(
 /** Why a DJ's last run was stopped early (lib/sync.ts StopLevel), NULL when it was not. */
 const SYNC_STOP = `json_extract(last_run_stats, '$.stop.reason')`
 
+/**
+ * A failed row whose stored error is YouTube's quota (or rate-limit) reply
+ * reads `quota` (or `rate_limited`) instead of `failed`: the whole project is out
+ * of quota, nothing is wrong with the item, and the scheduler tries again. The
+ * stored status stays `failed`; this is derived here, so rows written before
+ * the reason was recorded (their text is cut: lib/youtube-error.ts QUOTA_LIKE)
+ * read the same. Not a problem either.
+ */
+const likeAny = (col: string, pats: string[]) => `(${pats.map((p) => `${col} LIKE '${p}'`).join(' OR ')})`
+const quotaStatus = (status: string, text: string) =>
+  `(CASE WHEN ${status} = 'failed' AND ${likeAny(text, QUOTA_LIKE)} THEN 'quota' WHEN ${status} = 'failed' AND ${likeAny(text, RATE_LIMIT_LIKE)} THEN 'rate_limited' ELSE ${status} END)`
+const ADD_MSG = `json_extract(summary, '$.msg')`
+const REMOVAL_DETAIL = `COALESCE(detail, '')`
+const REMOVAL_QUOTA = `(${likeAny(REMOVAL_DETAIL, QUOTA_LIKE)} OR ${likeAny(REMOVAL_DETAIL, RATE_LIMIT_LIKE)})`
+
 // `problem` is what the Activity page paints red: something that will not fix
 // itself. An attempt that is tried again (a failed playlist addition, a failed
 // sweep removal, a sync the pool stopped) and the owner's own actions (a set
@@ -99,12 +121,12 @@ const ARMS: string[] = [
      (CASE WHEN status IN ('no_video','no_tracklist','upstream_error') OR json_extract(summary, '$.impossible') = 1 THEN 1 ELSE 0 END) AS problem,
      NULL AS dj, NULL AS set_url, NULL AS video_id, summary AS search, summary AS j
    FROM now_playing_audit`,
-  `SELECT ${pk('addition', 'id')}, ts, 'addition', CAST(id AS TEXT), 'playlist', status,
+  `SELECT ${pk('addition', 'id')}, ts, 'addition', CAST(id AS TEXT), 'playlist', ${quotaStatus('status', ADD_MSG)},
      (CASE WHEN status = 'abandoned' THEN 1 ELSE 0 END),
      slug, set_url, video_id, ${cat('slug', 'set_url', 'summary')}, summary
    FROM playlist_additions`,
-  `SELECT ${pk('removal', 'id')}, at * 1000, 'removal', CAST(id AS TEXT), 'hygiene', status,
-     (CASE WHEN status = 'failed' AND source != 'sweep' THEN 1 ELSE 0 END),
+  `SELECT ${pk('removal', 'id')}, at * 1000, 'removal', CAST(id AS TEXT), 'hygiene', ${quotaStatus('status', REMOVAL_DETAIL)},
+     (CASE WHEN status = 'failed' AND source != 'sweep' AND NOT ${REMOVAL_QUOTA} THEN 1 ELSE 0 END),
      slug, set_url, video_id, ${cat('source', 'reason', 'detail', 'playlist_kind', 'slug', 'set_url')},
      json_object('source', source, 'reason', reason, 'detail', detail, 'playlist_kind', playlist_kind)
    FROM playlist_removals`,
@@ -213,7 +235,7 @@ export function supersededReason(error: string | null | undefined): string {
 function mkvidDetail(r: { status: string; video_id: string | null; error: string | null }): string | null {
   switch (r.status) {
     case 'done': return r.video_id ? `uploaded ${r.video_id}` : 'uploaded'
-    case 'failed': return r.error
+    case 'failed': return errorLine(r.error)
     case 'banned': return 'banned from mkvid'
     case 'superseded': return supersededReason(r.error)
     default: return null
@@ -242,11 +264,11 @@ function describe(r: RawRow): { title: string; detail: string | null } {
       return { title: str(j.title) ?? '(no title)', detail: auditDetail(j) }
     case 'addition': {
       const cmb = j.cmb === 'failed' || j.cmb === 'unavailable' ? `combined ${j.cmb}` : null
-      return { title: labelFromSetUrl(r.set_url), detail: joinParts([str(j.msg) ?? (r.video_id ? `video ${r.video_id}` : null), cmb]) }
+      return { title: labelFromSetUrl(r.set_url), detail: joinParts([errorLine(str(j.msg)) ?? (r.video_id ? `video ${r.video_id}` : null), cmb]) }
     }
     case 'removal': {
       const source = String(j.source ?? ''), reason = String(j.reason ?? '')
-      return { title: `${REMOVAL_SOURCE_LABEL[source] ?? source}: ${REASON_LABELS[reason] ?? reason}`, detail: joinParts([clip(str(j.detail)), `${String(j.playlist_kind ?? '')} playlist`]) }
+      return { title: `${REMOVAL_SOURCE_LABEL[source] ?? source}: ${REASON_LABELS[reason] ?? reason}`, detail: joinParts([errorLine(str(j.detail)), `${String(j.playlist_kind ?? '')} playlist`]) }
     }
     case 'mkvid':
       return { title: str(j.set_title) || labelFromSetUrl(r.set_url), detail: mkvidDetail({ status: r.status, video_id: r.video_id, error: str(j.error) }) }
@@ -271,7 +293,7 @@ function describe(r: RawRow): { title: string; detail: string | null } {
     }
     case 'sync': {
       const runs = Number(j.runs) || 0
-      return { title: `Sync: ${str(j.artist_name) || r.key}`, detail: clip(str(j.last_error)) ?? joinParts([clip(str(j.stop)), runs > 1 && `${runs} runs in a row`, str(j.stop) && 'tried again by the scheduler']) }
+      return { title: `Sync: ${str(j.artist_name) || r.key}`, detail: errorLine(str(j.last_error)) ?? joinParts([clip(str(j.stop)), runs > 1 && `${runs} runs in a row`, str(j.stop) && 'tried again by the scheduler']) }
     }
     case 'ban':
       return { title: str(j.title) ?? 'IP block', detail: str(j.detail) }

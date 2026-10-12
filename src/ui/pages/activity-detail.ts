@@ -21,6 +21,10 @@ export const ACTIVITY_DETAIL_CSS = /* css */ `
   .h-dl ol { margin: 0; padding-left: 1.1rem; }
   .h-dl .warn, .h-detail .warn { color: var(--danger); }
   .h-dl .when { color: var(--subtle); }
+  .h-dl .badge.warn { color: var(--warn); }
+  .h-raw { margin-top: var(--sp-1); }
+  .h-raw summary { cursor: pointer; color: var(--muted); font-size: var(--fs-xs); }
+  .h-raw pre { margin: var(--sp-1) 0 0; padding: var(--sp-2); background: var(--elev); border-radius: var(--r-ctl); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
 `
 
 export const ACTIVITY_DETAIL_JS = /* js */ `
@@ -107,8 +111,21 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
     return out.join('');
   }
 
+  // The status line of a failed row whose error is a YouTube API reply (r.youtubeError,
+  // from the server): a quota or rate-limit reply is a wait (a warn badge and what
+  // happens next), any other reads as one line with the raw reply folded away.
+  function ytStatusHtml(r) {
+    const y = r.youtubeError;
+    const wait = !!y && (y.kind === 'quota' || y.kind === 'rate_limit');
+    const raw = y && y.raw ? '<details class="h-raw"><summary>Raw reply</summary><pre>' + esc(y.raw) + '</pre></details>' : '';
+    if (wait) return '<span class="badge warn">' + esc(y.label) + '</span> ' + esc(y.explanation) + raw;
+    const line = y ? y.headline : r.message;
+    return esc(r.status) + (line ? ' — <span class="warn">' + esc(line) + '</span>' : '') + raw;
+  }
+
   function plDetailHtml(r) {
     const out = [];
+    const waiting = !!r.youtubeError && (r.youtubeError.kind === 'quota' || r.youtubeError.kind === 'rate_limit');
     out.push('<div class="h-grp">Set</div>');
     out.push(dl([
       ['tracklist', link(r.setUrl, setLabel(r.setUrl))],
@@ -140,8 +157,8 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
 
     out.push('<div class="h-grp">Meta</div>');
     out.push(dl([
-      ['status', esc(r.status) + (r.message ? ' — <span class="warn">' + esc(r.message) + '</span>' : '')],
-      r.failureCount != null ? ['failures so far', esc(r.failureCount)] : null,
+      ['status', ytStatusHtml(r)],
+      r.failureCount != null && !waiting ? ['failures so far', esc(r.failureCount)] : null,
       ['trigger', r.trigger ? esc(r.trigger) : '—'],
       ['when', esc(r.t)],
       ['took', r.meta && r.meta.ms != null ? esc(r.meta.ms) + ' ms' : '—'],
