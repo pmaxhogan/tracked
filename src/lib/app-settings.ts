@@ -80,6 +80,8 @@ export const AppSettingsSchema = z.object({
     notifyFound: z.boolean(),
     /** Like a pre-saved track's video on the connected YouTube account once it has one (lib/presave-like.ts; 50 units each). */
     likeOnYouTube: z.boolean(),
+    /** Quota units a quota day the automatic likes may spend (51 each; default 1000). The backfill script is not counted. 0 = none. */
+    likeDailyUnitCap: z.number().int().min(0).max(10000),
     /** A set page fetched for any reason updates the pre-saved rows of that set (free). */
     useSetFetches: z.boolean(),
     /** Stop watching a track after this many days without a link (0 = never). */
@@ -141,6 +143,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     retryMinutes: 60,
     notifyFound: true,
     likeOnYouTube: true,
+    likeDailyUnitCap: 1000,
     useSetFetches: true,
     giveUpDays: 0,
   },

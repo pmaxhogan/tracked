@@ -4,7 +4,7 @@ import { tracklistRoute, tracklistHandler } from './routes/tracklist'
 import { tracklistPurgeRoute, tracklistPurgeHandler } from './routes/tracklist-purge'
 import { likesRoute, likesHandler } from './routes/likes'
 import { presaveRoute, presaveHandler, presaveStatusRoute, presaveStatusHandler, presaveLikeBackfillRoute, presaveLikeBackfillHandler } from './routes/presave'
-import { retryDuePresaveLikes } from './lib/presave-like'
+import { drainPresaveLikes, retryDuePresaveLikes } from './lib/presave-like'
 import { likedSongsRoute, likedSongsHandler } from './routes/liked-songs'
 import { HOME_HTML, subscriptionsApp } from './routes/subscriptions'
 import { servePage } from './ui/pages'
@@ -63,11 +63,11 @@ app.use('*', async (c, next) => {
   await next()
 })
 
-// Stored pages (lib/page-store.ts) and search index writes (lib/search/index.ts) run in the background; hand them to waitUntil once the response is built.
+// Stored pages (lib/page-store.ts), search index writes (lib/search/index.ts) and pre-save likes (lib/presave-like.ts) run in the background; hand them to waitUntil once the response is built.
 app.use('*', async (c, next) => {
   await next()
   try {
-    c.executionCtx.waitUntil(Promise.all([drainPageCaptures(), drainSearchIndex()]))
+    c.executionCtx.waitUntil(Promise.all([drainPageCaptures(), drainSearchIndex(), drainPresaveLikes()]))
   } catch {
     /* no executionCtx (tests): captures still run */
   }
@@ -244,11 +244,6 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       } catch (e) {
         log.warn('cron.push_retries_threw', errorFields(e))
       }
-      // Pre-saved tracks whose like failed and is due again (lib/presave-like.ts; one indexed query when none, never throws).
-      if (!isDaily) {
-        const l = await retryDuePresaveLikes(env, log)
-        if (l.tried) log.info('cron.presave_like_retries', l)
-      }
       // Separate try/catch: a failed tick shouldn't stop the combined
       // playlist from catching up on everything that *did* land.
       try {
@@ -256,11 +251,18 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       } catch (e) {
         log.error('cron.combined_backfill_threw', errorFields(e))
       }
+      // Pre-saved tracks whose like is due (lib/presave-like.ts), after the playlists had their turn at the quota; one indexed query when none, never throws.
+      if (!isDaily) {
+        const l = await retryDuePresaveLikes(env, log)
+        if (l.tried || l.stoppedBy) log.info('cron.presave_likes', l)
+      }
       // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
       await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) })
       } finally {
         // Stored pages finish even when the tick threw.
         await drainPageCaptures()
+        // Likes a scheduled check started (they swallow their own errors).
+        await drainPresaveLikes()
         // Search index writes started by this tick's verified fetches, likewise (they swallow their own errors).
         try {
           await drainSearchIndex()

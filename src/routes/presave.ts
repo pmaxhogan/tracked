@@ -50,7 +50,7 @@ import {
   type PresaveRow,
   type PresaveSource,
 } from '../lib/presave'
-import { backfillPresaveLikes, BACKFILL_MAX_LIKES } from '../lib/presave-like'
+import { backfillPresaveLikes, BACKFILL_MAX_LIKES, likeColumnsExist } from '../lib/presave-like'
 import { ErrorResponse } from '../schemas'
 
 // ─── schemas (OpenAPI) ──────────────────────────────────────────────────────
@@ -102,8 +102,8 @@ export const PresaveOutSchema = z
     notifiedAt: ms('When the push went out'),
     dismissedAt: ms('When it was dismissed'),
     likedAt: ms('When its video was liked on the connected YouTube account'),
-    likeError: z.string().nullable().openapi({ description: 'Why the last try did not like it: `<kind>: <detail>`, kind = quota | transient | not_connected (tried again) | gone | forbidden | disliked (not tried again).' }),
-    likeNextAt: ms('When the like is tried again; null when it is not'),
+    likeError: z.string().nullable().openapi({ description: 'Why the last try did not like it: `<kind>: <detail>`, kind = quota | budget | rate_limit | transient | not_connected | gone (tried again) | rating_disabled | purchase_required | email_not_verified | forbidden | rejected | disliked (not tried again).' }),
+    likeNextAt: ms('When the like is due; null when it is made or not tried again'),
     uploadEligibleAt: z.number().int().openapi({ description: 'createdAt + trackUploads.minWatchDays (unix ms).' }),
   })
   .openapi('Presave')
@@ -197,7 +197,7 @@ export const PresaveLikeBackfillResponse = z
     wouldLike: z.number().int(),
     failed: z.number().int(),
     units: z.object({ getRating: z.number().int(), rate: z.number().int() }).openapi({ description: 'Quota units: getRating spent by this request (a dry run too), rate spent (live) or needed (dry run).' }),
-    stoppedBy: z.enum(['quota', 'not_connected', 'error']).nullable(),
+    stoppedBy: z.enum(['quota', 'rate_limit', 'not_connected', 'error']).nullable().openapi({ description: 'quota: the day is used, run again after midnight Pacific. rate_limit: run again in a few minutes.' }),
     message: z.string().optional(),
     nextAfterId: z.number().int().nullable().openapi({ description: 'afterId of the next page; null when this was the last one.' }),
   })
@@ -214,11 +214,15 @@ export const presaveLikeBackfillRoute = createRoute({
     200: { content: { 'application/json': { schema: PresaveLikeBackfillResponse } }, description: 'The page: what was (or would be) liked. Out of quota is `stoppedBy: quota`, not an error status.' },
     400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Bad input' },
     401: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Missing/invalid bearer token' },
+    503: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Migration 0020 is not applied to the database yet' },
   },
 })
 
 export const presaveLikeBackfillHandler: RouteHandler<typeof presaveLikeBackfillRoute, { Bindings: Env }> = async (c) => {
   const log = makeLogger({ reqId: c.req.raw.headers.get('cf-ray') ?? 'local', route: 'presave.like_backfill' })
+  if (!(await likeColumnsExist(c.env))) {
+    return c.json({ error: 'migration_missing', message: 'migration 0020 (presave likes) is not applied to this database: run npm run d1:migrate' }, 503)
+  }
   return c.json(await backfillPresaveLikes(c.env, c.req.valid('json'), { log }), 200)
 }
 

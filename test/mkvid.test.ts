@@ -398,6 +398,34 @@ describe('queue lifecycle', () => {
     expect(quotaDayEnd(Date.parse('2026-03-08T12:00:00Z'))).toBe(Date.parse('2026-03-09T07:00:00Z') / 1000)
   })
 
+  it('the quota day is exact around both DST shifts: the day before, the day of, and the hours either side of 2 am', () => {
+    const z = (s: string) => Date.parse(s)
+    const sec = (s: string) => Date.parse(s) / 1000
+    // Spring forward, Sunday 2026-03-08 (2 am PST → 3 am PDT at 10:00Z). Midnight that day is 08:00Z.
+    // The day before: its end is that midnight, never an hour early (07:00Z would already be past at 23:30 PST).
+    expect(quotaDayEnd(z('2026-03-07T20:00:00Z'))).toBe(sec('2026-03-08T08:00:00Z'))
+    expect(quotaDayEnd(z('2026-03-08T07:30:00Z'))).toBe(sec('2026-03-08T08:00:00Z'))
+    expect(quotaDayStart(z('2026-03-08T07:30:00Z'))).toBe(sec('2026-03-07T08:00:00Z'))
+    // The day of: 09:30Z is 1:30 PST, 10:30Z is 3:30 PDT, 20:00Z is 1 pm PDT.
+    for (const t of ['2026-03-08T08:00:00Z', '2026-03-08T09:30:00Z', '2026-03-08T10:30:00Z', '2026-03-08T20:00:00Z', '2026-03-09T06:59:59Z']) {
+      expect(quotaDayStart(z(t))).toBe(sec('2026-03-08T08:00:00Z'))
+      expect(quotaDayEnd(z(t))).toBe(sec('2026-03-09T07:00:00Z'))
+    }
+    // Fall back, Sunday 2026-11-01 (2 am PDT → 1 am PST at 09:00Z). Midnight that day is 07:00Z.
+    expect(quotaDayEnd(z('2026-10-31T20:00:00Z'))).toBe(sec('2026-11-01T07:00:00Z'))
+    expect(quotaDayEnd(z('2026-11-01T06:30:00Z'))).toBe(sec('2026-11-01T07:00:00Z'))
+    // The day of: 08:30Z is the first 1:30, 09:30Z the second, 20:00Z is noon PST.
+    for (const t of ['2026-11-01T07:00:00Z', '2026-11-01T08:30:00Z', '2026-11-01T09:30:00Z', '2026-11-01T20:00:00Z', '2026-11-02T07:59:59Z']) {
+      expect(quotaDayStart(z(t))).toBe(sec('2026-11-01T07:00:00Z'))
+      expect(quotaDayEnd(z(t))).toBe(sec('2026-11-02T08:00:00Z'))
+    }
+    // The end is always after now and at most 25 hours away, every hour of a year.
+    for (let t = z('2026-01-01T00:30:00Z'); t < z('2027-01-01T00:00:00Z'); t += 3600_000) {
+      const left = quotaDayEnd(t) - t / 1000
+      if (left <= 0 || left > 25 * 3600 || quotaDayStart(t) > t / 1000) throw new Error(`wrong quota day at ${new Date(t).toISOString()}`)
+    }
+  })
+
   it('remembers what the last poll got, so the panel can tell a capped queue from a silent mkvid', async () => {
     const env = makeEnv({ MKVID_DAILY_CLAIM_CAP: '1', MKVID_SHARED_DAILY_CLAIM_CAP: '0' })
     expect(await getMkvidLastPoll(env)).toBeNull()

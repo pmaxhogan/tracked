@@ -15,7 +15,8 @@
  * same call. A YouTube link moves it to `found` and pushes to every device;
  * none hands it to mkvid's track uploads (lib/track-uploads.ts), which decides
  * by itself whether it is due. A pre-save that gets its video, found or
- * uploaded, is liked on the owner's YouTube account (lib/presave-like.ts).
+ * uploaded, is liked on the owner's YouTube account in the background
+ * (lib/presave-like.ts).
  *
  * Every check appends a `presave_checks` row. A pool refusal changes nothing
  * but the failure count and the next check time, and the scheduler reads it
@@ -102,6 +103,7 @@ export type PresaveRow = {
   like_attempts: number
   like_error: string | null
   like_next_at: number | null
+  like_claimed_at?: number | null
 }
 
 export type PresaveCheckRow = {
@@ -591,8 +593,8 @@ async function checkLinks(env: Env, p: PresaveRow, trigger: PresaveTrigger, sett
     } catch (e) {
       log.warn('presave.supersede_failed', { id: p.id, ...errorFields(e) })
     }
-    // It has its video: liked on the owner's YouTube account (never throws; a failed like is retried by the cron).
-    const liked = await onPresaveResolved(env, p.id, log, { now })
+    // It has its video: its like on the owner's YouTube account is due and runs in the background (never throws, nothing waits for YouTube).
+    const liked = await onPresaveResolved(env, p.id, log, { now, replacedVideoId: p.youtube_video_id })
     if (liked) w = { ...w, presave: { ...w.presave, ...liked } }
     if (settings.presave.notifyFound) {
       const sent = await sendPushToAll(env, presaveFoundPayload({ id: p.id, artist: w.presave.artist, title: w.presave.title, videoId }), log).catch(() => null)
@@ -839,6 +841,8 @@ async function restoreRow(env: Env, p: PresaveRow, now: number): Promise<Presave
   const stage: PresaveStage = p.youtube_video_id ? (p.found_at ? 'found' : 'uploaded') : p.track_id ? 'links' : 'identify'
   const next = stage === 'links' || stage === 'identify' ? now : null
   await dbOf(env).prepare('UPDATE presaves SET stage = ?, dismissed_at = NULL, next_check_at = ?, fail_count = 0, updated_at = ? WHERE id = ?').bind(stage, next, now, p.id).run()
+  // Restored with its video: the like is due again (never throws).
+  if (stage === 'found' || stage === 'uploaded') await onPresaveResolved(env, p.id, undefined, { now })
   return (await getPresaveRow(env, p.id))!
 }
 
@@ -1146,9 +1150,9 @@ export async function markPresaveUploaded(env: Env, presaveId: number, videoId: 
     await dbOf(env).prepare('UPDATE presave_checks SET youtube_video_id = ? WHERE id = ?').bind(videoId, w.check.id).run()
     return w.presave
   }
-  // The upload is its video now: liked like a found one (never throws; a failed like is retried by the cron).
+  // The upload is its video now: its like is due like a found one's (never throws, nothing waits for YouTube).
   if (!w.applied) return w.presave
-  const liked = await onPresaveResolved(env, p.id, undefined, { now })
+  const liked = await onPresaveResolved(env, p.id, undefined, { now, replacedVideoId: p.youtube_video_id })
   return liked ? { ...w.presave, ...liked } : w.presave
 }
 

@@ -131,15 +131,29 @@ ${PRESAVE_UI_JS}
 
   function dt(k, v, sub) { return v ? '<dt>' + esc(k) + '</dt><dd>' + v + (sub ? ' <span class="sub">' + sub + '</span>' : '') + '</dd>' : ''; }
   const at = (ms) => (ms == null ? '' : '<span' + TK.tip(when(ms)) + '>' + esc(rel(ms)) + '</span>');
+  // The like on the YouTube account (lib/presave-like.ts). Red only where the owner has to do something.
+  const LIKE_WHY = {
+    quota: ['Waiting: today’s YouTube quota is used'], budget: ['Waiting: today’s units for likes are used'], rate_limit: ['Waiting: YouTube is limiting requests'],
+    transient: ['Waiting: YouTube did not take it'], gone: ['The video is not on YouTube'], rating_disabled: ['Ratings are off for this video'],
+    purchase_required: ['The video has to be bought to rate it'], rejected: ['YouTube does not take a like for this video'], disliked: ['Left alone: you disliked it'],
+    not_connected: ['Connect YouTube in Settings to like it', 1], forbidden: ['YouTube refused: connect the account again in Settings', 1], email_not_verified: ['Verify the YouTube account’s email to like it', 1],
+  };
+  function likeLine(p) {
+    if (p.likedAt) return dt('Liked', at(p.likedAt), 'on YouTube');
+    if (!p.likeError && !p.likeNextAt) return '';
+    const next = p.likeNextAt ? (p.likeNextAt <= Date.now() ? 'next try soon' : 'next try ' + esc(rel(p.likeNextAt))) : '';
+    if (!p.likeError) return dt('Like', '<span class="sub">on its way</span>', next);
+    const kind = String(p.likeError).split(':')[0], why = LIKE_WHY[kind] || ['Not liked yet'];
+    return dt('Like', '<span class="' + (why[1] ? 'bad' : 'sub') + '"' + TK.tip(p.likeError) + '>' + esc(why[0]) + '</span>', next);
+  }
+
   function timeline(p, up) {
     let h = '';
     h += dt('Pre-saved', at(p.createdAt), esc('from ' + (p.source === 'tasker' ? 'Tasker' : p.source === 'ui' ? 'the web' : p.source)));
     h += dt('Identified', at(p.identifiedAt));
     h += dt('On YouTube', at(p.foundAt), p.notifiedAt ? 'pushed ' + esc(rel(p.notifiedAt)) : '');
     if (up && up.completedAt && up.status === 'done') h += dt('Uploaded', at(up.completedAt), 'by mkvid');
-    // The like on the YouTube account: red only for a refusal the owner has to look at.
-    if (p.likedAt) h += dt('Liked', at(p.likedAt), 'on YouTube');
-    else if (p.likeError) h += dt('Like', '<span class="' + (/^forbidden:/.test(p.likeError) ? 'bad' : 'sub') + '">' + esc(p.likeError) + '</span>', p.likeNextAt ? 'tried again ' + esc(rel(p.likeNextAt)) : '');
+    h += likeLine(p);
     h += dt('Dismissed', at(p.dismissedAt));
     h += dt('Last check', p.lastCheckedAt ? at(p.lastCheckedAt) + ' <span class="ps-res ' + resultCls(p.lastResult) + '" style="display:inline">' + esc(resultText(p.lastResult)) + '</span>' : '<span class="sub">never</span>');
     if (p.lastError) h += dt('Last error', '<span class="bad">' + esc(p.lastError) + '</span>');

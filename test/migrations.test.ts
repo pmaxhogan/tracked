@@ -80,8 +80,8 @@ describe('migrations on a copy of the pre-pool schema with data', () => {
     for (const f of upTo(19)) db.exec(readFileSync(join(DIR, f), 'utf8'))
     db.exec("INSERT INTO presaves (track_id, stage, youtube_video_id, found_at, created_at, updated_at) VALUES ('909720', 'found', 'h8CtvP1rEy8', 2, 1, 2)")
     for (const f of after(19)) db.exec(readFileSync(join(DIR, f), 'utf8'))
-    expect(rows(db, 'SELECT stage, youtube_video_id, liked_at, like_attempts, like_error, like_next_at FROM presaves')).toEqual([
-      { stage: 'found', youtube_video_id: 'h8CtvP1rEy8', liked_at: null, like_attempts: 0, like_error: null, like_next_at: null },
+    expect(rows(db, 'SELECT stage, youtube_video_id, liked_at, like_attempts, like_error, like_next_at, like_claimed_at FROM presaves')).toEqual([
+      { stage: 'found', youtube_video_id: 'h8CtvP1rEy8', liked_at: null, like_attempts: 0, like_error: null, like_next_at: null, like_claimed_at: null },
     ])
   })
 

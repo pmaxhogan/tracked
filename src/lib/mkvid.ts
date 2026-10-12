@@ -93,11 +93,22 @@ const QUOTA_TZ = 'America/Los_Angeles'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
-/** Unix seconds of the most recent midnight in the quota's time zone (DST handled by the zone). */
-export function quotaDayStart(nowMs = Date.now()): number {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: QUOTA_TZ, hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(nowMs))
+/** Seconds since midnight on the quota zone's wall clock at `sec` (unix seconds). */
+function quotaWallSeconds(sec: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: QUOTA_TZ, hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(sec * 1000))
   const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0)
-  return Math.floor(nowMs / 1000) - (get('hour') * 3600 + get('minute') * 60 + get('second'))
+  return get('hour') * 3600 + get('minute') * 60 + get('second')
+}
+
+/** Unix seconds of the most recent midnight in the quota's time zone, on the days the clocks change too. */
+export function quotaDayStart(nowMs = Date.now()): number {
+  const now = Math.floor(nowMs / 1000)
+  // The wall clock counts an hour too many or too few after a DST shift that day
+  // (the zone shifts at 2 am, so its midnight always exists, once): the clock is
+  // read again at the first answer and the difference taken out.
+  const start = now - quotaWallSeconds(now)
+  const off = quotaWallSeconds(start)
+  return off === 0 ? start : off > 12 * 3600 ? start + (86400 - off) : start - off
 }
 
 /**

@@ -5,10 +5,12 @@
  * Worker started liking them by itself; lib/presave-like.ts).
  *
  *   TRACKED_API_TOKEN=... node scripts/presave-like-backfill.mjs            # dry run: what it would like, and the cost
- *   TRACKED_API_TOKEN=... node scripts/presave-like-backfill.mjs --live     # like them
- *     --max <n>           like at most n videos this run (50 quota units each; default: all)
+ *   TRACKED_API_TOKEN=... node scripts/presave-like-backfill.mjs --live     # like them (10 at most)
+ *     --max <n>           like at most n videos this run (50 quota units each; default 10, so a
+ *                         live run never spends more than it said it would)
  *     --include-stopped   also the ones given up on (video gone, refused, disliked)
- *     --url <origin>      default $TRACKED_URL or https://tracked.pmaxhogan.workers.dev
+ *     --url <origin>      default $TRACKED_URL or https://tracked.pmaxhogan.workers.dev (https only,
+ *                         or http on localhost: the bearer goes there)
  *
  * The Worker does the work (POST /presave/like-backfill, a bounded page per
  * request) with the YouTube token it already holds, so no Google credential is
@@ -16,16 +18,25 @@
  * API_TOKEN secret), read from TRACKED_API_TOKEN and never printed.
  *
  * Quota: one videos.getRating unit per 50 pre-saves (a dry run spends it too),
- * 50 per like. A video already liked is only marked. Out of quota stops the
- * run cleanly; run it again after midnight Pacific, it picks up where it was
- * (it only ever looks at pre-saves with no like recorded).
+ * 50 per like. A video already liked is only marked, one you disliked is left
+ * alone. Out of quota stops the run cleanly; run it again after midnight
+ * Pacific, it picks up where it was (it only ever looks at pre-saves with no
+ * like recorded).
  */
 
 const args = process.argv.slice(2)
 const flag = (name) => args.includes(name)
+const die = (msg) => {
+  console.error(msg)
+  process.exit(2)
+}
+/** The option's value; an option given with no value is an error, never its default. */
 const opt = (name) => {
   const i = args.indexOf(name)
-  return i >= 0 ? args[i + 1] : undefined
+  if (i < 0) return undefined
+  const v = args[i + 1]
+  if (v === undefined || v.startsWith('--')) die(`${name} needs a value`)
+  return v
 }
 if (flag('--help') || flag('-h')) {
   console.log('usage: TRACKED_API_TOKEN=... node scripts/presave-like-backfill.mjs [--live] [--max n] [--include-stopped] [--url origin]')
@@ -33,18 +44,22 @@ if (flag('--help') || flag('-h')) {
 }
 const live = flag('--live')
 const includeStopped = flag('--include-stopped')
+/** Likes a live run makes when --max is not given. */
+const DEFAULT_MAX = 10
 const maxRaw = opt('--max')
-const max = maxRaw === undefined ? Infinity : Number(maxRaw)
-if (!Number.isInteger(max) && max !== Infinity) {
-  console.error('--max must be a whole number')
-  process.exit(2)
-}
+const max = maxRaw === undefined ? DEFAULT_MAX : Number(maxRaw)
+if (!Number.isInteger(max) || max < 1) die('--max must be a whole number of 1 or more')
 const origin = (opt('--url') ?? process.env.TRACKED_URL ?? 'https://tracked.pmaxhogan.workers.dev').replace(/\/+$/, '')
-const token = process.env.TRACKED_API_TOKEN
-if (!token) {
-  console.error("TRACKED_API_TOKEN is not set (the Worker's API_TOKEN secret, the one Tasker sends).")
-  process.exit(2)
+let target
+try {
+  target = new URL(origin)
+} catch {
+  die('--url is not a URL')
 }
+const local = target.hostname === 'localhost' || target.hostname === '127.0.0.1'
+if (target.protocol !== 'https:' && !(target.protocol === 'http:' && local)) die('--url must be https (http only on localhost / 127.0.0.1): the bearer token is sent there')
+const token = process.env.TRACKED_API_TOKEN
+if (!token) die("TRACKED_API_TOKEN is not set (the Worker's API_TOKEN secret, the one Tasker sends).")
 
 /** Likes one request may make (the Worker's own maximum). */
 const PAGE_LIKES = 20
@@ -55,6 +70,7 @@ let stoppedBy = null
 let total = null
 
 console.log(`${live ? 'LIVE' : 'DRY RUN'} against ${origin}`)
+if (live) console.log(`at most ${max} likes this run: up to ${max * 50} units for videos.rate, plus 1 per 50 pre-saves read${maxRaw === undefined ? ' (--max to change)' : ''}`)
 for (;;) {
   const left = max - sum.liked - sum.failed
   if (live && left <= 0) {
@@ -67,8 +83,10 @@ for (;;) {
     body: JSON.stringify({ dryRun: !live, afterId, includeStopped, limit: Math.min(PAGE_LIKES, left) }),
   })
   if (!res.ok) {
+    // 503 migration_missing: migration 0020 is not applied to the database yet.
     console.error(`the Worker answered ${res.status}: ${(await res.text()).slice(0, 300)}`)
-    process.exit(1)
+    process.exitCode = 1
+    break
   }
   const page = await res.json()
   if (total === null) total = page.total
@@ -92,18 +110,21 @@ for (;;) {
   afterId = page.nextAfterId
 }
 
-console.log('')
-console.log(`pre-saves with a video and no like: ${total ?? 0}`)
-if (live) {
-  console.log(`liked ${sum.liked}, already liked ${sum.alreadyLiked}, failed ${sum.failed}`)
-  console.log(`quota spent: about ${sum.getRating + sum.rate} units (${sum.getRating} getRating + ${sum.rate} rate)`)
-  if (stoppedBy === 'quota') console.log('Out of YouTube quota. Run it again after midnight Pacific; what is liked stays liked.')
-  if (stoppedBy === 'max') console.log('Stopped at --max. Run it again for the rest.')
-} else {
-  const cap = Math.min(sum.wouldLike, max)
-  console.log(`would like ${sum.wouldLike}${cap < sum.wouldLike ? ` (${cap} with --max ${max})` : ''}, already liked ${sum.alreadyLiked} (only marked, free)`)
-  console.log(`a live run costs about ${cap * 50 + sum.getRating} units (${cap} x 50 rate + ${sum.getRating} getRating); this dry run spent ${sum.getRating}`)
-  if (stoppedBy) console.log(`The ratings could not be read (${stoppedBy}), so every video is counted as not liked yet.`)
-  console.log('Nothing was liked. Add --live to do it.')
+if (process.exitCode !== 1) {
+  console.log('')
+  console.log(`pre-saves with a video and no like: ${total ?? 0}`)
+  if (live) {
+    console.log(`liked ${sum.liked}, already liked ${sum.alreadyLiked}, failed ${sum.failed}`)
+    console.log(`quota spent: about ${sum.getRating + sum.rate} units (${sum.getRating} getRating + ${sum.rate} rate)`)
+    if (stoppedBy === 'quota') console.log('Out of YouTube quota. Run it again after midnight Pacific; what is liked stays liked.')
+    if (stoppedBy === 'rate_limit') console.log('YouTube is limiting requests. Run it again in a few minutes.')
+    if (stoppedBy === 'max') console.log('Stopped at --max. Run it again for the rest.')
+  } else {
+    const cap = Math.min(sum.wouldLike, max)
+    console.log(`would like ${sum.wouldLike}${cap < sum.wouldLike ? ` (${cap} a run with --max ${max})` : ''}, already liked ${sum.alreadyLiked} (only marked, free)`)
+    console.log(`liking all ${sum.wouldLike} costs about ${sum.wouldLike * 50 + sum.getRating} units (${sum.wouldLike} x 50 rate + ${sum.getRating} getRating); this dry run spent ${sum.getRating}`)
+    if (stoppedBy) console.log(`The ratings could not be read (${stoppedBy}), so every video is counted as not liked yet.`)
+    console.log('Nothing was liked. Add --live to do it.')
+  }
+  if (stoppedBy === 'not_connected' || stoppedBy === 'error') process.exitCode = 1
 }
-process.exit(stoppedBy === 'not_connected' || stoppedBy === 'error' ? 1 : 0)
