@@ -4,7 +4,8 @@
  * guard. The actions (retry, move, ban, ...) stay in routes/subscriptions.ts.
  *
  *   GET /api/mkvid            the header: status line inputs, caps, counts (by stored status)
- *                             and `outcomes` (the finished requests by outcome), last poll,
+ *                             and `outcomes` (the finished requests by outcome), `removedBurst`
+ *                             (removals the owner has to rule on, or null), last poll,
  *                             the DJ list, old-style count, replaced videos, and the
  *                             requests rendering now (`rendering`). Home and Settings read
  *                             it too (they send `?limit=1`, which is ignored).
@@ -23,7 +24,8 @@
  * row still carries as `status`): in the queue it is the readiness state
  * (lib/mkvid-readiness.ts: ready, unverified, untimed, waiting_ids, backoff), in the
  * finished list the outcome (lib/mkvid-outcome.ts: `failed` split into real failures
- * and the two no-recording kinds, `superseded` by its cause). Both are SQL, so a
+ * and the two no-recording kinds, `superseded` by its cause, and `removed_unconfirmed`
+ * for a removal in the open burst: lib/mkvid-removed-burst.ts). Both are SQL, so a
  * filter or sort on it covers every page; each answer adds `counts`, the whole
  * list by that column, whatever the filters.
  */
@@ -46,6 +48,7 @@ import {
 } from '../lib/mkvid'
 import { MKVID_READINESS_STATES, readinessFor, readinessStateSql } from '../lib/mkvid-readiness'
 import { MKVID_OUTCOMES, mkvidOutcomeSql } from '../lib/mkvid-outcome'
+import { getRemovedBurst, removedBurstSince } from '../lib/mkvid-removed-burst'
 import { countOldStyleVideos, listUndeletedOldVideos } from '../lib/mkvid-recreate'
 import { parseTableQuery, runTableQuery, tableErrorBody, TableQueryError, type TableColumn, type TableDef, type TableQuery } from '../lib/table-query'
 import { dbOf } from '../lib/db'
@@ -89,18 +92,21 @@ export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
   }
 }
 
-export const MKVID_FINISHED_TABLE: TableDef<QueueDbRow> = {
-  from: 'mkvid_requests',
-  where: MKVID_FINISHED_SQL,
-  primaryKey: 'id',
-  defaultSort: '-updatedAt',
-  columns: { ...COLUMNS, status: { sql: mkvidOutcomeSql('status', 'error'), type: 'enum', options: MKVID_OUTCOMES } },
+/** The finished list. `since` is the open removed-recordings burst's start (null = none): a removal from then on reads `removed_unconfirmed`. */
+export function mkvidFinishedTable(since: number | null): TableDef<QueueDbRow> {
+  return {
+    from: 'mkvid_requests',
+    where: MKVID_FINISHED_SQL,
+    primaryKey: 'id',
+    defaultSort: '-updatedAt',
+    columns: { ...COLUMNS, status: { sql: mkvidOutcomeSql('status', 'error', { since }), type: 'enum', options: MKVID_OUTCOMES } },
+  }
 }
 
 type Ctx = Context<{ Bindings: Env; Variables: { cfAccessEmail: string } }>
 
 /** A table answer whose rows are requestSummary + readiness (+ position in the queue), plus `counts`. */
-async function requestTable(c: Ctx, def: TableDef<QueueDbRow>, now: number, counts: () => Promise<Record<string, number>>): Promise<Response> {
+async function requestTable(c: Ctx, def: TableDef<QueueDbRow>, now: number, counts: () => Promise<Record<string, number>>, since: number | null = null): Promise<Response> {
   let query: TableQuery
   try {
     query = parseTableQuery(new URL(c.req.url).searchParams, def)
@@ -113,12 +119,12 @@ async function requestTable(c: Ctx, def: TableDef<QueueDbRow>, now: number, coun
   const readiness = await readinessFor(c.env, reqs.map((x) => x.req).filter((r) => r.status !== 'done' && r.status !== 'superseded'), now)
   return c.json({
     ...result,
-    rows: reqs.map((x) => ({ ...summaryOf(x.req, readiness.get(x.req.id) ?? null), ...(x.position != null ? { position: x.position } : {}) })),
+    rows: reqs.map((x) => ({ ...summaryOf(x.req, readiness.get(x.req.id) ?? null, since), ...(x.position != null ? { position: x.position } : {}) })),
     counts: await counts(),
   })
 }
 
-const summaryOf = (r: MkvidRequest, readiness: unknown) => ({ ...requestSummary(r), readiness })
+const summaryOf = (r: MkvidRequest, readiness: unknown, since: number | null = null) => ({ ...requestSummary(r, since), readiness })
 
 /** The whole queue by readiness state. */
 async function countQueueStates(env: Env, def: TableDef<QueueDbRow>): Promise<Record<string, number>> {
@@ -133,7 +139,10 @@ mkvidUiApp.get('/api/mkvid/queue', (c) => {
   const def = mkvidQueueTable(now)
   return requestTable(c, def, now, () => countQueueStates(c.env, def))
 })
-mkvidUiApp.get('/api/mkvid/finished', (c) => requestTable(c, MKVID_FINISHED_TABLE, Math.floor(Date.now() / 1000), () => countMkvidOutcomes(c.env)))
+mkvidUiApp.get('/api/mkvid/finished', async (c) => {
+  const since = await removedBurstSince(c.env)
+  return requestTable(c, mkvidFinishedTable(since), Math.floor(Date.now() / 1000), () => countMkvidOutcomes(c.env, since), since)
+})
 
 /**
  * The mkvid header: the three things that decide whether anything moves (the
@@ -141,9 +150,10 @@ mkvidUiApp.get('/api/mkvid/finished', (c) => requestTable(c, MKVID_FINISHED_TABL
  * and the requests rendering now. The lists are the two table endpoints above.
  */
 mkvidUiApp.get('/api/mkvid', async (c) => {
+  const removedBurst = await getRemovedBurst(c.env)
   const [counts, outcomes, accounts, lastPoll, djs, oldStyleCount, oldVideos, claimed] = await Promise.all([
     countMkvidRequests(c.env),
-    countMkvidOutcomes(c.env),
+    countMkvidOutcomes(c.env, removedBurst?.since ?? null),
     mkvidAccountUsage(c.env),
     getMkvidLastPoll(c.env),
     listMkvidDjs(c.env),
@@ -158,6 +168,11 @@ mkvidUiApp.get('/api/mkvid', async (c) => {
     counts,
     /** The finished requests by outcome: `failed` is real failures only, the no-recording kinds are their own. */
     outcomes,
+    /**
+     * Removals the owner has to rule on (lib/mkvid-removed-burst.ts), or null: `{ since, count, sources, threshold }`.
+     * They read `removed_unconfirmed` and stay as they are until POST /ui/api/mkvid/removed-burst/retry or /confirm.
+     */
+    removedBurst,
     /** Done videos made with a style other than scene (unknown counts): what "Recreate all old-style videos" would queue. */
     oldStyleCount,
     /** Videos a recreation replaced that are not deleted from YouTube yet (pending retry, or refused by mkvid). */

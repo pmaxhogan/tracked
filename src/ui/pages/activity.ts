@@ -55,15 +55,16 @@ export const ACTIVITY_ROW_JS = /* js */ `
     waiting: 'The pool stopped the last sync of this DJ early (busy, a slow page load, the budget spent). The scheduler tries again by itself.',
     claimed: 'mkvid took this job.', done: 'Finished.', verified: 'Two fetches by different accounts agreed on the track list.',
     open: 'The block is still active.', ended: 'The block is over.', refunded: 'mkvid gave the job back without uploading, so it does not count against the daily cap.',
+    removed_unconfirmed: 'The recording came back "not found", and so did several others within a day. That may mean the source or the downloader is broken. Choose on the mkvid page: Try them again, or They are really gone.',
     recording_removed: 'The recording is gone from its source, so mkvid cannot make a video. Nothing to do.', recording_short: 'The recording ends before the tracklist does, so mkvid makes no video. Nothing to do.',
     pending: 'Waiting its turn.', banned: 'Excluded from mkvid.', removed: 'Taken out of the playlists.', would_remove: 'Not removed (yet): a dry run, or a deleted or private video waiting out its days. Nothing was deleted.', recorded: 'Found missing from a playlist and noted; it is never re-added.', undone: 'You undid this.',
   };
   // The statuses the Status filter offers (the server takes any).
   const ACTIVITY_STATUSES = ['ok', 'no_video', 'no_tracklist', 'upstream_error', 'added', 'duplicate', 'replaced', 'no_youtube', 'failed', 'quota', 'rate_limited', 'abandoned', 'removed', 'would_remove', 'recorded', 'undone',
-    'done', 'banned', 'superseded', 'recording_removed', 'recording_short', 'claimed', 'refunded', 'challenge.created', 'challenge.solved', 'challenge.expired', 'account.created', 'account.flagged', 'account.rested', 'account.retired', 'error', 'waiting', 'open', 'ended'];
+    'done', 'banned', 'superseded', 'removed_unconfirmed', 'recording_removed', 'recording_short', 'claimed', 'refunded', 'challenge.created', 'challenge.solved', 'challenge.expired', 'account.created', 'account.flagged', 'account.rested', 'account.retired', 'error', 'waiting', 'open', 'ended'];
   // Not a problem, not a success: an attempt that is tried again by itself.
   const ACTIVITY_RETRY = new Set(['failed', 'waiting', 'quota', 'rate_limited']);
-  const STATUS_LABELS = { quota: 'quota exceeded', rate_limited: 'rate limited', recording_removed: 'recording removed', recording_short: 'recording too short' };
+  const STATUS_LABELS = { quota: 'quota exceeded', rate_limited: 'rate limited', removed_unconfirmed: 'removed, unconfirmed', recording_removed: 'recording removed', recording_short: 'recording too short' };
   const activityTip = (r) => STATUS_TIPS[r.status] || (r.problem ? 'This event is flagged as a problem.' : '');
   function activityIso(ts) { try { return new Date(ts).toISOString(); } catch (e) { return ''; } }
   function activityStatusHtml(r) {

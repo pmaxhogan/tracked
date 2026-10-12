@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { saveSubState } from '../src/lib/sync-store'
 import { noteSetFetch } from '../src/lib/verification'
 import { DEFAULT_POOL_SETTINGS } from '../src/lib/pool-settings'
+import { updateAppSettings } from '../src/lib/app-settings'
 import { storeVerifiedList } from './helpers/mkvid-lists'
 
 /** Queue a set with a verified list (no ID rows), so the claim gate lets it through. */
@@ -270,7 +271,7 @@ describe('/mkvid routes', () => {
     expect(names(await table('finished', '?f.status=in:failed'))).toEqual([])
     expect(names(await table('finished', '?f.status=in:recording_short'))).toEqual(['a'])
     expect(names(await table('finished', '?f.status=in:failed|banned'))).toEqual(['b'])
-    expect(fin.counts).toEqual({ done: 0, failed: 0, recording_removed: 0, recording_short: 1, has_recording: 0, duplicate: 0, superseded: 0, banned: 1 })
+    expect(fin.counts).toEqual({ done: 0, failed: 0, removed_unconfirmed: 0, recording_removed: 0, recording_short: 1, has_recording: 0, duplicate: 0, superseded: 0, banned: 1 })
     expect(names(await table('finished', '?f.error=has:incomplete'))).toEqual(['a'])
     expect(names(await table('finished', '?sort=dj,-setDate'))).toEqual(['a', 'b'])
     expect((await table('queue')).total).toBe(0)
@@ -286,6 +287,8 @@ describe('/mkvid routes', () => {
 
   it('the finished Status column is the outcome: it filters, sorts and counts across every page', async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: '1' })
+    // Three removals seconds apart would be a burst (test/mkvid-removed-burst.test.ts); this is about the plain outcomes.
+    expect((await updateAppSettings(env, { mkvid: { removedBurstCount: 0 } })).ok).toBe(true)
     const GONE = 'probe: yt-dlp exit 1: ERROR: [soundcloud] 77: Unable to download JSON metadata: HTTP Error 404: Not Found'
     const SHORT = "incomplete_recording: source is 1824s but the tracklist's last cue is at 7009s"
     // 12 uploads, newest; then the rest, older, so the default first page of 10 holds none of them.
@@ -309,7 +312,7 @@ describe('/mkvid routes', () => {
 
     const first = await fin('?size=10')
     expect([first.total, first.pageCount, first.rows.every((r) => r.outcome === 'done')]).toEqual([21, 3, true])
-    const counts = { done: 12, failed: 1, recording_removed: 3, recording_short: 2, has_recording: 1, duplicate: 1, superseded: 0, banned: 1 }
+    const counts = { done: 12, failed: 1, removed_unconfirmed: 0, recording_removed: 3, recording_short: 2, has_recording: 1, duplicate: 1, superseded: 0, banned: 1 }
     expect(first.counts).toEqual(counts)
 
     const gone = await fin('?size=10&f.status=in:recording_removed')

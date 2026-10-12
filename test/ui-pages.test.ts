@@ -571,10 +571,10 @@ describe('DJ profile set table', () => {
 describe('Home page', () => {
   it('mkvid requests that ended for want of a usable recording are not listed as needing attention; real failures are', async () => {
     const now = Math.floor(Date.now() / 1000)
-    const mk = (outcomes: Record<string, number>) => ({ enabled: true, dailyClaimCap: 30, dailyClaims: 3, now, quotaResetsAt: now + 3600, counts: { pending: 0, claimed: 0, done: 4, failed: 5 }, outcomes,
+    const mk = (outcomes: Record<string, number>, removedBurst: unknown = null) => ({ enabled: true, dailyClaimCap: 30, dailyClaims: 3, now, quotaResetsAt: now + 3600, counts: { pending: 0, claimed: 0, done: 4, failed: 5 }, outcomes, removedBurst,
       accounts: [{ account: 'primary', label: 'primary', cap: 24, used: 3 }], lastPoll: { at: now, outcome: 'ok', accounts: ['primary'] }, oldVideos: [] })
-    const attnFor = async (outcomes: Record<string, number>) => {
-      const { ctx, els } = richStub(async (u: string) => (u.startsWith('/ui/api/mkvid') ? Response.json(mk(outcomes)) : new Response('{}', { status: 404 })), '/ui')
+    const attnFor = async (outcomes: Record<string, number>, removedBurst: unknown = null) => {
+      const { ctx, els } = richStub(async (u: string) => (u.startsWith('/ui/api/mkvid') ? Response.json(mk(outcomes, removedBurst)) : new Response('{}', { status: 404 })), '/ui')
       ;(ctx as any).URL = URL
       const html = await (await app.request('https://tracked.example/ui', {}, env())).text()
       for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
@@ -585,6 +585,13 @@ describe('Home page', () => {
     const some = await attnFor({ failed: 1, recording_removed: 3, recording_short: 1 })
     expect(some).toContain('/ui/mkvid?status=failed')
     expect(some).toContain('1 mkvid request failed')
+    // Several removals within a day wait for the owner's answer: listed, with where to give it.
+    expect(some).not.toContain('status=removed_unconfirmed')
+    const burst = await attnFor({ failed: 0, removed_unconfirmed: 4, recording_removed: 1, recording_short: 2 }, { since: now - 600, count: 4, sources: { soundcloud: 4 }, threshold: 3 })
+    expect(burst).toContain('/ui/mkvid?status=removed_unconfirmed&amp;tab=settled')
+    expect(burst).toContain('4 recordings came back &quot;not found&quot; within a day of each other')
+    expect(burst).toContain('Try them again or confirm they are gone on the mkvid page')
+    expect(burst).not.toContain('/ui/mkvid?status=failed')
   })
   it('/ui is the Home page and auto-prompts for notifications (ban page "home")', async () => {
     const html = await (await app.request('https://tracked.example/ui', {}, env())).text()

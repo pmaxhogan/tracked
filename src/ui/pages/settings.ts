@@ -34,6 +34,7 @@ const APP_GROUPS: FormGroup[] = [
         ],
       },
       { path: 'mkvid.goneCheckHours', label: 'Look for deleted videos every', help: 'One gone from YouTube leaves the playlists and is rendered again. 0 = never. Default 6.', unit: 'h', min: 0, max: 168 },
+      { path: 'mkvid.removedBurstCount', label: 'Recordings removed within a day before it is flagged', help: 'That many at once may mean the source or the downloader is broken: they turn red and stay as they are until you choose on the mkvid page. 0 = never. Default 3.', min: 0, max: 50, step: 1 },
     ],
   },
   {

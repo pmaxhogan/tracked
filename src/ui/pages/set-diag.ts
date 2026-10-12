@@ -143,6 +143,7 @@ export const SET_DIAG_JS = /* js */ `
     }
     else if (m.status === 'claimed') { tone = 'info'; finding = 'Rendering now.'; }
     else if (m.status === 'done') { tone = 'ok'; finding = 'Uploaded ' + (m.videoId || '(no video id)') + '.'; }
+    else if (m.status === 'failed' && m.outcome === 'removed_unconfirmed') { tone = 'bad'; finding = (m.outcomeLine || 'The recording looks gone.') + ' Choose on the mkvid page: Try them again, or They are really gone.'; }
     else if (m.status === 'failed' && m.outcomeLine) { tone = 'neutral'; finding = m.outcomeLine + ' Nothing to do.'; }
     else if (m.status === 'failed') { tone = 'bad'; finding = 'Failed: ' + (m.error || 'no error recorded') + '.'; }
     else if (m.status === 'banned') { tone = 'bad'; finding = 'Banned from mkvid.'; }

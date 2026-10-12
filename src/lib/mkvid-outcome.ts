@@ -15,6 +15,13 @@
  * shown neutral and never counted as failures. `superseded` is split the same
  * way, by the text stored when it happened (`has_recording`, `duplicate`).
  *
+ * One exception, `removed_unconfirmed`: several recordings answering "gone"
+ * within a day may be the source or the downloader breaking, not removals.
+ * Until the owner says which (lib/mkvid-removed-burst.ts), the removals from
+ * `since` on are a problem, shown red, and nothing changes them by itself.
+ * Every function here takes that `since` (unix seconds; null or absent = no
+ * such burst is open, and nothing reads `removed_unconfirmed`).
+ *
  * Nothing is stored: the same rules exist as a function (mkvidOutcome) and as
  * SQL (mkvidOutcomeSql), built from the lists below, so a list endpoint can
  * filter, sort and count by outcome across all its pages. The stored `status`
@@ -23,15 +30,16 @@
 
 export type MkvidNoRecording = 'recording_removed' | 'recording_short'
 /** `failed`, split. */
-export type MkvidFailureKind = MkvidNoRecording | 'failed'
+export type MkvidFailureKind = MkvidNoRecording | 'removed_unconfirmed' | 'failed'
 /** Where a request that left the queue ended. */
 export type MkvidOutcome = 'done' | MkvidFailureKind | 'has_recording' | 'duplicate' | 'superseded' | 'banned'
-export const MKVID_OUTCOMES: readonly MkvidOutcome[] = ['done', 'failed', 'recording_removed', 'recording_short', 'has_recording', 'duplicate', 'superseded', 'banned']
+export const MKVID_OUTCOMES: readonly MkvidOutcome[] = ['done', 'failed', 'removed_unconfirmed', 'recording_removed', 'recording_short', 'has_recording', 'duplicate', 'superseded', 'banned']
 export const MKVID_NO_RECORDING: readonly MkvidNoRecording[] = ['recording_removed', 'recording_short']
 
 export const MKVID_OUTCOME_LABELS: Record<MkvidOutcome, string> = {
   done: 'uploaded',
   failed: 'failed',
+  removed_unconfirmed: 'removed, unconfirmed',
   recording_removed: 'recording removed',
   recording_short: 'recording too short',
   has_recording: 'has a recording',
@@ -72,20 +80,29 @@ const RESOLVES_1001TL = '(1001tl)'
 /** ASCII-only lower case: what SQLite's lower() does. */
 const fold = (s: string) => s.replace(/[A-Z]/g, (ch) => ch.toLowerCase())
 
-/** Why a `failed` request failed. Conservative: a text it does not recognise is a failure. */
-export function mkvidFailureKind(error: string | null | undefined): MkvidFailureKind {
+/** Why a `failed` request failed, by its text alone. Conservative: a text it does not recognise is a failure. */
+export function mkvidFailureKind(error: string | null | undefined): MkvidNoRecording | 'failed' {
   const e = fold(error ?? '')
   if (e.startsWith(SHORT_PREFIX)) return 'recording_short'
   if (SOURCE_STAGES.some((p) => e.startsWith(p)) && GONE_MARKS.some((m) => e.includes(m)) && !NOT_GONE_MARKS.some((m) => e.includes(m))) return 'recording_removed'
   return 'failed'
 }
 
+/** A request as these rules read it. `updatedAt` (unix seconds) is when it failed: only an open burst (`since`) looks at it. */
+export type MkvidOutcomeInput = { status: string; error?: string | null; updatedAt?: number | null }
+
+/** The removal is part of the burst open since `since`: not confirmed by the owner yet. */
+const unconfirmed = (updatedAt: number | null | undefined, since: number | null | undefined) => since != null && updatedAt != null && updatedAt >= since
+
 /** The outcome of a request; a request still in the queue (`pending`, `claimed`) has none. */
-export function mkvidOutcome(r: { status: string; error?: string | null }): MkvidOutcome | null {
+export function mkvidOutcome(r: MkvidOutcomeInput, since?: number | null): MkvidOutcome | null {
   switch (r.status) {
     case 'done': return 'done'
     case 'banned': return 'banned'
-    case 'failed': return mkvidFailureKind(r.error)
+    case 'failed': {
+      const kind = mkvidFailureKind(r.error)
+      return kind === 'recording_removed' && unconfirmed(r.updatedAt, since) ? 'removed_unconfirmed' : kind
+    }
     case 'superseded': {
       const e = fold(r.error ?? '')
       if (DUPLICATE_PREFIXES.some((p) => e.startsWith(p))) return 'duplicate'
@@ -115,23 +132,49 @@ function removedSql(error: string): string {
   return `(NOT ${starts(e, SHORT_PREFIX)} AND ${any(SOURCE_STAGES.map((p) => starts(e, p)))} AND ${any(GONE_MARKS.map((m) => has(e, m)))} AND NOT ${any(NOT_GONE_MARKS.map((m) => has(e, m)))})`
 }
 
-/** SQL condition over an error column: the failure is one of the two no-recording kinds. */
-export function mkvidNoRecordingSql(error: string): string {
-  return `(${shortSql(error)} OR ${removedSql(error)})`
+/**
+ * The open burst as the SQL below takes it: its start (null or absent = none)
+ * and the column holding when the request failed. The start is written into
+ * the SQL as a whole number, the way readinessStateSql takes `now`.
+ */
+export type MkvidBurstSql = { since?: number | null; updatedAt?: string }
+const sinceOf = (b?: MkvidBurstSql) => (b?.since != null && Number.isFinite(b.since) ? Math.floor(b.since) : null)
+const inBurstSql = (b: MkvidBurstSql | undefined, since: number) => `${b?.updatedAt ?? 'updated_at'} >= ${since}`
+/** SQL expression for a removal: 'removed_unconfirmed' inside the open burst, else 'recording_removed'. */
+function removedKindSql(b?: MkvidBurstSql): string {
+  const since = sinceOf(b)
+  return since === null ? `'recording_removed'` : `(CASE WHEN ${inBurstSql(b, since)} THEN 'removed_unconfirmed' ELSE 'recording_removed' END)`
 }
 
-/** SQL expression: `failed` split into its kinds, any other status as it is stored (mkvidFailureKind). */
-export function mkvidFailureKindSql(status: string, error: string): string {
-  return `(CASE WHEN ${status} != 'failed' THEN ${status} WHEN ${shortSql(error)} THEN 'recording_short' WHEN ${removedSql(error)} THEN 'recording_removed' ELSE 'failed' END)`
+/** SQL condition over an error column: mkvidFailureKind(error) is 'recording_removed' (confirmed or not). */
+export function mkvidRemovedSql(error: string): string {
+  return removedSql(error)
+}
+
+/** SQL condition: a failed request's removal is part of the open burst (`removed_unconfirmed`). Never true without one. */
+export function mkvidUnconfirmedSql(error: string, b?: MkvidBurstSql): string {
+  const since = sinceOf(b)
+  return since === null ? '(0 = 1)' : `(${removedSql(error)} AND ${inBurstSql(b, since)})`
+}
+
+/** SQL condition: the failure is one of the two no-recording kinds, and not an unconfirmed removal. */
+export function mkvidNoRecordingSql(error: string, b?: MkvidBurstSql): string {
+  const either = `(${shortSql(error)} OR ${removedSql(error)})`
+  return sinceOf(b) === null ? either : `(${either} AND NOT ${mkvidUnconfirmedSql(error, b)})`
+}
+
+/** SQL expression: `failed` split into its kinds, any other status as it is stored. */
+export function mkvidFailureKindSql(status: string, error: string, b?: MkvidBurstSql): string {
+  return `(CASE WHEN ${status} != 'failed' THEN ${status} WHEN ${shortSql(error)} THEN 'recording_short' WHEN ${removedSql(error)} THEN ${removedKindSql(b)} ELSE 'failed' END)`
 }
 
 /** SQL expression: mkvidOutcome, NULL for a request still in the queue. */
-export function mkvidOutcomeSql(status: string, error: string): string {
+export function mkvidOutcomeSql(status: string, error: string, b?: MkvidBurstSql): string {
   const e = folded(error)
   return `(CASE ${status}
     WHEN 'done' THEN 'done'
     WHEN 'banned' THEN 'banned'
-    WHEN 'failed' THEN (CASE WHEN ${shortSql(error)} THEN 'recording_short' WHEN ${removedSql(error)} THEN 'recording_removed' ELSE 'failed' END)
+    WHEN 'failed' THEN (CASE WHEN ${shortSql(error)} THEN 'recording_short' WHEN ${removedSql(error)} THEN ${removedKindSql(b)} ELSE 'failed' END)
     WHEN 'superseded' THEN (CASE WHEN ${any(DUPLICATE_PREFIXES.map((p) => starts(e, p)))} THEN 'duplicate'
       WHEN ${starts(e, HAS_RECORDING_PREFIX)} OR (${starts(e, RESOLVES_PREFIX)} AND ${has(e, RESOLVES_1001TL)}) THEN 'has_recording'
       ELSE 'superseded' END)
@@ -162,12 +205,12 @@ function goneWhy(error: string): string | null {
 }
 
 /**
- * One short plain line for a no-recording outcome, with the specifics the
- * stored error carries (the two durations; what the source answered). Null for
- * every other outcome.
+ * One short plain line for a no-recording outcome or an unconfirmed removal,
+ * with the specifics the stored error carries (the two durations; what the
+ * source answered). Null for every other outcome.
  */
-export function mkvidOutcomeLine(r: { status: string; error?: string | null; source?: string | null }): string | null {
-  const outcome = mkvidOutcome(r)
+export function mkvidOutcomeLine(r: MkvidOutcomeInput & { source?: string | null }, since?: number | null): string | null {
+  const outcome = mkvidOutcome(r, since)
   const error = r.error ?? ''
   if (outcome === 'recording_short') {
     const m = /source is (\d+(?:\.\d+)?)s\b.*?last cue is at (\d+(?:\.\d+)?)s\b/.exec(error)
@@ -178,14 +221,22 @@ export function mkvidOutcomeLine(r: { status: string; error?: string | null; sou
     const why = goneWhy(error)
     return `The recording is gone from ${where}${why ? ` (${why})` : ''}.`
   }
+  if (outcome === 'removed_unconfirmed') {
+    const where = SOURCE_NAMES[r.source ?? ''] ?? 'its source'
+    const why = goneWhy(error)
+    return `The recording looks gone from ${where}${why ? ` (${why})` : ''}, but so did several others within a day.`
+  }
   return null
 }
 
 /** mkvidOutcomeLine plus what it means for the owner: the tooltip and the details text. */
-export function mkvidOutcomeDetail(r: { status: string; error?: string | null; source?: string | null }): string | null {
-  const line = mkvidOutcomeLine(r)
+export function mkvidOutcomeDetail(r: MkvidOutcomeInput & { source?: string | null }, since?: number | null): string | null {
+  const line = mkvidOutcomeLine(r, since)
   if (!line) return null
-  const outcome = mkvidOutcome(r)
+  const outcome = mkvidOutcome(r, since)
+  if (outcome === 'removed_unconfirmed') {
+    return `${line} That many at once may mean the source or the downloader is broken, not that they were deleted. Nothing changes this request by itself until you choose on the mkvid page: Try them again, or They are really gone.`
+  }
   return outcome === 'recording_short'
     ? `${line} It is a part of the set, not the whole set, so no video is made. Nothing to do: Retry fails the same way. If the tracklist page later links a different recording, the set is queued again by itself.`
     : `${line} No video can be made without it. Nothing to do: Retry only helps if the recording comes back. If the tracklist page later links a different recording, the set is queued again by itself.`

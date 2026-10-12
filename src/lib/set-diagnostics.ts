@@ -10,6 +10,7 @@ import { readCachedVideoMeta } from './video-meta'
 import { isOverridden } from './playlist-blocklist'
 import { getMkvidRequestForSet, mkvidQueuePosition } from './mkvid'
 import { mkvidOutcome, mkvidOutcomeDetail, mkvidOutcomeLine, type MkvidOutcome } from './mkvid-outcome'
+import { removedBurstSince } from './mkvid-removed-burst'
 import { readinessFor, type MkvidReadiness } from './mkvid-readiness'
 import { supersededReason } from './activity'
 import { describeYouTubeError, type YouTubeErrorView } from './youtube-error'
@@ -55,7 +56,7 @@ export type SetDiagnostics = {
     attempts: number
     notBefore: number | null
     error: string | null
-    /** Where a finished request ended (lib/mkvid-outcome.ts): a `failed` one may be a no-recording kind, which is not a problem. */
+    /** Where a finished request ended (lib/mkvid-outcome.ts): a `failed` one may be a no-recording kind, which is not a problem, or `removed_unconfirmed`, which is one. */
     outcome: MkvidOutcome | null
     /** A no-recording outcome in plain words: one line, and the line plus what it means. Else null. */
     outcomeLine: string | null
@@ -128,6 +129,8 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
   ])
 
   const facts = factsMap.get(url) ?? null
+  // A removal in the open burst reads `removed_unconfirmed` (lib/mkvid-removed-burst.ts); only a failed request can be one.
+  const burstSince = req?.status === 'failed' ? await removedBurstSince(env) : null
   const [position, readiness, listRow] = req
     ? await Promise.all([
         req.status === 'pending' ? mkvidQueuePosition(env, req.id) : Promise.resolve(null),
@@ -273,9 +276,9 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
           attempts: req.attempts,
           notBefore: req.notBefore,
           error: req.error,
-          outcome: mkvidOutcome(req),
-          outcomeLine: mkvidOutcomeLine(req),
-          outcomeDetail: mkvidOutcomeDetail(req),
+          outcome: mkvidOutcome(req, burstSince),
+          outcomeLine: mkvidOutcomeLine(req, burstSince),
+          outcomeDetail: mkvidOutcomeDetail(req, burstSince),
           supersededReason: req.status === 'superseded' ? supersededReason(req.error) : null,
           videoId: req.videoId,
           style: req.style,

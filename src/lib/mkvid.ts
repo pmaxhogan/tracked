@@ -50,6 +50,7 @@ import { isOldStyle, queueBannedUploadForDelete, queueSupersededOldVideo, RECREA
 import { decodeEntities } from './html-entities'
 import { DEFAULT_APP_SETTINGS, getAppSettings, type AppSettings } from './app-settings'
 import { MKVID_OUTCOMES, mkvidNoRecordingSql, mkvidOutcome, mkvidOutcomeDetail, mkvidOutcomeLine, mkvidOutcomeSql, type MkvidOutcome } from './mkvid-outcome'
+import { removedBurstSince } from './mkvid-removed-burst'
 
 export type MkvidSourceKind = 'soundcloud' | 'hearthis'
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ['soundcloud', 'hearthis']
@@ -603,11 +604,19 @@ export async function enqueueMkvidRequest(env: Env, input: EnqueueInput): Promis
   // is gone from its source (lib/mkvid-outcome.ts), gets another go when the
   // page now offers a different recording (a second, full player — see
   // extractSetAudioSource — or a new upload). The panel's Retry keeps the old source.
+  const parked = await dbOf(env)
+    .prepare(`SELECT id FROM mkvid_requests WHERE set_url = ? AND status = 'failed' AND ${mkvidNoRecordingSql('error')} AND source_url IS NOT ? LIMIT 1`)
+    .bind(input.setUrl, input.source.url)
+    .first<{ id: string }>()
+  if (!parked) return 'exists'
+  // Not while its removal is unconfirmed (lib/mkvid-removed-burst.ts): that
+  // request stays as it is until the owner has ruled on the burst.
+  const since = await removedBurstSince(env)
   const re = await dbOf(env)
     .prepare(
       `UPDATE mkvid_requests SET source = ?, source_url = ?, last_cue_seconds = ?, status = 'pending', attempts = 0, not_before = NULL,
               claimed_at = NULL, error = NULL, updated_at = ?
-       WHERE set_url = ? AND status = 'failed' AND ${mkvidNoRecordingSql('error')} AND source_url IS NOT ?`,
+       WHERE set_url = ? AND status = 'failed' AND ${mkvidNoRecordingSql('error', { since })} AND source_url IS NOT ?`,
     )
     .bind(input.source.kind, input.source.url, v(input.lastCueSeconds), now, input.setUrl, input.source.url)
     .run()
@@ -947,10 +956,13 @@ export async function countMkvidRequests(env: Env): Promise<Record<MkvidStatus, 
 /** The statuses of a request that has left the queue. */
 export const MKVID_FINISHED_SQL = "status IN ('done', 'failed', 'superseded', 'banned')"
 
-/** The finished requests by outcome (lib/mkvid-outcome.ts): `failed` here is real failures only. */
-export async function countMkvidOutcomes(env: Env): Promise<Record<MkvidOutcome, number>> {
+/**
+ * The finished requests by outcome (lib/mkvid-outcome.ts): `failed` here is real failures only.
+ * `since` is the open removed-recordings burst's start (lib/mkvid-removed-burst.ts), null when none is open.
+ */
+export async function countMkvidOutcomes(env: Env, since: number | null = null): Promise<Record<MkvidOutcome, number>> {
   const res = await dbOf(env)
-    .prepare(`SELECT ${mkvidOutcomeSql('status', 'error')} AS k, COUNT(*) AS n FROM mkvid_requests WHERE ${MKVID_FINISHED_SQL} GROUP BY k`)
+    .prepare(`SELECT ${mkvidOutcomeSql('status', 'error', { since })} AS k, COUNT(*) AS n FROM mkvid_requests WHERE ${MKVID_FINISHED_SQL} GROUP BY k`)
     .all<{ k: string | null; n: number }>()
   const out = Object.fromEntries(MKVID_OUTCOMES.map((k) => [k, 0])) as Record<MkvidOutcome, number>
   for (const r of res.results) if (r.k !== null && r.k in out) out[r.k as MkvidOutcome] = Number(r.n)
@@ -1367,6 +1379,8 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
   const req = await getMkvidRequest(env, input.id)
   if (!req) return null
   if (req.status === 'done' || req.status === 'superseded') return { status: req.status, attempts: req.attempts }
+  // A removal the owner has not confirmed yet is frozen (lib/mkvid-removed-burst.ts): a repeated report changes nothing.
+  if (req.status === 'failed' && mkvidOutcome(req, await removedBurstSince(env)) === 'removed_unconfirmed') return { status: req.status, attempts: req.attempts }
   // A late report for a job the request has moved on from (its video was
   // unpublished, which leaves job_id = 'unpublished'): nothing to refund or
   // count. A NULL job_id (mkvid had not said its job yet) is not "moved on".
@@ -1457,8 +1471,11 @@ function artistLabel(artistName: string | null, slug: string): string {
   return (artistName ?? slug).replace(/^Tracklists By\s+/i, '')
 }
 
-/** Read the JSON `summary`-like fields the panel needs without the full row noise. */
-export function requestSummary(r: MkvidRequest): Record<string, unknown> {
+/**
+ * Read the JSON `summary`-like fields the panel needs without the full row noise.
+ * `since` is the open removed-recordings burst's start (lib/mkvid-removed-burst.ts), null or absent when none is open.
+ */
+export function requestSummary(r: MkvidRequest, since?: number | null): Record<string, unknown> {
   return {
     ...r,
     sourceLabel: r.source === 'soundcloud' ? 'SoundCloud' : 'hearthis.at',
@@ -1467,10 +1484,10 @@ export function requestSummary(r: MkvidRequest): Record<string, unknown> {
     /** A video made with a style other than the current one (unknown counts): "Recreate all old-style videos" takes it. */
     oldStyle: !!r.videoId && isOldStyle(r.style),
     /** Where a finished request ended (lib/mkvid-outcome.ts); null while it is queued or rendering. */
-    outcome: mkvidOutcome(r),
-    /** A no-recording outcome in plain words, with what the stored error says: one line, and the line plus what it means. Else null. */
-    outcomeLine: mkvidOutcomeLine(r),
-    outcomeDetail: mkvidOutcomeDetail(r),
+    outcome: mkvidOutcome(r, since),
+    /** A no-recording outcome (or an unconfirmed removal) in plain words, with what the stored error says: one line, and the line plus what it means. Else null. */
+    outcomeLine: mkvidOutcomeLine(r, since),
+    outcomeDetail: mkvidOutcomeDetail(r, since),
   }
 }
 

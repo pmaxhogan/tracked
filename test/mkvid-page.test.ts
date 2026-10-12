@@ -189,7 +189,7 @@ describe('mkvid page tables', () => {
     expect(gets(calls)).toContain('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.dj=eq:some-dj')
     get('mk-settled').on.click(ctlClick({ 'data-tkt': 'chip', 'data-chip': 'problems' }))
     await settle()
-    expect(gets(calls).at(-1)).toBe('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.status=in:failed|banned&f.dj=eq:some-dj')
+    expect(gets(calls).at(-1)).toBe('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.status=in:failed|removed_unconfirmed|banned&f.dj=eq:some-dj')
 
     const old = page((url) => answers(url), '?status=failed,banned&tab=settled&source=hearthis&q=palmer')
     await settle()
@@ -249,6 +249,73 @@ describe('mkvid page tables', () => {
     expect(body).toContain('>recording removed</span> ' + line.replace(/"/g, '&quot;'))
     expect(body).toContain('<dt>mkvid said</dt><dd><span class="when">probe: yt-dlp exit 1')
     expect(body).toContain('It only helps if the recording is back.')
+  })
+
+  it('several removals within a day are red, under a banner with the two answers', async () => {
+    const said = 'probe: yt-dlp exit 1: ERROR: [soundcloud] 77: Unable to download JSON metadata: HTTP Error 404: Not Found'
+    const line = 'The recording looks gone from SoundCloud (the link answers "not found"), but so did several others within a day.'
+    const UNSURE = (id: string) => ({ ...DONE, id, setTitle: 'Unsure ' + id, status: 'failed', videoId: null, error: said, outcome: 'removed_unconfirmed', outcomeLine: line, outcomeDetail: line + ' Choose on the mkvid page.' })
+    const counts = { done: 0, failed: 0, removed_unconfirmed: 3, recording_removed: 1, recording_short: 0, has_recording: 0, duplicate: 0, superseded: 0, banned: 0 }
+    let burst: unknown = { since: NOW - 7200, count: 3, sources: { soundcloud: 3 }, threshold: 3 }
+    const { get, calls } = page((url, init) => {
+      if (init?.method === 'POST') { burst = null; return Response.json({ ok: true }) }
+      if (url.startsWith('/ui/api/mkvid/finished?')) return Response.json({ ...tableOf([UNSURE('u1'), UNSURE('u2'), UNSURE('u3')]), counts })
+      if (url === '/ui/api/mkvid') return Response.json(header({ counts: { pending: 2, claimed: 1, done: 1, failed: 4, superseded: 0, banned: 0 }, outcomes: counts, removedBurst: burst }))
+      return answers(url)
+    })
+    await settle()
+    const banner = get('mk-burst')
+    expect(banner.hidden).toBe(false)
+    expect(banner.innerHTML).toContain('<strong>3 recordings are marked removed, unconfirmed.</strong>')
+    expect(banner.innerHTML).toContain('3 or more came back "not found" within a day (the first 2h ago).')
+    expect(banner.innerHTML).toContain('may mean SoundCloud or the downloader is broken, not that they were deleted')
+    expect(banner.innerHTML).toMatch(/data-burst="retry"[^>]*>Try them again</)
+    expect(banner.innerHTML).toMatch(/data-burst="confirm"[^>]*>They are really gone</)
+    // Red rows, red badges, the plain line in red; counted in the header and in the Problems chip.
+    const fin = get('fin-body').innerHTML as string
+    expect(fin.match(/class="badge bad"/g)).toHaveLength(3)
+    expect(fin.match(/mk-failed/g)).toHaveLength(3)
+    expect(fin).toContain('>removed, unconfirmed</span>')
+    expect(fin).toContain('>' + line.replace(/"/g, '&quot;') + '</span>')
+    expect(get('mk-tiles').innerHTML).toContain('<div class="s">3 unconfirmed</div>')
+    expect(get('mk-summary').innerHTML).toMatch(/<span class="warn"[^>]*>3 removed, unconfirmed<\/span>/)
+    expect(get('mk-summary').innerHTML).toContain('>1 without a usable recording</span>')
+    const chips = get('fin-chips').innerHTML as string
+    expect(chips).toMatch(/data-chip="problems"[^>]*>Problems<span class="tkt-count">3</)
+    expect(chips).toMatch(/data-chip="unconfirmed"[^>]*>Removed, unconfirmed<span class="tkt-count">3</)
+    expect(chips).toMatch(/data-chip="removed"[^>]*>Recording removed<span class="tkt-count">1</)
+
+    const press = (what: string) => {
+      const btn = { getAttribute: (k: string) => (k === 'data-burst' ? what : null), textContent: 'x', disabled: false }
+      return { target: { closest: (sel: string) => (sel === 'button[data-burst]' ? btn : null) } }
+    }
+    // "Show them" filters the Finished tab; it changes nothing.
+    await banner.on.click(press('show'))
+    await settle()
+    expect(gets(calls).at(-1)).toBe('/ui/api/mkvid/finished?page=1&size=25&sort=-updatedAt&f.status=in:removed_unconfirmed')
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0)
+    // "They are really gone" posts the answer and reloads: the banner is gone.
+    await banner.on.click(press('confirm'))
+    await settle()
+    expect(calls.filter((c) => c.method === 'POST').map((c) => c.url)).toEqual(['/ui/api/mkvid/removed-burst/confirm'])
+    expect(banner.hidden).toBe(true)
+    expect(banner.innerHTML).toBe('')
+
+    // "Try them again" posts the other answer. A page without a burst shows no banner.
+    burst = { since: NOW - 7200, count: 1, sources: { soundcloud: 1, hearthis: 0 }, threshold: 3 }
+    const again = page((url, init) => {
+      if (init?.method === 'POST') return Response.json({ ok: true })
+      if (url === '/ui/api/mkvid') return Response.json(header({ removedBurst: burst }))
+      return answers(url)
+    })
+    await settle()
+    expect(again.get('mk-burst').innerHTML).toContain('<strong>1 recording is marked removed, unconfirmed.</strong>')
+    await again.get('mk-burst').on.click(press('retry'))
+    await settle()
+    expect(again.calls.filter((c) => c.method === 'POST').map((c) => c.url)).toEqual(['/ui/api/mkvid/removed-burst/retry'])
+    const none = page((url) => answers(url))
+    await settle()
+    expect(none.get('mk-burst').hidden).toBe(true)
   })
 
   it('the queue has a Status column and a chip per waiting state, filtered on the server', async () => {

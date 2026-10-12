@@ -228,6 +228,9 @@ ${ACTIVITY_DRAWER_JS}
       // Real failures only: a set whose recording was removed or is too short is nothing to act on.
       const failed = d.outcomes ? d.outcomes.failed || 0 : c.failed || 0;
       if (failed) items.push(item('/ui/mkvid?status=failed&tab=settled', 'bad', failed + ' mkvid request' + (failed === 1 ? '' : 's') + ' failed', 'Retry or ban them on the mkvid page', 'mkvid'));
+      // Several recordings "removed" within a day (lib/mkvid-removed-burst.ts): red until the owner rules on them.
+      const burst = d.removedBurst;
+      if (burst && burst.count) items.push(item('/ui/mkvid?status=removed_unconfirmed&tab=settled', 'bad', burst.count + ' recording' + (burst.count === 1 ? '' : 's') + ' came back "not found" within a day of each other', 'The source or the downloader may be broken. Try them again or confirm they are gone on the mkvid page', 'mkvid'));
       const olds = d.oldVideos || [];
       if (olds.length) items.push(item('/ui/mkvid?tab=old', 'warn', olds.length + ' old video' + (olds.length === 1 ? ' is' : 's are') + ' not deleted from YouTube yet', 'A recreation replaced ' + (olds.length === 1 ? 'it' : 'them'), 'Old videos'));
       if (st[0] === 'bad') items.push(item('/ui/mkvid', 'bad', 'mkvid: ' + st[1], st[2], 'mkvid'));

@@ -29,6 +29,7 @@ import { REASON_LABELS } from './playlist-hygiene'
 import { errorOneLine, QUOTA_LIKE, RATE_LIMIT_LIKE } from './youtube-error'
 import { buildTableSql, parseTableQuery, type TableDef, type TableQuery, type TableResult, type TableParams } from './table-query'
 import { mkvidFailureKindSql, mkvidNoRecordingSql, mkvidOutcomeLine } from './mkvid-outcome'
+import { removedBurstSince } from './mkvid-removed-burst'
 
 export const ACTIVITY_KINDS = ['request', 'playlist', 'hygiene', 'mkvid', 'pool', 'sync', 'ban'] as const
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number]
@@ -115,7 +116,9 @@ const REMOVAL_QUOTA = `(${likeAny(REMOVAL_DETAIL, QUOTA_LIKE)} OR ${likeAny(REMO
 // banned from the panel) are not. Nor is an mkvid request that ended because
 // the set has no usable recording (lib/mkvid-outcome.ts): its status reads
 // `recording_removed` or `recording_short` instead of `failed`, derived here.
-const ARMS: string[] = [
+// A removal in the open burst (`since`, lib/mkvid-removed-burst.ts; null = none)
+// reads `removed_unconfirmed` and is a problem: the owner has to rule on it.
+const arms = (since: number | null): string[] => [
   `SELECT ${pk('audit', 'id')} AS id, ts AS ts, 'audit' AS src, CAST(id AS TEXT) AS key, 'request' AS kind, status AS status,
      (CASE WHEN status IN ('no_video','no_tracklist','upstream_error') OR json_extract(summary, '$.impossible') = 1 THEN 1 ELSE 0 END) AS problem,
      NULL AS dj, NULL AS set_url, NULL AS video_id, summary AS search, summary AS j
@@ -129,8 +132,8 @@ const ARMS: string[] = [
      slug, set_url, video_id, ${cat('source', 'reason', 'detail', 'playlist_kind', 'slug', 'set_url')},
      json_object('source', source, 'reason', reason, 'detail', detail, 'playlist_kind', playlist_kind)
    FROM playlist_removals`,
-  `SELECT 'mkvid:' || id, updated_at * 1000, 'mkvid', id, 'mkvid', ${mkvidFailureKindSql('status', 'error')},
-     (CASE WHEN status = 'failed' AND NOT ${mkvidNoRecordingSql('error')} THEN 1 ELSE 0 END),
+  `SELECT 'mkvid:' || id, updated_at * 1000, 'mkvid', id, 'mkvid', ${mkvidFailureKindSql('status', 'error', { since })},
+     (CASE WHEN status = 'failed' AND NOT ${mkvidNoRecordingSql('error', { since })} THEN 1 ELSE 0 END),
      slug, set_url, video_id, ${cat('set_title', 'slug', 'set_url', 'error')},
      json_object('set_title', set_title, 'error', error, 'source', source)
    FROM mkvid_requests WHERE status IN ('done','failed','banned','superseded')`,
@@ -166,14 +169,19 @@ const ARMS: string[] = [
  * UNION ALL. Filters still push down into every arm.
  */
 export const COMPOUND_MAX = 4
-const groups: string[][] = []
-for (let i = 0; i < ARMS.length; i += COMPOUND_MAX) groups.push(ARMS.slice(i, i + COMPOUND_MAX))
-export const UNION_FROM = `(${groups.map((g) => `SELECT * FROM (${g.join('\nUNION ALL\n')})`).join('\nUNION ALL\n')}) AS a`
+function unionFrom(since: number | null): string {
+  const all = arms(since)
+  const groups: string[][] = []
+  for (let i = 0; i < all.length; i += COMPOUND_MAX) groups.push(all.slice(i, i + COMPOUND_MAX))
+  return `(${groups.map((g) => `SELECT * FROM (${g.join('\nUNION ALL\n')})`).join('\nUNION ALL\n')}) AS a`
+}
+export const UNION_FROM = unionFrom(null)
 
 type RawRow = { id: string; ts: number; src: ActivitySource; key: string; kind: ActivityKind; status: string; problem: number; dj: string | null; set_url: string | null; video_id: string | null; j: string | null }
 
-export const ACTIVITY_TABLE: TableDef<RawRow, ActivityRow> = {
-  from: UNION_FROM,
+/** The merged log's table. `since` is the open removed-recordings burst's start, null when none is open. */
+export const activityTable = (since: number | null): TableDef<RawRow, ActivityRow> => ({
+  from: since === null ? UNION_FROM : unionFrom(since),
   select: 'id, ts, src, key, kind, status, problem, dj, set_url, video_id, j',
   primaryKey: 'id',
   defaultSort: '-ts',
@@ -191,7 +199,9 @@ export const ACTIVITY_TABLE: TableDef<RawRow, ActivityRow> = {
     search: { type: 'text', searchable: true, sortable: false, filterable: false },
   },
   mapRow: toActivityRow,
-}
+})
+/** The table with no burst open: its columns, for parsing a query. */
+export const ACTIVITY_TABLE = activityTable(null)
 
 /** Parses the table query (throws TableQueryError on a bad one). */
 export function parseActivityQuery(params: TableParams): TableQuery {
@@ -237,6 +247,8 @@ function mkvidDetail(r: { status: string; video_id: string | null; error: string
     case 'failed': return errorLine(r.error)
     case 'recording_removed':
     case 'recording_short': return mkvidOutcomeLine({ status: 'failed', error: r.error, source: r.source })
+    // The row's status already says it is in the open burst: any `since` at or before its failure reads the same.
+    case 'removed_unconfirmed': return mkvidOutcomeLine({ status: 'failed', error: r.error, source: r.source, updatedAt: 0 }, 0)
     case 'banned': return 'banned from mkvid'
     case 'superseded': return supersededReason(r.error)
     default: return null
@@ -374,7 +386,7 @@ async function banRows(env: Env, q: TableQuery): Promise<BanJson[]> {
 /** One page of the merged log: a COUNT over the union and one sorted, paged SELECT. */
 export async function listActivity(env: Env, q: TableQuery): Promise<TableResult<ActivityRow>> {
   const bans = JSON.stringify(await banRows(env, q))
-  const b = buildTableSql(ACTIVITY_TABLE, q)
+  const b = buildTableSql(activityTable(await removedBurstSince(env)), q)
   const db = dbOf(env)
   const count = await db.prepare(b.countSql).bind(bans, ...b.binds).first<{ n: number }>()
   const total = Number(count?.n ?? 0)
