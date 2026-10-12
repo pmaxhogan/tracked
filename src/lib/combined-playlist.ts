@@ -46,6 +46,7 @@ import {
   removeVideoFromPlaylist,
 } from './youtube-playlists'
 import { errorFields, type Logger } from './log'
+import { noteQuotaOut } from './youtube-quota'
 import { combinedSkipIds } from './playlist-blocklist'
 import { getAppSettings } from './app-settings'
 
@@ -398,6 +399,7 @@ export async function mergeIntoCombinedPlaylist(
       failed += 1
       log.warn('combined.backfill.insert_failed', { videoId: m.videoId, fromSlug: m.slug, ...errorFields(e) })
       if (isQuotaError(e)) {
+        await noteQuotaOut(env, e, log)
         // Out of quota — every further insert this run fails the same way,
         // and each attempt would be pure log noise. Stop here.
         cappedBy = 'quota'

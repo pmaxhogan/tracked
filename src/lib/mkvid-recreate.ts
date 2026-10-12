@@ -31,6 +31,7 @@ import type { Env } from '../types'
 import { dbOf } from './db'
 import { pullInHeldRecheck, TIMED_SQL } from './mkvid-readiness'
 import { errorFields, type Logger } from './log'
+import { noteQuotaOut } from './youtube-quota'
 import { loadCombinedState, openCombinedPlaylist, removeFromCombined, type CombinedHandle } from './combined-playlist'
 import { cachePlaylistVideoIds, invalidatePlaylistVideoIds } from './playlist-cache'
 import { isQuotaError, listPlaylistVideoIds, removeListedVideosFromPlaylist, removeVideoFromPlaylist } from './youtube-playlists'
@@ -671,6 +672,7 @@ export async function checkDeletedMkvidVideos(
         failedPlaylists.add(pl)
         log.warn('mkvid.gone_playlist_clean_failed', { playlistId: pl, ...errorFields(e) })
         if (isQuotaError(e)) {
+          await noteQuotaOut(env, e, log)
           out.stoppedBy = 'quota'
           break
         }
@@ -689,6 +691,7 @@ export async function checkDeletedMkvidVideos(
       } catch (e) {
         log.warn('mkvid.gone_video_remake_failed', { id: r.id, videoId: r.video_id, ...errorFields(e) })
         if (isQuotaError(e)) {
+          await noteQuotaOut(env, e, log)
           out.stoppedBy = 'quota'
           break
         }

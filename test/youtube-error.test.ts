@@ -62,6 +62,23 @@ describe('youtube error reasons', () => {
     expect(describeYouTubeError('youtube playlistItems.insert: playlist not found (PL1)')).toBeNull()
   })
 
+  it('only a 403 is a quota reply; a 429 (charged as an ordinary failure) and an abandoned row are not a wait', () => {
+    const t = new YouTubeApiError('playlistItems.insert', 429, 'rateLimitExceeded', '{}').message
+    expect(describeYouTubeError(t)).toMatchObject({ kind: 'other', wait: false })
+    const q = new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', QUOTA_BODY).message
+    expect(describeYouTubeError(q, 'failed')).toMatchObject({ kind: 'quota', wait: true, label: 'quota exceeded' })
+    const given = describeYouTubeError(q, 'abandoned')!
+    expect(given).toMatchObject({ kind: 'quota', wait: false, label: null, explanation: null })
+    expect(given.headline).toMatch(/^Given up after repeated failures; YouTube's daily quota was used up/)
+    expect(given.headline).not.toMatch(/will try again/)
+  })
+
+  it('the "have exceeded your" wording stands for the reason only in the legacy clipped body, not in any text', () => {
+    expect(parseYouTubeErrorText('youtube playlistItems.insert 403: you have exceeded your patience')!.reason).toBeNull()
+    expect(parseYouTubeErrorText('youtube playlistItems.insert 404: { "error": { "message": "you have exceeded your <a')!.reason).toBeNull()
+    expect(parseYouTubeErrorText(LEGACY_CLIPPED)!.reason).toBe('quotaExceeded')
+  })
+
   it('a 403 that is not quota stays "other", also when the body is cut', () => {
     const t = 'youtube playlistItems.insert 403: { "error": { "code": 403, "message": "The caller does not have permission", "errors": [ { "reason": "forbidden"'
     expect(describeYouTubeError(t)).toMatchObject({ kind: 'other', headline: 'playlistItems.insert 403 forbidden: The caller does not have permission' })

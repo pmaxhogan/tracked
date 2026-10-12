@@ -17,6 +17,7 @@ import { MkvidClaimBody, MkvidClaimResponse } from './schemas'
 import { bearerAuth } from './middleware/auth'
 import type { Env } from './types'
 import { backfillCombined } from './lib/sync'
+import { getQuotaOut } from './lib/youtube-quota'
 import { runSchedulerTick } from './lib/fetch-scheduler'
 import { poolEventsApp } from './routes/pool-api'
 import { runKvMigrationTickSafely } from './lib/kv-import'
@@ -244,7 +245,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
       // Separate try/catch: a failed tick shouldn't stop the combined
       // playlist from catching up on everything that *did* land.
       try {
-        log.info('cron.combined_backfill', await backfillCombined(env, { log, trigger }))
+        log.info('cron.combined_backfill', (await getQuotaOut(env)) ? { skipped: 'youtube_quota_out' } : await backfillCombined(env, { log, trigger }))
       } catch (e) {
         log.error('cron.combined_backfill_threw', errorFields(e))
       }

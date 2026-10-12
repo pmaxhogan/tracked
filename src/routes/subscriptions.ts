@@ -752,7 +752,7 @@ subscriptionsApp.get('/api/playlist-addition-detail', async (c) => {
   const record = await getPlaylistAddition(c.env, key)
   if (!record) return c.json({ error: 'not_found' }, 404)
   // `youtubeError`: the stored error read as a YouTube API reply (quota exceeded, ...), also for rows written before it was structured.
-  const youtubeError = describeYouTubeError(typeof record.message === 'string' ? record.message : null)
+  const youtubeError = describeYouTubeError(typeof record.message === 'string' ? record.message : null, typeof record.status === 'string' ? record.status : null)
   return c.json({ record: youtubeError ? { ...record, youtubeError } : record })
 })
 

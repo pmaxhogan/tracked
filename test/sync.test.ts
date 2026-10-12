@@ -28,6 +28,7 @@ import {
   type SubState,
 } from '../src/lib/sync'
 import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
+import { getQuotaOut } from '../src/lib/youtube-quota'
 import { makeLogger } from '../src/lib/log'
 import { PoolPausedError, PoolUnavailableError } from '../src/lib/pool'
 import { POOL_SETTINGS_KEY } from '../src/lib/pool-settings'
@@ -1038,7 +1039,12 @@ describe('syncOne', () => {
     const state = (await loadSubState(env, sub.slug))!
     expect(state.failureCounts).toEqual({})
     expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('phoneVid123')
-    expect(await playlistAdditions(env)).toEqual([])
+    // One failed row, uncharged (no failure count), like a new set's: Activity shows it as the quota wait.
+    const rows = await playlistAdditions(env)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.record).toMatchObject({ status: 'failed', failureCount: null })
+    expect(rows[0]!.record.message).toMatch(/^recheck: youtube playlistItems\.insert 403 quotaExceeded/)
+    expect(await getQuotaOut(env)).not.toBeNull()
     // The row still names the old video, which the sync itself took out: the comparison must not read it as the owner's removal.
     expect((await confirmedMembership(env, 'PLartist')).get('phoneVid123')).toBe('out')
   })

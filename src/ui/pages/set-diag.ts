@@ -99,10 +99,11 @@ export const SET_DIAG_JS = /* js */ `
     let tone, finding;
     if (!last) { tone = 'info'; finding = 'No playlist addition recorded (kept 90 days).'; }
     else if (['added', 'replaced', 'duplicate'].indexOf(last.status) >= 0) { tone = 'ok'; finding = last.status + ' ' + TK.fmt.rel(diagIso(last.ts)) + '.'; }
-    else if (last.status === 'failed' || last.status === 'abandoned') { tone = 'bad'; finding = last.status + ': ' + (last.message || 'no message') + '.'; }
+    else if (last.youtube && last.youtube.wait) { tone = 'warn'; finding = last.youtube.label + ': ' + last.youtube.explanation; }
+    else if (last.status === 'failed' || last.status === 'abandoned') { tone = 'bad'; finding = last.status + ': ' + (last.youtube ? last.youtube.headline : last.message || 'no message') + (/[.]$/.test(last.youtube ? last.youtube.headline : '') ? '' : '.'); }
     else if (last.status === 'no_youtube') { tone = 'warn'; finding = 'No YouTube recording when last processed.'; }
     else { tone = 'info'; finding = last.status + ' ' + TK.fmt.rel(diagIso(last.ts)) + '.'; }
-    const facts = adds.map((a) => [a.status, TK.fmt.rel(diagIso(a.ts)) + (a.message ? ': ' + a.message : '')])
+    const facts = adds.map((a) => [a.youtube && a.youtube.wait ? a.youtube.label : a.status, TK.fmt.rel(diagIso(a.ts)) + (a.youtube ? ': ' + a.youtube.headline : a.message ? ': ' + a.message : '')])
       .concat(conf.map((c) => [c.state === 'in' ? 'In playlist' : 'Out of playlist', c.playlistId + ' (' + c.source + ', ' + diagRel(c.at) + ')']));
     return { key: 'playlist', label: 'Playlist', tone, finding, facts };
   }

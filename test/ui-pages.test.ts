@@ -612,7 +612,8 @@ describe('Activity page', () => {
       const ytRaw = '{ "error": { "code": 403, "message": "quota <b>" } }'
       const ytBase = { t: 'now', status: 'failed', setUrl: 'https://www.1001tracklists.com/tracklist/x/some-set.html', slug: 'dj-one', videoId: 'abcdefghijk', playlistId: 'PL1', meta: { ms: 5 } }
       // A quota reply (here with the failure count a pre-fix row has) and another YouTube error.
-      if (u === '/ui/api/playlist-addition-detail?key=13') return Response.json({ record: { ...ytBase, failureCount: 2, message: 'youtube playlistItems.insert 403 quotaExceeded: x\n' + ytRaw, youtubeError: { kind: 'quota', label: 'quota exceeded', headline: 'WAIT', explanation: 'YouTube daily quota is used up <i>', raw: ytRaw } } })
+      if (u === '/ui/api/playlist-addition-detail?key=13') return Response.json({ record: { ...ytBase, failureCount: 2, message: 'youtube playlistItems.insert 403 quotaExceeded: x\n' + ytRaw, youtubeError: { kind: 'quota', wait: true, label: 'quota exceeded', headline: 'WAIT', explanation: 'YouTube daily quota is used up <i>', raw: ytRaw } } })
+      if (u === '/ui/api/playlist-addition-detail?key=15') return Response.json({ record: { ...ytBase, status: 'abandoned', failureCount: 3, message: 'x', youtubeError: { kind: 'quota', label: null, headline: 'Given up after repeated failures; quota <b>', explanation: null, raw: ytRaw, wait: false } } })
       if (u === '/ui/api/playlist-addition-detail?key=14') return Response.json({ record: { ...ytBase, failureCount: 1, message: 'youtube playlistItems.insert 404 videoNotFound: Video not found.\n{}', youtubeError: { kind: 'other', label: null, headline: 'playlistItems.insert 404 videoNotFound: Video not found.', explanation: null, raw: '{}' } } })
       return new Response('{}', { status: 404 })
     }, '/ui/activity')
@@ -669,11 +670,12 @@ describe('Activity page', () => {
   })
   it('shows a quota failure as a warn "quota exceeded" with the explanation, not "failed" and a JSON dump; other YouTube errors as one line with the raw reply folded away', async () => {
     const quotaRow = { id: 'addition:000000000013', ts: Date.now() - 30_000, kind: 'playlist', status: 'quota', problem: false, title: 'Some set', detail: 'YouTube daily quota is used up', dj: 'dj-one', setUrl: null, videoId: 'abcdefghijk', ref: { kind: 'addition', key: '13' } }
+    const abandonedRow = { ...quotaRow, id: 'addition:000000000015', status: 'abandoned', problem: true, detail: 'Given up after repeated failures', ref: { kind: 'addition', key: '15' } }
     const otherRow = { ...quotaRow, id: 'addition:000000000014', status: 'failed', detail: 'playlistItems.insert 404 videoNotFound: Video not found.', ref: { kind: 'addition', key: '14' } }
-    const { fetches, els, handlers } = await run('', () => answer([quotaRow, otherRow]))
+    const { fetches, els, handlers } = await run('', () => answer([quotaRow, otherRow, abandonedRow]))
     const body = els.get('a-body').innerHTML as string
     expect(body).toMatch(/<span class="badge warn"[^>]*>quota exceeded<\/span>/)
-    expect(body).not.toContain('data-problem="1"')
+    expect(body.split('data-problem="1"').length - 1).toBe(1) // only the abandoned row
     expect(body).toContain('YouTube daily quota is used up')
     handlers['a-table']!(tableClick({ row: 0 }))
     await tick()
@@ -690,6 +692,13 @@ describe('Activity page', () => {
     expect(o).toContain('failed — <span class="warn">playlistItems.insert 404 videoNotFound: Video not found.</span>')
     expect(o).toContain('<details class="h-raw">')
     expect(o).toContain('failures so far')
+    // An abandoned row that holds a quota reply reads as abandoned (red, with its count), never as a wait.
+    handlers['a-table']!(tableClick({ row: 2 }))
+    await tick()
+    const a = els.get('tk-drawer-body').innerHTML as string
+    expect(a).toContain('abandoned — <span class="warn">Given up after repeated failures; quota &lt;b&gt;</span>')
+    expect(a).not.toContain('badge warn')
+    expect(a).toContain('failures so far')
   })
   it('a row with no detail endpoint opens its own fields without a fetch', async () => {
     const { fetches, els, handlers } = await run('', () => answer([poolRow]))
@@ -793,6 +802,21 @@ describe('Set diagnostics', () => {
     expect(rows.map((r: any) => r.key)).toEqual(['discovered', 'recording', 'verification', 'rule', 'playlist', 'hygiene', 'mkvid'])
     expect(rows.map((r: any) => r.tone)).toEqual(['warn', 'info', 'info', 'neutral', 'info', 'ok', 'neutral'])
     for (const r of rows) { expect(typeof r.label).toBe('string'); expect(typeof r.finding).toBe('string'); expect(Array.isArray(r.facts)).toBe(true) }
+  })
+  it('setDiagRows: a quota reply on a failed addition is an amber wait; other YouTube errors are one line; an abandoned quota row is red and says so', async () => {
+    const ctx = await diagCtx()
+    const pl = (adds: object[]) => ctx.setDiagRows({ ...empty(), playlist: { additions: adds, confirmed: [] } }).find((r: any) => r.key === 'playlist')
+    const q = { kind: 'quota', wait: true, label: 'quota exceeded', headline: 'WAIT.', explanation: 'YouTube daily quota is used up.', raw: '{}' }
+    const wait = pl([{ status: 'failed', ts: 1_790_000_000_000, message: 'youtube raw', youtube: q }])
+    expect(wait.tone).toBe('warn')
+    expect(wait.finding).toBe('quota exceeded: YouTube daily quota is used up.')
+    expect(JSON.stringify(wait.facts)).not.toContain('youtube raw')
+    const other = pl([{ status: 'failed', ts: 1_790_000_000_000, message: 'youtube raw', youtube: { kind: 'other', wait: false, label: null, headline: 'playlistItems.insert 404 videoNotFound: Video not found.', explanation: null, raw: '{}' } }])
+    expect(other.tone).toBe('bad')
+    expect(other.finding).toBe('failed: playlistItems.insert 404 videoNotFound: Video not found.')
+    const given = pl([{ status: 'abandoned', ts: 1_790_000_000_000, message: 'x', youtube: { ...q, wait: false, label: null, headline: 'Given up after repeated failures; quota.' } }])
+    expect(given.tone).toBe('bad')
+    expect(given.finding).toMatch(/^abandoned: Given up after repeated failures/)
   })
   it('setDiagRows: mkvid waiting for IDs, the rule verdict, the override and an owner removal', async () => {
     const ctx = await diagCtx()

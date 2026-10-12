@@ -8,6 +8,9 @@ import { loadDjBackfill, loadSubState, saveDjBackfill, saveSubState } from '../s
 import { noteSetFetch } from '../src/lib/verification'
 import { setPause, _resetTallyForTests } from '../src/lib/ban-state'
 import { PoolPausedError, PoolUnavailableError } from '../src/lib/pool'
+import { clearQuotaOut, getQuotaOut, QUOTA_OUT_KEY } from '../src/lib/youtube-quota'
+import { quotaDayEnd } from '../src/lib/mkvid'
+import { YouTubeApiError } from '../src/lib/youtube-playlists'
 
 // Network edges stubbed; the scheduler, syncOne, D1 and the verification
 // logic run for real.
@@ -25,7 +28,7 @@ vi.mock('../src/lib/video-meta', async () => {
   return { ...actual, getVideoMeta: vi.fn(async () => new Map()) }
 })
 import { crawlDjIndex, djScrollStep, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-index'
-import { findPlaylistByTitle, listPlaylistVideoIds } from '../src/lib/youtube-playlists'
+import { addVideoToPlaylist, findPlaylistByTitle, listPlaylistVideoIds } from '../src/lib/youtube-playlists'
 
 const H = 3600
 const D = 24 * H
@@ -236,6 +239,47 @@ describe('runSchedulerTick', () => {
     expect(state.abandonedTracklistUrls).toEqual([])
     expect(await runSchedulerTick(env, { random: always(0.99), now: NOW + 60 })).toMatchObject({ skipped: 'backoff' })
     expect(fetch1001Html).toHaveBeenCalledTimes(1)
+  })
+
+  it('a daily-quota reply stands the first-time set additions down until midnight Pacific, without costing a set an attempt or stopping the tick; clearing it resumes', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await quietDjs(env, 'a')
+    const urls = [1, 2, 3].map((i) => setUrl(`q${i}`, 1))
+    await saveSubState(env, 'a', { playlistId: 'PL', artistName: 'A', discoveredTracklistUrls: urls, processedTracklistUrls: [] })
+    mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
+    mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'))
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    // The first set got the reply; the other two were not fetched, claimed or failed.
+    expect(r.items.map((i) => i.outcome)).toEqual(['ok', 'skipped', 'skipped'])
+    expect(r.stoppedBy).toBeUndefined()
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+    const flag = await getQuotaOut(env, NOW * 1000)
+    expect(flag!.until).toBe(quotaDayEnd(NOW * 1000))
+    const attempts = (await env.DB.prepare('SELECT url, attempts_today FROM set_schedule').all<{ url: string; attempts_today: number }>()).results
+    expect(attempts.map((a) => [a.url, a.attempts_today])).toEqual([[urls[0], 1]])
+    const state = (await loadSubState(env, 'a'))!
+    expect(state.failureCounts).toEqual({})
+    expect(state.abandonedTracklistUrls).toEqual([])
+    // While it holds, later ticks do not even pick those sets: nothing is fetched.
+    expect(await runSchedulerTick(env, { random: always(0.99), now: NOW + 600 })).toMatchObject({ skipped: 'nothing_due' })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+    // The owner clears it (the quota was raised): the sets are picked again.
+    await clearQuotaOut(env)
+    mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
+    const again = await runSchedulerTick(env, { random: always(0.99), now: NOW + 1200 })
+    expect(again.items.filter((i) => i.outcome === 'ok').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('work that adds no video goes on while quota is out: a discovery item still runs', async () => {
+    const env = makeEnv()
+    await subscribe(env, 'a')
+    await env.DB.prepare('INSERT OR REPLACE INTO dj_schedule (slug, next_discovery_at, next_backfill_at, updated_at) VALUES (?, ?, ?, ?)').bind('a', NOW - 10, NOW + 30 * D, NOW).run()
+    await env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW, until: NOW + H }))
+    mocked(crawlDjIndex).mockResolvedValue({ artistName: 'A', tracklistUrls: [], pagesWalked: 1, stopReason: null, tail: null })
+    const r = await runSchedulerTick(env, { random: always(0.99), now: NOW })
+    expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([['discovery', 'ok']])
   })
 
   it('an item-scoped refusal (no_healthy_account, timeout) moves on to the next item and sets no backoff', async () => {

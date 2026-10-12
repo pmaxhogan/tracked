@@ -37,6 +37,7 @@ import { mkvidAuth } from '../middleware/auth'
 import { MkvidClaimBody } from '../schemas'
 import { getAccessToken, GoogleOAuthRefreshFailed } from '../lib/google-oauth'
 import { makeLogger, errorFields } from '../lib/log'
+import { noteQuotaOut } from '../lib/youtube-quota'
 import { deleteOldVideo, RECREATE_STYLE } from '../lib/mkvid-recreate'
 import { attachMkvidJob, claimMkvidRequest, completeMkvidRequest, countMkvidRequests, failMkvidRequest, mkvidAccountUsage, recordMkvidPoll } from '../lib/mkvid'
 
@@ -141,6 +142,7 @@ mkvidApp.post('/complete', async (c) => {
     }
     return c.json(r)
   } catch (e) {
+    await noteQuotaOut(c.env, e, log)
     log.error('mkvid.complete_threw', { id: b.id, videoId: b.videoId, ...errorFields(e) })
     return c.json({ error: 'complete_failed', ...errorFields(e) }, 502)
   }

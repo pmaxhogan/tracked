@@ -108,13 +108,13 @@ export function parseYouTubeErrorText(text: string | null | undefined): ParsedYo
       }
     }
     reason = reason ?? /"reason"\s*:\s*"(\w+)"/.exec(rest)?.[1] ?? null
+    // The legacy text cut before the reason: Google's quota wording stands for it.
+    if (!reason && status === 403 && /have exceeded your|youtube\.quota/.test(rest)) reason = 'quotaExceeded'
   } else {
     const nl = rest.indexOf('\n')
     message = (nl < 0 ? rest : rest.slice(0, nl)).trim() || null
     raw = nl < 0 ? null : rest.slice(nl + 1).trim() || null
   }
-  // Old text cut before the reason: Google's quota wording stands for it.
-  if (!reason && status === 403 && /have exceeded your|youtube\.quota|quotaExceeded/.test(rest)) reason = 'quotaExceeded'
   return { op, status, reason, message, raw }
 }
 
@@ -129,18 +129,42 @@ export type YouTubeErrorView = {
   explanation: string | null
   /** The raw reply body for a collapsed details element; null when none was kept. */
   raw: string | null
+  /** True for a quota / rate-limit reply on a row that is still tried again (status `failed`): a wait, shown amber. */
+  wait: boolean
 }
 
 const QUOTA_EXPLANATION = "YouTube's daily quota is used up. It resets at midnight Pacific time, and tracked will try again."
 const RATE_LIMIT_EXPLANATION = 'YouTube is limiting requests for the moment. tracked will try again.'
 
-/** How a stored error text is shown; null when it is not a YouTube API error. */
-export function describeYouTubeError(text: string | null | undefined): YouTubeErrorView | null {
+/** The row statuses a quota reply is still a wait for: the item is tried again (an `abandoned` one is not). */
+const WAIT_ROW_STATUSES = ['failed', 'quota', 'rate_limited']
+
+/**
+ * How a stored error text is shown; null when it is not a YouTube API error.
+ * `rowStatus` is the status of the row that holds the text: a quota reply is a
+ * wait only on a row that is still tried again. On an `abandoned` row (given up
+ * before quota replies stopped being charged) it says so instead. Only a 403
+ * is a quota reply, as in `isQuotaError`: a 429 was charged as an ordinary failure.
+ */
+export function describeYouTubeError(text: string | null | undefined, rowStatus?: string | null): YouTubeErrorView | null {
   const p = parseYouTubeErrorText(text)
   if (!p) return null
-  const kind = quotaKind(p.reason)
-  if (kind === 'quota') return { kind, label: 'quota exceeded', headline: QUOTA_EXPLANATION, explanation: QUOTA_EXPLANATION, raw: p.raw }
-  if (kind === 'rate_limit') return { kind, label: 'rate limited', headline: RATE_LIMIT_EXPLANATION, explanation: RATE_LIMIT_EXPLANATION, raw: p.raw }
+  const kind = p.status === 403 ? quotaKind(p.reason) : null
+  const wait = !rowStatus || WAIT_ROW_STATUSES.includes(rowStatus)
+  if (kind && wait) {
+    const e = kind === 'quota' ? QUOTA_EXPLANATION : RATE_LIMIT_EXPLANATION
+    return { kind, label: kind === 'quota' ? 'quota exceeded' : 'rate limited', headline: e, explanation: e, raw: p.raw, wait: true }
+  }
+  if (kind) {
+    const what = kind === 'quota' ? "YouTube's daily quota was used up" : 'YouTube was rate limiting requests'
+    return { kind, label: null, headline: `Given up after repeated failures; ${what} (it was charged to the set). Invalidate & resync on the DJs page gives it another chance.`, explanation: null, raw: p.raw, wait: false }
+  }
   const head = [p.op, String(p.status)].filter(Boolean).join(' ') + (p.reason ? ` ${p.reason}` : '')
-  return { kind: 'other', label: null, headline: p.message ? `${head}: ${p.message}` : head, explanation: null, raw: p.raw }
+  return { kind: 'other', label: null, headline: p.message ? `${head}: ${p.message}` : head, explanation: null, raw: p.raw, wait: false }
+}
+
+/** A stored error as one readable line: a YouTube API error by its headline, anything else as it is. */
+export function errorOneLine(text: string | null | undefined, rowStatus?: string | null): string | null {
+  if (!text) return null
+  return describeYouTubeError(text, rowStatus)?.headline ?? text
 }

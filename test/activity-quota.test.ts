@@ -25,7 +25,7 @@ const WAIT = "YouTube's daily quota is used up. It resets at midnight Pacific ti
 async function failedAddition(env: Env, id: number, tsMs: number, msg: string, status = 'failed') {
   const summary = { t: new Date(tsMs).toISOString(), status, slug: 'adam-beyer', artist: 'Adam Beyer', set: SET, vid: '4Tf2dNjuRLg', via: 'pool', trg: 'manual.one', msg: msg.slice(0, 160), ms: 18609, cmb: null }
   await env.DB.prepare('INSERT INTO playlist_additions (id, t, ts, status, slug, set_url, video_id, summary, record) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .bind(id, summary.t, tsMs, status, 'adam-beyer', SET, '4Tf2dNjuRLg', JSON.stringify(summary), JSON.stringify({ message: msg })).run()
+    .bind(id, summary.t, tsMs, status, 'adam-beyer', SET, '4Tf2dNjuRLg', JSON.stringify(summary), JSON.stringify({ message: msg, status })).run()
 }
 
 describe('YouTube quota replies in the Activity feed', () => {
@@ -65,6 +65,22 @@ describe('YouTube quota replies in the Activity feed', () => {
     const rows = await page(env, '?sort=ts')
     expect(rows.map((r) => [r.ref.key, r.status, r.problem])).toEqual([['4', 'quota', false], ['3', 'failed', true], ['2', 'failed', true], ['1', 'quota', false]])
     expect(rows.find((r) => r.ref.key === '2')!.detail).toContain('playlistItems.delete 500')
+  })
+
+  it('an abandoned row with a quota error is described as given up, not as a wait to be retried', async () => {
+    const env = makeEnv()
+    await failedAddition(env, 1, 3000, NEW_MSG, 'abandoned')
+    await failedAddition(env, 2, 2000, LEGACY_MSG, 'abandoned')
+    const rows = await page(env, '')
+    for (const r of rows) {
+      expect(r.status).toBe('abandoned')
+      expect(r.problem).toBe(true)
+      expect(r.detail).toMatch(/^Given up after repeated failures; YouTube's daily quota was used up/)
+      expect(r.detail).not.toContain('try again')
+    }
+    const d = (await (await get(env, '/ui/api/playlist-addition-detail?key=1')).json()) as { record: { youtubeError: { wait: boolean; label: string | null; headline: string } } }
+    expect(d.record.youtubeError).toMatchObject({ wait: false, label: null })
+    expect(d.record.youtubeError.headline).toContain('Given up')
   })
 
   it('the addition detail adds the parsed reply: a wait for quota, nothing for a plain message', async () => {

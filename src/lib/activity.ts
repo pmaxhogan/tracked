@@ -26,7 +26,7 @@
 import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import { REASON_LABELS } from './playlist-hygiene'
-import { describeYouTubeError, QUOTA_LIKE, RATE_LIMIT_LIKE } from './youtube-error'
+import { errorOneLine, QUOTA_LIKE, RATE_LIMIT_LIKE } from './youtube-error'
 import { buildTableSql, parseTableQuery, type TableDef, type TableQuery, type TableResult, type TableParams } from './table-query'
 
 export const ACTIVITY_KINDS = ['request', 'playlist', 'hygiene', 'mkvid', 'pool', 'sync', 'ban'] as const
@@ -80,11 +80,7 @@ const joinParts = (parts: Array<string | null | undefined | false>): string | nu
   return kept.length ? kept.join(' · ') : null
 }
 /** A stored error as one readable line: a YouTube API error by its explanation / `op status reason: message`, anything else clipped. */
-const errorLine = (text: string | null | undefined): string | null => {
-  if (!text) return null
-  const y = describeYouTubeError(text)
-  return clip(y ? y.headline : text)
-}
+const errorLine = (text: string | null | undefined, rowStatus?: string | null): string | null => clip(errorOneLine(text, rowStatus))
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
 
 // ── the union ──
@@ -264,11 +260,11 @@ function describe(r: RawRow): { title: string; detail: string | null } {
       return { title: str(j.title) ?? '(no title)', detail: auditDetail(j) }
     case 'addition': {
       const cmb = j.cmb === 'failed' || j.cmb === 'unavailable' ? `combined ${j.cmb}` : null
-      return { title: labelFromSetUrl(r.set_url), detail: joinParts([errorLine(str(j.msg)) ?? (r.video_id ? `video ${r.video_id}` : null), cmb]) }
+      return { title: labelFromSetUrl(r.set_url), detail: joinParts([errorLine(str(j.msg), r.status) ?? (r.video_id ? `video ${r.video_id}` : null), cmb]) }
     }
     case 'removal': {
       const source = String(j.source ?? ''), reason = String(j.reason ?? '')
-      return { title: `${REMOVAL_SOURCE_LABEL[source] ?? source}: ${REASON_LABELS[reason] ?? reason}`, detail: joinParts([errorLine(str(j.detail)), `${String(j.playlist_kind ?? '')} playlist`]) }
+      return { title: `${REMOVAL_SOURCE_LABEL[source] ?? source}: ${REASON_LABELS[reason] ?? reason}`, detail: joinParts([errorLine(str(j.detail), r.status), `${String(j.playlist_kind ?? '')} playlist`]) }
     }
     case 'mkvid':
       return { title: str(j.set_title) || labelFromSetUrl(r.set_url), detail: mkvidDetail({ status: r.status, video_id: r.video_id, error: str(j.error) }) }

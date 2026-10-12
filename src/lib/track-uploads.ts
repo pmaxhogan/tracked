@@ -31,9 +31,11 @@
 import type { Env } from '../types'
 import { dbOf, parseJson, v } from './db'
 import { errorFields, type Logger } from './log'
+import { noteQuotaOut } from './youtube-quota'
 import { getAppSettings, type AppSettings } from './app-settings'
 import { claimTtl, mkvidAccountUsage, quotaDayStart, type MkvidAccount } from './mkvid'
 import { cachePlaylistVideoIds, findOrCreatePlaylist, getCachedPlaylistVideoIds } from './playlist-cache'
+import { describeYouTubeError } from './youtube-error'
 import { addVideoToPlaylist, isPermanentInsertError, isQuotaError, PlaylistNotFoundError } from './youtube-playlists'
 import { sendPushToAll, trackUploadedPayload } from './web-push'
 import { markPresaveUploaded } from './presave'
@@ -173,7 +175,7 @@ export function trackUploadOut(r: TrackUploadRow & { source_banned?: number | nu
     youtubeMusicUrl: r.video_id ? `https://music.youtube.com/watch?v=${r.video_id}` : null,
     privacy: r.privacy,
     playlistStatus: r.playlist_status,
-    error: r.error,
+    error: readableError(r.error),
     createdAt: Number(r.created_at) * 1000,
     updatedAt: Number(r.updated_at) * 1000,
     completedAt: ms(r.completed_at),
@@ -572,6 +574,19 @@ export async function addToTrackPlaylist(env: Env, videoId: string, accessToken:
   return { playlistId: pl.id, status: 'added' }
 }
 
+/**
+ * A stored `playlist insert failed (kind): <text>` as one readable line (old rows hold the raw
+ * YouTube reply). Nothing retries this insert by itself, so a quota reply says to press Retry.
+ */
+export function readableError(error: string | null): string | null {
+  const m = /^(playlist insert failed \(\w+\)): ([\s\S]*)$/.exec(error ?? '')
+  if (!m) return error
+  const y = describeYouTubeError(m[2])
+  if (!y) return error
+  const say = y.kind === 'other' ? y.headline : y.kind === 'quota' ? "YouTube's daily quota is used up (it resets at midnight Pacific time): press Retry then" : 'YouTube is limiting requests: press Retry in a minute'
+  return `${m[1]}: ${say}`
+}
+
 /** Insert with the failure classified: quota / permanent / transient errors become `failed` (the request is still done; Retry in the UI re-runs the insert). */
 async function insertSafely(env: Env, uploadId: number, videoId: string, accessToken: string, log: Logger): Promise<{ playlistId: string | null; status: TrackPlaylistStatus; error: string | null }> {
   try {
@@ -580,6 +595,7 @@ async function insertSafely(env: Env, uploadId: number, videoId: string, accessT
   } catch (e) {
     const kind = isQuotaError(e) ? 'quota' : isPermanentInsertError(e) ? 'permanent' : 'transient'
     log.warn('track_upload.playlist_insert_failed', { id: uploadId, videoId, kind, ...errorFields(e) })
+    if (kind === 'quota') await noteQuotaOut(env, e, log)
     return { playlistId: (await getStoredTrackPlaylist(env))?.playlistId ?? null, status: 'failed', error: `playlist insert failed (${kind}): ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}` }
   }
 }

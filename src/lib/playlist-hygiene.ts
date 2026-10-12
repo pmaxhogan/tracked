@@ -28,6 +28,7 @@
 import type { Env } from '../types'
 import { dbOf, batchChunked } from './db'
 import { errorFields, type Logger } from './log'
+import { noteQuotaOut } from './youtube-quota'
 import { decideFullRecording, hasNoFullRecordingNotice, maxAudioSeconds, REJECT_REASON_LABELS, type RejectReason } from './full-recording'
 import type { TableDef } from './table-query'
 import { getVideoMeta, readCachedVideoMeta, type VideoMeta } from './video-meta'
@@ -60,6 +61,7 @@ import { parseCueValueData } from './tracklists1001'
 import { parseSetYouTubeId } from './dj-index'
 import { pushConfigured, sendPushToAll, type PushPayload } from './web-push'
 import { getAppSettings, type AppSettings } from './app-settings'
+import { errorOneLine } from './youtube-error'
 import {
   enqueueMkvidRequest,
   extractSetAudioSource,
@@ -424,6 +426,8 @@ export const REMOVALS_TABLE: TableDef<RemovalRow> = {
     reason: { type: 'enum' },
     detail: { type: 'text', sortable: false, searchable: true },
   },
+  // A failed removal's detail is the stored YouTube error: shown as one readable line.
+  mapRow: (r) => (r.status === 'failed' && r.detail ? { ...r, detail: errorOneLine(r.detail, r.status) } : r),
 }
 
 /** DJs that have at least one removal (the DJ filter's options), by slug. */
@@ -558,7 +562,10 @@ export async function runRemovalSweep(
     // Judge from facts alone; the next sweep retries the lookup.
     result.metaFailed = true
     log.warn('hygiene.sweep.meta_failed', { candidates: candidates.length, ...errorFields(e) })
-    if (isQuotaError(e)) return { ...result, stoppedBy: 'quota' }
+    if (isQuotaError(e)) {
+      await noteQuotaOut(env, e, log)
+      return { ...result, stoppedBy: 'quota' }
+    }
     metas = await readCachedVideoMeta(env, candidates.map((r) => r.video_id))
   }
   const facts = await loadSetFacts(env, candidates.map((r) => r.url))
@@ -649,6 +656,7 @@ export async function runRemovalSweep(
         log.warn('hygiene.sweep.remove_failed', { slug: r.slug, setUrl: r.url, videoId: r.video_id, playlistId: pl, ...errorFields(e) })
         await logRemoval(env, { source: 'sweep', status: 'failed', slug: r.slug, set_url: r.url, video_id: r.video_id, playlist_id: pl, playlist_kind: kind, reason: r.verdict.reason, detail: (e instanceof Error ? e.message : String(e)).slice(0, 300) })
         if (isQuotaError(e)) {
+          await noteQuotaOut(env, e, log)
           quota = true
           break
         }

@@ -11,6 +11,7 @@ import { isOverridden } from './playlist-blocklist'
 import { getMkvidRequestForSet, mkvidQueuePosition } from './mkvid'
 import { readinessFor, type MkvidReadiness } from './mkvid-readiness'
 import { supersededReason } from './activity'
+import { describeYouTubeError, type YouTubeErrorView } from './youtube-error'
 
 export type SetDiagnostics = {
   url: string
@@ -38,7 +39,7 @@ export type SetDiagnostics = {
     override: boolean
   } | null
   playlist: {
-    additions: Array<{ key: string; ts: number; status: string; slug: string; videoId: string | null; message: string | null }>
+    additions: Array<{ key: string; ts: number; status: string; slug: string; videoId: string | null; message: string | null; youtube: YouTubeErrorView | null }>
     confirmed: Array<{ playlistId: string; state: 'in' | 'out'; source: string; at: number }>
   }
   hygiene: {
@@ -253,7 +254,7 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
       : null,
     video,
     playlist: {
-      additions: adds.results.map((r) => ({ key: String(r.id), ts: Number(r.ts), status: r.status, slug: r.slug, videoId: r.video_id, message: r.msg ?? null })),
+      additions: adds.results.map((r) => ({ key: String(r.id), ts: Number(r.ts), status: r.status, slug: r.slug, videoId: r.video_id, message: r.msg ?? null, youtube: describeYouTubeError(r.msg, r.status) })),
       confirmed,
     },
     hygiene: { removed, removals },

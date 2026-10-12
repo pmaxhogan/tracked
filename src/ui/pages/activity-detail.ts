@@ -116,7 +116,7 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
   // happens next), any other reads as one line with the raw reply folded away.
   function ytStatusHtml(r) {
     const y = r.youtubeError;
-    const wait = !!y && (y.kind === 'quota' || y.kind === 'rate_limit');
+    const wait = !!y && y.wait;
     const raw = y && y.raw ? '<details class="h-raw"><summary>Raw reply</summary><pre>' + esc(y.raw) + '</pre></details>' : '';
     if (wait) return '<span class="badge warn">' + esc(y.label) + '</span> ' + esc(y.explanation) + raw;
     const line = y ? y.headline : r.message;
@@ -125,7 +125,7 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
 
   function plDetailHtml(r) {
     const out = [];
-    const waiting = !!r.youtubeError && (r.youtubeError.kind === 'quota' || r.youtubeError.kind === 'rate_limit');
+    const waiting = !!r.youtubeError && r.youtubeError.wait;
     out.push('<div class="h-grp">Set</div>');
     out.push(dl([
       ['tracklist', link(r.setUrl, setLabel(r.setUrl))],

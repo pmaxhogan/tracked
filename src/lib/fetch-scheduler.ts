@@ -68,6 +68,7 @@ import { INDEX_FORMAT_SINCE, queueSearchIndex } from './search/index'
 import { updatePresaveCandidates } from './presave-candidates'
 import { getAppSettings } from './app-settings'
 import { DISCOVERED_SQL, ID_WAIT_SECONDS } from './mkvid-readiness'
+import { getQuotaOut } from './youtube-quota'
 import { duePresaves, presaveOnSetParsed, runScheduledPresave } from './presave'
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
@@ -662,6 +663,8 @@ export async function pickTickItems(
   dueOut?: Record<ScheduledClass, number>,
   /** Index catch-up items allowed this tick (default: indexCatchUpAllowance). */
   catchUpAllowance?: number,
+  /** YouTube's daily quota is used up: leave out first-time set additions (kind `set`), whose only next step is an insert. Everything else is picked as usual. */
+  quotaOut = false,
 ): Promise<TickItem[]> {
   if (n <= 0) return []
   const db = dbOf(env)
@@ -698,7 +701,7 @@ export async function pickTickItems(
     if (seenUrl.has(r.url)) continue
     seenUrl.add(r.url)
     const cls = firstFetchClass(settings, r.age)
-    buckets[cls].push({ cls, kind: 'set', slug: r.slug, url: r.url })
+    if (!quotaOut) buckets[cls].push({ cls, kind: 'set', slug: r.slug, url: r.url })
   }
 
   for (const v of await dueVerifications(env, nowSec, lim)) {
@@ -868,7 +871,7 @@ export async function runSchedulerTick(
     skipped = 'zero_draw'
   } else {
     due = { new: 0, verify: 0, recheck: 0, backfill: 0 } as Record<ScheduledClass, number>
-    items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec, undefined, due)
+    items = await pickTickItems(env, settings, drawn, new Set(bySlug.keys()), nowSec, undefined, due, undefined, !!(await getQuotaOut(env, nowSec * 1000)))
     if (items.length === 0) {
       log.info('scheduler.nothing_due', { drawn })
       skipped = 'nothing_due'
@@ -958,6 +961,12 @@ export async function runSchedulerTick(
         poolCode = b.poolCode ?? null
       } else {
         let res: SyncOneResult
+        if (item.kind === 'set' && (await getQuotaOut(env, nowSec * 1000))) {
+          // Quota ran out earlier in this tick: do not fetch or claim an attempt for an insert that would fail.
+          log.info('scheduler.item_quota_skipped', { slug: item.slug, setUrl: item.url })
+          results.push({ item, outcome: 'skipped', stopReason: 'YouTube quota used up until midnight Pacific time' })
+          continue
+        }
         if (item.kind === 'discovery') {
           await setDjDue(env, 'next_discovery_at', item.slug, nowSec + settings.retry.djRetryMinutes * 60, nowSec)
           res = await syncOne(env, sub, tokenInfo!.accessToken, { log, trigger: 'cron.discovery', priority: 'new', selection: { newUrls: [], recheckUrls: [] }, settings })

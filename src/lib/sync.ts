@@ -90,6 +90,7 @@ import {
   type PlaylistSource,
 } from './combined-playlist'
 import { makeLogger, errorFields, type Logger } from './log'
+import { noteQuotaOut } from './youtube-quota'
 import { pickSetVideo, rejectionNote } from './playlist-hygiene'
 import { combinedRefuses, markInPlaylist, markOutOfPlaylist } from './playlist-blocklist'
 import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
@@ -1059,6 +1060,7 @@ export async function syncOne(
         // the row (no failure count) and stop the writes; the set stays in the
         // window for a later tick, and the recheck window is skipped below.
         quotaHit = true
+        await noteQuotaOut(env, e, log)
         log.warn('sync.quota_exhausted', { slug: sub.slug, setUrl, ...errorFields(e) })
         auditSet('failed', setUrl, {
           message: e instanceof Error ? e.message : String(e),
@@ -1235,7 +1237,16 @@ export async function syncOne(
         // the set is still due, so stop here without charging it a failure —
         // a later tick redoes the swap from the top (every completed step is
         // a no-op on retry).
+        quotaHit = true
+        await noteQuotaOut(env, e, log)
         log.warn('sync.recheck_quota_exhausted', { slug: sub.slug, setUrl, ...errorFields(e) })
+        // Same row as a new set's: failed, no failure count, so Activity shows the wait.
+        auditSet('failed', setUrl, {
+          videoId: prev?.videoId ?? null,
+          videoUrl: prev?.videoId ? watchUrl(prev.videoId) : null,
+          message: `recheck: ${e instanceof Error ? e.message : String(e)}`,
+          meta: { ms: Date.now() - tSet },
+        })
         break
       }
       // Same counter as first-time processing, but a set that already has a

@@ -18,6 +18,7 @@ import { tipAttr } from '../tip'
 import type { UiPage } from './index'
 
 const BODY = /* html */ `
+<div id="sc-quota" class="tk-card sc-quota" hidden></div>
 <section class="tk-card" aria-labelledby="sc-h-day">
   <div class="sc-head"><h2 id="sc-h-day"><span class="tip-term"${tipAttr('Every 5 minutes the scheduler wakes up (a tick), draws a few items from what is due and fetches them one at a time. This summarizes the ticks of the last day.')}>Last 24 hours</span></h2><span id="sc-asof" class="muted sc-asof"></span></div>
   <div id="sc-err" class="error"></div>
@@ -44,6 +45,8 @@ const CSS = /* css */ `
   .sc-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); }
   .sc-head h2 { margin: 0; }
   .sc-asof { font-size: var(--fs-sm); }
+  .sc-quota { border-left: 3px solid var(--warn); font-size: var(--fs-sm); }
+  .sc-quota .btn { margin-left: var(--sp-2); }
   .sc-note { margin: 0 0 var(--sp-3); font-size: var(--fs-sm); }
   .sc-t td { font-variant-numeric: tabular-nums; }
   .sc-t tr.starve td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
@@ -208,12 +211,26 @@ const JS = /* js */ `
     djTable.setRows(djs);
   }
 
+  // ── YouTube quota flag (lib/youtube-quota.ts): a warn notice with the early clear ──
+  function renderQuota(q) {
+    const el = $('sc-quota');
+    el.hidden = !q;
+    if (!q) { el.innerHTML = ''; return; }
+    el.innerHTML = '<span class="badge warn"' + TK.tip('YouTube said the daily quota is used up. First-time set additions are paused until it resets; everything that does not add a video goes on.') + '>YouTube quota used up</span> New sets are not fetched until it resets at midnight Pacific time (' + esc(TK.fmt.time(iso(q.until)) || '') + '). Rechecks, verification, discovery and pre-save checks go on.<button type="button" class="btn" id="sc-quota-clear"' + TK.tip('Use this when you raised the quota or it reset early. It is set again if YouTube still refuses.') + '>Clear now</button>';
+    $('sc-quota-clear').addEventListener('click', (ev) => TK.busy(ev.currentTarget, 'Clearing…', async () => {
+      const res = await TK.api.post('/ui/api/scheduler/quota-clear', {});
+      TK.toast(res.ok ? 'Quota flag cleared.' : TK.errText(res, 'Could not clear it (' + res.status + ')'), res.ok ? 'ok' : 'bad');
+      loadSummary();
+    }));
+  }
+
   async function loadSummary() {
     await TK.api.swr('/ui/api/scheduler', (res) => {
       const d = res && res.ok && res.data && res.data.summary ? res.data : null;
       if (!d) { $('sc-err').textContent = TK.errText(res, 'Could not load the scheduler summary (' + ((res && res.status) || 'offline') + ')'); return; }
       $('sc-err').textContent = '';
       renderSummary(d.summary);
+      renderQuota(d.quotaOut);
       djs = (Array.isArray(d.djs) ? d.djs : []).map((x) => Object.assign({}, x, { worst: worstOf(x) }));
       renderDjs();
     });
