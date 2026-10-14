@@ -99,6 +99,8 @@ ${PRESAVE_UI_JS}
     if (p.stage === 'links' && !(up && (up.status === 'pending' || up.status === 'claimed' || up.status === 'done'))) {
       acts.push('<button type="button" class="btn primary" data-do="ripnow"' + TK.tip('Have mkvid rip it from another site and upload it to YouTube now, without waiting for the watch period.') + '>Rip and upload now</button>');
     }
+    // Search YouTube Music (and Soulseek) for it at mkvid's next poll; candidates land on the Pre-save matches page.
+    if (p.stage === 'links') acts.push('<button type="button" class="btn" data-do="searchnow"' + TK.tip('Have mkvid search YouTube Music for it now and compare what it finds with the previews.') + '>Search for matches</button>');
     if (p.stage === 'dismissed') acts.push('<button type="button" class="btn" data-do="restore"' + TK.tip('Watch it again.') + '>Restore</button>');
     else if (p.stage === 'identify' || p.stage === 'links') acts.push('<button type="button" class="btn ghost" data-do="dismiss"' + TK.tip('Stop watching it.') + '>Dismiss</button>');
     acts.push('<button type="button" class="btn danger" data-do="delete"' + TK.tip('Forget it and its check history.') + '>Delete</button>');
@@ -240,6 +242,11 @@ ${PRESAVE_UI_JS}
         else TK.toast(TK.errText(res, 'Delete failed (' + res.status + ')'), 'bad');
       });
     }
+    if (what === 'searchnow') return TK.busy(btn, 'Asking\\u2026', async () => {
+      const res = await TK.api.post('/ui/api/presave-matches/search-now', { presaveId: p.id });
+      if (res.ok) TK.toast('mkvid searches for it on its next poll. Candidates it cannot decide show up on the Pre-save matches page.', 'ok', null, { href: '/ui/presave-matches?presave=' + p.id, text: 'Pre-save matches' });
+      else TK.toast(TK.errText(res, 'Could not ask for a search (' + res.status + ')'), 'bad');
+    });
     if (what === 'ripnow') {
       if (!(await TK.ask('Rip this track from another site and upload it to YouTube now? mkvid picks it up on its next poll (it counts toward the daily track upload cap).', { yes: 'Rip and upload' }))) return;
       return TK.busy(btn, 'Queueing…', async () => {
