@@ -156,6 +156,38 @@ export const AppSettingsSchema = z.object({
     /** mkvid refuses a rip shorter than this share of the expected length (a preview clip; default 0.85). */
     minDurationRatio: z.number().min(0).max(1),
   }),
+  /** Pre-save matches (lib/presave-match.ts): mkvid searches YouTube Music (and Soulseek) for a pre-save with no YouTube link and compares the audio with its previews. */
+  presaveMatch: z.object({
+    /** Hand search jobs to mkvid at all. */
+    enabled: z.boolean(),
+    /** A pre-save is first searched once it has been watched this long (default 48 h: 1001tracklists often links it within a day or two). */
+    searchDelayHours: z
+      .number()
+      .min(0)
+      .max(24 * 365),
+    /** Searched again this many days after the last search (default 7). */
+    researchDays: z.number().min(0.5).max(365),
+    /** Searches per pre-save and kind at most (default 4). */
+    maxSearches: z.number().int().min(1).max(50),
+    /** Search jobs handed out per day at most (default 40). 0 pauses. */
+    dailySearchCap: z.number().int().min(0).max(1000),
+    /** Candidates one search may post at most (default 6). */
+    maxCandidates: z.number().int().min(1).max(20),
+    /** Auto-approve: audio score (0..1) against a preview at least this (default 0.7; the same master scores 0.79-0.93, unrelated audio ~0.05). */
+    autoApproveScore: z.number().min(0).max(1),
+    /** Auto-reject: every preview scores below this (default 0.2). */
+    autoRejectScore: z.number().min(0).max(1),
+    /** Auto-approve: the candidate's length within this many seconds of the track's (default 5). */
+    durationToleranceSeconds: z.number().min(0).max(120),
+    /** Auto-approve: artist and title match at least this well (0..1, default 0.6). */
+    minNameScore: z.number().min(0).max(1),
+    /** Push to every device when candidates wait for approval. */
+    notifyReview: z.boolean(),
+    /** Search Soulseek too (needs slskd on mkvid). Soulseek files are never auto-approved. */
+    soulseek: z.boolean(),
+    /** Offer a Spotify rip (burner account on mkvid) when nothing else was found; always behind approval. */
+    spotifyRip: z.boolean(),
+  }),
   /** Per-track link pre-warm (lib/link-prewarm.ts): the sync queues a parsed set's tracks, the cron looks a few up. */
   linkPrewarm: z.object({
     /** Queue and look up at all (off: nothing is queued and the queue is left as it is). */
@@ -244,6 +276,21 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     maxAttempts: 3,
     retryBackoffHours: 6,
     minDurationRatio: 0.85,
+  },
+  presaveMatch: {
+    enabled: true,
+    searchDelayHours: 48,
+    researchDays: 7,
+    maxSearches: 4,
+    dailySearchCap: 40,
+    maxCandidates: 6,
+    autoApproveScore: 0.7,
+    autoRejectScore: 0.2,
+    durationToleranceSeconds: 5,
+    minNameScore: 0.6,
+    notifyReview: true,
+    soulseek: false,
+    spotifyRip: false,
   },
   linkPrewarm: { enabled: true, maxPerTick: 3 },
   appleCues: {

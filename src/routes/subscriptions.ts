@@ -113,6 +113,8 @@ import { searchApp } from "./search";
 import { graphApp } from "./graph";
 import { schedulerUiApp } from "./scheduler-ui";
 import { trackUploadsUiApp } from "./track-uploads-ui";
+import { presaveMatchUiApp } from "./presave-match-ui";
+import { PRESAVE_MATCHES_PAGE } from "../ui/pages/presave-matches";
 import { mkvidUiApp } from "./mkvid-ui";
 import { describeYouTubeError } from "../lib/youtube-error";
 
@@ -155,6 +157,7 @@ subscriptionsApp.route("/", graphApp);
 // Scheduler tick history and DJ due times, and the POST that clears the YouTube quota hold (routes/scheduler-ui.ts). Behind cfAccess above.
 subscriptionsApp.route("/", schedulerUiApp);
 subscriptionsApp.route("/", trackUploadsUiApp); // /ui/api/track-uploads* (routes/track-uploads-ui.ts), behind cfAccess above
+subscriptionsApp.route("/", presaveMatchUiApp); // /ui/api/presave-matches* (routes/presave-match-ui.ts), behind cfAccess above
 subscriptionsApp.route("/", mkvidUiApp); // GET /ui/api/mkvid, /mkvid/queue, /mkvid/finished (routes/mkvid-ui.ts), behind cfAccess above
 
 // Home: status tiles, needs attention, recent activity (ui/pages/home.ts).
@@ -183,6 +186,7 @@ subscriptionsApp.get("/mkvid", (c) => servePage(c, MKVID_PAGE_HTML));
 subscriptionsApp.get(PRESAVES_PAGE.path, (c) => servePage(c, PRESAVES_PAGE.html));
 subscriptionsApp.get(PRESAVE_PAGE.path, (c) => servePage(c, PRESAVE_PAGE.html));
 subscriptionsApp.get(TRACK_UPLOADS_PAGE.path, (c) => servePage(c, TRACK_UPLOADS_PAGE.html));
+subscriptionsApp.get(PRESAVE_MATCHES_PAGE.path, (c) => servePage(c, PRESAVE_MATCHES_PAGE.html));
 
 // Standalone "tracklist viewer" page: paste a 1001tracklists URL, get a clean
 // per-song list with a YouTube icon-link and an Apple Music button when 1001tl

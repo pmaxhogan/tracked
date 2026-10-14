@@ -51,6 +51,7 @@ export const PAGES: Array<[string, string]> = [
   ["/ui/presave?id=1", "Pre-saved track"],
   ["/ui/track-uploads", "Track uploads"],
   ["/ui/graph", "Graph"],
+  ["/ui/presave-matches", "Pre-save matches"],
 ];
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
@@ -2963,5 +2964,153 @@ describe("Apple Music cue hints (mkvid page, set page)", () => {
     ) as string;
     expect(ready).not.toContain("data-recheck-now");
     expect(ready).toContain("4 cues from Apple Music");
+  });
+});
+
+describe("Pre-save matches page", () => {
+  const cand = {
+    presaveId: 5,
+    album: null,
+    decidedBy: null,
+    outcome: null,
+    trackUploadId: null,
+    createdAt: 1,
+    decidedAt: null,
+    decision: "review",
+    clipUrl: null,
+  };
+  const group = {
+    presave: {
+      id: 5,
+      artist: "JAWNS",
+      title: "Damager",
+      artworkUrl: null,
+      durationSeconds: 170,
+      trackUrl: null,
+      stage: "links",
+    },
+    references: [
+      {
+        kind: "apple",
+        url: "https://music.apple.com/x?i=1",
+        playUrl: "https://audio-ssl.itunes.apple.com/p.m4a",
+        ok: true,
+        durationSeconds: 30,
+        error: null,
+      },
+      {
+        kind: "deezer",
+        url: null,
+        playUrl: "/ui/api/presave-matches/clip/0b7c3f1e-0000-4000-8000-000000000000",
+        ok: true,
+        durationSeconds: 30,
+        error: null,
+      },
+    ],
+    searchError: null,
+    candidates: [
+      {
+        ...cand,
+        id: 12,
+        source: "ytm",
+        externalId: "Lnpw0PbJYWM",
+        url: "https://music.youtube.com/watch?v=Lnpw0PbJYWM",
+        title: "Damager <b>",
+        artist: "JAWNS",
+        channelTitle: "JAWNS - Topic",
+        videoType: "MUSIC_VIDEO_TYPE_ATV",
+        isTopic: true,
+        commentsOff: false,
+        videoId: "Lnpw0PbJYWM",
+        durationSeconds: 170,
+        durationDelta: 0,
+        nameScore: 1,
+        audioScore: 0.5,
+        scores: [{ ref: "apple", score: 0.5, offsetSeconds: 45 }],
+        extra: null,
+        reason: "audio 0.50 is unclear",
+      },
+      {
+        ...cand,
+        id: 13,
+        source: "slsk",
+        externalId: "u f.flac",
+        url: null,
+        title: "JAWNS - Damager.flac",
+        artist: null,
+        channelTitle: null,
+        videoType: null,
+        isTopic: null,
+        commentsOff: null,
+        videoId: null,
+        durationSeconds: 171,
+        durationDelta: 1,
+        nameScore: 1,
+        audioScore: null,
+        scores: [],
+        extra: { username: "u", bitRate: 1000, size: 20e6 },
+        reason: "Soulseek files are approved by hand",
+      },
+    ],
+  };
+
+  it("renders every preview and candidate side by side (YouTube embed, audio), escaped, and approve posts", async () => {
+    const calls: Array<[string, string]> = [];
+    const { ctx, els } = richStub(
+      (async (u: string, init?: RequestInit) => {
+        calls.push([u, (init && init.method) || "GET"]);
+        if (u.startsWith("/ui/api/presave-matches?"))
+          return Response.json({
+            view: "review",
+            groups: [group],
+            counts: { presavesInReview: 1, auto_approved: 2, auto_rejected: 3 },
+          });
+        if (u === "/ui/api/presave-matches/12/approve")
+          return Response.json({ ok: true, outcome: "found", message: "it is the video now" });
+        return new Response("{}", { status: 404 });
+      }) as unknown as (u: string) => Promise<Response>,
+      "/ui/presave-matches",
+    );
+    withAppend(ctx);
+    const list = (ctx as any).document.getElementById("pm-list");
+    const on: Record<string, (e: unknown) => unknown> = {};
+    list.addEventListener = (t: string, f: (e: unknown) => unknown) => (on[t] = f);
+    const r = await app.request("https://tracked.example/ui/presave-matches", {}, env());
+    const text = await r.text();
+    expect(text).toContain('href="/ui/presaves"');
+    for (const s of scriptsOf(text)) vm.runInContext(s, ctx);
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0));
+    expect(calls).toContainEqual(["/ui/api/presave-matches?view=review", "GET"]);
+    const html = list.innerHTML as string;
+    expect(html).toContain(
+      'src="https://www.youtube-nocookie.com/embed/Lnpw0PbJYWM?enablejsapi=1&rel=0"',
+    );
+    expect(html).toContain(
+      '<audio controls preload="none" src="https://audio-ssl.itunes.apple.com/p.m4a"></audio>',
+    );
+    expect(html).toContain("/ui/api/presave-matches/clip/0b7c3f1e-0000-4000-8000-000000000000");
+    expect(html).toContain("Damager &lt;b&gt;");
+    expect(html).toContain(">Topic</span>");
+    expect(html).toContain("Audio 0.50");
+    expect(html).toContain('data-act="playall"');
+    expect(html).toContain("1000 kbps");
+    // Red means action: nothing on this page is red.
+    expect(html).not.toContain("badge bad");
+    expect(html).not.toMatch(/<(?!iframe\b)[a-z][^>]*\stitle="/i);
+    expect(html).not.toContain(String.fromCharCode(0x2014));
+    expect(els.get("pm-sum").innerHTML).toContain(
+      "<strong>1</strong> track with candidates to approve",
+    );
+    const btn = {
+      textContent: "Approve",
+      disabled: false,
+      dataset: {},
+      setAttribute() {},
+      removeAttribute() {},
+      getAttribute: (k: string) => (k === "data-act" ? "approve" : k === "data-id" ? "12" : null),
+    };
+    await on.click!({ target: { closest: () => btn } });
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0));
+    expect(calls).toContainEqual(["/ui/api/presave-matches/12/approve", "POST"]);
   });
 });

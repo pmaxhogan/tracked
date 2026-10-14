@@ -166,10 +166,10 @@ tracked, bearer MKVID_TOKEN (routes/mkvid-presave.ts, mounted at
 
 - `POST /search/claim { kinds?: ['ytm'|'slsk'] }` -> `{ job | null }` with
   `{ searchId, kind, presaveId, artist, title, durationSeconds, trackUrl,
-  references: [{ kind, url }], known: [externalId], maxCandidates,
-  durationToleranceSeconds, allowSpotifyRip }`.
+references: [{ kind, url }], known: [externalId], maxCandidates,
+durationToleranceSeconds, allowSpotifyRip }`.
 - `POST /search/complete { searchId, references: [{ kind, url, ok,
-  durationSeconds?, clipKey?, error? }], candidates: [...] }` -> per candidate
+durationSeconds?, clipKey?, error? }], candidates: [...] }` -> per candidate
   decisions.
 - `POST /search/fail { searchId, error, retryAfterSeconds? }` -> backoff, no
   red state (an innertube breakage is a warning on the page).

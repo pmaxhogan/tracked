@@ -4,7 +4,7 @@
  * at /mkvid/track in src/index.ts ahead of /mkvid, so the API_TOKEN wildcard
  * gate skips it too. Request ids are INTEGERS (track_uploads.id), not UUIDs.
  *
- *   POST /mkvid/track/claim    { accounts?: ['primary'|'shared'...] } -> { request: TrackRequest | null }
+ *   POST /mkvid/track/claim    { accounts?: ['primary'|'shared'...], sources?: ['soulseek'|'spotify'...] } -> { request: TrackRequest | null }
  *                              Oldest claimable first; needs room under trackUploads.dailyCap AND the
  *                              account's per-project mkvid cap (shared with set uploads).
  *   POST /mkvid/track/job      { id, jobId } -> { ok }   renews the claim while the job is queued / running;
@@ -48,6 +48,10 @@ export const MkvidTrackClaimBody = z
         description:
           'Accounts mkvid can upload through right now; default ["primary"]. The primary fills first, then the shared one. A track claim counts against the same per-project caps as a set claim.',
       }),
+    sources: z.array(z.string().min(1).max(40)).max(20).optional().openapi({
+      description:
+        "Extra sources this mkvid can rip beyond the yt-dlp ones (soulseek, spotify). Requests from approved pre-save matches with those sources go only to an mkvid that lists them.",
+    }),
   })
   .openapi("MkvidTrackClaimBody");
 
@@ -152,7 +156,12 @@ mkvidTrackApp.post("/claim", async (c) => {
   const parsed = MkvidTrackClaimBody.safeParse((await c.req.json().catch(() => null)) ?? {});
   if (!parsed.success) return c.json({ error: "invalid_request" }, 400);
   try {
-    const { request } = await claimTrackUpload(c.env, log, parsed.data.accounts ?? ["primary"]);
+    const { request } = await claimTrackUpload(
+      c.env,
+      log,
+      parsed.data.accounts ?? ["primary"],
+      parsed.data.sources ?? [],
+    );
     return c.json({ request });
   } catch (e) {
     log.error("track_upload.claim_threw", errorFields(e));

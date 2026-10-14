@@ -60,7 +60,14 @@ const CUE_TOLERANCE = 2;
 
 export const PRESAVE_STAGES = ["identify", "links", "found", "uploaded", "dismissed"] as const;
 export type PresaveStage = (typeof PRESAVE_STAGES)[number];
-export const PRESAVE_TRIGGERS = ["scheduled", "manual", "add", "set_fetch", "upload"] as const;
+export const PRESAVE_TRIGGERS = [
+  "scheduled",
+  "manual",
+  "add",
+  "set_fetch",
+  "upload",
+  "match",
+] as const;
 export type PresaveTrigger = (typeof PRESAVE_TRIGGERS)[number];
 export const PRESAVE_RESULTS = [
   "found",
@@ -696,6 +703,94 @@ async function failCheck(
   };
 }
 
+/**
+ * The presave has its video (1001tracklists' YouTube link, or an approved
+ * pre-save match): stage `found`, live track uploads superseded, the like
+ * queued, and the "on YouTube" push. Nothing but the check row happens when
+ * the stage changed meanwhile (no second push).
+ */
+async function applyFound(
+  env: Env,
+  p: PresaveRow,
+  videoId: string,
+  patch: Partial<PresaveRow>,
+  check: CheckFields,
+  o: { settings: AppSettings; log: Logger; now: number; why: string },
+): Promise<CheckWrite> {
+  const { settings, log, now } = o;
+  let w = await writeCheck(env, p, patch, check, now);
+  // Changed meanwhile (uploaded, dismissed, or a concurrent check already found it): no second push.
+  if (!w.applied) {
+    log.info("presave.found_concurrent", {
+      id: p.id,
+      videoId,
+      stageNow: w.presave.stage,
+      trigger: check.trigger,
+    });
+    return w;
+  }
+  log.info("presave.found", { id: p.id, trackId: p.track_id, videoId, trigger: check.trigger });
+  try {
+    await supersedeTrackUploadsForPresave(env, p.id, o.why);
+  } catch (e) {
+    log.warn("presave.supersede_failed", { id: p.id, ...errorFields(e) });
+  }
+  // It has its video: its like on the owner's YouTube account is due and runs in the background (never throws, nothing waits for YouTube).
+  const liked = await onPresaveResolved(env, p.id, log, {
+    now,
+    replacedVideoId: p.youtube_video_id,
+  });
+  if (liked) w = { ...w, presave: { ...w.presave, ...liked } };
+  if (settings.presave.notifyFound) {
+    const sent = await sendPushToAll(
+      env,
+      presaveFoundPayload({
+        id: p.id,
+        artist: w.presave.artist,
+        title: w.presave.title,
+        videoId,
+        artworkUrl: w.presave.artwork_url,
+      }),
+      log,
+    ).catch(() => null);
+    if (sent && sent.sent > 0) {
+      await dbOf(env)
+        .prepare("UPDATE presaves SET notified_at = ? WHERE id = ?")
+        .bind(now, p.id)
+        .run();
+      w = { ...w, presave: { ...w.presave, notified_at: now } };
+    }
+  }
+  return w;
+}
+
+/**
+ * An approved pre-save match (lib/presave-match.ts) is the presave's video:
+ * the same as 1001tracklists linking it (stage `found`, like, push), with a
+ * `match` check row. Only from stage `links` / `identify`; null when the
+ * presave is gone or no longer waiting (found, uploaded, dismissed).
+ */
+export async function markPresaveFoundFromMatch(
+  env: Env,
+  presaveId: number,
+  videoId: string,
+  detail: Record<string, unknown>,
+  log: Logger = makeLogger({ route: "presave.match" }),
+  now = Date.now(),
+): Promise<CheckWrite | null> {
+  const p = await getPresaveRow(env, presaveId);
+  if (!p || (p.stage !== "links" && p.stage !== "identify")) return null;
+  const settings = await getAppSettings(env);
+  return applyFound(
+    env,
+    p,
+    videoId,
+    { stage: "found", youtube_video_id: videoId, found_at: now, next_check_at: null },
+    { trigger: "match", result: "found", detail },
+    { settings, log, now, why: "a pre-save match was approved" },
+  );
+}
+
 /** Stage `links`: one uncached lookup of every source. */
 async function checkLinks(
   env: Env,
@@ -736,56 +831,14 @@ async function checkLinks(
   };
   const videoId = youtubeIdOf(r.links);
   if (videoId) {
-    let w = await writeCheck(
+    return applyFound(
       env,
       p,
+      videoId,
       { ...base, stage: "found", youtube_video_id: videoId, found_at: now, next_check_at: null },
       { trigger, result: "found", ms: r.ms, links: r.links, detail: { accountId: r.accountId } },
-      now,
+      { settings, log, now, why: "found on 1001tracklists" },
     );
-    // Changed meanwhile (uploaded, dismissed, or a concurrent check already found it): no second push.
-    if (!w.applied) {
-      log.info("presave.found_concurrent", {
-        id: p.id,
-        videoId,
-        stageNow: w.presave.stage,
-        trigger,
-      });
-      return w;
-    }
-    log.info("presave.found", { id: p.id, trackId: p.track_id, videoId, trigger });
-    try {
-      await supersedeTrackUploadsForPresave(env, p.id, "found on 1001tracklists");
-    } catch (e) {
-      log.warn("presave.supersede_failed", { id: p.id, ...errorFields(e) });
-    }
-    // It has its video: its like on the owner's YouTube account is due and runs in the background (never throws, nothing waits for YouTube).
-    const liked = await onPresaveResolved(env, p.id, log, {
-      now,
-      replacedVideoId: p.youtube_video_id,
-    });
-    if (liked) w = { ...w, presave: { ...w.presave, ...liked } };
-    if (settings.presave.notifyFound) {
-      const sent = await sendPushToAll(
-        env,
-        presaveFoundPayload({
-          id: p.id,
-          artist: w.presave.artist,
-          title: w.presave.title,
-          videoId,
-          artworkUrl: w.presave.artwork_url,
-        }),
-        log,
-      ).catch(() => null);
-      if (sent && sent.sent > 0) {
-        await dbOf(env)
-          .prepare("UPDATE presaves SET notified_at = ? WHERE id = ?")
-          .bind(now, p.id)
-          .run();
-        w = { ...w, presave: { ...w.presave, notified_at: now } };
-      }
-    }
-    return w;
   }
   if (gaveUp(settings, p, now)) {
     const w = await writeCheck(

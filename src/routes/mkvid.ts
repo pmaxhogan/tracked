@@ -23,7 +23,7 @@
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used.
- *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
+ *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
  *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
  *                         is retryable; a scene-style mkvid claims nothing until it sees it
  *
@@ -99,6 +99,8 @@ mkvidApp.get("/health", async (c) => {
     verifiedLists: true,
     // This Worker serves the track-upload queue at /mkvid/track/* (routes/mkvid-track.ts).
     trackUploads: true,
+    // This Worker serves pre-save match searches at /mkvid/presave/* (routes/mkvid-presave.ts).
+    presaveSearch: true,
     // Recreations go only to an mkvid whose claim says this style.
     recreateStyle: RECREATE_STYLE,
     counts: await countMkvidRequests(c.env),

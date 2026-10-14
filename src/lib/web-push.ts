@@ -45,7 +45,8 @@ export type PushKind =
   | "presave_found"
   | "track_uploaded"
   | "playlist_add"
-  | "channel_ban";
+  | "channel_ban"
+  | "presave_match";
 
 /** What the service worker receives (as JSON) and turns into a Notification. */
 export type PushPayload = {
@@ -349,6 +350,37 @@ export function presaveFoundPayload(p: {
     ts: new Date().toISOString(),
     icon: artwork(p.artworkUrl) ?? youtubeThumbnail(p.videoId),
     image: youtubeThumbnail(p.videoId),
+  };
+}
+
+/**
+ * A search for a pre-saved track found candidates that need the owner's
+ * ear (lib/presave-match.ts): tapping opens the approval page on that track.
+ * One tag per presave, so a later search replaces the earlier notice.
+ */
+export function presaveMatchReviewPayload(p: {
+  presaveId: number;
+  artist: string | null;
+  title: string | null;
+  count: number;
+  artworkUrl?: string | null;
+  videoId?: string | null;
+}): PushPayload {
+  const a = p.artist && p.artist !== "ID" ? p.artist : null;
+  const t = p.title && p.title !== "ID" ? p.title : null;
+  const name = a && t ? `${a} - ${t}` : (a ?? t ?? "A pre-saved track");
+  return {
+    kind: "presave_match",
+    title:
+      p.count === 1
+        ? "Possible match for a pre-save"
+        : `${p.count} possible matches for a pre-save`,
+    body: `${name}: listen and approve or reject`,
+    url: `/ui/presave-matches?presave=${p.presaveId}`,
+    tag: `tracked-presave-match-${p.presaveId}`,
+    ts: new Date().toISOString(),
+    icon: artwork(p.artworkUrl) ?? (p.videoId ? youtubeThumbnail(p.videoId) : undefined),
+    ...(p.videoId ? { image: youtubeThumbnail(p.videoId) } : {}),
   };
 }
 

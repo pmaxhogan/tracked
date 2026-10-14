@@ -80,10 +80,28 @@ export const TRACK_SOURCE_HOSTS: Readonly<Record<string, RegExp>> = {
   bandcamp: /(^|\.)bandcamp\.com$/,
   hearthis: /(^|\.)hearthis\.at$/,
   mixcloud: /(^|\.)mixcloud\.com$/,
+  // Approved pre-save matches only (lib/presave-match.ts): never in the default allowedSources.
+  youtube: /^(www\.|music\.|m\.)?youtube\.com$/,
+  spotify: /^open\.spotify\.com$/,
 };
+
+/**
+ * Sources only an approved pre-save match queues, and only an mkvid that says
+ * it can rip them (`sources` on POST /mkvid/track/claim) is handed: an older
+ * mkvid would feed `slsk://` to yt-dlp.
+ */
+export const MATCH_ONLY_SOURCES = ["soulseek", "spotify"] as const;
+
+/** A Soulseek file as a track upload's source URL: `slsk://<username>/<path>` (both URI-encoded). */
+export function soulseekSourceUrl(username: string, filename: string): string {
+  return `slsk://${encodeURIComponent(username)}/${encodeURIComponent(filename)}`;
+}
+const SLSK_URL = /^slsk:\/\/[^/\s]{1,200}\/[^\s]{1,1500}$/;
 
 /** `url` normalised (`URL.href`) when it is https: on a host allowlisted for `sourceName`, else null. */
 export function safeSourceUrl(sourceName: string, url: unknown): string | null {
+  if (sourceName.toLowerCase() === "soulseek")
+    return typeof url === "string" && SLSK_URL.test(url) ? url : null;
   const hosts = TRACK_SOURCE_HOSTS[sourceName.toLowerCase()];
   if (!hosts || typeof url !== "string" || !url) return null;
   let u: URL;
@@ -134,6 +152,8 @@ export type TrackUploadRow = {
   updated_at: number;
   completed_at: number | null;
   notified_at: number | null;
+  /** The approved pre-save match this rips (migration 0022), null for a 1001tracklists link. */
+  match_id?: number | null;
 };
 
 /** What the UI (and the presave page) gets for one request. Times are unix ms. */
@@ -479,6 +499,115 @@ export async function supersedeTrackUploadsForPresave(
   }
 }
 
+export type MatchQueueReason =
+  | "queued"
+  | "not_found"
+  | "stage"
+  | "already_live"
+  | "already_uploaded"
+  | "banned"
+  | "unsafe_source"
+  | "error";
+
+/**
+ * An approved pre-save match that is not the presave's video by itself (a
+ * YouTube upload that is not a Topic one with comments on, a Soulseek file, a
+ * Spotify track): rip and upload it like a 1001tracklists link. No
+ * minWatchDays and no allowedSources (the owner approved this one); bans,
+ * the one-live-request rule and the daily cap at claim still apply. A pending
+ * request for another source is superseded by this one; a claimed one (mkvid
+ * is ripping it) is left alone. Never throws.
+ */
+export async function queueMatchUpload(
+  env: Env,
+  m: {
+    presaveId: number;
+    matchId: number;
+    sourceName: string;
+    sourceUrl: string;
+    expectedDurationSeconds: number | null;
+    artist?: string | null;
+    title?: string | null;
+  },
+  log?: Logger,
+): Promise<{ queued: boolean; reason: MatchQueueReason; uploadId?: number }> {
+  try {
+    const href = safeSourceUrl(m.sourceName, m.sourceUrl);
+    if (!href) return { queued: false, reason: "unsafe_source" };
+    const p = await getPresaveLite(env, m.presaveId);
+    if (!p) return { queued: false, reason: "not_found" };
+    if (p.stage !== "links") return { queued: false, reason: "stage" };
+    const db = dbOf(env);
+    const done = await db
+      .prepare("SELECT id FROM track_uploads WHERE presave_id = ? AND status = 'done' LIMIT 1")
+      .bind(p.id)
+      .first<{ id: number }>();
+    if (done) return { queued: false, reason: "already_uploaded", uploadId: Number(done.id) };
+    const banned = await db
+      .prepare("SELECT 1 AS x FROM track_upload_bans WHERE url = ?")
+      .bind(href)
+      .first();
+    if (banned) return { queued: false, reason: "banned" };
+    const now = nowSeconds();
+    const claimed = await db
+      .prepare("SELECT id FROM track_uploads WHERE presave_id = ? AND status = 'claimed' LIMIT 1")
+      .bind(p.id)
+      .first<{ id: number }>();
+    if (claimed) return { queued: false, reason: "already_live", uploadId: Number(claimed.id) };
+    await db
+      .prepare(
+        "UPDATE track_uploads SET status = 'superseded', error = 'replaced by an approved pre-save match', not_before = NULL, updated_at = ? WHERE presave_id = ? AND status = 'pending'",
+      )
+      .bind(now, p.id)
+      .run();
+    const expected =
+      typeof m.expectedDurationSeconds === "number" && m.expectedDurationSeconds > 0
+        ? Math.round(m.expectedDurationSeconds)
+        : typeof p.duration_seconds === "number" && p.duration_seconds > 0
+          ? Math.round(p.duration_seconds)
+          : null;
+    let res: D1Result;
+    try {
+      res = await db
+        .prepare(
+          `INSERT INTO track_uploads (presave_id, track_id, artist, title, artwork_url, track_url, source_name, source_url, expected_duration_seconds, status, attempts, created_at, updated_at, match_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`,
+        )
+        .bind(
+          p.id,
+          v(p.track_id),
+          v(p.artist ?? m.artist ?? null),
+          v(p.title ?? m.title ?? null),
+          v(p.artwork_url),
+          v(p.track_url),
+          m.sourceName.toLowerCase(),
+          href,
+          v(expected),
+          now,
+          now,
+          m.matchId,
+        )
+        .run();
+    } catch (e) {
+      if (/UNIQUE/i.test(String((e as Error)?.message ?? e)))
+        return { queued: false, reason: "already_live" };
+      throw e;
+    }
+    const uploadId = Number(res.meta.last_row_id);
+    log?.info("track_upload.match_queued", {
+      uploadId,
+      presaveId: p.id,
+      matchId: m.matchId,
+      sourceName: m.sourceName,
+      sourceUrl: href.slice(0, 300),
+    });
+    return { queued: true, reason: "queued", uploadId };
+  } catch (e) {
+    log?.warn("track_upload.match_queue_threw", { presaveId: m.presaveId, ...errorFields(e) });
+    return { queued: false, reason: "error" };
+  }
+}
+
 // --- claim ------------------------------------------------------------------
 
 /** What `POST /mkvid/track/claim` hands mkvid. */
@@ -513,7 +642,10 @@ export async function claimTrackUpload(
   env: Env,
   log: Logger,
   accounts: readonly MkvidAccount[] = ["primary"],
+  sources: readonly string[] = [],
 ): Promise<{ request: TrackRequest | null; outcome: TrackClaimOutcome }> {
+  // Rows this mkvid cannot rip (it did not list them) stay pending for one that can.
+  const unsupported = MATCH_ONLY_SOURCES.filter((x) => !sources.includes(x));
   const settings = await getAppSettings(env);
   const app = settings.trackUploads;
   if (!app.enabled || app.dailyCap <= 0) return { request: null, outcome: "paused" };
@@ -543,9 +675,10 @@ export async function claimTrackUpload(
       .prepare(
         `SELECT * FROM track_uploads WHERE (${CLAIMABLE_WHERE})
           ${skip.length ? `AND id NOT IN (${skip.map(() => "?").join(", ")})` : ""}
+          ${unsupported.length ? `AND source_name NOT IN (${unsupported.map(() => "?").join(", ")})` : ""}
           ORDER BY created_at ASC, id ASC LIMIT 25`,
       )
-      .bind(now, stale, ...skip)
+      .bind(now, stale, ...skip, ...unsupported)
       .all<TrackUploadRow>();
     if (!batch.results.length) return { request: null, outcome: "empty" };
     for (const row of batch.results) {

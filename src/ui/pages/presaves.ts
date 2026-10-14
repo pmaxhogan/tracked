@@ -383,7 +383,7 @@ export const PRESAVES_PAGE: UiPage = {
     title: "Pre-saves",
     description:
       "Tracks with no YouTube video yet, looked up again until 1001tracklists links one. Found ones push to every device.",
-    actions: `<a class="btn" href="/ui/track-uploads"${tipAttr("Tracks mkvid rips from another site when YouTube never gets one.")}>Track uploads</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr("How often tracks are looked up, pushes, giving up.")}>Settings</a>`,
+    actions: `<a class="btn" href="/ui/presave-matches"${tipAttr("Candidates found on YouTube Music or Soulseek, waiting for your ear.")}>Matches</a><a class="btn" href="/ui/track-uploads"${tipAttr("Tracks mkvid rips from another site when YouTube never gets one.")}>Track uploads</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr("How often tracks are looked up, pushes, giving up.")}>Settings</a>`,
     body: BODY,
     css: CSS,
     js: JS,

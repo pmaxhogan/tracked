@@ -204,7 +204,7 @@ ${PRESAVE_UI_JS}
       source: { url: '/ui/api/presaves/' + encodeURIComponent(id) + '/checks' },
       columns: [
         { key: 'at', label: 'Time', type: 'datetime', render: (c) => whenCell(c.at) },
-        { key: 'trigger', label: 'Trigger', type: 'enum', options: [{ value: 'scheduled', label: 'Scheduled' }, { value: 'manual', label: 'Recheck now' }, { value: 'add', label: 'When saved' }, { value: 'set_fetch', label: 'Set fetch' }, { value: 'upload', label: 'mkvid upload' }] },
+        { key: 'trigger', label: 'Trigger', type: 'enum', options: [{ value: 'scheduled', label: 'Scheduled' }, { value: 'manual', label: 'Recheck now' }, { value: 'add', label: 'When saved' }, { value: 'set_fetch', label: 'Set fetch' }, { value: 'upload', label: 'mkvid upload' }, { value: 'match', label: 'Pre-save match' }] },
         { key: 'result', label: 'Result', type: 'enum', options: RESULT_OPTS, render: (c) => '<span class="ps-res ' + resultCls(c.result) + '" style="display:inline">' + esc(resultText(c.result)) + '</span>' },
         { key: 'stageAfter', label: 'Stage', type: 'enum', options: STAGE_OPTS, hideOn: 'phone', render: (c) => (c.stageBefore && c.stageBefore !== c.stageAfter ? esc((STAGE[c.stageBefore] || [c.stageBefore])[0]) + '<span class="pv-arrow">\\u2192</span>' : '') + esc(c.stageAfter ? (STAGE[c.stageAfter] || [c.stageAfter])[0] : '') },
         { key: 'linkCount', label: 'Links', type: 'number', render: (c) => (c.linkCount == null ? '<span class="tkt-nil">\\u2013</span>' : '<div>' + esc(String(c.linkCount)) + ((c.linkSources || []).filter((n) => n !== 'none').length ? ' <span class="ps-sub" style="display:inline">' + esc(c.linkSources.filter((n) => n !== 'none').map(siteName).join(', ')) + '</span>' : '') + '</div>') },
@@ -287,7 +287,7 @@ export const PRESAVE_PAGE: UiPage = {
   html: shell({
     nav: "presaves",
     title: "Pre-saved track",
-    actions: `<a class="btn" href="/ui/presaves"${tipAttr("Every pre-saved track.")}>All pre-saves</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr("How often tracks are looked up, pushes, giving up.")}>Settings</a>`,
+    actions: `<a class="btn" href="/ui/presave-matches"${tipAttr("Candidates found on YouTube Music or Soulseek, waiting for your ear.")}>Matches</a><a class="btn" href="/ui/presaves"${tipAttr("Every pre-saved track.")}>All pre-saves</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr("How often tracks are looked up, pushes, giving up.")}>Settings</a>`,
     body: BODY,
     css: CSS,
     js: JS,

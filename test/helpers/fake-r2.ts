@@ -1,4 +1,4 @@
-/** In-memory R2 bucket for tests: put / get / list (prefix, cursor, startAfter, limit, customMetadata). */
+/** In-memory R2 bucket for tests: put / get / delete / list (prefix, cursor, startAfter, limit, customMetadata). */
 type Obj = {
   body: Uint8Array;
   httpMetadata?: { contentEncoding?: string; contentType?: string };
@@ -36,7 +36,13 @@ export function fakeR2(): R2Bucket & { _store: Map<string, Obj>; failPuts: boole
         async arrayBuffer() {
           return o.body.buffer.slice(o.body.byteOffset, o.body.byteOffset + o.body.byteLength);
         },
+        get body() {
+          return new Response(o.body).body;
+        },
       };
+    },
+    async delete(keys: string | string[]) {
+      for (const k of Array.isArray(keys) ? keys : [keys]) store.delete(k);
     },
     async list({
       prefix = "",
