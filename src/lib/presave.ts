@@ -600,7 +600,7 @@ async function checkLinks(env: Env, p: PresaveRow, trigger: PresaveTrigger, sett
     const liked = await onPresaveResolved(env, p.id, log, { now, replacedVideoId: p.youtube_video_id })
     if (liked) w = { ...w, presave: { ...w.presave, ...liked } }
     if (settings.presave.notifyFound) {
-      const sent = await sendPushToAll(env, presaveFoundPayload({ id: p.id, artist: w.presave.artist, title: w.presave.title, videoId }), log).catch(() => null)
+      const sent = await sendPushToAll(env, presaveFoundPayload({ id: p.id, artist: w.presave.artist, title: w.presave.title, videoId, artworkUrl: w.presave.artwork_url }), log).catch(() => null)
       if (sent && sent.sent > 0) {
         await dbOf(env).prepare('UPDATE presaves SET notified_at = ? WHERE id = ?').bind(now, p.id).run()
         w = { ...w, presave: { ...w.presave, notified_at: now } }

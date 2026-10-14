@@ -47,6 +47,20 @@ export type PushPayload = {
   /** Notifications with the same tag replace each other on the device. */
   tag: string
   ts: string
+  /** Small picture beside the text (album art, a video thumbnail). */
+  icon?: string
+  /** Large picture under the text (Android shows it when the notification is expanded). */
+  image?: string
+}
+
+/** A YouTube video's thumbnail (480x360, always there for a public or unlisted video). */
+export function youtubeThumbnail(videoId: string): string {
+  return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`
+}
+
+/** An http(s) artwork URL, else undefined (a placeholder or junk never reaches the device). */
+function artwork(url: string | null | undefined): string | undefined {
+  return url && /^https?:\/\//.test(url) ? url : undefined
 }
 
 export function pushConfigured(env: Env): boolean {
@@ -217,7 +231,7 @@ export function testPayload(): PushPayload {
 }
 
 /** mkvid ripped a pre-saved track and uploaded it (lib/track-uploads.ts); tapping opens it on YouTube Music. */
-export function trackUploadedPayload(t: { uploadId: number; artist: string | null; title: string | null; sourceName: string; videoId: string; playlistTitle: string }): PushPayload {
+export function trackUploadedPayload(t: { uploadId: number; artist: string | null; title: string | null; sourceName: string; videoId: string; playlistTitle: string; artworkUrl?: string | null }): PushPayload {
   const name = [t.artist, t.title].filter(Boolean).join(' – ') || 'A pre-saved track'
   return {
     kind: 'track_uploaded',
@@ -226,6 +240,8 @@ export function trackUploadedPayload(t: { uploadId: number; artist: string | nul
     url: `https://music.youtube.com/watch?v=${t.videoId}`,
     tag: `track-uploaded-${t.uploadId}`,
     ts: new Date().toISOString(),
+    icon: artwork(t.artworkUrl) ?? youtubeThumbnail(t.videoId),
+    image: youtubeThumbnail(t.videoId),
   }
 }
 
@@ -234,7 +250,7 @@ export function trackUploadedPayload(t: { uploadId: number; artist: string | nul
  * Tapping opens the YouTube Music version; one tag per presave so two finds
  * minutes apart do not replace each other on the device.
  */
-export function presaveFoundPayload(p: { id: number; artist: string | null; title: string | null; videoId: string }): PushPayload {
+export function presaveFoundPayload(p: { id: number; artist: string | null; title: string | null; videoId: string; artworkUrl?: string | null }): PushPayload {
   const a = p.artist && p.artist !== 'ID' ? p.artist : null
   const t = p.title && p.title !== 'ID' ? p.title : null
   return {
@@ -244,6 +260,8 @@ export function presaveFoundPayload(p: { id: number; artist: string | null; titl
     url: `https://music.youtube.com/watch?v=${p.videoId}`,
     tag: `tracked-presave-${p.id}`,
     ts: new Date().toISOString(),
+    icon: artwork(p.artworkUrl) ?? youtubeThumbnail(p.videoId),
+    image: youtubeThumbnail(p.videoId),
   }
 }
 

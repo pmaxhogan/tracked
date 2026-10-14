@@ -370,6 +370,9 @@ self.addEventListener('push', (event) => {
     requireInteraction: data.requireInteraction === true || STICKY_KINDS.includes(data.kind) || /challenge/.test(data.kind || ''),
     timestamp: data.ts ? Date.parse(data.ts) : Date.now(),
     data: { url: data.url || '/ui/', kind: data.kind || null },
+    // Album art / a video thumbnail, when the push carries one.
+    ...(typeof data.icon === 'string' ? { icon: data.icon } : {}),
+    ...(typeof data.image === 'string' ? { image: data.image } : {}),
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });

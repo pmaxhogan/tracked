@@ -698,7 +698,7 @@ export async function completeTrackUpload(env: Env, input: TrackCompleteInput, a
     try {
       const sent = await sendPushToAll(
         env,
-        trackUploadedPayload({ uploadId: Number(row.id), artist: row.artist, title: row.title, sourceName: row.source_name, videoId: input.videoId, playlistTitle: app.playlistTitle }),
+        trackUploadedPayload({ uploadId: Number(row.id), artist: row.artist, title: row.title, sourceName: row.source_name, videoId: input.videoId, playlistTitle: app.playlistTitle, artworkUrl: row.artwork_url }),
         log,
         fetchImpl,
       )
