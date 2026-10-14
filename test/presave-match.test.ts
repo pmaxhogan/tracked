@@ -336,6 +336,7 @@ describe("completeSearchJob", () => {
     const { job } = await claimSearchJob(env, ["ytm"], log, NOW);
     const { f } = ytFetcher({
       Lnpw0PbJYWM: { channelTitle: "JAWNS - Topic", commentCount: "2" },
+      U7SsWFFYcwk: { channelTitle: "LionMusic", commentCount: "5" },
       eTmdmS_BQMw: {
         channelTitle: "Bass Boost Everything",
         commentCount: "3",
@@ -362,6 +363,14 @@ describe("completeSearchJob", () => {
         ],
         candidates: [
           topic(),
+          // A re-upload scoring higher still loses to the Topic upload: that one needs no rip.
+          topic({
+            externalId: "U7SsWFFYcwk",
+            title: "JAWNS - Damager",
+            artist: "LionMusic",
+            videoType: "MUSIC_VIDEO_TYPE_UGC",
+            scores: [{ ref: "apple", score: 0.95 }],
+          }),
           topic({
             externalId: "eTmdmS_BQMw",
             title: "JAWNS - Damager [Bass Boosted]",
@@ -386,6 +395,7 @@ describe("completeSearchJob", () => {
     if (r.status !== "done") return;
     expect(r.decisions.map((d) => [d.externalId, d.decision, d.outcome])).toEqual([
       ["Lnpw0PbJYWM", "auto_approved", "found"],
+      ["U7SsWFFYcwk", "superseded", null],
       ["eTmdmS_BQMw", "superseded", null],
       ["9rvikRTSe-Q", "auto_rejected", null],
     ]);

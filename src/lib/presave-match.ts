@@ -636,7 +636,7 @@ export async function completeSearchJob(
   }
 
   const decisions: CandidateOutcome[] = [];
-  const approvedIds: Array<{ id: number; audio: number }> = [];
+  const approvedIds: Array<{ id: number; audio: number; video: boolean }> = [];
   const reviewIds: number[] = [];
   for (const c of body.candidates) {
     const externalId = str(c.externalId, 1500);
@@ -704,12 +704,17 @@ export async function completeSearchJob(
     const rowId = Number(ins.meta.last_row_id);
     decisions.push({ externalId, id: rowId, decision, reason, outcome: null });
     if (decision === "auto_approved")
-      approvedIds.push({ id: rowId, audio: verdict.audioScore ?? 0 });
+      approvedIds.push({
+        id: rowId,
+        audio: verdict.audioScore ?? 0,
+        video: !!yt && (yt.isTopic === true || yt.commentsOff === true),
+      });
     if (decision === "review") reviewIds.push(rowId);
   }
 
   // The best auto-approved candidate is applied; it supersedes the rest of the queue for this track.
-  approvedIds.sort((a, b) => b.audio - a.audio);
+  // One that can be the track's video as it is (Topic, comments off) beats a re-upload that would be ripped.
+  approvedIds.sort((a, b) => Number(b.video) - Number(a.video) || b.audio - a.audio);
   if (approvedIds.length) {
     const best = approvedIds[0]!;
     const r = await applyApproval(env, best.id, "auto", log, now);
