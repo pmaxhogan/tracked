@@ -35,7 +35,8 @@ vi.mock('../src/lib/itunes', () => ({ lookupAppleLink: vi.fn(async () => null) }
 
 import { resolveVideo } from '../src/lib/youtube'
 import { searchByTitle, searchByYouTubeUrl } from '../src/lib/tracklists1001'
-import { resolveTracklistPage } from '../src/lib/tracklist-resolve'
+import { resolveTracklistPage, resolveTrackMediaLinks } from '../src/lib/tracklist-resolve'
+import { PHONE_ANSWER_BUDGET_MS } from '../src/routes/now-playing'
 import { DecoyTracklistError, parseTracklist } from '../src/lib/tracklists1001'
 
 const SET_URL = 'https://www.1001tracklists.com/tracklist/2u10c9r9/mau-p-panorama-festival-italy-2026-08-16.html'
@@ -112,7 +113,7 @@ describe('POST /now-playing — sets tracked itself uploaded through mkvid', () 
     expect(resolveVideo).not.toHaveBeenCalled()
     expect(searchByYouTubeUrl).not.toHaveBeenCalled()
     expect(searchByTitle).not.toHaveBeenCalled()
-    expect(resolveTracklistPage).toHaveBeenCalledWith(expect.anything(), SET_URL, expect.anything())
+    expect(resolveTracklistPage).toHaveBeenCalledWith(expect.anything(), SET_URL, expect.anything(), expect.anything())
   })
 
   it('matches the title YouTube actually shows: case-insensitive, and cut to the 100 chars mkvid uploads', async () => {
@@ -284,5 +285,66 @@ describe('POST /now-playing — an anonymous "ID - ID" row is playing', () => {
     expect(withAnon.body.tracks.map((t: any) => t.rowIndex)).toEqual(base.body.tracks.map((t: any) => (t.rowIndex >= 4 ? t.rowIndex + 1 : t.rowIndex)))
     expect(withAnon.body.tracks.filter((t: any) => t.isCurrent).map((t: any) => t.title)).toEqual([before.title])
     expect(withAnon.audit.select.currentFromAnonymousRow).toBe(false)
+  })
+})
+
+describe('POST /now-playing — the phone time budget for link lookups', () => {
+  const withIds = () => ({
+    tracks: [
+      { ...track(0, 'Mau P', 'Drugs From Amsterdam'), trackId: '101', mediaId: '101' },
+      { ...track(300, 'Chris Lake', 'Turn Off The Lights'), trackId: '102', mediaId: '102' },
+      { ...track(600, 'Odd Mob', 'Left To Right'), trackId: '103', mediaId: '103' },
+      { ...track(900, 'Fisher', 'Losing It'), trackId: '104', mediaId: '104' },
+      { ...track(1200, 'John Summit', 'Where You Are'), trackId: '105', mediaId: '105' },
+    ],
+    setAppleLink: null,
+    setYoutubeLink: null,
+    setSoundcloudLink: null,
+  })
+
+  it('answers when the budget runs out, the unfinished tracks marked linksPending, and records the phase times', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const env = makeEnv()
+      await seedMkvidUpload(env)
+      await seedTracklistVideo(env)
+      ;(resolveTracklistPage as ReturnType<typeof vi.fn>).mockImplementation(async () => withIds())
+      ;(resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mockImplementation(async (_env: Env, id: string) =>
+        id === '102' ? new Promise(() => {}) : { appleLink: null, youtubeLink: `https://youtu.be/v${id}` },
+      )
+      const pending = post(env, { videoTitle: SET_TITLE, videoDurationSeconds: 6967, currentSeconds: 400 })
+      await vi.advanceTimersByTimeAsync(PHONE_ANSWER_BUDGET_MS + 100)
+      const res = await pending
+      const body = (await res.json()) as any
+      expect(body.status).toBe('ok')
+      const byTitle = Object.fromEntries(body.tracks.map((t: any) => [t.title, t]))
+      expect(byTitle['Turn Off The Lights'].linksPending).toBe(true)
+      expect(byTitle['Turn Off The Lights'].youtubeLink).toBeNull()
+      expect(byTitle['Turn Off The Lights'].trackId).toBe('102')
+      expect(byTitle['Drugs From Amsterdam'].youtubeLink).toBe('https://youtu.be/v101')
+      expect(byTitle['Drugs From Amsterdam'].linksPending).toBeUndefined()
+
+      await vi.advanceTimersByTimeAsync(10)
+      const row = await env.DB.prepare('SELECT record FROM now_playing_audit').first<{ record: string }>()
+      const meta = JSON.parse(row!.record).meta
+      expect(Object.keys(meta.phases)).toEqual(['video', 'search', 'scrape', 'links', 'liked'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('waits for links that answer in time, and warms the links of the next tracks afterwards', async () => {
+    const env = makeEnv()
+    await seedMkvidUpload(env)
+    await seedTracklistVideo(env)
+    ;(resolveTracklistPage as ReturnType<typeof vi.fn>).mockImplementation(async () => withIds())
+    ;(resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mockImplementation(async (_env: Env, id: string) => ({ appleLink: null, youtubeLink: `https://youtu.be/v${id}` }))
+    const res = await post(env, { videoTitle: SET_TITLE, videoDurationSeconds: 6967, currentSeconds: 400 })
+    const body = (await res.json()) as any
+    expect(body.tracks.every((t: any) => t.linksPending === undefined && t.youtubeLink)).toBe(true)
+    await new Promise((r) => setTimeout(r, 10))
+    const asked = (resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])
+    // Picked: 0, 300, 600 (previous / current / next); then the next ones ahead.
+    expect(asked).toEqual(['101', '102', '103', '104', '105'])
   })
 })

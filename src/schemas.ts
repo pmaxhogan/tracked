@@ -72,6 +72,11 @@ export const ResponseTrackSchema = z
     }),
     trackId: z.string().nullable().openapi({ example: '909720', description: 'Internal 1001tracklists track id (the medialink id POST /presave takes). null on an anonymous "ID - ID" row.' }),
     rowIndex: z.number().int().nullable().openapi({ example: 12, description: "0-based page row in the set (anonymous rows counted): with tracklistUrl it names an ID row for POST /presave. null on a cache entry older than the rows." }),
+    linksPending: z.boolean().optional().openapi({
+      example: true,
+      description:
+        "true when this track's Apple/YouTube links were still being looked up when the answer had to go (the phone's time budget): appleLink and youtubeLink are null for now, not \"none\". The lookup finishes in the background and is cached, so asking again in a few seconds has them. Absent otherwise.",
+    }),
   })
   .openapi('ResponseTrack')
 

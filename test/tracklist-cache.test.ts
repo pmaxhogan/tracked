@@ -12,6 +12,8 @@ import {
   TRACKLIST_TTL,
   cacheAgeSeconds,
   cacheParsedTracklist,
+  readCachedTracklist,
+  readCachedTracklistEntry,
   tracklistCacheKey,
   tracklistCacheTtl,
 } from '../src/lib/tracklist-cache'
@@ -146,7 +148,8 @@ describe('resolveTracklistPage TTL selection', () => {
     poolServes(fx('tracklist-habstrakt.html'))
     const r = await resolveTracklistPage(env, FULL_URL, log)
     expect(r.tracks).toHaveLength(31)
-    expect(ttls[tracklistCacheKey(FULL_SLUG)]).toBe(TRACKLIST_TTL.FULL)
+    expect(ttls[tracklistCacheKey(FULL_SLUG)]).toBe(TRACKLIST_TTL.FULL + TRACKLIST_TTL.STALE_KEEP)
+    expect(r.ttlSeconds).toBe(TRACKLIST_TTL.FULL)
     expect(r.fetchedAt).toEqual(expect.any(String))
   })
 
@@ -155,7 +158,7 @@ describe('resolveTracklistPage TTL selection', () => {
     const ttls = ttlSpy(env)
     poolServes(fx('tracklist-maxstyler.html'))
     await resolveTracklistPage(env, PARTIAL_URL, log)
-    expect(ttls[tracklistCacheKey('1pmwyfn1')]).toBe(TRACKLIST_TTL.SHORT)
+    expect(ttls[tracklistCacheKey('1pmwyfn1')]).toBe(TRACKLIST_TTL.SHORT + TRACKLIST_TTL.STALE_KEEP)
   })
 
   it('writes a fully identified set under 2 days old for 6 hours', async () => {
@@ -165,7 +168,7 @@ describe('resolveTracklistPage TTL selection', () => {
     const ttls = ttlSpy(env)
     poolServes(fx('tracklist-habstrakt.html'))
     await resolveTracklistPage(env, FULL_URL, log)
-    expect(ttls[tracklistCacheKey(FULL_SLUG)]).toBe(TRACKLIST_TTL.SHORT)
+    expect(ttls[tracklistCacheKey(FULL_SLUG)]).toBe(TRACKLIST_TTL.SHORT + TRACKLIST_TTL.STALE_KEEP)
   })
 
   it('serves the second call from cache; force refetches', async () => {
@@ -176,6 +179,48 @@ describe('resolveTracklistPage TTL selection', () => {
     expect(calls).toHaveLength(1)
     await resolveTracklistPage(env, FULL_URL, log, { force: true })
     expect(calls).toHaveLength(2)
+  })
+
+  it('treats an entry past its TTL as a miss for every caller but the phone', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-14T10:00:00Z'))
+    const env = makeEnv()
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
+    await resolveTracklistPage(env, FULL_URL, log)
+    vi.setSystemTime(new Date('2026-10-14T10:00:00Z').getTime() + (TRACKLIST_TTL.FULL + 60) * 1000)
+    expect(await readCachedTracklist(env, FULL_SLUG)).toBeUndefined()
+    expect((await readCachedTracklist(env, FULL_SLUG, { allowStale: true }))?.tracks).toHaveLength(31)
+    expect((await readCachedTracklistEntry(env, FULL_SLUG))?.stale).toBe(true)
+    await resolveTracklistPage(env, FULL_URL, log)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('answers the phone from a stale entry at once and fetches it again in the background', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-14T10:00:00Z'))
+    const env = makeEnv()
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
+    const first = await resolveTracklistPage(env, FULL_URL, log)
+    vi.setSystemTime(new Date('2026-10-14T10:00:00Z').getTime() + (TRACKLIST_TTL.FULL + 60) * 1000)
+    const bg: Array<Promise<unknown>> = []
+    const r = await resolveTracklistPage(env, FULL_URL, log, { background: (p) => bg.push(p) })
+    expect(r.fetchedAt).toBe(first.fetchedAt)
+    expect(bg).toHaveLength(1)
+    await Promise.all(bg)
+    expect(calls).toHaveLength(2)
+    const after = await readCachedTracklistEntry(env, FULL_SLUG)
+    expect(after?.stale).toBe(false)
+    expect(after?.value.fetchedAt).not.toBe(first.fetchedAt)
+  })
+
+  it('a fresh entry starts no background fetch', async () => {
+    const env = makeEnv()
+    const calls = poolServes(fx('tracklist-habstrakt.html'))
+    await resolveTracklistPage(env, FULL_URL, log)
+    const bg: Array<Promise<unknown>> = []
+    await resolveTracklistPage(env, FULL_URL, log, { background: (p) => bg.push(p) })
+    expect(bg).toHaveLength(0)
+    expect(calls).toHaveLength(1)
   })
 })
 

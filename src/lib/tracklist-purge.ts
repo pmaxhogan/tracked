@@ -71,7 +71,7 @@ export async function resolvePurgeTarget(env: Env, t: PurgeTarget): Promise<Reso
   if (t.slug) {
     const slug = t.slug.trim()
     if (!SLUG_RE.test(slug)) return { ok: false, status: 400, error: 'invalid_slug', message: 'a tracklist slug is the short id in /tracklist/<slug>/…' }
-    const fromCache = (await readCachedTracklist(env, slug))?.tracklistUrl
+    const fromCache = (await readCachedTracklist(env, slug, { allowStale: true }))?.tracklistUrl
     if (fromCache) return { ok: true, tracklistUrl: fromCache, via: 'slug' }
     const like = `%/tracklist/${slug}/%`
     const db = dbOf(env)
@@ -193,7 +193,8 @@ const dayKey = (nowMs: number) => `tlrefresh:v1:day:${new Date(nowMs).toISOStrin
 export async function refreshTracklistPage(env: Env, tracklistUrl: string, log: Logger, opts: { nowMs?: number } = {}): Promise<RefreshResult> {
   const nowMs = opts.nowMs ?? Date.now()
   const slug = tracklistSlug(tracklistUrl)
-  const previous = await readCachedTracklist(env, slug)
+  // Past its TTL still counts: it is the list a failed refetch keeps answering with.
+  const previous = await readCachedTracklist(env, slug, { allowStale: true })
   const { forcedRefetch } = await getPoolSettings(env)
   const lastAt = Number((await env.CACHE.get(cooldownKey(slug))) ?? 0) || 0
   const left = lastAt ? Math.ceil(lastAt / 1000 + forcedRefetch.cooldownSeconds - nowMs / 1000) : 0

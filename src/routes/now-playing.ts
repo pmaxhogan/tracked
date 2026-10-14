@@ -64,10 +64,44 @@ const CV = {
   // and /tracklist share the same cache keys.
 } as const
 
+/**
+ * The phone's HTTP step gives up at 30 s. Link lookups (one pool fetch per
+ * uncached track, a cold browser each: ~10-15 s) stop being waited for this
+ * long after the request started; the tracks still pending go out with
+ * `linksPending` and their lookups finish in the background (cached 30 days),
+ * so the next tap has them.
+ */
+export const PHONE_ANSWER_BUDGET_MS = 20_000
+/** Even a request whose set page took the whole budget waits this long for links (cached ones answer in well under it). */
+export const LINKS_MIN_WAIT_MS = 2_500
+/**
+ * After answering, the links of this many identified tracks after the picked
+ * ones are looked up in the background, so a tap a few minutes later (the
+ * usual pattern: the audit shows taps on one set minutes apart) is all cache.
+ */
+export const LINKS_PREFETCH_AHEAD = 3
+
 export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings: Env }> = async (c) => {
   const reqId = c.req.raw.headers.get('cf-ray') ?? `local-${Math.random().toString(36).slice(2, 10)}`
   const log = makeLogger({ reqId })
   const tStart = Date.now()
+  // Where the time went (ms per phase), in the audit record's meta.
+  const phases: Record<string, number> = {}
+  let tPhase = tStart
+  const phaseDone = (name: string) => {
+    const now = Date.now()
+    phases[name] = now - tPhase
+    tPhase = now
+  }
+  // Work that must not hold the answer: after the response, via waitUntil.
+  const background = (p: Promise<unknown>) => {
+    const safe = p.catch((e) => log.warn('background.failed', errorFields(e)))
+    try {
+      c.executionCtx.waitUntil(safe)
+    } catch {
+      /* no executionCtx (dev/tests): let it run fire-and-forget */
+    }
+  }
 
   const body = c.req.valid('json')
   const env = c.env
@@ -127,7 +161,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
       youtube: audit.youtube ?? null,
       search: audit.search ?? null,
       select: audit.select ?? null,
-      meta: { colo: cf?.colo ?? null, country: cf?.country ?? null, totalMs: Date.now() - tStart },
+      meta: { colo: cf?.colo ?? null, country: cf?.country ?? null, totalMs: Date.now() - tStart, phases },
     }
     // Compact summary stored in KV metadata so the admin list view is a single
     // list() round-trip (no per-row get). Must stay under KV's 1024-byte cap —
@@ -233,6 +267,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     return respond('no_video', {}, 'videoUrl or videoTitle is required')
   }
   audit.youtube = { videoId, videoUrl, matchTitle: ytMatchTitle, error: ytError }
+  phaseDone('video')
 
   // Phase 2 (steps b→d) — find a tracklist, trying each available signal until
   // one hits: (b) the resolved YouTube URL, (c) the resolved video's title,
@@ -316,13 +351,12 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     return respond('no_video', {}, msg)
   }
   log.info('phase.search.resolved', { tracklistUrl, via: tracklistVia })
+  phaseDone('search')
   // Whatever step found it: a purge by this video id then refreshes this same list.
   if (videoId) {
-    try {
-      await rememberVideoTracklist(env, videoId, tracklistUrl)
-    } catch (e) {
-      log.warn('phase.search.remember_failed', { videoId, ...errorFields(e) })
-    }
+    const vid = videoId
+    const url = tracklistUrl
+    background(rememberVideoTracklist(env, vid, url).catch((e) => log.warn('phase.search.remember_failed', { videoId: vid, ...errorFields(e) })))
   }
 
   // Phase 3 — scrape the tracklist
@@ -360,7 +394,8 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
         log.warn('phase.scrape.refresh_failed_served_cache', { tracklistUrl, keptFetchedAt: kept.fetchedAt ?? null, error: (err as Error).message })
       }
     } else {
-      scraped = await resolveTracklistPage(env, tracklistUrl, log)
+      // A list past its TTL answers now and is fetched again behind the answer.
+      scraped = await resolveTracklistPage(env, tracklistUrl, log, { background })
       cache = { fetchedAt: scraped.fetchedAt ?? null, ageSeconds: cacheAgeSeconds(scraped), ttlSeconds: scraped.ttlSeconds ?? null, refreshed: false }
     }
     parsedTracks = scraped.tracks
@@ -392,6 +427,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     log.error('phase.scrape.throw', { tracklistUrl, ...errorFields(e) })
     return respond('upstream_error', { videoUrl, tracklistUrl, cache }, `1001 scrape: ${(e as Error).message}`)
   }
+  phaseDone('scrape')
   log.info('phase.scrape.resolved', {
     tracklistUrl,
     trackCount: parsedTracks.length,
@@ -438,22 +474,61 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     return respond('no_tracklist', { videoUrl, tracklistUrl, cache })
   }
 
-  // Phase 5 — enrich with deep links
-  const enriched = await Promise.all(
-    sel.picked.map(async (t) => {
-      const parsed = selectable.find((p) => p.title === t.title && p.startSeconds === t.startSeconds)
-      const links = await resolveLinks(env, parsed, t, log)
-      // trackId / rowIndex: what POST /presave takes (an anonymous row's data-id is a page position, not a track id).
-      // mediaId undefined = a list cached before the field: its trackId may be a page position, so no id (the save goes by row).
-      const ids = { trackId: parsed && !parsed.anonymous ? (parsed.mediaId ?? null) : null, rowIndex: parsed?.rowIndex ?? null }
-      return { ...t, ...links, ...ids } satisfies ResponseTrack & typeof ids
+  // Phase 5 — enrich with deep links, within the phone's time budget. Each
+  // track's lookup is its own promise; whatever has not finished when the
+  // budget runs out goes out with linksPending and completes in the background.
+  type Enriched = ResponseTrack & { trackId: string | null; rowIndex: number | null; linksPending?: boolean }
+  const parsedFor = (t: ResponseTrack) => selectable.find((p) => p.title === t.title && p.startSeconds === t.startSeconds)
+  // trackId / rowIndex: what POST /presave takes (an anonymous row's data-id is a page position, not a track id).
+  // mediaId undefined = a list cached before the field: its trackId may be a page position, so no id (the save goes by row).
+  const idsFor = (parsed: ReturnType<typeof parsedFor>) => ({ trackId: parsed && !parsed.anonymous ? (parsed.mediaId ?? null) : null, rowIndex: parsed?.rowIndex ?? null })
+  const done: Array<Enriched | undefined> = new Array(sel.picked.length)
+  const lookups = Promise.all(
+    sel.picked.map(async (t, i) => {
+      const parsed = parsedFor(t)
+      let links: { appleLink: string | null; youtubeLink: string | null }
+      try {
+        links = await resolveLinks(env, parsed, t, log)
+      } catch (e) {
+        log.warn('links.lookup_failed', { artist: t.artist, title: t.title, ...errorFields(e) })
+        links = { appleLink: null, youtubeLink: null }
+      }
+      done[i] = { ...t, ...links, ...idsFor(parsed) }
     }),
   )
+  // The tracks just after the picked ones, warmed once the picked lookups are
+  // through (never competing with them for the pool's browsers).
+  const lastPicked = sel.picked[sel.picked.length - 1]
+  const lastIdx = lastPicked ? selectable.findIndex((p) => p.title === lastPicked.title && p.startSeconds === lastPicked.startSeconds) : -1
+  const ahead = [
+    ...new Set(
+      selectable
+        .slice(lastIdx + 1)
+        .filter((p) => !p.anonymous && !p.isUnidentified && p.trackId && /^\d+$/.test(p.trackId))
+        .map((p) => p.trackId!),
+    ),
+  ].slice(0, LINKS_PREFETCH_AHEAD)
+  background(
+    lookups.then(() =>
+      Promise.all(ahead.map((id) => resolveTrackMediaLinks(env, id, log).catch((e) => log.warn('links.prefetch_failed', { trackId: id, ...errorFields(e) })))),
+    ),
+  )
+  const waitMs = Math.max(LINKS_MIN_WAIT_MS, PHONE_ANSWER_BUDGET_MS - (Date.now() - tStart))
+  let budgetTimer: ReturnType<typeof setTimeout> | undefined
+  const inTime = await Promise.race([lookups.then(() => true), new Promise<false>((r) => (budgetTimer = setTimeout(() => r(false), waitMs)))])
+  clearTimeout(budgetTimer)
+  const enriched: Enriched[] = sel.picked.map(
+    (t, i) => done[i] ?? { ...t, appleLink: null, youtubeLink: null, ...idsFor(parsedFor(t)), linksPending: true },
+  )
+  const pendingCount = enriched.filter((t) => t.linksPending).length
+  if (!inTime) log.warn('links.budget_exceeded', { waitMs, pending: pendingCount, of: enriched.length })
+  phaseDone('links')
 
   // Phase 6 — mark which tracks the connected YouTube account has already
   // liked (drives the filled/outlined thumbs-up in the Tasker scene). Best
   // effort: null everywhere when YouTube isn't connected or the lookup fails.
   const tracks = await attachYoutubeLiked(env, enriched, log)
+  phaseDone('liked')
 
   const status: Status = sel.anyUnidentified ? 'unidentified' : 'ok'
   const payload = { status, videoUrl, tracklistUrl, setAppleLink, tracks, cache } satisfies Res

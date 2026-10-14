@@ -90,6 +90,10 @@ Steps:
      - without one: **Pre-save** (a + icon, see below) and, when there is an `appleLink`, the Apple Music note. ID rows get the + too.
    - When `setAppleLink` is set, an "Open whole set on Apple Music" card sits on top. A ‹ › pager at the bottom (`Tracked.Page`) loads the whole set once via `POST /tracklist` (`%FULL_TRACKS`) and pages through it 5 at a time.
 
+   **Links that are still loading.** The Worker answers within about 20 s of the request (`PHONE_ANSWER_BUDGET_MS`), well inside the HTTP step's 30 s timeout. A track whose Apple/YouTube links were not looked up by then comes back with `linksPending: true` and null links; its card shows a small spinner instead of buttons. The task then runs up to three fill rounds (Wait 5 s, the same `POST /now-playing` with a 15 s timeout, `whatsplaying-fill.js`), which merge the links into `%NP_TRACKS` by cue + artist + title and re-render, stopping as soon as nothing is pending. The lookups finish in the background on the Worker and are cached for 30 days, so a fill round is answered from cache. After each answer the Worker also looks up the links of the next 3 tracks in the background, so the next tap a few minutes later is all cache.
+
+   **A set page past its cache TTL** is answered from the kept copy at once (KV keeps it 7 days past the TTL) and fetched again behind the answer; only a set never fetched before waits for 1001tracklists.
+
    The response always carries up to three groups (previous, current, next) so the user can disambiguate transitions and peek ahead. `isCurrent` is `true` only on the current group's members. Edge cases the response handles automatically: at the start of the set there's no previous; at the end there's no next; before any cued track the response is just `[firstCuedGroup]` with all `isCurrent: false` ("next up").
 
 7. **Network error**

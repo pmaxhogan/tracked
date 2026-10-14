@@ -12,7 +12,7 @@ import {
   TRACKLIST_CACHE_VERSION,
   cacheAgeSeconds,
   cacheParsedTracklist,
-  readCachedTracklist,
+  readCachedTracklistEntry,
   tracklistCacheKey,
   tracklistSlug,
   type CachedTracklist,
@@ -45,6 +45,13 @@ export type ResolveTracklistOpts = {
   force?: boolean
   /** Handed to the fetch layer. Default 'phone': every caller here is a person waiting. */
   priority?: FetchPriority
+  /**
+   * Stale-while-revalidate (the phone): an entry past its TTL but still in KV
+   * (TRACKLIST_TTL.STALE_KEEP) answers at once and the page is fetched again
+   * in the background, handed to this (the request's waitUntil). Without it a
+   * stale entry is a miss, as before.
+   */
+  background?: (p: Promise<unknown>) => void
 }
 
 /**
@@ -59,19 +66,34 @@ export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: 
   const slug = tracklistSlug(tracklistUrl)
   const key = tracklistCacheKey(slug)
   if (!opts.force) {
-    // Older entries may be a bare ParsedTrack[]; readCachedTracklist normalizes them.
-    const cached = await readCachedTracklist(env, slug)
-    if (cached) {
+    // Older entries may be a bare ParsedTrack[]; readCachedTracklistEntry normalizes them.
+    const entry = await readCachedTracklistEntry(env, slug)
+    const cached = entry?.value
+    if (entry && cached && (!entry.stale || opts.background)) {
       log.counters.cacheHits++
-      log.info('cache.hit', { key, trackCount: cached.tracks.length, setAppleLink: cached.setAppleLink, ageSeconds: cacheAgeSeconds(cached), ttlSeconds: cached.ttlSeconds ?? null })
+      log.info('cache.hit', { key, trackCount: cached.tracks.length, setAppleLink: cached.setAppleLink, ageSeconds: cacheAgeSeconds(cached), ttlSeconds: cached.ttlSeconds ?? null, stale: entry.stale })
+      if (entry.stale && opts.background) {
+        // Never throws into the request: the answer is already the kept list.
+        opts.background(
+          fetchAndCacheTracklistPage(env, tracklistUrl, log, opts.priority ?? 'phone').then(
+            (v) => log.info('cache.revalidated', { key, trackCount: v.tracks.length }),
+            (e) => log.warn('cache.revalidate_failed', { key, error: (e as Error).message }),
+          ),
+        )
+      }
       return cached
     }
     log.counters.cacheMisses++
-    log.info('cache.miss', { key })
+    log.info('cache.miss', { key, stale: entry?.stale ?? false })
   } else {
     log.info('cache.bypass', { key, reason: 'force' })
   }
-  const fetchOpts: FetchTracklistOpts = fetchOptsFromEnv(env, log, { priority: opts.priority ?? 'phone' })
+  return fetchAndCacheTracklistPage(env, tracklistUrl, log, opts.priority ?? 'phone')
+}
+
+/** One set page through the pool, parsed and written to the cache (decoy: thrown, empty: not cached). */
+async function fetchAndCacheTracklistPage(env: Env, tracklistUrl: string, log: Logger, priority: FetchPriority): Promise<CachedTracklist> {
+  const fetchOpts: FetchTracklistOpts = fetchOptsFromEnv(env, log, { priority })
   const { result, html } = await fetchTracklist(tracklistUrl, fetchOpts)
   // The page's media facts (W6's full-recording rule reads them) from every set page fetch.
   await recordPageFacts(env, tracklistUrl, html, log)

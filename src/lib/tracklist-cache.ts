@@ -37,6 +37,13 @@ export const TRACKLIST_TTL = {
   FULL: 60 * 60 * 24 * 3,
   /** Any unidentified row, or a set under 2 days old. */
   SHORT: 60 * 60 * 6,
+  /**
+   * How long KV keeps an entry past its TTL. Readers treat it as expired at
+   * `ttlSeconds` as before; only the phone (`readCachedTracklistEntry` with
+   * stale allowed) answers from it while it fetches the page again in the
+   * background, so a set page that went cold costs no wait on the phone.
+   */
+  STALE_KEEP: 60 * 60 * 24 * 7,
 } as const
 
 /** A set younger than this is cached for the short TTL whatever its rows say. */
@@ -134,7 +141,7 @@ export async function cacheParsedTracklist(
     tracklistUrl,
     setDate,
   }
-  await putJson(env.CACHE, key, value, ttlSeconds)
+  await putJson(env.CACHE, key, value, ttlSeconds + TRACKLIST_TTL.STALE_KEEP)
   log.info('cache.put', {
     key,
     source: opts.source ?? null,
@@ -177,10 +184,23 @@ export function cacheAgeSeconds(value: Pick<CachedTracklist, 'fetchedAt'>, nowMs
   return Number.isFinite(t) ? Math.max(0, Math.round((nowMs - t) / 1000)) : null
 }
 
-/** The cached entry for a slug, if any. Legacy bare-array entries are normalized. */
-export async function readCachedTracklist(env: Env, slug: string): Promise<CachedTracklist | undefined> {
+/** Whether an entry is past the TTL it was written with (entries without the stamps never are: KV expired them). */
+export function isStaleTracklist(value: Pick<CachedTracklist, 'fetchedAt' | 'ttlSeconds'>, nowMs: number = Date.now()): boolean {
+  const age = cacheAgeSeconds(value, nowMs)
+  return age !== null && typeof value.ttlSeconds === 'number' && age > value.ttlSeconds
+}
+
+/** The KV entry for a slug and whether it is past its TTL. Legacy bare-array entries are normalized. */
+export async function readCachedTracklistEntry(env: Env, slug: string, nowMs: number = Date.now()): Promise<{ value: CachedTracklist; stale: boolean } | undefined> {
   const cached = await getJson<CachedTracklist | ParsedTrack[]>(env.CACHE, tracklistCacheKey(slug))
   if (!cached) return undefined
-  if (Array.isArray(cached)) return { tracks: cached, setAppleLink: null, setYoutubeLink: null, setSoundcloudLink: null }
-  return cached
+  if (Array.isArray(cached)) return { value: { tracks: cached, setAppleLink: null, setYoutubeLink: null, setSoundcloudLink: null }, stale: false }
+  return { value: cached, stale: isStaleTracklist(cached, nowMs) }
+}
+
+/** The cached entry for a slug, if any and within its TTL (`allowStale`: also one past it). */
+export async function readCachedTracklist(env: Env, slug: string, opts: { allowStale?: boolean } = {}): Promise<CachedTracklist | undefined> {
+  const e = await readCachedTracklistEntry(env, slug)
+  if (!e || (e.stale && !opts.allowStale)) return undefined
+  return e.value
 }
