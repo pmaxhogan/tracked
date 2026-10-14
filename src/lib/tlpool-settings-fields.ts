@@ -62,6 +62,7 @@ export const TLPOOL_FIELD_GROUPS: TlpoolFieldGroup[] = [
       f('netErrorBenchAfter', 'Network-error fetches before an exit rests', 3, 0, 20, '', 'In a row, while other accounts fetch fine; it then rests like a failed exit. 0 = never.'),
       f('resultTtlSeconds', 'Reuse a finished answer for', 1800, 0, 86400, 's', 'A repeat request for the same URL gets it.'),
       f('idleCloseSeconds', 'Close an idle browser after', 0, 0, 3600, 's', '0 = the IDLE_CLOSE_SECONDS env value (240); else at least 30.'),
+      f('phoneLingerSeconds', 'Keep a browser open after a phone fetch for', 900, 0, 3600, 's', 'So the next tap finds it warm (tlpool picks a warm browser for phone fetches). Still closed when another account needs the slot. 0 = off.'),
     ],
   },
   {
