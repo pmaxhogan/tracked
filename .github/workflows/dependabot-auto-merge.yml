@@ -1,0 +1,152 @@
+# stack-template: automerge/native@1 650efb04c1b9
+name: Dependabot auto-merge
+
+# Native auto-merge for repos where rulesets / branch protection and `gh pr merge
+# --auto` exist (public repos, or private repos on a paid plan). Stack standard
+# deps.dependabot-policy:
+#   - semver minor and patch: approve and arm auto-merge
+#   - semver major: ONLY when every bumped dependency is @types/* or a dev-only
+#     dependency (dependency-type direct:development); a production major always
+#     waits for a human (D-DEP-1)
+#   - no semver update type (calendar-versioned artifacts such as the Compose BOM):
+#     hold, ONE comment, never repeated on re-runs (D-DEP-5)
+#   - security updates fast-track: merge on green whatever the semver type (D-DEP-6)
+# Auto-merge only completes once the REQUIRED checks pass, so the required checks
+# in the branch protection / ruleset are the real gate; this workflow just arms it.
+#
+# Why `pull_request` and not `pull_request_target`: pull_request_target runs with
+# secrets and a write token in the context of the BASE branch, which is the classic
+# way a poisoned PR steals credentials. Nothing here needs it: Dependabot's own
+# pull_request runs can be granted the permissions below, and Dependabot-scoped
+# secrets (Settings > Secrets > Dependabot) are readable on them.
+#
+# Why the actor check: github.actor is whoever pushed the head commit. If a human
+# pushes onto a Dependabot branch the actor changes and the PR silently opts out of
+# auto-merge, which is the behaviour we want (a human touched it, a human merges it).
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One run per PR; a newer push supersedes an older run.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    env:
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      # Secrets cannot be tested in a step `if`, so surface "is the App configured"
+      # as a plain env var. Store AUTOMERGE_APP_ID (the App's Client ID) and
+      # AUTOMERGE_APP_PRIVATE_KEY as DEPENDABOT secrets, not Actions secrets:
+      # Dependabot-triggered runs cannot read Actions secrets.
+      HAS_APP: ${{ secrets.AUTOMERGE_APP_ID != '' }}
+    steps:
+      # Optional GitHub App token. Two reasons to prefer it over GITHUB_TOKEN:
+      #   1. A merge made with GITHUB_TOKEN does not trigger push workflows, so the
+      #      default branch gets no CI run and no deploy after a Dependabot merge
+      #      (the 14-hour stall that motivated D-DEP-7). A merge made by an App does.
+      #   2. fetch-metadata's alert lookup (security fast-track) needs a PAT or App
+      #      token; GITHUB_TOKEN cannot read Dependabot alerts.
+      - name: Mint App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+          # Looks up the Dependabot alert behind a security PR. Only possible with
+          # the App token; without it security PRs are recognised by their group.
+          alert-lookup: ${{ steps.app.outputs.token != '' }}
+
+      # fetch-metadata reports only the HIGHEST semver change in `update-type`, and a
+      # grouped PR can mix a dev major with a production minor, so classify from the
+      # per-dependency JSON instead.
+      - name: Classify update
+        id: classify
+        env:
+          DEPS_JSON: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          ALERT_STATE: ${{ steps.metadata.outputs.alert-state }}
+          DEP_GROUP: ${{ steps.metadata.outputs.dependency-group }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          node - <<'JS' >> "$GITHUB_OUTPUT"
+          const deps = JSON.parse(process.env.DEPS_JSON || "[]");
+          // Security: the alert is OPEN (App token present), or the PR came from the
+          // `security` group / a security-* branch (works without the token).
+          const security =
+            process.env.ALERT_STATE === "OPEN" ||
+            process.env.DEP_GROUP === "security" ||
+            /^dependabot\/[\w-]+\/(?:[\w.-]+\/)*security-[0-9a-f]{6,}$/.test(process.env.HEAD_REF || "");
+          const type = (d) => d.updateType || "";
+          let kind;
+          if (!deps.length || deps.some((d) => !type(d))) kind = "unknown";
+          else if (deps.every((d) => type(d) !== "version-update:semver-major")) kind = "minor-or-patch";
+          else if (
+            deps
+              .filter((d) => type(d) === "version-update:semver-major")
+              .every((d) => d.dependencyName.startsWith("@types/") || d.dependencyType === "direct:development")
+          ) kind = "dev-major";
+          else kind = "major";
+          // A security PR merges regardless of semver type, but never when the type
+          // is unknown: that is a hold, not a guess.
+          if (security && kind !== "unknown") kind = "security";
+          console.error(JSON.stringify({ deps, security, kind }));
+          console.log(`kind=${kind}`);
+          JS
+
+      # Approval is for repos whose ruleset requires one review. GITHUB_TOKEN cannot
+      # approve unless the repo allows Actions to approve PRs, so a failure here is a
+      # warning, not a red run: auto-merge may still be allowed without approval.
+      - name: Approve
+        if: contains(fromJSON('["minor-or-patch","dev-major","security"]'), steps.classify.outputs.kind)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+        run: gh pr review --approve "$PR_URL" || echo "::warning::could not approve $PR_URL (repo setting 'Allow GitHub Actions to create and approve pull requests' is off and no App token is configured)"
+
+      - name: Enable auto-merge
+        if: contains(fromJSON('["minor-or-patch","dev-major","security"]'), steps.classify.outputs.kind)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --squash "$PR_URL"
+
+      # D-DEP-7. Without an App token the eventual merge is made by GITHUB_TOKEN and
+      # triggers NO push workflows: the default branch gets no CI run and no deploy
+      # until something else pushes. We cannot dispatch CI from here, because auto-merge
+      # fires later, after this job has ended; dispatching now would run CI on the
+      # unmerged default branch and prove nothing. So surface it loudly instead.
+      - name: Warn when post-merge CI will not run
+        if: env.HAS_APP != 'true' && contains(fromJSON('["minor-or-patch","dev-major","security"]'), steps.classify.outputs.kind)
+        run: |
+          echo "::warning::No GitHub App token configured (AUTOMERGE_APP_ID unset). The auto-merge will be made with GITHUB_TOKEN and will NOT trigger push workflows on main. After the merge, run: gh workflow run ci.yml --ref main (the workflow needs a workflow_dispatch trigger), or configure the App."
+
+      # ONE comment per hold. The marker makes the check exact, so re-runs, new
+      # pushes and rebases never add a second one (D-DEP-5).
+      - name: Hold production majors and unclassified updates for a human
+        if: steps.classify.outputs.kind == 'major' || steps.classify.outputs.kind == 'unknown'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+          KIND: ${{ steps.classify.outputs.kind }}
+        run: |
+          marker="<!-- stack:automerge-hold -->"
+          if [ "$KIND" = "major" ]; then
+            body="Major version bump of a production dependency, not auto-merging. Review and merge by hand."
+          else
+            # e.g. calendar-versioned artifacts like the Compose BOM.
+            body="Dependabot reported no semver update type, not auto-merging. Review and merge by hand."
+          fi
+          already="$(gh pr view "$PR_URL" --json comments --jq "[.comments[] | select(.body | contains(\"$marker\"))] | length")"
+          if [ "$already" = "0" ]; then
+            gh pr comment "$PR_URL" --body "$(printf '%s\n\n%s' "$marker" "$body")"
+          fi

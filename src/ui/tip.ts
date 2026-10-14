@@ -17,24 +17,27 @@
 
 /** HTML-escapes text for an attribute or text node. */
 export function tipEscape(s: unknown): string {
-  return (s == null ? '' : String(s))
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+  return (s == null ? "" : String(s))
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /** ` data-tip="..."` (leading space), escaped; empty string for empty text. */
 export function tipAttr(text: string | null | undefined): string {
-  const t = text == null ? '' : String(text).trim()
-  return t ? ` data-tip="${tipEscape(t)}"` : ''
+  const t = text == null ? "" : String(text).trim();
+  return t ? ` data-tip="${tipEscape(t)}"` : "";
 }
 
 /** Inline text with a tooltip and the dotted-underline hint. Only for non-interactive text. */
 export function tipTerm(label: string, text: string): string {
-  return `<span class="tip-term"${tipAttr(text)}>${tipEscape(label)}</span>`
+  return `<span class="tip-term"${tipAttr(text)}>${tipEscape(label)}</span>`;
 }
 
 export const TIP_CSS = /* css */ `
-/* ── tooltips (data-tip) ── */
+/* -- tooltips (data-tip) -- */
 .tk-tip { position: fixed; inset: auto; margin: 0; z-index: 100; max-width: min(20rem, calc(100vw - 16px)); padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-tile); background: var(--elev); color: var(--fg); box-shadow: var(--shadow-float); font: 500 var(--fs-xs)/1.45 var(--sans); text-align: left; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; overflow: visible; opacity: 0; transform: translateY(2px); transition: opacity .12s ease, transform .12s ease; }
 .tk-tip.on { opacity: 1; transform: none; }
 .tk-tip::after { content: ""; position: absolute; left: var(--ax, 50%); width: 8px; height: 8px; margin-left: -4px; background: var(--elev); border: 1px solid var(--line-strong); transform: rotate(45deg); }
@@ -43,7 +46,7 @@ export const TIP_CSS = /* css */ `
 @media (prefers-reduced-motion: reduce) { .tk-tip { transition: none; } }
 .tip-term { text-decoration: underline dotted var(--subtle); text-underline-offset: 3px; cursor: help; }
 @media (hover: none) { [data-tip] { -webkit-touch-callout: none; } }
-`
+`;
 
 export const TIP_JS = /* js */ `
 (() => {
@@ -119,7 +122,7 @@ export const TIP_JS = /* js */ `
     if (autoHideMs) hideTimer = setTimeout(hide, autoHideMs);
   }
 
-  // ── mouse / pen hover ──
+  // -- mouse / pen hover --
   document.addEventListener('pointerover', (e) => {
     if (e.pointerType === 'touch') return;
     const a = closestTip(e.target);
@@ -138,7 +141,7 @@ export const TIP_JS = /* js */ `
     if (a === anchor) { clearTimeout(hideTimer); hideTimer = setTimeout(hide, 60); }
   });
 
-  // ── keyboard focus ──
+  // -- keyboard focus --
   document.addEventListener('focusin', (e) => {
     const a = closestTip(e.target);
     if (!a) return;
@@ -151,7 +154,7 @@ export const TIP_JS = /* js */ `
   window.addEventListener('resize', hide);
   window.addEventListener('blur', hide);
 
-  // ── touch: press and hold ──
+  // -- touch: press and hold --
   document.addEventListener('pointerdown', (e) => {
     blockClick = null;
     if (e.pointerType !== 'touch') { hide(); return; }
@@ -186,4 +189,4 @@ export const TIP_JS = /* js */ `
     blockClick = null;
   }, true);
 })();
-`
+`;

@@ -8,111 +8,185 @@
 // their tests scan the whole page: no shell <input>/<select> attribute may
 // name credentials, and the scripts add no long timers and no tlpool calls.
 
-import { TOKENS_CSS } from './tokens'
-import { BASE_CSS } from './base'
-import { icon, type IconName } from './icons'
-import { THEME_BOOT_JS, RUNTIME_JS } from './runtime'
-import { TIP_CSS, TIP_JS, tipAttr } from './tip'
-import { DATA_TABLE_CSS, DATA_TABLE_JS } from './data-table'
-import { BAN_BANNER_HTML, BAN_JS } from '../routes/ban-ui'
+import { TOKENS_CSS } from "./tokens";
+import { BASE_CSS } from "./base";
+import { icon, type IconName } from "./icons";
+import { THEME_BOOT_JS, RUNTIME_JS } from "./runtime";
+import { TIP_CSS, TIP_JS, tipAttr } from "./tip";
+import { DATA_TABLE_CSS, DATA_TABLE_JS } from "./data-table";
+import { BAN_BANNER_HTML, BAN_JS } from "../routes/ban-ui";
 
-export type NavKey = 'home' | 'stats' | 'djs' | 'search' | 'presaves' | 'playlists' | 'removed' | 'mkvid' | 'track-uploads' | 'activity'
-  | 'pool' | 'captcha' | 'pool-settings' | 'scheduler' | 'settings' | 'tools'
+export type NavKey =
+  | "home"
+  | "stats"
+  | "djs"
+  | "search"
+  | "presaves"
+  | "playlists"
+  | "removed"
+  | "mkvid"
+  | "track-uploads"
+  | "activity"
+  | "pool"
+  | "captcha"
+  | "pool-settings"
+  | "scheduler"
+  | "settings"
+  | "tools";
 
 export interface NavItem {
-  key: NavKey
-  label: string
-  href: string
-  icon: IconName
+  key: NavKey;
+  label: string;
+  href: string;
+  icon: IconName;
   /** Sidebar group heading; null for the ungrouped items. */
-  group: string | null
+  group: string | null;
   /** Label in the phone tab bar; absent when the item is not a tab. */
-  tab?: string
+  tab?: string;
   /** Extra markup after the label (the Challenges count). */
-  extra?: string
+  extra?: string;
 }
 
 /** The Search page (phase 3): the nav item, the phone tab and the top search box. */
-export const SEARCH_HREF = '/ui/search'
+export const SEARCH_HREF = "/ui/search";
 
 export const NAV: NavItem[] = [
-  { key: 'home', label: 'Home', href: '/ui/', icon: 'home', group: null, tab: 'Home' },
-  { key: 'stats', label: 'Stats', href: '/ui/stats', icon: 'chart', group: null },
-  { key: 'djs', label: 'DJs', href: '/ui/djs', icon: 'djs', group: 'Library', tab: 'DJs' },
-  { key: 'search', label: 'Search', href: SEARCH_HREF, icon: 'search', group: 'Library', tab: 'Search' },
-  { key: 'presaves', label: 'Pre-saves', href: '/ui/presaves', icon: 'bookmark', group: 'Library' },
-  { key: 'playlists', label: 'Playlists', href: '/ui/playlists', icon: 'playlist', group: 'Library' },
-  { key: 'removed', label: 'Removed videos', href: '/ui/removed', icon: 'removed', group: 'Library' },
-  { key: 'mkvid', label: 'mkvid', href: '/ui/mkvid', icon: 'mkvid', group: 'Pipeline', tab: 'mkvid' },
-  { key: 'track-uploads', label: 'Track uploads', href: '/ui/track-uploads', icon: 'upload', group: 'Pipeline' },
-  { key: 'activity', label: 'Activity', href: '/ui/activity', icon: 'activity', group: 'Pipeline' },
-  { key: 'pool', label: 'Accounts', href: '/ui/pool', icon: 'pool', group: 'Pool', tab: 'Pool' },
-  { key: 'captcha', label: 'Challenges', href: '/ui/captcha', icon: 'captcha', group: 'Pool', extra: '<span class="count" id="nav-count-captcha" data-tip="Captchas waiting for you to solve." hidden></span>' },
-  { key: 'pool-settings', label: 'Pool settings', href: '/ui/pool/settings', icon: 'sliders', group: 'Pool' },
-  { key: 'scheduler', label: 'Scheduler', href: '/ui/scheduler', icon: 'clock', group: 'Pool' },
-  { key: 'settings', label: 'Settings', href: '/ui/settings', icon: 'settings', group: null },
-  { key: 'tools', label: 'Tools', href: '/ui/tools', icon: 'tools', group: null },
-]
+  { key: "home", label: "Home", href: "/ui/", icon: "home", group: null, tab: "Home" },
+  { key: "stats", label: "Stats", href: "/ui/stats", icon: "chart", group: null },
+  { key: "djs", label: "DJs", href: "/ui/djs", icon: "djs", group: "Library", tab: "DJs" },
+  {
+    key: "search",
+    label: "Search",
+    href: SEARCH_HREF,
+    icon: "search",
+    group: "Library",
+    tab: "Search",
+  },
+  { key: "presaves", label: "Pre-saves", href: "/ui/presaves", icon: "bookmark", group: "Library" },
+  {
+    key: "playlists",
+    label: "Playlists",
+    href: "/ui/playlists",
+    icon: "playlist",
+    group: "Library",
+  },
+  {
+    key: "removed",
+    label: "Removed videos",
+    href: "/ui/removed",
+    icon: "removed",
+    group: "Library",
+  },
+  {
+    key: "mkvid",
+    label: "mkvid",
+    href: "/ui/mkvid",
+    icon: "mkvid",
+    group: "Pipeline",
+    tab: "mkvid",
+  },
+  {
+    key: "track-uploads",
+    label: "Track uploads",
+    href: "/ui/track-uploads",
+    icon: "upload",
+    group: "Pipeline",
+  },
+  { key: "activity", label: "Activity", href: "/ui/activity", icon: "activity", group: "Pipeline" },
+  { key: "pool", label: "Accounts", href: "/ui/pool", icon: "pool", group: "Pool", tab: "Pool" },
+  {
+    key: "captcha",
+    label: "Challenges",
+    href: "/ui/captcha",
+    icon: "captcha",
+    group: "Pool",
+    extra:
+      '<span class="count" id="nav-count-captcha" data-tip="Captchas waiting for you to solve." hidden></span>',
+  },
+  {
+    key: "pool-settings",
+    label: "Pool settings",
+    href: "/ui/pool/settings",
+    icon: "sliders",
+    group: "Pool",
+  },
+  { key: "scheduler", label: "Scheduler", href: "/ui/scheduler", icon: "clock", group: "Pool" },
+  { key: "settings", label: "Settings", href: "/ui/settings", icon: "settings", group: null },
+  { key: "tools", label: "Tools", href: "/ui/tools", icon: "tools", group: null },
+];
 
 export interface ShellOptions {
-  nav: NavKey | null        // active nav item; DJ profile uses 'djs', Set uses null
-  title: string             // plain text: <title>, top-bar title and <h1>
-  h1Id?: string             // DJ profile needs <h1 id="dj-name">
-  description?: string      // raw HTML, one line under the h1
-  actions?: string          // raw HTML for the header actions slot
-  body: string              // raw HTML page content
-  css?: string              // page CSS
-  js?: string               // page script, emitted as its own bare <script>, after the shared ones
-  banPage?: 'home' | 'settings' | 'other'   // <body data-ban-page>, default 'other'
-  width?: 'wide' | 'narrow' // narrow = 560px centered column (captcha page)
-  ownNavCount?: boolean     // page reports the Challenges count itself via TK.navCount(n)
+  nav: NavKey | null; // active nav item; DJ profile uses 'djs', Set uses null
+  title: string; // plain text: <title>, top-bar title and <h1>
+  h1Id?: string; // DJ profile needs <h1 id="dj-name">
+  description?: string; // raw HTML, one line under the h1
+  actions?: string; // raw HTML for the header actions slot
+  body: string; // raw HTML page content
+  css?: string; // page CSS
+  js?: string; // page script, emitted as its own bare <script>, after the shared ones
+  banPage?: "home" | "settings" | "other"; // <body data-ban-page>, default 'other'
+  width?: "wide" | "narrow"; // narrow = 560px centered column (captcha page)
+  ownNavCount?: boolean; // page reports the Challenges count itself via TK.navCount(n)
 }
 
 function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
-const current = (on: boolean) => (on ? ' class="on" aria-current="page"' : '')
+const current = (on: boolean) => (on ? ' class="on" aria-current="page"' : "");
 
 /** The Pool tab stands for every Pool page. */
 function tabIsOn(item: NavItem, nav: NavKey | null): boolean {
-  if (item.key === 'pool') return nav === 'pool' || nav === 'captcha' || nav === 'pool-settings' || nav === 'scheduler'
-  return item.key === nav
+  if (item.key === "pool")
+    return nav === "pool" || nav === "captcha" || nav === "pool-settings" || nav === "scheduler";
+  return item.key === nav;
 }
 
 function sideNav(nav: NavKey | null): string {
-  let out = ''
-  let group: string | null = null
+  let out = "";
+  let group: string | null = null;
   for (const item of NAV) {
     if (item.group !== group) {
       // Ungrouped items after a group get an empty heading as a spacer.
-      out += item.group ? `<div class="grp">${esc(item.group)}</div>` : '<div class="grp" aria-hidden="true"></div>'
-      group = item.group
+      out += item.group
+        ? `<div class="grp">${esc(item.group)}</div>`
+        : '<div class="grp" aria-hidden="true"></div>';
+      group = item.group;
     }
     // data-tip-rail: the label is also the tooltip, shown only while the icon rail hides the text.
-    out += `<a href="${esc(item.href)}"${tipAttr(item.label)} data-tip-rail${current(item.key === nav)}>${icon(item.icon)}<span class="lbl">${esc(item.label)}</span>${item.extra ?? ''}</a>`
+    out += `<a href="${esc(item.href)}"${tipAttr(item.label)} data-tip-rail${current(item.key === nav)}>${icon(item.icon)}<span class="lbl">${esc(item.label)}</span>${item.extra ?? ""}</a>`;
   }
-  return out
+  return out;
 }
 
 function menuNav(nav: NavKey | null): string {
-  let out = ''
-  let group: string | null = null
+  let out = "";
+  let group: string | null = null;
   for (const item of NAV) {
     if (item.group !== group) {
       // Same grouping as the sidebar: ungrouped items after a group get an empty heading as a spacer.
-      out += item.group ? `<div class="grp">${esc(item.group)}</div>` : '<div class="grp" aria-hidden="true"></div>'
-      group = item.group
+      out += item.group
+        ? `<div class="grp">${esc(item.group)}</div>`
+        : '<div class="grp" aria-hidden="true"></div>';
+      group = item.group;
     }
-    out += `<a href="${esc(item.href)}"${current(item.key === nav)}>${esc(item.label)}</a>`
+    out += `<a href="${esc(item.href)}"${current(item.key === nav)}>${esc(item.label)}</a>`;
   }
-  return out
+  return out;
 }
 
 function tabs(nav: NavKey | null): string {
-  return NAV.filter((i) => i.tab).map((i) =>
-    `<a href="${esc(i.href)}"${current(tabIsOn(i, nav))}>${icon(i.icon)}<span>${esc(i.tab!)}</span>${i.key === 'pool' ? '<span id="tab-count-captcha" class="count" hidden></span>' : ''}</a>`,
-  ).join('')
+  return NAV.filter((i) => i.tab)
+    .map(
+      (i) =>
+        `<a href="${esc(i.href)}"${current(tabIsOn(i, nav))}>${icon(i.icon)}<span>${esc(i.tab!)}</span>${i.key === "pool" ? '<span id="tab-count-captcha" class="count" hidden></span>' : ""}</a>`,
+    )
+    .join("");
 }
 
 /**
@@ -130,7 +204,7 @@ export const SHELL_JS = /* js */ `
   const $ = (id) => document.getElementById(id);
   const on = (el, type, fn) => { if (el && typeof el.addEventListener === 'function') el.addEventListener(type, fn); };
 
-  // ── click on the background closes a side panel ──
+  // -- click on the background closes a side panel --
   // The drawer and the phone menu are modal <dialog>s: a click on the dimmed
   // ::backdrop is dispatched on the dialog itself, so it counts only when it
   // lands outside the dialog's box (its own padding is inside it, and a click on
@@ -154,20 +228,20 @@ export const SHELL_JS = /* js */ `
   };
   closeOnBackdrop($('tk-drawer'));
 
-  // ── phone menu ──
+  // -- phone menu --
   const menu = $('tk-menu');
   closeOnBackdrop(menu);
   on($('tk-menu-btn'), 'click', () => { if (menu && !menu.open && typeof menu.showModal === 'function') { try { menu.showModal(); } catch (e) {} } });
   on($('tk-menu-close'), 'click', () => { if (menu && menu.open && typeof menu.close === 'function') menu.close(); });
 
-  // ── theme ──
+  // -- theme --
   const themeSel = $('tk-theme');
   if (themeSel) {
     themeSel.value = TK.theme.get();
     on(themeSel, 'change', () => TK.theme.set(themeSel.value));
   }
 
-  // ── "/" focuses search ──
+  // -- "/" focuses search --
   on(document, 'keydown', (e) => {
     if (!e || e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
     const t = e.target;
@@ -180,7 +254,7 @@ export const SHELL_JS = /* js */ `
   const body = document.body;
   if (!body) return;
 
-  // ── status pill ──
+  // -- status pill --
   const pill = $('tk-status');
   if (pill) TK.api.get('/ui/api/ban/status').then((r) => {
     const s = r && r.ok && r.data;
@@ -191,7 +265,7 @@ export const SHELL_JS = /* js */ `
     pill.setAttribute('data-tip', s.pause ? 'Fetching from 1001tracklists is paused after an IP block. See the banner above.' : !s.poolConfigured ? 'The browser pool (tlpool) is not set up, so nothing can be fetched from 1001tracklists.' : 'Fetching from 1001tracklists is running.');
   }).catch(() => {});
 
-  // ── Challenges count ──
+  // -- Challenges count --
   if (body.dataset && body.dataset.ownCount) return;
   TK.api.get('/ui/api/pool/challenges').then((r) => {
     const list = r && r.ok && r.data && r.data.challenges;
@@ -199,20 +273,20 @@ export const SHELL_JS = /* js */ `
     TK.navCount(list.filter((c) => c && c.state === 'pending' && c.ready !== false).length);
   }).catch(() => {});
 })();
-`
+`;
 
 export function shell(o: ShellOptions): string {
-  const title = esc(o.title)
-  const own = o.ownNavCount ? ' data-own-count="1"' : ''
+  const title = esc(o.title);
+  const own = o.ownNavCount ? ' data-own-count="1"' : "";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light"><title>${title} · tracked</title>
-<style>${TOKENS_CSS}${BASE_CSS}${TIP_CSS}${DATA_TABLE_CSS}${o.css ?? ''}</style>
+<style>${TOKENS_CSS}${BASE_CSS}${TIP_CSS}${DATA_TABLE_CSS}${o.css ?? ""}</style>
 <script>${THEME_BOOT_JS}</script></head>
-<body data-ban-page="${o.banPage ?? 'other'}"${own}>
+<body data-ban-page="${o.banPage ?? "other"}"${own}>
 <div class="tk-shell">
   <aside class="tk-side">
-    <a class="tk-brand" href="/ui/"${tipAttr('tracked: back to Home')} data-tip-rail>${icon('playlist')}<span class="lbl">tracked</span></a>
+    <a class="tk-brand" href="/ui/"${tipAttr("tracked: back to Home")} data-tip-rail>${icon("playlist")}<span class="lbl">tracked</span></a>
     <nav class="tk-nav" aria-label="Pages">${sideNav(o.nav)}</nav>
     <div class="tk-side-foot">
       <span id="tk-status" class="badge neutral" data-tip="Whether fetching from 1001tracklists is running.">…</span>
@@ -220,21 +294,21 @@ export function shell(o: ShellOptions): string {
       <span class="lbl">Signed in via Access</span>
     </div>
   </aside>
-  <header class="tk-top"><button type="button" class="btn icon" id="tk-menu-btn" aria-label="Menu">${icon('menu')}</button><span class="tk-top-title">${title}</span></header>
-  <main class="tk-main${o.width === 'narrow' ? ' narrow' : ''}" id="main">
+  <header class="tk-top"><button type="button" class="btn icon" id="tk-menu-btn" aria-label="Menu">${icon("menu")}</button><span class="tk-top-title">${title}</span></header>
+  <main class="tk-main${o.width === "narrow" ? " narrow" : ""}" id="main">
     <form class="tk-search" action="/ui/search" method="get" role="search"><input id="tk-search" name="q" type="search" placeholder="Search tracks, sets, DJs" aria-label="Search tracks, sets, DJs"></form>
     ${BAN_BANNER_HTML}
-    <div class="tk-head"><div><h1${o.h1Id ? ` id="${esc(o.h1Id)}"` : ''}>${title}</h1>${o.description ? `<p class="desc">${o.description}</p>` : ''}</div><div class="actions">${o.actions ?? ''}</div></div>
+    <div class="tk-head"><div><h1${o.h1Id ? ` id="${esc(o.h1Id)}"` : ""}>${title}</h1>${o.description ? `<p class="desc">${o.description}</p>` : ""}</div><div class="actions">${o.actions ?? ""}</div></div>
     ${o.body}
   </main>
   <nav class="tk-tabs" aria-label="Main">${tabs(o.nav)}</nav>
 </div>
-<dialog id="tk-menu" class="tk-dialog tk-menu" aria-label="Menu"><div class="tk-drawer-head"><h2>Menu</h2><button type="button" id="tk-menu-close" class="btn icon" aria-label="Close">${icon('close')}</button></div><nav aria-label="All pages">${menuNav(o.nav)}</nav></dialog>
+<dialog id="tk-menu" class="tk-dialog tk-menu" aria-label="Menu"><div class="tk-drawer-head"><h2>Menu</h2><button type="button" id="tk-menu-close" class="btn icon" aria-label="Close">${icon("close")}</button></div><nav aria-label="All pages">${menuNav(o.nav)}</nav></dialog>
 <dialog id="tk-confirm" class="tk-dialog"><p id="tk-confirm-text"></p><div class="actions"><button type="button" id="tk-confirm-no" class="btn">Cancel</button><button type="button" id="tk-confirm-yes" class="btn primary">Yes</button></div></dialog>
-<dialog id="tk-drawer" class="tk-drawer"><div class="tk-drawer-head"><h2 id="tk-drawer-title"></h2><button type="button" id="tk-drawer-close" class="btn icon" aria-label="Close">${icon('close')}</button></div><div id="tk-drawer-body"></div></dialog>
+<dialog id="tk-drawer" class="tk-drawer"><div class="tk-drawer-head"><h2 id="tk-drawer-title"></h2><button type="button" id="tk-drawer-close" class="btn icon" aria-label="Close">${icon("close")}</button></div><div id="tk-drawer-body"></div></dialog>
 <div id="tk-toasts" class="tk-toasts" aria-live="polite"></div>
 <script>${RUNTIME_JS}
 ${TIP_JS}
-${DATA_TABLE_JS}</script><script>${SHELL_JS}</script><script>${BAN_JS}</script>${o.js ? `<script>${o.js}</script>` : ''}
-</body></html>`
+${DATA_TABLE_JS}</script><script>${SHELL_JS}</script><script>${BAN_JS}</script>${o.js ? `<script>${o.js}</script>` : ""}
+</body></html>`;
 }

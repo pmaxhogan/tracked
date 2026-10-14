@@ -16,42 +16,50 @@
 //     per-minute rate limit (rateLimitExceeded / userRateLimitExceeded) sets
 //     nothing: the run that got it stops its writes, and the next tick in a few
 //     minutes simply tries again.
-import type { Env } from '../types'
-import { errorFields, type Logger } from './log'
-import { quotaKind } from './youtube-error'
-import { YouTubeApiError } from './youtube-playlists'
+import type { Env } from "../types";
+import { errorFields, type Logger } from "./log";
+import { quotaKind } from "./youtube-error";
+import { YouTubeApiError } from "./youtube-playlists";
 // The quota day's end is mkvid.ts's (not reimplemented here), so the hold expires exactly when the daily claims reset.
-import { quotaDayEnd } from './mkvid'
+import { quotaDayEnd } from "./mkvid";
 
-export const QUOTA_OUT_KEY = 'yt:quota:out'
+export const QUOTA_OUT_KEY = "yt:quota:out";
 
-export type QuotaOut = { since: number; until: number }
+export type QuotaOut = { since: number; until: number };
 
 /** The flag while it holds, else null. */
 export async function getQuotaOut(env: Env, nowMs = Date.now()): Promise<QuotaOut | null> {
   try {
-    const v = await env.CACHE.get<QuotaOut>(QUOTA_OUT_KEY, 'json')
-    return v && typeof v.until === 'number' && v.until * 1000 > nowMs ? v : null
+    const v = await env.CACHE.get<QuotaOut>(QUOTA_OUT_KEY, "json");
+    return v && typeof v.until === "number" && v.until * 1000 > nowMs ? v : null;
   } catch {
-    return null
+    return null;
   }
 }
 
 /** Marks quota as used up until the next midnight Pacific when `e` is a daily-quota reply; any other error is ignored. Never throws. */
-export async function noteQuotaOut(env: Env, e: unknown, log?: Logger, nowMs = Date.now()): Promise<void> {
+export async function noteQuotaOut(
+  env: Env,
+  e: unknown,
+  log?: Logger,
+  nowMs = Date.now(),
+): Promise<void> {
   try {
-    if (!(e instanceof YouTubeApiError) || e.status !== 403 || quotaKind(e.reason) !== 'quota') return
-    if (await getQuotaOut(env, nowMs)) return
-    const until = quotaDayEnd(nowMs)
-    const since = Math.floor(nowMs / 1000)
-    await env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since, until } satisfies QuotaOut), { expirationTtl: Math.max(60, until - since) })
-    log?.warn('youtube.quota_out', { until: new Date(until * 1000).toISOString() })
+    if (!(e instanceof YouTubeApiError) || e.status !== 403 || quotaKind(e.reason) !== "quota")
+      return;
+    if (await getQuotaOut(env, nowMs)) return;
+    const until = quotaDayEnd(nowMs);
+    const since = Math.floor(nowMs / 1000);
+    await env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since, until } satisfies QuotaOut), {
+      expirationTtl: Math.max(60, until - since),
+    });
+    log?.warn("youtube.quota_out", { until: new Date(until * 1000).toISOString() });
   } catch (err) {
-    log?.warn('youtube.quota_out_note_failed', errorFields(err))
+    log?.warn("youtube.quota_out_note_failed", errorFields(err));
   }
 }
 
 /** The owner's early clear (they may have raised the quota). */
 export async function clearQuotaOut(env: Env): Promise<void> {
-  await env.CACHE.delete(QUOTA_OUT_KEY)
+  await env.CACHE.delete(QUOTA_OUT_KEY);
 }

@@ -12,19 +12,19 @@ The individual components (track rows, set cards, the captcha widget, the add-ac
 
 ## 2. Decisions
 
-| Topic | Decision |
-| --- | --- |
-| Prefix | Everything that lives under `/subscriptions/**` today (pages, `/api/*`, `/oauth/*`, `sw.js`) moves to `/ui/**`, with the same shapes. `GET /` becomes a 302 to `/ui/`. The Cloudflare Access application path and the Google OAuth redirect URI move with it (section 3a). |
-| Identity | amber's token shape, shell classes, small components and icon dictionary, ported by hand into server-rendered CSS. tracked gets its own palette (section 7). amber's built CSS cannot be served: it is a Vue 3 + PrimeVue SPA whose look lives in a runtime preset. |
-| URLs | HTML page paths may change; no redirects required. JSON/API paths never change. |
-| Shell | Sidebar app shell (option A). Collapses to icons at 1100px; under 800px a top bar plus a bottom tab bar. |
-| Phone tabs | Home, DJs, Search, mkvid, Pool. Everything else behind the top-bar menu. |
-| Tracklist viewer | Becomes the Set page at `/ui/set?url=`, and grows a diagnostics column in phase 2. `/subscriptions/tracklist` is retired. |
-| Search index | Verified track lists only, fed from `noteSetFetch` in `src/lib/verification.ts` (owner's decoy rule, relayed by the pool session). Per-track YouTube links found by the lazy links lookup are written back into the index. |
-| Accent | Violet on slate neutrals. Dark first, designed light mode, manual toggle (system / dark / light). |
-| Removed videos | Same path, `/ui/removed` (push payloads open it), filed under Playlists in the nav. |
-| Phasing | Phase 1 ships to main first (after the owner's ok and the pool session's all-clear), then phase 2, then phase 3. |
-| Top jobs (order the Home page and phone tabs by) | answer captchas / live view; diagnose "why isn't set X in my playlist"; tend the mkvid queue; manage DJs and resync. |
+| Topic                                            | Decision                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prefix                                           | Everything that lives under `/subscriptions/**` today (pages, `/api/*`, `/oauth/*`, `sw.js`) moves to `/ui/**`, with the same shapes. `GET /` becomes a 302 to `/ui/`. The Cloudflare Access application path and the Google OAuth redirect URI move with it (section 3a). |
+| Identity                                         | amber's token shape, shell classes, small components and icon dictionary, ported by hand into server-rendered CSS. tracked gets its own palette (section 7). amber's built CSS cannot be served: it is a Vue 3 + PrimeVue SPA whose look lives in a runtime preset.        |
+| URLs                                             | HTML page paths may change; no redirects required. JSON/API paths never change.                                                                                                                                                                                            |
+| Shell                                            | Sidebar app shell (option A). Collapses to icons at 1100px; under 800px a top bar plus a bottom tab bar.                                                                                                                                                                   |
+| Phone tabs                                       | Home, DJs, Search, mkvid, Pool. Everything else behind the top-bar menu.                                                                                                                                                                                                   |
+| Tracklist viewer                                 | Becomes the Set page at `/ui/set?url=`, and grows a diagnostics column in phase 2. `/subscriptions/tracklist` is retired.                                                                                                                                                  |
+| Search index                                     | Verified track lists only, fed from `noteSetFetch` in `src/lib/verification.ts` (owner's decoy rule, relayed by the pool session). Per-track YouTube links found by the lazy links lookup are written back into the index.                                                 |
+| Accent                                           | Violet on slate neutrals. Dark first, designed light mode, manual toggle (system / dark / light).                                                                                                                                                                          |
+| Removed videos                                   | Same path, `/ui/removed` (push payloads open it), filed under Playlists in the nav.                                                                                                                                                                                        |
+| Phasing                                          | Phase 1 ships to main first (after the owner's ok and the pool session's all-clear), then phase 2, then phase 3.                                                                                                                                                           |
+| Top jobs (order the Home page and phone tabs by) | answer captchas / live view; diagnose "why isn't set X in my playlist"; tend the mkvid queue; manage DJs and resync.                                                                                                                                                       |
 
 ## 3. Non-negotiables
 
@@ -46,6 +46,7 @@ Taken from the code and tests at `d5ab9c4`. They are spec, not folklore.
 Owner decision (2026-09-30). Everything the Worker serves under `/subscriptions` moves to `/ui` with identical shapes; `/subscriptions/**` is not served any more. `GET /` (today: hint text behind the bearer gate) becomes a 302 to `/ui/`, exempt from the bearer gate. Both `/ui` and `/ui/` serve Home.
 
 Code touch points (grep for `subscriptions` and check each hit; the list is what the survey found at `d5ab9c4`):
+
 - `src/index.ts`: the two `sameOriginJson` mounts, the two `noFraming` mounts, both `app.route('/subscriptions', ...)` mounts, the wildcard bearer gate's prefix exemptions, the `GET /` handler and its comment.
 - `src/middleware/same-origin.ts`: `LIVE_VIEW_PATH` (the live-view iframe path that gets `SAMEORIGIN` / `frame-ancestors 'self'`).
 - `src/routes/subscriptions.ts`: `STATE_COOKIE` path (`/subscriptions/oauth` to `/ui/oauth`), the OAuth redirect URI the callback expects, the `?yt=` redirect targets, every `/subscriptions/api/...` literal in page JS (moves into `src/ui/` anyway).
@@ -58,6 +59,7 @@ Code touch points (grep for `subscriptions` and check each hit; the list is what
 Redirects (required by the pool session, 2026-09-30, for phone bookmarks and push notifications delivered before the deploy; the owner had said redirects were not needed, so this supersedes that): `/subscriptions` and every `/subscriptions/<page>` path answer a 301 to the same path under `/ui/`; `/subscriptions/api/*` and `/subscriptions/oauth/*` answer `410 { error: 'moved', message: 'This API moved to /ui/api/...' }` (a redirect would not carry a POST body). Neither handler serves content, so neither needs Access. Keep them, and the old Access application, until the owner retires them.
 
 Deploy gates for the phase 1 release (from the pool session; the Worker's own `cfAccess` middleware fails closed, so a gap would mean 401s rather than exposure, but the gates stay):
+
 1. An Access application covering `tracked.pmaxhogan.workers.dev/ui/*` with the same policy exists BEFORE the code that serves `/ui/` is deployed. Editing the existing app's path keeps its AUD; a new app means a new `CF_ACCESS_AUD` in `wrangler.jsonc` in the same deploy. The implementing session asks the pool session (it holds a token that can edit Access apps) or the owner to make that change at deploy time; it never creates or copies Cloudflare tokens itself.
 2. `cfAccess` (the `Cf-Access-Jwt-Assertion` / `CF_Authorization` check against `CF_ACCESS_*`) is mounted on every `/ui/**` route, and `test/ui-pages.test.ts` proves every `/ui/**` path answers 401 without a JWT and never reaches tlpool.
 3. The Google OAuth redirect URI `https://<worker-host>/ui/oauth/callback` is added in the Google console before the deploy, with the old one kept until the redirects are retired.
@@ -68,23 +70,23 @@ Deploy gates for the phase 1 release (from the pool session; the Worker's own `c
 
 All under `/ui` (the Access application, service worker scope, same-origin guard and anti-framing are bound to that one prefix; see section 3a for the move). "Same path" below means the path is unchanged apart from the prefix.
 
-| Path | Page | Phase | Notes |
-| --- | --- | --- | --- |
-| `/ui` | Home | 1 | status tiles, needs-attention list, recent activity, quick actions |
-| `/ui/djs` | DJs | 1 | table on desktop, cards on phone; add form in the header |
-| `/ui/dj/:slug` | DJ profile | 1 | same path; sticky summary column + set cards |
-| `/ui/set?url=` | Set | 1 (viewer), 2 (diagnostics) | replaces `/ui/tracklist`; `?url=` deep link kept |
-| `/ui/search?q=` | Search | 3 | sets, tracks, DJs |
-| `/ui/playlists` | Playlists | 1 | YouTube connection, combined playlist, per-DJ playlist table, fix titles, hygiene strip |
-| `/ui/removed` | Removed videos | 1 | same path (push target) |
-| `/ui/mkvid` | mkvid | 1 | status line, caps, Queue / Finished / Old videos tabs, detail drawer |
-| `/ui/activity` | Activity | 2 | unified log, filters in the URL, detail drawer |
-| `/ui/pool` | Pool accounts | 1 | same path; stats, challenges, accounts table, add-account dialog |
-| `/ui/captcha` | Challenges | 1 | same path |
-| `/ui/captcha/:id` | Challenge | 1 | same path (push target); phone-first, 560px centered on desktop |
-| `/ui/pool/settings` | Pool settings | 1 | same path (tests link to it) |
-| `/ui/settings` | Settings | 1 | YouTube account, notifications and devices, theme, integrations status, ban episodes |
-| `/ui/tools` | Tools | 1 | video JSON, purge a tracklist, simulate ban, requeue victims, migration status, (3) rebuild search index |
+| Path                | Page           | Phase                       | Notes                                                                                                    |
+| ------------------- | -------------- | --------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `/ui`               | Home           | 1                           | status tiles, needs-attention list, recent activity, quick actions                                       |
+| `/ui/djs`           | DJs            | 1                           | table on desktop, cards on phone; add form in the header                                                 |
+| `/ui/dj/:slug`      | DJ profile     | 1                           | same path; sticky summary column + set cards                                                             |
+| `/ui/set?url=`      | Set            | 1 (viewer), 2 (diagnostics) | replaces `/ui/tracklist`; `?url=` deep link kept                                                         |
+| `/ui/search?q=`     | Search         | 3                           | sets, tracks, DJs                                                                                        |
+| `/ui/playlists`     | Playlists      | 1                           | YouTube connection, combined playlist, per-DJ playlist table, fix titles, hygiene strip                  |
+| `/ui/removed`       | Removed videos | 1                           | same path (push target)                                                                                  |
+| `/ui/mkvid`         | mkvid          | 1                           | status line, caps, Queue / Finished / Old videos tabs, detail drawer                                     |
+| `/ui/activity`      | Activity       | 2                           | unified log, filters in the URL, detail drawer                                                           |
+| `/ui/pool`          | Pool accounts  | 1                           | same path; stats, challenges, accounts table, add-account dialog                                         |
+| `/ui/captcha`       | Challenges     | 1                           | same path                                                                                                |
+| `/ui/captcha/:id`   | Challenge      | 1                           | same path (push target); phone-first, 560px centered on desktop                                          |
+| `/ui/pool/settings` | Pool settings  | 1                           | same path (tests link to it)                                                                             |
+| `/ui/settings`      | Settings       | 1                           | YouTube account, notifications and devices, theme, integrations status, ban episodes                     |
+| `/ui/tools`         | Tools          | 1                           | video JSON, purge a tracklist, simulate ban, requeue victims, migration status, (3) rebuild search index |
 
 Same path under the new prefix: `/ui/sw.js`, `/ui/oauth/*`, `/ui/accounts` (302), every `/ui/api/*`. Nothing is served under `/subscriptions` any more (section 3a).
 
@@ -105,41 +107,53 @@ What moved from the current single page: YouTube strip to Playlists and Settings
 Behaviour details (polling, paging, copy, confirmations) are in the companion contract and are not repeated here.
 
 ### Home
+
 Status tiles: Fetching (active / paused until; pool pages used of budget from `api/pool/status`), YouTube (channel; combined inserts used of cap from `api/combined`), mkvid (the existing status line and both caps from `api/mkvid`), Challenges (count, oldest time left). Needs attention: open challenges, flagged or retired accounts, held playlists, failed mkvid requests, undeleted old videos, DJs whose last sync errored (`api/state/:slug`), an active ban episode; each row links to its fix. Recent activity: phase 2 `api/activity?limit=12`; phase 1 the last 6 requests and last 6 playlist additions side by side. Quick actions: Sync all, Backfill combined, Run hygiene compare.
 
 ### DJs
+
 `api/list` plus `api/state/:slug` per row. Columns: DJ (profile link, 1001tracklists link), Sets (processed of known, pending), Last sync (time, error badge), Playlist (link, count), Actions (Sync, Invalidate & resync, Remove with in-row confirm). Header: Add DJ (URL field), Sync all, Invalidate & resync all, Fix titles (dialog: dry run first, then confirm). Filter: text over names, "with errors" toggle. Cards under 800px.
 
 ### DJ profile
+
 Sticky summary column (subscribed badge, counts, playlist link, last sync, Sync, Invalidate & resync, Refresh from 1001tracklists) plus set cards in the remaining width (two across at 1300px). Cards keep the lazy per-set load, completeness badge, set links, "Open set page", "Remove and replace". Filter chips: all / with video / no video / partial ID.
 
 ### Set
+
 Phase 1: the viewer as is (URL field, `?url=` prefill and auto-load, track rows, Load links, Refresh track list) at the new path. Phase 2: a diagnostics column from `GET /ui/api/set?url=` (new, read-only): Discovered (`tracklists` row), Recording (video id, source, checked at, next due from `set_schedule`), Verification (`set_verification`), Full-recording rule (`set_media_facts`, `video_overrides`), Playlist (`playlist_additions` rows for the URL), Hygiene (`removed_videos`, `playlist_removals` for the video), mkvid (`mkvid_requests` status, position, waits-because, trusted list). Actions are the existing ones only.
 
 ### Search (phase 3)
+
 One input, results as you type (150 ms debounce, previous request cancelled), grouped All / Tracks / Sets / DJs, keyboard navigation, highlighted tokens, corrected-query notice with "search exactly". Track result: artist and title, label, the sets it appears on (DJ, date, cue, Set page and 1001tracklists links), 1001tracklists track link, YouTube link when known, else the lazy "links" button. Set result: title, DJ, date, completeness, video badge, Set page and 1001tl links. DJ result: name, subscribed badge, set count, profile link.
 
 ### Playlists
+
 Connection card (channel, scope, Sign in / Disconnect, reconnect prompt after a token rejection). Combined playlist card (link, count, missing, unavailable, inserts used of cap as a meter, last backfill, Backfill now). Per-DJ playlists table from `api/list` + `api/state/:slug` (title, link, videos, last addition, mkvid videos). Fix titles dialog. Hygiene strip (DRY RUN / LIVE, deletes today, held count, link to Removed videos).
 
 ### Removed videos
+
 Holds first (cards with "They really are removed, apply once"), then the removals table with filter chips (all / sweep / owner / replace) and a DJ filter; the same actions (Undo, Keep it, Compare now, Run sweep); "Older" paging.
 
 ### mkvid
+
 Status line and both caps (meter) at the top, backlog estimate. Filter bar (text, status, source, account, DJ, Clear; summary says how many match). Tabs: Queue (claim order, position badge, move and ban controls), Finished (Retry / Unban), Old videos (Retry now). Row opens a detail drawer (side panel on desktop, bottom sheet on phone) with the existing detail fields and buttons (Render now, Delete and recreate, Retry, Unban, Open set page). Header: Refresh, Recreate all old-style (expect-count confirm). Keyset paging per tab, 25 rows.
 
 ### Activity (phase 2)
+
 Filter chips: kind (request, playlist, hygiene, mkvid, pool, sync, ban), problems only, DJ, range (24h, 7d, 30d, 90d), mirrored in the query string. Row: time, kind icon, status badge, summary, DJ / set link; anomaly highlighting kept. Drawer: full record via the existing detail routes for requests and playlist additions, inline fields for the rest.
 
 `GET /ui/api/activity?kind=a,b&problems=1&dj=&since=&cursor=&limit=50` returns `{ rows: [{ ts, kind, status, problem, title, detail, dj, setUrl, videoId, ref: { kind, key } }], cursor }`. Sources: `now_playing_audit` (request), `playlist_additions` (playlist), `playlist_removals` (hygiene), `mkvid_requests` transitions and `mkvid_claims` (mkvid), `pool_events` (pool), `sub_sync` last run and error (sync), KV `ban:ep:*` (ban). One SELECT per source with the same output columns, ordered and limited per source, merged in the Worker; keyset on `(ts, kind, key)`. No writes.
 
 ### Pool accounts, Challenges, Challenge, Pool settings
+
 Same content and behaviour, laid out for width: stat tiles and priority chips across the top, challenges as cards, the accounts table full width (cards under 700px, exit kind and passive as badges), the add-account `<dialog>` unchanged in ids and strings. Challenge page stays narrow and phone-first. Pool settings: the two forms side by side as cards, saved toasts. The schedule form keeps the `renderFeedPerDay` field main added after `d5ab9c4` (input `#feed`, "Render feeder: first fetches a day", 0 to 500, default 40, 0 = off; loaded from and saved to `api/pool/settings`).
 
 ### Settings
+
 YouTube account card; Notifications (VAPID configured, Enable on this device, Send test, device list); Theme (system / dark / light); Integrations status (tlpool, mkvid token, Web Push); Ban episodes table.
 
 ### Tools
+
 Cards: YouTube video JSON (copy), Purge a tracklist, Simulate a ban, Requeue ban victims (days, dry run), Migration status, (phase 3) Search index (indexed count, Rebuild 500 more).
 
 ## 7. Visual tokens
@@ -154,32 +168,32 @@ Type: `system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`; mono `ui-monos
 
 ## 8. Component inventory
 
-| Component | Source | Notes |
-| --- | --- | --- |
-| App shell (sidebar, top bar, bottom tabs, collapse) | amber shell/nav + new | `shell(page)` wraps every page; owns banner slot and nav active state |
-| Page header | amber | title, description, actions |
-| Ban/pause banner | existing, restyled | `BAN_JS` unchanged |
-| Stat tile with meter | new | label, value, sub, optional meter |
-| Card | amber | the only bordered surface |
-| Table that turns into cards | new (pool page has a first version) | `data-label` per cell |
-| Badge / status pill | amber OutcomeBadge, StatusPill | ok / warn / bad / info / neutral |
-| Buttons: primary, secondary, danger, ghost, icon | new | busy state; in-row confirm pattern kept |
-| Field, input, select, toggle, number | amber `.amber-field` + new | label above, hint below, error text |
-| Filter bar and chips | new | state mirrored into the query string |
-| Tabs | new | `role=tablist`, arrow keys |
-| Drawer (side panel / bottom sheet) | new | native `<dialog>`, Escape closes |
-| Dialog | existing add-account, restyled | native `<dialog>`, never `confirm()` on the pool pages |
-| Toast | new | success / error, `aria-live` |
-| Empty state, Error state (Retry), Skeleton | amber | |
-| Track row | existing, restyled | cue, artwork, artist, title, link pills, lazy links button |
-| Set card | existing, restyled | completeness badge, set links |
-| Activity row | new | time, kind icon, badge, summary, link |
-| Diagnostic row | new | label, badge, finding, expandable facts |
-| Search box and result groups | new | debounced, keyboard nav, highlights, corrected-query notice |
-| Copy field | amber | |
-| Captcha widget (image / live view) | existing, restyled | ids, `data-r` attributes and strings pinned by tests |
-| Icons | amber AppIcon paths + about 10 new | `icon(name)` returns an inline SVG string |
-| Theme toggle | amber behaviour | system / dark / light |
+| Component                                           | Source                              | Notes                                                                 |
+| --------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------- |
+| App shell (sidebar, top bar, bottom tabs, collapse) | amber shell/nav + new               | `shell(page)` wraps every page; owns banner slot and nav active state |
+| Page header                                         | amber                               | title, description, actions                                           |
+| Ban/pause banner                                    | existing, restyled                  | `BAN_JS` unchanged                                                    |
+| Stat tile with meter                                | new                                 | label, value, sub, optional meter                                     |
+| Card                                                | amber                               | the only bordered surface                                             |
+| Table that turns into cards                         | new (pool page has a first version) | `data-label` per cell                                                 |
+| Badge / status pill                                 | amber OutcomeBadge, StatusPill      | ok / warn / bad / info / neutral                                      |
+| Buttons: primary, secondary, danger, ghost, icon    | new                                 | busy state; in-row confirm pattern kept                               |
+| Field, input, select, toggle, number                | amber `.amber-field` + new          | label above, hint below, error text                                   |
+| Filter bar and chips                                | new                                 | state mirrored into the query string                                  |
+| Tabs                                                | new                                 | `role=tablist`, arrow keys                                            |
+| Drawer (side panel / bottom sheet)                  | new                                 | native `<dialog>`, Escape closes                                      |
+| Dialog                                              | existing add-account, restyled      | native `<dialog>`, never `confirm()` on the pool pages                |
+| Toast                                               | new                                 | success / error, `aria-live`                                          |
+| Empty state, Error state (Retry), Skeleton          | amber                               |                                                                       |
+| Track row                                           | existing, restyled                  | cue, artwork, artist, title, link pills, lazy links button            |
+| Set card                                            | existing, restyled                  | completeness badge, set links                                         |
+| Activity row                                        | new                                 | time, kind icon, badge, summary, link                                 |
+| Diagnostic row                                      | new                                 | label, badge, finding, expandable facts                               |
+| Search box and result groups                        | new                                 | debounced, keyboard nav, highlights, corrected-query notice           |
+| Copy field                                          | amber                               |                                                                       |
+| Captcha widget (image / live view)                  | existing, restyled                  | ids, `data-r` attributes and strings pinned by tests                  |
+| Icons                                               | amber AppIcon paths + about 10 new  | `icon(name)` returns an inline SVG string                             |
+| Theme toggle                                        | amber behaviour                     | system / dark / light                                                 |
 
 ## 9. Search (phase 3)
 

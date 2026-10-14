@@ -15,17 +15,17 @@
 // several recordings "removed" within a day (lib/mkvid-removed-burst.ts): those
 // are red ("removed, unconfirmed") under a banner with the two answers, Try
 // them again and They are really gone (POST /ui/api/mkvid/removed-burst/*).
-import { shell } from '../shell'
-import { MKVID_OUTCOMES, MKVID_OUTCOME_LABELS } from '../../lib/mkvid-outcome'
-import { tipAttr, tipTerm } from '../tip'
-import { MKVID_STATE_JS } from './mkvid-state'
+import { shell } from "../shell";
+import { MKVID_OUTCOMES, MKVID_OUTCOME_LABELS } from "../../lib/mkvid-outcome";
+import { tipAttr, tipTerm } from "../tip";
+import { MKVID_STATE_JS } from "./mkvid-state";
 
 const BODY = /* html */ `
   <div id="mk-state" class="mk-state" role="status"><span class="skel" style="width: 18rem"></span></div>
   <div id="mk-run" hidden></div>
   <div id="mk-tiles" class="tk-tiles"></div>
   <div id="mk-summary" class="mk-summary">loading…</div>
-  <div id="mk-error" class="err-state" role="alert" hidden><span id="mk-error-text" class="grow"></span><button type="button" id="mk-error-retry" class="btn"${tipAttr('Asks for the mkvid status again.')}>Retry</button></div>
+  <div id="mk-error" class="err-state" role="alert" hidden><span id="mk-error-text" class="grow"></span><button type="button" id="mk-error-retry" class="btn"${tipAttr("Asks for the mkvid status again.")}>Retry</button></div>
   <div id="mk-burst" class="err-state mk-burst" role="alert" hidden></div>
   <div class="mk-filters">
     <label class="mk-djf">DJ <select id="mk-dj" aria-label="DJ"><option value="">any DJ</option></select></label>
@@ -34,7 +34,7 @@ const BODY = /* html */ `
   <div id="mk-p-queue" role="tabpanel" aria-labelledby="mk-tab-queue"><div id="mk-rendering"></div><div id="mk-queue"></div></div>
   <div id="mk-p-settled" role="tabpanel" aria-labelledby="mk-tab-settled" hidden><div id="mk-settled"></div></div>
   <div id="mk-p-old" role="tabpanel" aria-labelledby="mk-tab-old" hidden><div id="mk-old"></div></div>
-`
+`;
 
 const CSS = /* css */ `
   .mk-state { background: var(--card); border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--r-tile); padding: 10px var(--sp-3); margin-bottom: var(--sp-3); line-height: 1.4; }
@@ -125,7 +125,7 @@ const CSS = /* css */ `
     .mk-meta { white-space: normal; }
     .mk-acts { flex-basis: 100%; justify-content: flex-end; }
   }
-`
+`;
 
 const JS = /* js */ `
 (() => {
@@ -171,7 +171,7 @@ ${MKVID_STATE_JS}
 
   let header = null, capped = false;
 
-  // ── the sets mkvid is working on now (GET /ui/api/mkvid/progress, every 15 s while visible) ──
+  // -- the sets mkvid is working on now (GET /ui/api/mkvid/progress, every 15 s while visible) --
   // Up to two at once, never in the same stage: one queued for the stage the other holds is waiting.
   const $run = $('mk-run');
   const RUN_MIN_SHARE = 6; // narrow stages (download ~2% of a job) still get a visible section
@@ -258,7 +258,7 @@ ${MKVID_STATE_JS}
   }
   function link(u, label, cls, tip) {
     const h = TK.safeHref(u);
-    if (!h) return u ? esc(u) : '—';
+    if (!h) return u ? esc(u) : '-';
     return '<a' + (cls ? ' class="' + cls + '"' : '') + ' href="' + esc(h) + '" target="_blank" rel="noreferrer noopener"' + TK.tip(tip) + '>' + esc(label || u) + '</a>';
   }
   const isoOf = (sec) => { try { return new Date(sec * 1000).toISOString(); } catch (e) { return ''; } };
@@ -266,7 +266,7 @@ ${MKVID_STATE_JS}
   const titleOf = (r) => r.setTitle || TK.fmt.setLabel(r.setUrl);
   const videoHref = (r) => r.videoUrl || ('https://youtu.be/' + r.videoId);
 
-  // ── header: status line, caps, summary ──
+  // -- header: status line, caps, summary --
   function renderHeader() {
     const d = header;
     if (!d) return;
@@ -284,7 +284,7 @@ ${MKVID_STATE_JS}
     });
     const perDay = eff.cap || d.dailyClaimCap;
     tiles.push('<div class="tk-tile"' + TK.tip('Sets queued for mkvid. The backlog estimate divides them by the uploads allowed per day.') + '><div class="k">Waiting</div><div class="v">' + esc(c.pending || 0) + '</div><div class="s">' +
-      (perDay > 0 && c.pending ? 'backlog ≈ ' + esc(Math.ceil(c.pending / perDay)) + ' day' + (c.pending > perDay ? 's' : '') : 'nothing queued') + '</div></div>');
+      (perDay > 0 && c.pending ? 'backlog ~ ' + esc(Math.ceil(c.pending / perDay)) + ' day' + (c.pending > perDay ? 's' : '') : 'nothing queued') + '</div></div>');
     // Failed = real failures only; a set without a usable recording is not one.
     const o = d.outcomes || { failed: c.failed || 0 };
     const noRec = (o.recording_removed || 0) + (o.recording_short || 0);
@@ -299,7 +299,7 @@ ${MKVID_STATE_JS}
     if (c.superseded) bits.push(esc(c.superseded) + ' superseded');
     if (c.banned) bits.push(esc(c.banned) + ' banned');
     for (const a of d.accounts || []) bits.push('<span' + TK.tip('Uploads through the ' + a.label + ' Google project today, out of its daily cap.') + '>' + esc(a.label) + ' ' + esc(a.used) + '/' + esc(a.cap) + '</span>');
-    if (perDay > 0 && c.pending) bits.push('<span' + TK.tip(c.pending + ' waiting sets at ' + perDay + ' uploads a day.') + '>backlog ≈ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + esc(perDay) + '/day</span>');
+    if (perDay > 0 && c.pending) bits.push('<span' + TK.tip(c.pending + ' waiting sets at ' + perDay + ' uploads a day.') + '>backlog ~ ' + Math.ceil(c.pending / perDay) + ' day' + (c.pending > perDay ? 's' : '') + ' at ' + esc(perDay) + '/day</span>');
     if (d.lastPoll) bits.push('<span' + TK.tip('The last time mkvid asked for work. This is only recorded every 10 minutes.') + '>mkvid seen ' + esc(rel(d.lastPoll.at)) + '</span>');
     const olds = d.oldVideos || [];
     if (olds.length) bits.push('<span class="warn">' + olds.length + ' replaced video' + (olds.length === 1 ? '' : 's') + ' not deleted yet</span>');
@@ -309,7 +309,7 @@ ${MKVID_STATE_JS}
     $recreateOld.textContent = 'Recreate all old-style videos (' + (d.oldStyleCount || 0) + ')';
   }
 
-  // ── removals the owner has to rule on: the banner and its two answers ──
+  // -- removals the owner has to rule on: the banner and its two answers --
   const SOURCE_NAMES = { soundcloud: 'SoundCloud', hearthis: 'hearthis.at' };
   function renderBurst() {
     const b = header && header.removedBurst;
@@ -334,7 +334,7 @@ ${MKVID_STATE_JS}
     await reloadAll();
   });
 
-  // ── rows ──
+  // -- rows --
   // Reorder / ban controls on a waiting row. The list reloads after each, so
   // positions stay honest.
   const ACTS = [['top', '⤒', 'Move to the top'], ['up', '↑', 'Move up one'], ['down', '↓', 'Move down one'], ['bottom', '⤓', 'Move to the bottom'], ['ban', '✕', 'Never upload this set via mkvid']];
@@ -394,7 +394,7 @@ ${MKVID_STATE_JS}
       '</div>';
   }
 
-  // ── the requests mkvid is rendering now (from the header), above the queue ──
+  // -- the requests mkvid is rendering now (from the header), above the queue --
   let rendering = [];
   function renderRendering() {
     rendering = (header && header.rendering) || [];
@@ -410,11 +410,11 @@ ${MKVID_STATE_JS}
     if (r) openDetail(r);
   });
 
-  // ── the three tables ──
+  // -- the three tables --
   const SOURCES = [{ value: 'soundcloud', label: 'SoundCloud' }, { value: 'hearthis', label: 'hearthis.at' }];
   const ACCOUNTS = [{ value: 'primary', label: 'primary' }, { value: 'shared', label: 'shared' }];
-  const when = (sec) => (sec ? '<span class="tkt-when"' + TK.tip(TK.fmt.time(isoOf(sec))) + '>' + esc(rel(sec)) + '</span>' : '<span class="tkt-nil">–</span>');
-  const nil = '<span class="tkt-nil">–</span>';
+  const when = (sec) => (sec ? '<span class="tkt-when"' + TK.tip(TK.fmt.time(isoOf(sec))) + '>' + esc(rel(sec)) + '</span>' : '<span class="tkt-nil">-</span>');
+  const nil = '<span class="tkt-nil">-</span>';
   function titleCell(r, sub) {
     return '<span class="mk-cell"><span class="mk-cell-title">' + esc(titleOf(r)) + '</span>' + (sub ? '<span class="mk-cell-sub">' + sub + '</span>' : '') + '</span>';
   }
@@ -596,7 +596,7 @@ ${MKVID_STATE_JS}
     return null;
   }
 
-  // ── the DJ select: one filter on both request tables ──
+  // -- the DJ select: one filter on both request tables --
   function djFilterOf(t) { const f = t.state().filters.find((x) => x.col === 'dj' && x.op === 'eq'); return f ? f.value : ''; }
   function djOptions() {
     const keep = djFilterOf(queueTable) || djFilterOf(finTable);
@@ -611,7 +611,7 @@ ${MKVID_STATE_JS}
     for (const t of [queueTable, finTable]) t.setFilter('dj', v ? 'eq' : null, v);
   });
 
-  // ── loading: the header (GET /ui/api/mkvid), then the tables reload themselves ──
+  // -- loading: the header (GET /ui/api/mkvid), then the tables reload themselves --
   let headSeq = 0;
   async function loadHeader() {
     const my = ++headSeq;
@@ -634,7 +634,7 @@ ${MKVID_STATE_JS}
   }
   function reloadAll() { return Promise.all([loadHeader(), queueTable.reload(), finTable.reload()]); }
 
-  // ── tabs (role=tablist, arrow keys) ──
+  // -- tabs (role=tablist, arrow keys) --
   // Built once, then updated in place, so a finished load never takes focus off a tab.
   let tabCounts = { queue: null, settled: null, old: null };
   let tabsBuilt = false;
@@ -678,7 +678,7 @@ ${MKVID_STATE_JS}
     return res;
   }
 
-  // ── detail drawer ──
+  // -- detail drawer --
   function dl(pairs) {
     return '<dl class="mk-dl">' + pairs.filter(Boolean).map((p) => '<dt>' + esc(p[0]) + '</dt><dd>' + p[1] + '</dd>').join('') + '</dl>';
   }
@@ -687,8 +687,8 @@ ${MKVID_STATE_JS}
     out.push('<div class="mk-dgrp">Set</div>');
     out.push(dl([
       ['tracklist', link(r.setUrl, TK.fmt.setLabel(r.setUrl))],
-      ['title', r.setTitle ? esc(r.setTitle) : '—'],
-      ['set date', r.setDate ? esc(r.setDate) : '— <span class="when">(undated sets are queued last)</span>'],
+      ['title', r.setTitle ? esc(r.setTitle) : '-'],
+      ['set date', r.setDate ? esc(r.setDate) : '- <span class="when">(undated sets are queued last)</span>'],
       ['DJ', esc(r.artistLabel || r.artistName || r.slug) + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
       ['source', esc(r.sourceLabel || r.source) + ' ' + link(r.sourceUrl, 'open')],
       r.trackCount != null ? ['tracklist', esc(r.idedCount) + '/' + esc(r.trackCount) + ' IDed' + (r.lastCueSeconds != null ? ' · last cue ' + esc(TK.fmt.clock(r.lastCueSeconds)) : '')] : null,
@@ -697,7 +697,7 @@ ${MKVID_STATE_JS}
     out.push(dl([
       ['status', badgeHtml(r) + (r.outcomeDetail ? ' ' + esc(r.outcomeDetail) : r.error ? (r.status === 'superseded' || r.status === 'banned' ? ' <span class="when">' + esc(r.error) + '</span>' : ' <span class="warn">' + esc(errorLabel(r)) + '</span>') : '')],
       r.outcomeDetail && r.error ? ['mkvid said', '<span class="when">' + esc(r.error) + '</span>'] : null,
-      ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '—'],
+      ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '-'],
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy === 'private' ? ' <span class="warn">(an unverified OAuth app forces private whatever was requested)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + esc(rel(r.notBefore)) : '')],
       r.status !== 'pending' ? ['project', esc(r.accountLabel || r.account)] : null,
@@ -759,7 +759,7 @@ ${MKVID_STATE_JS}
     };
   }
 
-  // ── header actions ──
+  // -- header actions --
   $refresh.addEventListener('click', () => { startRun(); TK.busy($refresh, 'Refreshing…', () => reloadAll()); });
   // Bulk recreate: confirm with the live count, and send it back so a count that changed meanwhile is refused.
   // The reload runs after busy has put its saved label back, so the button
@@ -773,7 +773,7 @@ ${MKVID_STATE_JS}
       const text = 'Recreate ' + count + ' old-style video' + (count === 1 ? '' : 's') + '? Each set is rendered again at the back of the queue (they count against the daily cap); every old video stays up until its new one is in the playlists, then it is deleted from YouTube.';
       if (!(await TK.ask(text, { yes: 'Recreate', danger: true }))) return false;
       const res = await TK.api.post('/ui/api/mkvid/recreate-old-style', { expect: count });
-      if (!res.ok) TK.toast(res.status === 409 ? 'the number of old-style videos changed — try again' : 'recreate failed (' + res.status + ')', 'bad');
+      if (!res.ok) TK.toast(res.status === 409 ? 'the number of old-style videos changed - try again' : 'recreate failed (' + res.status + ')', 'bad');
       return true;
     });
     if (reload) await reloadAll();
@@ -784,14 +784,14 @@ ${MKVID_STATE_JS}
   loadHeader();
   startRun();
 })();
-`
+`;
 
 export const MKVID_PAGE_HTML = shell({
-  nav: 'mkvid',
-  title: 'mkvid',
-  description: `Sets with no YouTube recording, ${tipTerm('rendered into a video by mkvid', 'Sets that have no YouTube recording but a SoundCloud or hearthis.at one are handed to mkvid, a service on the NAS that renders a video from the audio and uploads it (privacy: Settings, mkvid uploads).')}. Where each request stands and why nothing is uploading.`,
-  actions: `<button type="button" id="mk-recreate-old" class="btn" hidden${tipAttr('Renders every finished video made in a style other than scene again, at the back of the queue. They count against the daily cap, and each old video is deleted once its replacement is in the playlists.')}>Recreate all old-style videos</button><button type="button" id="mk-refresh" class="btn"${tipAttr('Reloads the queue and the progress bar.')}>Refresh</button>`,
+  nav: "mkvid",
+  title: "mkvid",
+  description: `Sets with no YouTube recording, ${tipTerm("rendered into a video by mkvid", "Sets that have no YouTube recording but a SoundCloud or hearthis.at one are handed to mkvid, a service on the NAS that renders a video from the audio and uploads it (privacy: Settings, mkvid uploads).")}. Where each request stands and why nothing is uploading.`,
+  actions: `<button type="button" id="mk-recreate-old" class="btn" hidden${tipAttr("Renders every finished video made in a style other than scene again, at the back of the queue. They count against the daily cap, and each old video is deleted once its replacement is in the playlists.")}>Recreate all old-style videos</button><button type="button" id="mk-refresh" class="btn"${tipAttr("Reloads the queue and the progress bar.")}>Refresh</button>`,
   body: BODY,
   css: CSS,
   js: JS,
-})
+});

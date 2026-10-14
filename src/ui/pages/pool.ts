@@ -1,15 +1,15 @@
 // Pool accounts page: stats, pending challenges, accounts table and the Add account dialog.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import { POOL_CSS, COMMON_JS, CAPTCHA_JS } from './pool-common'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import { POOL_CSS, COMMON_JS, CAPTCHA_JS } from "./pool-common";
 
 const BODY = /* html */ `
   <div id="err" class="banner bad" hidden></div>
   <div id="stats" class="tk-tiles"></div>
   <div id="prio" class="tk-card" hidden></div>
-  <h2 class="pool-h2"><span class="tip-term"${tipAttr('Captchas that a pool account ran into and that wait for a person. An unanswered one expires, and its account rests for 6 hours.')}>Pending challenges</span></h2>
+  <h2 class="pool-h2"><span class="tip-term"${tipAttr("Captchas that a pool account ran into and that wait for a person. An unanswered one expires, and its account rests for 6 hours.")}>Pending challenges</span></h2>
   <div id="chals"><div id="chals-msg"><div class="empty">loading…</div></div><div id="pc"></div></div>
-  <h2 class="pool-h2"><span class="tip-term"${tipAttr('The logged-in 1001tracklists accounts the pool fetches with. Each has its own exit IP and daily page budget.')}>Accounts</span></h2>
+  <h2 class="pool-h2"><span class="tip-term"${tipAttr("The logged-in 1001tracklists accounts the pool fetches with. Each has its own exit IP and daily page budget.")}>Accounts</span></h2>
   <div id="accts"><div id="accts-msg"><div class="empty">loading…</div></div><div id="pa"></div></div>
   <p class="muted stat-note">Accounts are shown by their opaque id only. Usernames, emails and passwords stay on the NAS.</p>
 
@@ -31,13 +31,13 @@ const BODY = /* html */ `
     <div class="row" style="margin-top:var(--sp-3)"><button id="add-back" type="button" class="btn">Back</button><span class="spacer"></span><button id="add-retry" type="button" class="btn" hidden>Try again</button></div>
   </div>
 </dialog>
-`
+`;
 
 const JS = /* js */ `
 (() => {
 ${COMMON_JS}
 ${CAPTCHA_JS}
-  // ── overview ───────────────────────────────────────────────────────────
+  // -- overview -----------------------------------------------------------
   // Account states that mean "still being created" (tlpool: new; older shapes: the rest).
   const IN_CREATION = /^(creating|signup|pending|new)$/;
   const stateBadge = (a) => {
@@ -56,7 +56,7 @@ ${CAPTCHA_JS}
   };
   const badgeClass = (a) => { const m = /class="badge (?:badge-btn )?([a-z]*)"/.exec(stateBadge(a)); return m ? m[1] : ''; };
 
-  // ── state details (drawer) ─────────────────────────────────────────────
+  // -- state details (drawer) ---------------------------------------------
   // What a state means, why the account is in it and what happens next, from
   // tlpool's /status fields, plus that account's stored pool events. Account
   // ids only; free text holding an '@' is never shown.
@@ -96,7 +96,7 @@ ${CAPTCHA_JS}
   const DAY_MS = 86400000;
   const plusMs = (iso, ms) => (iso && Number.isFinite(Date.parse(iso)) ? new Date(Date.parse(iso) + ms).toISOString() : null);
   function when(iso) {
-    if (!iso || !Number.isFinite(Date.parse(iso))) return '—';
+    if (!iso || !Number.isFinite(Date.parse(iso))) return '-';
     const d = Date.parse(iso) - Date.now();
     return fmtTime(iso) + ' (' + (d >= 0 ? 'in ' + fmtDur(d) : fmtDur(-d) + ' ago') + ')';
   }
@@ -129,7 +129,7 @@ ${CAPTCHA_JS}
     if (a.retestPending) why.push(li('A retest is pending.'));
     const lastErr = safeText(a.lastError);
     if (lastErr) why.push(li('Last error: ' + tkEsc(lastErr)));
-    if (a.exitKind || a.exitLabel) why.push(li('Exit: <span class="mono">' + tkEsc(a.exitLabel || '—') + '</span>' + (a.exitKind ? ' (' + tkEsc(a.exitKind) + ')' : '') + '.'));
+    if (a.exitKind || a.exitLabel) why.push(li('Exit: <span class="mono">' + tkEsc(a.exitLabel || '-') + '</span>' + (a.exitKind ? ' (' + tkEsc(a.exitKind) + ')' : '') + '.'));
     if (!why.length) why.push(li('<span class="muted">The pool does not say when or why it entered this state.</span>'));
 
     // What happens next.
@@ -249,9 +249,9 @@ ${CAPTCHA_JS}
     const used = fetching.reduce((s, a) => s + (a.usedToday || 0), 0);
     const tile = (v, k, tip) => '<div class="tk-tile"><div class="k"><span class="tip-term"' + tipA(tip) + '>' + esc(k) + '</span></div><div class="v">' + esc(v) + '</div></div>';
     $('stats').innerHTML =
-      tile(st.requestsToday ?? '—', 'page views today', '1001tracklists pages the pool has loaded today, for every account and every kind of work.') +
+      tile(st.requestsToday ?? '-', 'page views today', '1001tracklists pages the pool has loaded today, for every account and every kind of work.') +
       tile(used + ' / ' + budget, 'used / budget (fetching accounts)', 'Page views of the last 24 hours out of the combined daily budget of the accounts that fetch. Passive, flagged and retired accounts are not counted.') +
-      tile(st.queueDepth ?? '—', 'queued fetches', 'Fetches waiting for a free account. They run in priority order, and pause when budgets are spent.') +
+      tile(st.queueDepth ?? '-', 'queued fetches', 'Fetches waiting for a free account. They run in priority order, and pause when budgets are spent.') +
       tile(fetching.length + ' / ' + live.length, 'fetching / live accounts', 'Accounts that fetch right now (active or warming) out of all accounts that are not retired. Resting, passive and flagged ones are live but do not fetch.') +
       tile(chals.length, 'pending challenges', 'Captchas waiting for you. Solve them under Challenges before they expire.') +
       (queuedN ? tile(queuedN, 'queued accounts (scheduled)', 'Accounts scheduled to be created later. tlpool creates each one at its time, or as soon as it is back up if it was down then.') : '');
@@ -265,7 +265,7 @@ ${CAPTCHA_JS}
     $('prio').innerHTML = parts.join('');
   }
 
-  // ── the two tables (TKTable, local mode: tlpool's lists are small and come whole) ──
+  // -- the two tables (TKTable, local mode: tlpool's lists are small and come whole) --
   // Both are created on the first good status, inside #chals and #accts, so a
   // pool that is down from the start leaves those empty. Every poll hands the
   // tables the new rows (setRows), keeping their sort, filters and page.
@@ -323,13 +323,13 @@ ${CAPTCHA_JS}
       { key: 'exit', label: 'Exit', type: 'text', value: (a) => a.exitLabel || a.exitKind || null, tip: 'The IP address route this account is pinned to. Each account keeps one exit for good.',
         render: (a) => isQueued(a)
           ? (a.exitKind ? '<span class="badge neutral">' + esc(a.exitKind) + '</span>' : '<span class="muted">auto</span>')
-          : '<span class="mono">' + esc(a.exitLabel || '—') + '</span>' + (a.exitKind ? ' <span class="badge neutral"' + tipA('Where the traffic of this account leaves from: your own IP, Mullvad or AirVPN.') + '>' + esc(a.exitKind) + '</span>' : '') },
+          : '<span class="mono">' + esc(a.exitLabel || '-') + '</span>' + (a.exitKind ? ' <span class="badge neutral"' + tipA('Where the traffic of this account leaves from: your own IP, Mullvad or AirVPN.') + '>' + esc(a.exitKind) + '</span>' : '') },
       { key: 'usedToday', label: 'Today', type: 'number', value: (a) => (isQueued(a) ? null : a.usedToday), tip: 'Page views in the last 24 hours out of the account daily budget. Sorts by page views.',
-        render: (a) => (isQueued(a) ? '—' : esc(a.usedToday ?? '—') + ' / ' + esc(a.budget ?? '—')) },
+        render: (a) => (isQueued(a) ? '-' : esc(a.usedToday ?? '-') + ' / ' + esc(a.budget ?? '-')) },
       { key: 'rampDay', label: 'Ramp', type: 'number', value: (a) => (isQueued(a) ? null : a.rampDay), tip: 'Which day of its ramp a new account is on. New accounts get a smaller budget for their first days.', hideOn: 'phone',
-        render: (a) => (isQueued(a) ? '—' : esc(a.rampDay ?? '—')) },
-      { key: 'lastOkAt', label: 'Last ok', type: 'datetime', storage: 'iso', tip: 'When this account last loaded a page successfully.', render: (a) => (isQueued(a) ? '—' : esc(ago(a.lastOkAt))) },
-      { key: 'lastChallengeAt', label: 'Last challenge', type: 'datetime', storage: 'iso', tip: 'When this account last hit a captcha.', hideOn: 'phone', render: (a) => (isQueued(a) ? '—' : esc(ago(a.lastChallengeAt))) },
+        render: (a) => (isQueued(a) ? '-' : esc(a.rampDay ?? '-')) },
+      { key: 'lastOkAt', label: 'Last ok', type: 'datetime', storage: 'iso', tip: 'When this account last loaded a page successfully.', render: (a) => (isQueued(a) ? '-' : esc(ago(a.lastOkAt))) },
+      { key: 'lastChallengeAt', label: 'Last challenge', type: 'datetime', storage: 'iso', tip: 'When this account last hit a captcha.', hideOn: 'phone', render: (a) => (isQueued(a) ? '-' : esc(ago(a.lastChallengeAt))) },
       { key: 'flagged', label: 'Flagged', type: 'bool', value: (a) => !!a.flagged, tip: 'Whether 1001tracklists flagged the account as suspicious.',
         render: (a) => (a.flagged ? '<span class="badge bad"' + tipA('1001tracklists flagged this account (for instance it served decoy track names). It rests 72 hours, then gets one retest.') + '>flagged</span>' + (a.flagReason ? ' <span class="muted">' + esc(a.flagReason.replace(/_/g, ' ')) + '</span>' : '') : '<span class="muted">no</span>') },
     ];
@@ -420,7 +420,7 @@ ${CAPTCHA_JS}
   const showBanner = (t) => { $('err').hidden = false; $('err').textContent = t; };
   poller(load, 20000, { onAuth: () => showBanner(SIGN_IN_AGAIN), onTimeout: () => showBanner('Auto-refresh stopped after 15 minutes. Reload the page to see fresh numbers.') });
 
-  // ── Add account ────────────────────────────────────────────────────────
+  // -- Add account --------------------------------------------------------
   const STEPS = [
     ['exit_assigned', 'Exit assigned'],
     ['form_opened', 'Signup form opened'],
@@ -457,7 +457,7 @@ ${CAPTCHA_JS}
   function renderSteps(f, idx, failed) {
     const skipCaptcha = !f.captchaSeen && idx > stepIndex(OPTIONAL_STEP);
     $('add-steps').innerHTML = STEPS.map((s, i) => {
-      if (s[0] === OPTIONAL_STEP && skipCaptcha) return '<li class="skip"><span class="dot">–</span>' + esc('No captcha needed') + '</li>';
+      if (s[0] === OPTIONAL_STEP && skipCaptcha) return '<li class="skip"><span class="dot">-</span>' + esc('No captcha needed') + '</li>';
       const cls = failed && i === idx ? 'fail' : i < idx || (i === idx && s[0] === 'done') ? 'done' : i === idx ? 'cur' : '';
       const dot = cls === 'done' ? '✓' : cls === 'cur' ? '●' : cls === 'fail' ? '✗' : '○';
       return '<li class="' + cls + '"><span class="dot">' + dot + '</span>' + esc(s[1]) + '</li>';
@@ -595,7 +595,7 @@ ${CAPTCHA_JS}
     if (t.getTime() > Date.now() + 90 * DAY_MS) return bad('The pool queues an account at most 90 days ahead.');
     return t.toISOString();
   }
-  const fmtDateTime = (iso) => (!iso || !Number.isFinite(Date.parse(iso)) ? '—' : new Date(iso).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
+  const fmtDateTime = (iso) => (!iso || !Number.isFinite(Date.parse(iso)) ? '-' : new Date(iso).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
 
   async function create() {
     $('add-form-msg').innerHTML = '';
@@ -684,7 +684,7 @@ ${CAPTCHA_JS}
   });
   dlg.addEventListener('close', () => { for (const f of flows.values()) if (f.poller) f.poller.stop(); load(); });
 })();
-`
+`;
 
 /** The state details drawer (TK.drawer). */
 const DETAILS_CSS = /* css */ `
@@ -699,14 +699,14 @@ const DETAILS_CSS = /* css */ `
   .sd ul.sd-list { margin: 0; padding-left: 1.2rem; display: grid; gap: var(--sp-1); }
   .sd ul.sd-events { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
   .sd ul.sd-events li { border-left: 2px solid var(--line-strong); padding-left: var(--sp-3); }
-`
+`;
 
 export const POOL_PAGE_HTML = shell({
-  nav: 'pool',
-  title: 'Pool accounts',
+  nav: "pool",
+  title: "Pool accounts",
   actions: '<button id="add-btn" type="button" class="btn primary">+ Add account</button>',
   body: BODY,
   css: POOL_CSS + DETAILS_CSS,
   js: JS,
   ownNavCount: true,
-})
+});

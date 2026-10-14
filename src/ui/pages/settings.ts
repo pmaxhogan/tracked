@@ -1,144 +1,442 @@
 // Settings: the YouTube connection, this device's notifications, the theme, the
 // integrations in use and the ban episodes. BAN_JS (banPage 'settings') fills the
 // alerts-*, ban-route, ban-devices and ban-episodes elements by id.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { YOUTUBE_CARD_CSS, YOUTUBE_CARD_HTML, YOUTUBE_CARD_JS } from './youtube-card'
-import { SETTINGS_FORM_CSS, SETTINGS_FORM_JS, type FormGroup } from './settings-form'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { YOUTUBE_CARD_CSS, YOUTUBE_CARD_HTML, YOUTUBE_CARD_JS } from "./youtube-card";
+import { SETTINGS_FORM_CSS, SETTINGS_FORM_JS, type FormGroup } from "./settings-form";
 
 // App settings (lib/app-settings.ts, GET/PUT /ui/api/settings). A blank
 // env-backed field saves null: the env var, else the old default (shown as
 // the placeholder).
 const APP_GROUPS: FormGroup[] = [
   {
-    id: 'sf-mkvid',
-    title: 'mkvid uploads',
-    intro: 'Blank = the env var or secret, else the default (shown greyed).',
+    id: "sf-mkvid",
+    title: "mkvid uploads",
+    intro: "Blank = the env var or secret, else the default (shown greyed).",
     fields: [
-      { path: 'mkvid.dailyClaimCap', label: 'Uploads a day, mkvid project', help: 'mkvid-uploads. 0 pauses the queue.', min: 0, max: 100, step: 1, nullable: true },
-      { path: 'mkvid.sharedDailyClaimCap', label: 'Uploads a day, shared project', help: 'tracked-youtube, once the first is full.', min: 0, max: 100, step: 1, nullable: true },
-      { path: 'mkvid.claimTtlMinutes', label: 'Hand a stuck claim out again after', help: 'mkvid died mid-job.', unit: 'min', min: 10, max: 1440, step: 1, nullable: true },
-      { path: 'mkvid.maxAttempts', label: 'Attempts before a request fails', help: 'Default 3.', min: 1, max: 10, step: 1 },
-      { path: 'mkvid.retryBackoffHours', label: 'Retry a failed render after', help: 'Times the attempts so far. Default 6.', unit: 'h', min: 0.25, max: 168 },
-      { path: 'mkvid.unverifiedRetryMinutes', label: 'List not verified: look again after', help: 'No attempt used. Default 60.', unit: 'min', min: 5, max: 1440, step: 1 },
       {
-        path: 'mkvid.privacy',
-        label: 'Upload privacy',
-        help: 'Of set videos. Default unlisted.',
-        kind: 'select',
+        path: "mkvid.dailyClaimCap",
+        label: "Uploads a day, mkvid project",
+        help: "mkvid-uploads. 0 pauses the queue.",
+        min: 0,
+        max: 100,
+        step: 1,
+        nullable: true,
+      },
+      {
+        path: "mkvid.sharedDailyClaimCap",
+        label: "Uploads a day, shared project",
+        help: "tracked-youtube, once the first is full.",
+        min: 0,
+        max: 100,
+        step: 1,
+        nullable: true,
+      },
+      {
+        path: "mkvid.claimTtlMinutes",
+        label: "Hand a stuck claim out again after",
+        help: "mkvid died mid-job.",
+        unit: "min",
+        min: 10,
+        max: 1440,
+        step: 1,
+        nullable: true,
+      },
+      {
+        path: "mkvid.maxAttempts",
+        label: "Attempts before a request fails",
+        help: "Default 3.",
+        min: 1,
+        max: 10,
+        step: 1,
+      },
+      {
+        path: "mkvid.retryBackoffHours",
+        label: "Retry a failed render after",
+        help: "Times the attempts so far. Default 6.",
+        unit: "h",
+        min: 0.25,
+        max: 168,
+      },
+      {
+        path: "mkvid.unverifiedRetryMinutes",
+        label: "List not verified: look again after",
+        help: "No attempt used. Default 60.",
+        unit: "min",
+        min: 5,
+        max: 1440,
+        step: 1,
+      },
+      {
+        path: "mkvid.privacy",
+        label: "Upload privacy",
+        help: "Of set videos. Default unlisted.",
+        kind: "select",
         options: [
-          { value: 'public', label: 'public' },
-          { value: 'unlisted', label: 'unlisted' },
-          { value: 'private', label: 'private' },
+          { value: "public", label: "public" },
+          { value: "unlisted", label: "unlisted" },
+          { value: "private", label: "private" },
         ],
       },
-      { path: 'mkvid.goneCheckHours', label: 'Look for deleted videos every', help: 'One gone from YouTube leaves the playlists and is rendered again. 0 = never. Default 6.', unit: 'h', min: 0, max: 168 },
-      { path: 'mkvid.removedBurstCount', label: 'Recordings removed within a day before it is flagged', help: 'That many at once may mean the source or the downloader is broken: they turn red and stay as they are until you choose on the mkvid page. 0 = never, otherwise 2 to 50. Default 3.', min: 0, max: 50, step: 1 },
-    ],
-  },
-  {
-    id: 'sf-playlists',
-    title: 'Playlists',
-    fields: [
-      { path: 'playlists.sweepDryRun', label: 'Removal sweep only reports', help: 'On: videos that are not full recordings, and deleted or private videos still in a playlist, are only listed on the Removed page. Off: they are taken out. Blank = PLAYLIST_SWEEP_DRY_RUN (unset = on).', kind: 'bool', nullable: true },
-      { path: 'playlists.sweepDailyRemovals', label: 'Sweep removals a day', help: '50 quota units each; dead videos taken out of a playlist count too. Blank = env, else 40.', min: 0, max: 500, step: 1, nullable: true },
-      { path: 'playlists.rejectVertical', label: 'Turn down vertical videos', help: 'Shorts. Blank = REJECT_VERTICAL (unset = off).', kind: 'bool', nullable: true },
-      { path: 'playlists.shortToleranceMinutes', label: 'Video shorter than the last cue by', help: 'More than this is not the full set. Default 5.', unit: 'min', min: 0, max: 60 },
-      { path: 'playlists.audioToleranceMinutes', label: 'Audio longer than the video by', help: 'More than this means the video is a cut. Default 10.', unit: 'min', min: 0, max: 120 },
-      { path: 'playlists.massRemovalMax', label: 'Hold a playlist when missing more than', help: 'Videos at once, instead of removing. Default 5.', min: 0, max: 100, step: 1 },
-      { path: 'playlists.massRemovalRatio', label: 'Or more than this share of it', help: 'Default 0.3.', min: 0, max: 1, step: 0.05 },
-      { path: 'playlists.runRemovalMax', label: 'Hold every playlist when one run misses more than', help: 'Across all playlists. Default 15.', min: 0, max: 500, step: 1 },
-      { path: 'playlists.combinedDailyInsertCap', label: 'Combined playlist inserts a day', help: '50 quota units each. Default 80.', min: 0, max: 190, step: 1 },
-      { path: 'playlists.combinedMaxInsertsPerRun', label: 'Combined playlist inserts per run', help: 'Default 20.', min: 0, max: 100, step: 1 },
-      { path: 'playlists.orderDailyUnits', label: 'Quota units a day for ordering playlists', help: 'Moves videos already in an artist playlist to their set-date place, 50 units each. 0 = paused (the default): nothing is moved. Otherwise at least 110. Check now on the Playlists page says what a budget means in days; start small.', min: 0, max: 10000, step: 10 },
-      { path: 'playlists.orderMovesPerRun', label: 'Playlist moves per run', help: 'Default 10. Set 1 for the first day, to watch single moves land.', min: 1, max: 100, step: 1 },
-    ],
-  },
-  {
-    id: 'sf-presave',
-    title: 'Pre-saves',
-    intro: 'Pre-saved tracks are looked up again until 1001tracklists has a YouTube link. Recheck on a track always works.',
-    fields: [
-      { path: 'presave.enabled', label: 'Scheduled rechecks', help: 'Off stops the twice-a-day lookups.', kind: 'bool' },
-      { path: 'presave.recheckIntervalHours', label: 'Look a track up again every', help: 'Default 12: twice a day.', unit: 'h', min: 1, max: 720 },
-      { path: 'presave.jitterFraction', label: 'Spread each interval by', help: 'Plus or minus this share. Default 0.15.', min: 0, max: 0.5, step: 0.05 },
-      { path: 'presave.maxPerTick', label: 'Rechecks a scheduler tick', help: 'On top of its other fetches. Default 1.', min: 0, max: 10, step: 1 },
       {
-        path: 'presave.priority',
-        label: 'Pool priority of a recheck',
-        help: 'Manual rechecks go at phone priority.',
-        kind: 'select',
+        path: "mkvid.goneCheckHours",
+        label: "Look for deleted videos every",
+        help: "One gone from YouTube leaves the playlists and is rendered again. 0 = never. Default 6.",
+        unit: "h",
+        min: 0,
+        max: 168,
+      },
+      {
+        path: "mkvid.removedBurstCount",
+        label: "Recordings removed within a day before it is flagged",
+        help: "That many at once may mean the source or the downloader is broken: they turn red and stay as they are until you choose on the mkvid page. 0 = never, otherwise 2 to 50. Default 3.",
+        min: 0,
+        max: 50,
+        step: 1,
+      },
+    ],
+  },
+  {
+    id: "sf-playlists",
+    title: "Playlists",
+    fields: [
+      {
+        path: "playlists.sweepDryRun",
+        label: "Removal sweep only reports",
+        help: "On: videos that are not full recordings, and deleted or private videos still in a playlist, are only listed on the Removed page. Off: they are taken out. Blank = PLAYLIST_SWEEP_DRY_RUN (unset = on).",
+        kind: "bool",
+        nullable: true,
+      },
+      {
+        path: "playlists.sweepDailyRemovals",
+        label: "Sweep removals a day",
+        help: "50 quota units each; dead videos taken out of a playlist count too. Blank = env, else 40.",
+        min: 0,
+        max: 500,
+        step: 1,
+        nullable: true,
+      },
+      {
+        path: "playlists.rejectVertical",
+        label: "Turn down vertical videos",
+        help: "Shorts. Blank = REJECT_VERTICAL (unset = off).",
+        kind: "bool",
+        nullable: true,
+      },
+      {
+        path: "playlists.shortToleranceMinutes",
+        label: "Video shorter than the last cue by",
+        help: "More than this is not the full set. Default 5.",
+        unit: "min",
+        min: 0,
+        max: 60,
+      },
+      {
+        path: "playlists.audioToleranceMinutes",
+        label: "Audio longer than the video by",
+        help: "More than this means the video is a cut. Default 10.",
+        unit: "min",
+        min: 0,
+        max: 120,
+      },
+      {
+        path: "playlists.massRemovalMax",
+        label: "Hold a playlist when missing more than",
+        help: "Videos at once, instead of removing. Default 5.",
+        min: 0,
+        max: 100,
+        step: 1,
+      },
+      {
+        path: "playlists.massRemovalRatio",
+        label: "Or more than this share of it",
+        help: "Default 0.3.",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        path: "playlists.runRemovalMax",
+        label: "Hold every playlist when one run misses more than",
+        help: "Across all playlists. Default 15.",
+        min: 0,
+        max: 500,
+        step: 1,
+      },
+      {
+        path: "playlists.combinedDailyInsertCap",
+        label: "Combined playlist inserts a day",
+        help: "50 quota units each. Default 80.",
+        min: 0,
+        max: 190,
+        step: 1,
+      },
+      {
+        path: "playlists.combinedMaxInsertsPerRun",
+        label: "Combined playlist inserts per run",
+        help: "Default 20.",
+        min: 0,
+        max: 100,
+        step: 1,
+      },
+      {
+        path: "playlists.orderDailyUnits",
+        label: "Quota units a day for ordering playlists",
+        help: "Moves videos already in an artist playlist to their set-date place, 50 units each. 0 = paused (the default): nothing is moved. Otherwise at least 110. Check now on the Playlists page says what a budget means in days; start small.",
+        min: 0,
+        max: 10000,
+        step: 10,
+      },
+      {
+        path: "playlists.orderMovesPerRun",
+        label: "Playlist moves per run",
+        help: "Default 10. Set 1 for the first day, to watch single moves land.",
+        min: 1,
+        max: 100,
+        step: 1,
+      },
+    ],
+  },
+  {
+    id: "sf-presave",
+    title: "Pre-saves",
+    intro:
+      "Pre-saved tracks are looked up again until 1001tracklists has a YouTube link. Recheck on a track always works.",
+    fields: [
+      {
+        path: "presave.enabled",
+        label: "Scheduled rechecks",
+        help: "Off stops the twice-a-day lookups.",
+        kind: "bool",
+      },
+      {
+        path: "presave.recheckIntervalHours",
+        label: "Look a track up again every",
+        help: "Default 12: twice a day.",
+        unit: "h",
+        min: 1,
+        max: 720,
+      },
+      {
+        path: "presave.jitterFraction",
+        label: "Spread each interval by",
+        help: "Plus or minus this share. Default 0.15.",
+        min: 0,
+        max: 0.5,
+        step: 0.05,
+      },
+      {
+        path: "presave.maxPerTick",
+        label: "Rechecks a scheduler tick",
+        help: "On top of its other fetches. Default 1.",
+        min: 0,
+        max: 10,
+        step: 1,
+      },
+      {
+        path: "presave.priority",
+        label: "Pool priority of a recheck",
+        help: "Manual rechecks go at phone priority.",
+        kind: "select",
         options: [
-          { value: 'new', label: 'new' },
-          { value: 'verify', label: 'verify' },
-          { value: 'recheck', label: 'recheck (default)' },
-          { value: 'backfill', label: 'backfill' },
+          { value: "new", label: "new" },
+          { value: "verify", label: "verify" },
+          { value: "recheck", label: "recheck (default)" },
+          { value: "backfill", label: "backfill" },
         ],
       },
-      { path: 'presave.retryMinutes', label: 'Retry a failed lookup after', help: 'Pool refused or a page error. Default 60.', unit: 'min', min: 5, max: 1440, step: 1 },
-      { path: 'presave.notifyFound', label: 'Push when one is on YouTube', help: 'To every device. Tapping opens YouTube Music.', kind: 'bool' },
-      { path: 'presave.likeOnYouTube', label: 'Like it on YouTube', help: 'Once it has a video (found or uploaded), so it is in your liked music. One you disliked is left alone.', kind: 'bool' },
-      { path: 'presave.likeDailyUnitCap', label: 'Likes may spend a day', help: 'Quota units, 51 a like. The rest wait for the next day. Default 1000.', unit: 'units', min: 0, max: 10000, step: 1 },
-      { path: 'presave.useSetFetches', label: 'Learn from set fetches', help: 'A set page fetched for any reason updates the ID rows saved from it. Free.', kind: 'bool' },
-      { path: 'presave.giveUpDays', label: 'Stop watching after', help: 'Days without a link. 0 = never.', unit: 'days', min: 0, max: 3650, step: 1 },
+      {
+        path: "presave.retryMinutes",
+        label: "Retry a failed lookup after",
+        help: "Pool refused or a page error. Default 60.",
+        unit: "min",
+        min: 5,
+        max: 1440,
+        step: 1,
+      },
+      {
+        path: "presave.notifyFound",
+        label: "Push when one is on YouTube",
+        help: "To every device. Tapping opens YouTube Music.",
+        kind: "bool",
+      },
+      {
+        path: "presave.likeOnYouTube",
+        label: "Like it on YouTube",
+        help: "Once it has a video (found or uploaded), so it is in your liked music. One you disliked is left alone.",
+        kind: "bool",
+      },
+      {
+        path: "presave.likeDailyUnitCap",
+        label: "Likes may spend a day",
+        help: "Quota units, 51 a like. The rest wait for the next day. Default 1000.",
+        unit: "units",
+        min: 0,
+        max: 10000,
+        step: 1,
+      },
+      {
+        path: "presave.useSetFetches",
+        label: "Learn from set fetches",
+        help: "A set page fetched for any reason updates the ID rows saved from it. Free.",
+        kind: "bool",
+      },
+      {
+        path: "presave.giveUpDays",
+        label: "Stop watching after",
+        help: "Days without a link. 0 = never.",
+        unit: "days",
+        min: 0,
+        max: 3650,
+        step: 1,
+      },
     ],
   },
   {
-    id: 'sf-track-uploads',
-    title: 'Track uploads',
-    intro: 'A pre-saved track with no YouTube link but a link mkvid can rip is uploaded by mkvid into one playlist.',
+    id: "sf-track-uploads",
+    title: "Track uploads",
+    intro:
+      "A pre-saved track with no YouTube link but a link mkvid can rip is uploaded by mkvid into one playlist.",
     fields: [
-      { path: 'trackUploads.enabled', label: 'Queue tracks for mkvid', help: 'Off stops new track uploads.', kind: 'bool' },
-      { path: 'trackUploads.minWatchDays', label: 'Watch a track first for', help: 'Before it is queued. Default 5.', unit: 'days', min: 0, max: 365 },
-      { path: 'trackUploads.allowedSources', label: 'Sources mkvid may rip', help: 'In order of preference, comma separated.', kind: 'list', max: 20, maxLength: 40 },
-      { path: 'trackUploads.dailyCap', label: 'Track uploads a day', help: 'Shares the mkvid caps. 0 pauses. Default 4.', min: 0, max: 100, step: 1 },
-      { path: 'trackUploads.playlistTitle', label: 'Playlist', help: 'Created when missing. Default Track uploads.', kind: 'text', maxLength: 150 },
       {
-        path: 'trackUploads.privacy',
-        label: 'Upload privacy',
-        help: 'Default unlisted.',
-        kind: 'select',
+        path: "trackUploads.enabled",
+        label: "Queue tracks for mkvid",
+        help: "Off stops new track uploads.",
+        kind: "bool",
+      },
+      {
+        path: "trackUploads.minWatchDays",
+        label: "Watch a track first for",
+        help: "Before it is queued. Default 5.",
+        unit: "days",
+        min: 0,
+        max: 365,
+      },
+      {
+        path: "trackUploads.allowedSources",
+        label: "Sources mkvid may rip",
+        help: "In order of preference, comma separated.",
+        kind: "list",
+        max: 20,
+        maxLength: 40,
+      },
+      {
+        path: "trackUploads.dailyCap",
+        label: "Track uploads a day",
+        help: "Shares the mkvid caps. 0 pauses. Default 4.",
+        min: 0,
+        max: 100,
+        step: 1,
+      },
+      {
+        path: "trackUploads.playlistTitle",
+        label: "Playlist",
+        help: "Created when missing. Default Track uploads.",
+        kind: "text",
+        maxLength: 150,
+      },
+      {
+        path: "trackUploads.privacy",
+        label: "Upload privacy",
+        help: "Default unlisted.",
+        kind: "select",
         options: [
-          { value: 'public', label: 'public' },
-          { value: 'unlisted', label: 'unlisted' },
-          { value: 'private', label: 'private' },
+          { value: "public", label: "public" },
+          { value: "unlisted", label: "unlisted" },
+          { value: "private", label: "private" },
         ],
       },
-      { path: 'trackUploads.notifyUploaded', label: 'Push when one is uploaded', help: 'To every device.', kind: 'bool' },
-      { path: 'trackUploads.maxAttempts', label: 'Attempts before a track fails', help: 'Default 3.', min: 1, max: 10, step: 1 },
-      { path: 'trackUploads.retryBackoffHours', label: 'Retry a failed rip after', help: 'Times the attempts so far. Default 6.', unit: 'h', min: 0.25, max: 168 },
-      { path: 'trackUploads.minDurationRatio', label: 'Refuse a rip shorter than', help: 'This share of the expected length: a preview. Default 0.85.', min: 0, max: 1, step: 0.05 },
+      {
+        path: "trackUploads.notifyUploaded",
+        label: "Push when one is uploaded",
+        help: "To every device.",
+        kind: "bool",
+      },
+      {
+        path: "trackUploads.maxAttempts",
+        label: "Attempts before a track fails",
+        help: "Default 3.",
+        min: 1,
+        max: 10,
+        step: 1,
+      },
+      {
+        path: "trackUploads.retryBackoffHours",
+        label: "Retry a failed rip after",
+        help: "Times the attempts so far. Default 6.",
+        unit: "h",
+        min: 0.25,
+        max: 168,
+      },
+      {
+        path: "trackUploads.minDurationRatio",
+        label: "Refuse a rip shorter than",
+        help: "This share of the expected length: a preview. Default 0.85.",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
     ],
   },
   {
-    id: 'sf-link-prewarm',
-    title: 'Link pre-warm',
-    intro: "A set the sync reads queues its tracks' Apple Music and YouTube links, and the cron looks a few up, so What's playing finds them cached.",
+    id: "sf-link-prewarm",
+    title: "Link pre-warm",
+    intro:
+      "A set the sync reads queues its tracks' Apple Music and YouTube links, and the cron looks a few up, so What's playing finds them cached.",
     fields: [
-      { path: 'linkPrewarm.enabled', label: 'Pre-warm track links', help: 'Off stops queueing and lookups.', kind: 'bool' },
-      { path: 'linkPrewarm.maxPerTick', label: 'Lookups a cron tick', help: 'Every 5 minutes, at pool priority backfill; one page view each, cached tracks cost none. Default 3.', min: 0, max: 20, step: 1 },
+      {
+        path: "linkPrewarm.enabled",
+        label: "Pre-warm track links",
+        help: "Off stops queueing and lookups.",
+        kind: "bool",
+      },
+      {
+        path: "linkPrewarm.maxPerTick",
+        label: "Lookups a cron tick",
+        help: "Every 5 minutes, at pool priority backfill; one page view each, cached tracks cost none. Default 3.",
+        min: 0,
+        max: 20,
+        step: 1,
+      },
     ],
   },
   {
-    id: 'sf-retention',
-    title: 'Retention',
+    id: "sf-retention",
+    title: "Retention",
     fields: [
-      { path: 'retention.auditDays', label: 'Keep now-playing and playlist audit', help: 'Default 90.', unit: 'days', min: 1, max: 3650, step: 1 },
-      { path: 'retention.tickHistoryDays', label: 'Keep scheduler tick history', help: 'Default 14.', unit: 'days', min: 1, max: 365, step: 1 },
+      {
+        path: "retention.auditDays",
+        label: "Keep now-playing and playlist audit",
+        help: "Default 90.",
+        unit: "days",
+        min: 1,
+        max: 3650,
+        step: 1,
+      },
+      {
+        path: "retention.tickHistoryDays",
+        label: "Keep scheduler tick history",
+        help: "Default 14.",
+        unit: "days",
+        min: 1,
+        max: 365,
+        step: 1,
+      },
     ],
   },
-]
+];
 
 const BODY = /* html */ `
 ${YOUTUBE_CARD_HTML}
 <div class="tk-card">
   <h2>Notifications</h2>
   <div id="alerts-row" class="tk-row st-alerts">
-    <span class="muted"><span class="tip-term"${tipAttr('Pushes sent when 1001tracklists blocks tracked, a captcha needs solving, or a playlist is held.')}>IP-ban alerts</span> on this device:</span>
+    <span class="muted"><span class="tip-term"${tipAttr("Pushes sent when 1001tracklists blocks tracked, a captcha needs solving, or a playlist is held.")}>IP-ban alerts</span> on this device:</span>
     <span id="alerts-state" class="alerts-state">checking…</span>
-    <button id="alerts-enable" type="button" class="btn small" hidden${tipAttr('Asks this browser for permission to push ban, captcha and held-playlist alerts to this device.')}>Enable on this device</button>
-    <button id="alerts-test" type="button" class="btn small"${tipAttr('Sends a test push to every subscribed device, to check delivery works.')}>Send test notification</button>
+    <button id="alerts-enable" type="button" class="btn small" hidden${tipAttr("Asks this browser for permission to push ban, captcha and held-playlist alerts to this device.")}>Enable on this device</button>
+    <button id="alerts-test" type="button" class="btn small"${tipAttr("Sends a test push to every subscribed device, to check delivery works.")}>Send test notification</button>
     <span id="alerts-msg" class="alerts-msg muted" role="status"></span>
   </div>
   <div id="ban-devices" class="ban-route" hidden></div>
@@ -154,21 +452,21 @@ ${YOUTUBE_CARD_HTML}
 <div class="tk-card">
   <h2>Integrations</h2>
   <ul class="st-list">
-    <li><span><span class="tip-term"${tipAttr('The pool of logged-in browsers on the NAS that does every 1001tracklists fetch. Without it nothing is fetched.')}>tlpool</span> (1001tracklists browser pool)</span><span id="int-pool" class="badge neutral">checking…</span></li>
-    <li><span><span class="tip-term"${tipAttr('The keys that let the Worker send push notifications to your devices.')}>Web Push</span> (VAPID keys)</span><span id="int-push" class="badge neutral">checking…</span></li>
-    <li><span><span class="tip-term"${tipAttr('The shared secret mkvid uses to claim render jobs. Without it no video is queued.')}>mkvid token</span></span><span id="int-mkvid" class="badge neutral">checking…</span></li>
+    <li><span><span class="tip-term"${tipAttr("The pool of logged-in browsers on the NAS that does every 1001tracklists fetch. Without it nothing is fetched.")}>tlpool</span> (1001tracklists browser pool)</span><span id="int-pool" class="badge neutral">checking…</span></li>
+    <li><span><span class="tip-term"${tipAttr("The keys that let the Worker send push notifications to your devices.")}>Web Push</span> (VAPID keys)</span><span id="int-push" class="badge neutral">checking…</span></li>
+    <li><span><span class="tip-term"${tipAttr("The shared secret mkvid uses to claim render jobs. Without it no video is queued.")}>mkvid token</span></span><span id="int-mkvid" class="badge neutral">checking…</span></li>
   </ul>
 </div>
 <div id="sf-app"></div>
 <div class="tk-card">
   <div class="st-head">
-    <h2><span class="tip-term"${tipAttr('Each time 1001tracklists blocked tracked: when it started, how long it lasted and how many requests went through each route.')}>Ban episodes</span></h2>
-    <button id="ban-refresh" type="button" class="btn small"${tipAttr('Reloads the status checks and the ban history.')}>Refresh</button>
+    <h2><span class="tip-term"${tipAttr("Each time 1001tracklists blocked tracked: when it started, how long it lasted and how many requests went through each route.")}>Ban episodes</span></h2>
+    <button id="ban-refresh" type="button" class="btn small"${tipAttr("Reloads the status checks and the ban history.")}>Refresh</button>
   </div>
   <div id="ban-route" class="ban-route"><span class="muted">loading…</span></div>
   <div id="ban-episodes"></div>
 </div>
-`
+`;
 
 const CSS = /* css */ `
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
@@ -187,14 +485,14 @@ const CSS = /* css */ `
   .ban-eps td.open { color: var(--danger); font-weight: 600; }
   .ban-eps .muted { color: var(--muted); }
 ${YOUTUBE_CARD_CSS}
-${SETTINGS_FORM_CSS}`
+${SETTINGS_FORM_CSS}`;
 
 const JS = /* js */ `
 (() => {
 ${YOUTUBE_CARD_JS}
   const $ = TK.$;
 
-  // ── theme: radios <-> TK.theme <-> the sidebar select ──
+  // -- theme: radios <-> TK.theme <-> the sidebar select --
   const radios = ['system', 'dark', 'light'].map((v) => $('st-theme-' + v)).filter(Boolean);
   const $sel = $('tk-theme');
   function syncTheme() {
@@ -206,7 +504,7 @@ ${YOUTUBE_CARD_JS}
   if ($sel) $sel.addEventListener('change', syncTheme);
   syncTheme();
 
-  // ── integrations ──
+  // -- integrations --
   function badge(id, on, onText, offText) {
     const el = $(id);
     if (!el) return;
@@ -224,7 +522,7 @@ ${YOUTUBE_CARD_JS}
   const refreshBtn = $('ban-refresh');
   if (refreshBtn) refreshBtn.addEventListener('click', loadIntegrations);
 
-  // ── app settings: field-table cards (ui/pages/settings-form.ts) ──
+  // -- app settings: field-table cards (ui/pages/settings-form.ts) --
 ${SETTINGS_FORM_JS}
   const APP_GROUPS = ${JSON.stringify(APP_GROUPS)};
   async function loadApp() {
@@ -248,17 +546,18 @@ ${SETTINGS_FORM_JS}
   YT.load();
   loadIntegrations();
 })();
-`
+`;
 
 export const SETTINGS_PAGE: UiPage = {
-  path: '/settings',
+  path: "/settings",
   html: shell({
-    nav: 'settings',
-    title: 'Settings',
-    description: 'The YouTube connection, notifications, theme, integrations, mkvid uploads, playlists, pre-saves, track uploads and retention.',
+    nav: "settings",
+    title: "Settings",
+    description:
+      "The YouTube connection, notifications, theme, integrations, mkvid uploads, playlists, pre-saves, track uploads and retention.",
     body: BODY,
     css: CSS,
     js: JS,
-    banPage: 'settings',
+    banPage: "settings",
   }),
-}
+};

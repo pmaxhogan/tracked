@@ -25,14 +25,14 @@ export const ACTIVITY_DETAIL_CSS = /* css */ `
   .h-raw { margin-top: var(--sp-1); }
   .h-raw summary { cursor: pointer; color: var(--muted); font-size: var(--fs-xs); }
   .h-raw pre { margin: var(--sp-1) 0 0; padding: var(--sp-2); background: var(--elev); border-radius: var(--r-ctl); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
-`
+`;
 
 export const ACTIVITY_DETAIL_JS = /* js */ `
   const clock = TK.fmt.clock, setLabel = TK.fmt.setLabel;
-  const BIG_SKEW = 600; // |pos − track start| over 10 min → flag as suspicious
+  const BIG_SKEW = 600; // |pos - track start| over 10 min -> flag as suspicious
   function link(u, label) {
     // Only http(s) becomes a link; anything else renders as escaped text.
-    if (!u) return '—';
+    if (!u) return '-';
     const h = TK.safeHref(u);
     if (!h) return esc(u);
     return '<a href="' + esc(h) + '" target="_blank" rel="noreferrer noopener">' + esc(label || u) + '</a>';
@@ -65,10 +65,10 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
 
     out.push('<div class="h-grp">Input</div>');
     out.push(dl([
-      ['title', esc(inp.videoTitle) || '—'],
+      ['title', esc(inp.videoTitle) || '-'],
       inp.videoUrl ? ['videoUrl', link(inp.videoUrl)] : null,
       ['position', clock(inp.currentSeconds) + (inp.videoDurationSeconds ? ' / ' + clock(inp.videoDurationSeconds) : '') +
-        (r.impossibleTimestamp ? ' <span class="warn">— past end of video (client bug?)</span>' : '')],
+        (r.impossibleTimestamp ? ' <span class="warn">- past end of video (client bug?)</span>' : '')],
     ]));
 
     out.push('<div class="h-grp">YouTube match</div>');
@@ -81,7 +81,7 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
     out.push('<div class="h-grp">Tracklist search</div>');
     const attempts = (se.attempts && se.attempts.length)
       ? '<ol>' + se.attempts.map((a) => '<li>' + esc(a.via) + ': <span class="mono">' + esc(a.query) + '</span>' + (a.via === se.via ? ' ✓' : '') + '</li>').join('') + '</ol>'
-      : '—';
+      : '-';
     out.push(dl([
       ['attempts', attempts],
       ['matched via', se.via ? esc(se.via) : '<span class="warn">no tracklist found</span>'],
@@ -91,21 +91,21 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
     if (sel) {
       out.push('<div class="h-grp">Selection</div>');
       const skewBad = sel.currentSkewSeconds != null && Math.abs(sel.currentSkewSeconds) > BIG_SKEW;
-      const cur = (sel.currentTracks || []).map((t) => '<li>' + esc(t.startTime) + ' — ' + esc(t.artist) + ' – ' + esc(t.title) + '</li>').join('');
+      const cur = (sel.currentTracks || []).map((t) => '<li>' + esc(t.startTime) + ' - ' + esc(t.artist) + ' - ' + esc(t.title) + '</li>').join('');
       out.push(dl([
         ['current track start', clock(sel.currentStartSeconds)],
-        ['skew (pos − start)', '<span class="' + (skewBad ? 'warn' : '') + '">' + clock(sel.currentSkewSeconds) + '</span>'],
-        ['tracks in set', (sel.trackCount != null ? esc(sel.trackCount) : '—') + (sel.unidentifiedCount ? ' (' + esc(sel.unidentifiedCount) + ' unidentified)' : '')],
-        ['now playing', cur ? '<ol>' + cur + '</ol>' : '—'],
+        ['skew (pos - start)', '<span class="' + (skewBad ? 'warn' : '') + '">' + clock(sel.currentSkewSeconds) + '</span>'],
+        ['tracks in set', (sel.trackCount != null ? esc(sel.trackCount) : '-') + (sel.unidentifiedCount ? ' (' + esc(sel.unidentifiedCount) + ' unidentified)' : '')],
+        ['now playing', cur ? '<ol>' + cur + '</ol>' : '-'],
       ]));
     }
 
     out.push('<div class="h-grp">Meta</div>');
     out.push(dl([
-      ['status', esc(r.status) + (r.message ? ' — ' + esc(r.message) : '')],
+      ['status', esc(r.status) + (r.message ? ' - ' + esc(r.message) : '')],
       ['when', esc(r.t)],
-      ['edge', esc([meta.colo, meta.country].filter(Boolean).join(' · ')) || '—'],
-      ['took', meta.totalMs != null ? esc(meta.totalMs) + ' ms' : '—'],
+      ['edge', esc([meta.colo, meta.country].filter(Boolean).join(' · ')) || '-'],
+      ['took', meta.totalMs != null ? esc(meta.totalMs) + ' ms' : '-'],
       ['reqId', '<span class="mono">' + esc(r.reqId) + '</span>'],
     ]));
     return out.join('');
@@ -120,7 +120,7 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
     const raw = y && y.raw ? '<details class="h-raw"><summary>Raw reply</summary><pre>' + esc(y.raw) + '</pre></details>' : '';
     if (wait) return '<span class="badge warn">' + esc(y.label) + '</span> ' + esc(y.explanation) + raw;
     const line = y ? y.headline : r.message;
-    return esc(r.status) + (line ? ' — <span class="warn">' + esc(line) + '</span>' : '') + raw;
+    return esc(r.status) + (line ? ' - <span class="warn">' + esc(line) + '</span>' : '') + raw;
   }
 
   function plDetailHtml(r) {
@@ -129,8 +129,8 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
     out.push('<div class="h-grp">Set</div>');
     out.push(dl([
       ['tracklist', link(r.setUrl, setLabel(r.setUrl))],
-      ['DJ', esc(r.artistName || r.slug || '—') + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
-      ['scraped via', r.via ? esc(r.via) : '—'],
+      ['DJ', esc(r.artistName || r.slug || '-') + (r.slug ? ' <span class="when">(' + esc(r.slug) + ')</span>' : '')],
+      ['scraped via', r.via ? esc(r.via) : '-'],
     ]));
 
     out.push('<div class="h-grp">Playlist</div>');
@@ -138,7 +138,7 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
       ['video', r.videoId
         ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(r.videoUrl || ('https://youtu.be/' + r.videoId), 'open')
         : (r.status === 'failed' || r.status === 'abandoned')
-          ? '<span class="warn">unknown — the set failed before a video was recorded</span>'
+          ? '<span class="warn">unknown - the set failed before a video was recorded</span>'
           : '<span class="warn">no YouTube recording on the set page</span>'],
       // A recheck found the set's recording swapped on 1001tracklists: this
       // is the one that came out of the playlists.
@@ -147,22 +147,22 @@ export const ACTIVITY_DETAIL_JS = /* js */ `
         : null,
       ['playlist', r.playlistId
         ? link('https://www.youtube.com/playlist?list=' + encodeURIComponent(r.playlistId), r.playlistTitle || r.playlistId)
-        : '—'],
+        : '-'],
       // How the same video fared in the combined all-artists playlist. A miss
-      // here isn't a set failure — the combined backfill re-derives it.
+      // here isn't a set failure - the combined backfill re-derives it.
       ['combined', r.combinedStatus
         ? '<span class="' + (r.combinedStatus === 'failed' || r.combinedStatus === 'unavailable' ? 'warn' : '') + '">' + esc(r.combinedStatus) + '</span>'
-        : '—'],
+        : '-'],
     ]));
 
     out.push('<div class="h-grp">Meta</div>');
     out.push(dl([
       ['status', ytStatusHtml(r)],
       r.failureCount != null && !waiting ? ['failures so far', esc(r.failureCount)] : null,
-      ['trigger', r.trigger ? esc(r.trigger) : '—'],
+      ['trigger', r.trigger ? esc(r.trigger) : '-'],
       ['when', esc(r.t)],
-      ['took', r.meta && r.meta.ms != null ? esc(r.meta.ms) + ' ms' : '—'],
+      ['took', r.meta && r.meta.ms != null ? esc(r.meta.ms) + ' ms' : '-'],
     ]));
     return out.join('');
   }
-`
+`;

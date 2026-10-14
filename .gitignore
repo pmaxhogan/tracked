@@ -12,12 +12,15 @@ logs/
 .claude/
 .gstack/
 
-# Tasker project exports — contain the live API bearer token; never commit.
+# Tasker project exports - contain the live API bearer token; never commit.
 tasker/
 *.prj.xml
 
-# Web Push VAPID key backup — private key, never commit.
+# Web Push VAPID key backup - private key, never commit.
 .vapid-prod.env
 
-# 1001tracklists account credentials for the NAS forwarder — never commit.
+# 1001tracklists account credentials for the NAS forwarder - never commit.
 .1001tl-accounts.env
+
+# vitest coverage output
+coverage/

@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { fakeD1 } from './helpers/fake-d1'
-import type { Env } from '../src/types'
-import { enqueueMkvidRequest, getMkvidRequestForSet, getMkvidTracks } from '../src/lib/mkvid'
-import { isVerified } from '../src/lib/verification'
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { fakeD1 } from "./helpers/fake-d1";
+import type { Env } from "../src/types";
+import { enqueueMkvidRequest, getMkvidRequestForSet, getMkvidTracks } from "../src/lib/mkvid";
+import { isVerified } from "../src/lib/verification";
 import {
   backfillCombined,
   collectCombinedSources,
@@ -26,38 +26,39 @@ import {
   STOP_ERROR_SECONDS,
   AUTH_ERROR_RUNS,
   type SubState,
-} from '../src/lib/sync'
-import { PlaylistNotFoundError, YouTubeApiError } from '../src/lib/youtube-playlists'
-import { clearQuotaOut, getQuotaOut, QUOTA_OUT_KEY } from '../src/lib/youtube-quota'
-import { quotaDayEnd } from '../src/lib/mkvid'
-import { makeLogger } from '../src/lib/log'
-import { PoolPausedError, PoolUnavailableError } from '../src/lib/pool'
-import { POOL_SETTINGS_KEY } from '../src/lib/pool-settings'
-import { UpstreamPausedError, UpstreamUnavailableError } from '../src/lib/upstream1001'
-import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
-import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
-import { TRACKLIST_TTL } from '../src/lib/tracklist-cache'
-import { resolveTracklistPage } from '../src/lib/tracklist-resolve'
-import { prewarmIds } from '../src/lib/link-prewarm'
-import { parseTracklist } from '../src/lib/tracklists1001'
-import { updateAppSettings } from '../src/lib/app-settings'
+} from "../src/lib/sync";
+import { PlaylistNotFoundError, YouTubeApiError } from "../src/lib/youtube-playlists";
+import { clearQuotaOut, getQuotaOut, QUOTA_OUT_KEY } from "../src/lib/youtube-quota";
+import { quotaDayEnd } from "../src/lib/mkvid";
+import { makeLogger } from "../src/lib/log";
+import { PoolPausedError, PoolUnavailableError } from "../src/lib/pool";
+import { POOL_SETTINGS_KEY } from "../src/lib/pool-settings";
+import { UpstreamPausedError, UpstreamUnavailableError } from "../src/lib/upstream1001";
+import { IPBlockedError, CloudflareChallengeError } from "../src/lib/fetch";
+import { _resetTallyForTests } from "../src/lib/ban-state";
+import { TRACKLIST_TTL } from "../src/lib/tracklist-cache";
+import { resolveTracklistPage } from "../src/lib/tracklist-resolve";
+import { prewarmIds } from "../src/lib/link-prewarm";
+import { parseTracklist } from "../src/lib/tracklists1001";
+import { updateAppSettings } from "../src/lib/app-settings";
 
 // Stub the network-touching primitives so syncOne becomes a deterministic
 // orchestrator test. This is the most important behavior to lock down: state
 // transitions, dedup, the state-vs-fresh-token-vs-create cascade for the
 // playlist, and per-set error isolation.
-vi.mock('../src/lib/dj-index', async () => {
-  const actual = await vi.importActual<typeof import('../src/lib/dj-index')>('../src/lib/dj-index')
+vi.mock("../src/lib/dj-index", async () => {
+  const actual = await vi.importActual<typeof import("../src/lib/dj-index")>("../src/lib/dj-index");
   return {
     ...actual,
     fetch1001Html: vi.fn(),
     crawlDjIndex: vi.fn(),
     parseSetYouTubeId: vi.fn(),
-  }
-})
-vi.mock('../src/lib/youtube-playlists', async () => {
-  const actual =
-    await vi.importActual<typeof import('../src/lib/youtube-playlists')>('../src/lib/youtube-playlists')
+  };
+});
+vi.mock("../src/lib/youtube-playlists", async () => {
+  const actual = await vi.importActual<typeof import("../src/lib/youtube-playlists")>(
+    "../src/lib/youtube-playlists",
+  );
   return {
     ...actual,
     findPlaylistByTitle: vi.fn(),
@@ -65,85 +66,119 @@ vi.mock('../src/lib/youtube-playlists', async () => {
     listPlaylistVideoIds: vi.fn(),
     addVideoToPlaylist: vi.fn(),
     removeVideoFromPlaylist: vi.fn(),
-  }
-})
+  };
+});
 
 // The full-recording gate (lib/playlist-hygiene.ts) looks every page video up
 // with videos.list; no network here. An empty answer = rules needing duration
 // or orientation do not apply, so the sync behaves as before.
-vi.mock('../src/lib/video-meta', async () => {
-  const actual = await vi.importActual<typeof import('../src/lib/video-meta')>('../src/lib/video-meta')
-  return { ...actual, getVideoMeta: vi.fn(async () => new Map()) }
-})
+vi.mock("../src/lib/video-meta", async () => {
+  const actual =
+    await vi.importActual<typeof import("../src/lib/video-meta")>("../src/lib/video-meta");
+  return { ...actual, getVideoMeta: vi.fn(async () => new Map()) };
+});
 
-import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from '../src/lib/dj-index'
-import { getVideoMeta } from '../src/lib/video-meta'
-import { confirmedMembership, recordRemoved } from '../src/lib/playlist-blocklist'
+import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from "../src/lib/dj-index";
+import { getVideoMeta } from "../src/lib/video-meta";
+import { confirmedMembership, recordRemoved } from "../src/lib/playlist-blocklist";
 import {
   addVideoToPlaylist,
   createPlaylist,
   findPlaylistByTitle,
   listPlaylistVideoIds,
   removeVideoFromPlaylist,
-} from '../src/lib/youtube-playlists'
+} from "../src/lib/youtube-playlists";
 
-const NOW = Math.floor(Date.now() / 1000)
-/** A tracklistVideos entry checked just now — not due for another 5 days. */
-const fresh = (videoId: string | null) => ({ videoId, checkedAt: NOW })
-/** A tracklistVideos entry older than the recheck interval — due now. */
-const stale = (videoId: string | null) => ({ videoId, checkedAt: NOW - RECHECK_INTERVAL_SECONDS - 60 })
+const NOW = Math.floor(Date.now() / 1000);
+/** A tracklistVideos entry checked just now - not due for another 5 days. */
+const fresh = (videoId: string | null) => ({ videoId, checkedAt: NOW });
+/** A tracklistVideos entry older than the recheck interval - due now. */
+const stale = (videoId: string | null) => ({
+  videoId,
+  checkedAt: NOW - RECHECK_INTERVAL_SECONDS - 60,
+});
 
 function fakeKV(): KVNamespace {
-  const store = new Map<string, { value: string; metadata?: unknown }>()
+  const store = new Map<string, { value: string; metadata?: unknown }>();
   return {
-    async get(key: string, type?: 'json' | 'text') {
-      const v = store.get(key)
-      if (v === undefined) return null
-      return type === 'json' ? JSON.parse(v.value) : v.value
+    async get(key: string, type?: "json" | "text") {
+      const v = store.get(key);
+      if (v === undefined) return null;
+      return type === "json" ? JSON.parse(v.value) : v.value;
     },
     async put(key: string, value: string, opts?: { metadata?: unknown }) {
-      store.set(key, { value, metadata: opts?.metadata })
+      store.set(key, { value, metadata: opts?.metadata });
     },
     async delete(key: string) {
-      store.delete(key)
+      store.delete(key);
     },
-    // Ascending key order, like the real thing — the audit trails rely on it.
-    async list({ prefix = '' }: { prefix?: string; cursor?: string; limit?: number } = {}) {
+    // Ascending key order, like the real thing - the audit trails rely on it.
+    async list({ prefix = "" }: { prefix?: string; cursor?: string; limit?: number } = {}) {
       const keys = [...store.entries()]
         .filter(([k]) => k.startsWith(prefix))
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([name, v]) => ({ name, metadata: v.metadata }))
-      return { keys, list_complete: true, cacheStatus: null }
+        .map(([name, v]) => ({ name, metadata: v.metadata }));
+      return { keys, list_complete: true, cacheStatus: null };
     },
-  } as unknown as KVNamespace
+  } as unknown as KVNamespace;
 }
 
 /** The playlist-addition audit rows a run wrote, newest-first (the panel's order). */
 async function playlistAdditions(env: Env) {
-  const res = await env.DB.prepare('SELECT id, summary, record FROM playlist_additions ORDER BY ts DESC, id DESC').all<{
-    id: number
-    summary: string
-    record: string
-  }>()
+  const res = await env.DB.prepare(
+    "SELECT id, summary, record FROM playlist_additions ORDER BY ts DESC, id DESC",
+  ).all<{
+    id: number;
+    summary: string;
+    record: string;
+  }>();
   return res.results.map((r) => ({
     key: String(r.id),
     metadata: JSON.parse(r.summary) as Record<string, unknown>,
     record: JSON.parse(r.record) as Record<string, any>,
-  }))
+  }));
 }
 
 /** Seed audit rows straight into D1 (what an earlier run would have flushed). Bodies are empty, like the old planted KV rows, so tests can tell seeds from a run's own rows. */
 async function seedAdditionRows(
   env: Env,
-  rows: Array<{ t: string; status: string; slug: string; set: string; vid?: string | null; msg?: string | null }>,
+  rows: Array<{
+    t: string;
+    status: string;
+    slug: string;
+    set: string;
+    vid?: string | null;
+    msg?: string | null;
+  }>,
 ) {
   for (const r of rows) {
-    const summary = { t: r.t, status: r.status, slug: r.slug, artist: null, set: r.set, vid: r.vid ?? null, via: null, trg: 'cron.pending', msg: r.msg ?? null, ms: null, cmb: null }
+    const summary = {
+      t: r.t,
+      status: r.status,
+      slug: r.slug,
+      artist: null,
+      set: r.set,
+      vid: r.vid ?? null,
+      via: null,
+      trg: "cron.pending",
+      msg: r.msg ?? null,
+      ms: null,
+      cmb: null,
+    };
     await env.DB.prepare(
-      'INSERT INTO playlist_additions (t, ts, status, slug, set_url, video_id, legacy_key, summary, record) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)',
+      "INSERT INTO playlist_additions (t, ts, status, slug, set_url, video_id, legacy_key, summary, record) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
     )
-      .bind(r.t, Date.parse(r.t), r.status, r.slug, r.set, r.vid ?? null, JSON.stringify(summary), '{}')
-      .run()
+      .bind(
+        r.t,
+        Date.parse(r.t),
+        r.status,
+        r.slug,
+        r.set,
+        r.vid ?? null,
+        JSON.stringify(summary),
+        "{}",
+      )
+      .run();
   }
 }
 
@@ -152,157 +187,172 @@ function makeEnv(): Env {
     CACHE: fakeKV(),
     DB: fakeD1(),
     SUBS: fakeKV(),
-    API_TOKEN: 't',
-    YOUTUBE_API_KEY: 'k',
-  } as Env
+    API_TOKEN: "t",
+    YOUTUBE_API_KEY: "k",
+  } as Env;
 }
 
-const sub = { slug: 'lillypalmer', sourceUrl: 'https://www.1001tracklists.com/dj/lillypalmer/', addedAt: 0 }
+const sub = {
+  slug: "lillypalmer",
+  sourceUrl: "https://www.1001tracklists.com/dj/lillypalmer/",
+  addedAt: 0,
+};
 
-function mockCrawl(tracklistUrls: string[], artistName: string | null = 'X') {
-  ;(crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+function mockCrawl(tracklistUrls: string[], artistName: string | null = "X") {
+  (crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
     artistName,
     tracklistUrls,
     pagesWalked: 1,
-    stopReason: 'empty',
-  })
+    stopReason: "empty",
+  });
 }
 
 beforeEach(() => {
   // resetAllMocks, not clearAllMocks: `mockClear` leaves implementations (and
-  // queued `…Once` values) in place, so a mock configured by one test would
+  // queued `...Once` values) in place, so a mock configured by one test would
   // otherwise answer calls in the next one.
-  vi.resetAllMocks()
-  ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
-    html: '<set/>',
-    via: 'direct',
-    state: { cookie: '' },
-  })
+  vi.resetAllMocks();
+  (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+    html: "<set/>",
+    via: "direct",
+    state: { cookie: "" },
+  });
   // A fresh Set per call: the sync mutates the returned set in place, and one
   // run now reads two playlists (the artist's and the combined one), so a
   // single shared instance would leak inserts from one into the other.
-  ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set<string>())
-  ;(removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue(1)
-})
+  (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(
+    async () => new Set<string>(),
+  );
+  (removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+});
 
-describe('prettifySlug', () => {
-  it('replaces separators and word-caps', () => {
-    expect(prettifySlug('lilly_palmer')).toBe('Lilly Palmer')
-    expect(prettifySlug('charlotte-de-witte')).toBe('Charlotte De Witte')
-    expect(prettifySlug('boys.noize')).toBe('Boys Noize')
-  })
+describe("prettifySlug", () => {
+  it("replaces separators and word-caps", () => {
+    expect(prettifySlug("lilly_palmer")).toBe("Lilly Palmer");
+    expect(prettifySlug("charlotte-de-witte")).toBe("Charlotte De Witte");
+    expect(prettifySlug("boys.noize")).toBe("Boys Noize");
+  });
 
-  it('leaves run-on slugs alone (no way to split letter runs)', () => {
-    expect(prettifySlug('lillypalmer')).toBe('Lillypalmer')
-  })
-})
+  it("leaves run-on slugs alone (no way to split letter runs)", () => {
+    expect(prettifySlug("lillypalmer")).toBe("Lillypalmer");
+  });
+});
 
-describe('combined playlist orchestration', () => {
+describe("combined playlist orchestration", () => {
   /** Subscribe `slug` and give it a synced state row (or none). */
   async function subscribe(env: Env, slug: string, state?: Partial<SubState>) {
-    const list = ((await env.SUBS.get('subs:list', 'json')) as string[] | null) ?? []
-    await env.SUBS.put('subs:list', JSON.stringify([...list, slug]))
+    const list = ((await env.SUBS.get("subs:list", "json")) as string[] | null) ?? [];
+    await env.SUBS.put("subs:list", JSON.stringify([...list, slug]));
     await env.SUBS.put(
       `subs:item:${slug}`,
       JSON.stringify({ sourceUrl: `https://www.1001tracklists.com/dj/${slug}/`, addedAt: 0 }),
-    )
-    if (state) await saveSubState(env, slug, { processedTracklistUrls: [], ...state })
+    );
+    if (state) await saveSubState(env, slug, { processedTracklistUrls: [], ...state });
   }
 
   /** A stored OAuth token that `getAccessToken` accepts without refreshing. */
   async function connectYouTube(env: Env) {
     await env.SUBS.put(
-      'oauth:google',
+      "oauth:google",
       JSON.stringify({
-        accessToken: 'tok',
-        refreshToken: 'refresh',
+        accessToken: "tok",
+        refreshToken: "refresh",
         expiresAt: Math.floor(Date.now() / 1000) + 3600,
-        scope: 'https://www.googleapis.com/auth/youtube',
+        scope: "https://www.googleapis.com/auth/youtube",
         channelId: null,
         channelTitle: null,
         connectedAt: 0,
       }),
-    )
+    );
   }
 
-  it('collects one source per subscription that has been synced', async () => {
-    const env = makeEnv()
-    await subscribe(env, 'synced', { playlistId: 'PLa', artistName: 'Synced' })
-    await subscribe(env, 'never-synced')
+  it("collects one source per subscription that has been synced", async () => {
+    const env = makeEnv();
+    await subscribe(env, "synced", { playlistId: "PLa", artistName: "Synced" });
+    await subscribe(env, "never-synced");
 
     expect(await collectCombinedSources(env)).toEqual([
-      { slug: 'synced', artistName: 'Synced', playlistId: 'PLa' },
-    ])
-  })
+      { slug: "synced", artistName: "Synced", playlistId: "PLa" },
+    ]);
+  });
 
-  it('skips the backfill when YouTube is not connected', async () => {
-    const env = makeEnv()
-    await subscribe(env, 'a', { playlistId: 'PLa' })
+  it("skips the backfill when YouTube is not connected", async () => {
+    const env = makeEnv();
+    await subscribe(env, "a", { playlistId: "PLa" });
 
-    expect(await backfillCombined(env)).toEqual({ ok: false, reason: 'youtube_not_connected' })
-    expect(findPlaylistByTitle).not.toHaveBeenCalled()
-  })
+    expect(await backfillCombined(env)).toEqual({ ok: false, reason: "youtube_not_connected" });
+    expect(findPlaylistByTitle).not.toHaveBeenCalled();
+  });
 
-  it('skips the backfill (and creates no playlist) before anything has been synced', async () => {
-    const env = makeEnv()
-    await connectYouTube(env)
-    await subscribe(env, 'fresh')
+  it("skips the backfill (and creates no playlist) before anything has been synced", async () => {
+    const env = makeEnv();
+    await connectYouTube(env);
+    await subscribe(env, "fresh");
 
-    expect(await backfillCombined(env)).toEqual({ ok: false, reason: 'no_sources' })
-    expect(createPlaylist).not.toHaveBeenCalled()
-  })
+    expect(await backfillCombined(env)).toEqual({ ok: false, reason: "no_sources" });
+    expect(createPlaylist).not.toHaveBeenCalled();
+  });
 
-  it('backfills the union of every artist playlist into the combined one', async () => {
-    const env = makeEnv()
-    await connectYouTube(env)
-    await subscribe(env, 'a', { playlistId: 'PLa', artistName: 'A' })
-    await subscribe(env, 'b', { playlistId: 'PLb', artistName: 'B' })
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
-    ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: 'PLcombined',
-      title: 'All tracked artists (1001tklists)',
-    })
-    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async (playlistId: string) =>
-      new Set(playlistId === 'PLa' ? ['aVid1234567'] : ['bVid1234567']),
-    )
+  it("backfills the union of every artist playlist into the combined one", async () => {
+    const env = makeEnv();
+    await connectYouTube(env);
+    await subscribe(env, "a", { playlistId: "PLa", artistName: "A" });
+    await subscribe(env, "b", { playlistId: "PLb", artistName: "B" });
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(
+      async (playlistId: string) =>
+        new Set(playlistId === "PLa" ? ["aVid1234567"] : ["bVid1234567"]),
+    );
 
-    const r = await backfillCombined(env, { trigger: 'manual.combined' })
+    const r = await backfillCombined(env, { trigger: "manual.combined" });
 
-    expect(r).toMatchObject({ ok: true, playlistId: 'PLcombined', inserted: 2, pending: 0 })
-    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLcombined', 'aVid1234567'],
-      ['PLcombined', 'bVid1234567'],
-    ])
-  })
-})
+    expect(r).toMatchObject({ ok: true, playlistId: "PLcombined", inserted: 2, pending: 0 });
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLcombined", "aVid1234567"],
+      ["PLcombined", "bVid1234567"],
+    ]);
+  });
+});
 
-describe('syncOne', () => {
-  it('creates a new playlist on first run, scrapes each set, adds non-duplicate videos, and writes state', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'], 'Lilly Palmer')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
-    ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLnew', title: 'Lilly Palmer (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>)
-      .mockReturnValueOnce('vidA1234567') // a → has video
-      .mockReturnValueOnce(null) // b → no video
-      .mockReturnValueOnce('vidC1234567') // c → has video
+describe("syncOne", () => {
+  it("creates a new playlist on first run, scrapes each set, adds non-duplicate videos, and writes state", async () => {
+    const env = makeEnv();
+    mockCrawl(
+      ["https://x/tracklist/a", "https://x/tracklist/b", "https://x/tracklist/c"],
+      "Lilly Palmer",
+    );
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLnew",
+      title: "Lilly Palmer (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce("vidA1234567") // a -> has video
+      .mockReturnValueOnce(null) // b -> no video
+      .mockReturnValueOnce("vidC1234567"); // c -> has video
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(r.ok).toBe(true)
-    expect(r.playlistId).toBe('PLnew')
+    expect(r.ok).toBe(true);
+    expect(r.playlistId).toBe("PLnew");
     // Two playlists get created on a virgin account: this artist's, and the
     // combined all-artists one every video is mirrored into.
     expect((createPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].title)).toEqual([
-      'Lilly Palmer (1001tklists)',
-      'All tracked artists (1001tklists)',
-    ])
+      "Lilly Palmer (1001tklists)",
+      "All tracked artists (1001tklists)",
+    ]);
     expect((createPlaylist as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
-      title: 'Lilly Palmer (1001tklists)',
-      privacyStatus: 'public',
-      description: 'Every set Lilly Palmer has a YouTube recording for on 1001tracklists.',
-    })
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(4) // 2 videos × (artist + combined)
+      title: "Lilly Palmer (1001tklists)",
+      privacyStatus: "public",
+      description: "Every set Lilly Palmer has a YouTube recording for on 1001tracklists.",
+    });
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(4); // 2 videos x (artist + combined)
     expect(r.stats).toEqual({
       tracklistsSeen: 3,
       tracklistsProcessed: 3,
@@ -313,1992 +363,2735 @@ describe('syncOne', () => {
       tracklistsRechecked: 0,
       videosReplaced: 0,
       rechecksPending: 0,
-    })
+    });
 
     // State persisted with all three URLs marked processed and the playlistId cached.
-    const state = await loadSubState(env, sub.slug)
-    expect(state?.playlistId).toBe('PLnew')
-    expect(state?.artistName).toBe('Lilly Palmer')
+    const state = await loadSubState(env, sub.slug);
+    expect(state?.playlistId).toBe("PLnew");
+    expect(state?.artistName).toBe("Lilly Palmer");
     expect(state?.processedTracklistUrls).toEqual([
-      'https://x/tracklist/a',
-      'https://x/tracklist/b',
-      'https://x/tracklist/c',
-    ])
-    // …and what each set resolved to, stamped now, so the recheck loop knows
+      "https://x/tracklist/a",
+      "https://x/tracklist/b",
+      "https://x/tracklist/c",
+    ]);
+    // ...and what each set resolved to, stamped now, so the recheck loop knows
     // both what to compare against and when to look again.
     expect(state?.tracklistVideos).toEqual({
-      'https://x/tracklist/a': { videoId: 'vidA1234567', checkedAt: expect.any(Number) },
-      'https://x/tracklist/b': { videoId: null, checkedAt: expect.any(Number) },
-      'https://x/tracklist/c': { videoId: 'vidC1234567', checkedAt: expect.any(Number) },
-    })
-    expect(dueRechecks(state!)).toEqual([])
-  })
+      "https://x/tracklist/a": { videoId: "vidA1234567", checkedAt: expect.any(Number) },
+      "https://x/tracklist/b": { videoId: null, checkedAt: expect.any(Number) },
+      "https://x/tracklist/c": { videoId: "vidC1234567", checkedAt: expect.any(Number) },
+    });
+    expect(dueRechecks(state!)).toEqual([]);
+  });
 
-  it('skips listPlaylistVideoIds after creating a fresh playlist (eventual-consistency 404 avoidance)', async () => {
+  it("skips listPlaylistVideoIds after creating a fresh playlist (eventual-consistency 404 avoidance)", async () => {
     // YouTube\'s read API takes a few seconds to see a freshly-created
     // playlist; listing it immediately after create 404s with
     // playlistNotFound. A new playlist is empty by definition, so just skip.
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a'], 'Lilly Palmer')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
-    ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLnew', title: 'Lilly Palmer (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    const env = makeEnv();
+    mockCrawl(["https://x/tracklist/a"], "Lilly Palmer");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLnew",
+      title: "Lilly Palmer (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(r.ok).toBe(true)
-    expect(listPlaylistVideoIds).not.toHaveBeenCalled()
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLnew', 'vidA1234567', 'tok')
-  })
+    expect(r.ok).toBe(true);
+    expect(listPlaylistVideoIds).not.toHaveBeenCalled();
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PLnew", "vidA1234567", "tok");
+  });
 
-  it('reuses a same-titled playlist found by lookup instead of creating a new one', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a'], 'Lilly Palmer')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLold', title: 'Lilly Palmer (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+  it("reuses a same-titled playlist found by lookup instead of creating a new one", async () => {
+    const env = makeEnv();
+    mockCrawl(["https://x/tracklist/a"], "Lilly Palmer");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLold",
+      title: "Lilly Palmer (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(r.playlistId).toBe('PLold')
-    expect(createPlaylist).not.toHaveBeenCalled()
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLold', 'vidA1234567', 'tok')
-  })
+    expect(r.playlistId).toBe("PLold");
+    expect(createPlaylist).not.toHaveBeenCalled();
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PLold", "vidA1234567", "tok");
+  });
 
-  it('uses cached playlistId from state without calling list/create on subsequent runs', async () => {
-    const env = makeEnv()
+  it("uses cached playlistId from state without calling list/create on subsequent runs", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLcached',
-      artistName: 'Lilly Palmer',
-      processedTracklistUrls: ['https://x/tracklist/old'],
-      tracklistVideos: { 'https://x/tracklist/old': fresh('vidOld12345') },
-    })
-    mockCrawl(['https://x/tracklist/old', 'https://x/tracklist/new'], 'Lilly Palmer')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: 'PLcombined',
-      title: 'All tracked artists (1001tklists)',
-    })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidNew11234')
+      playlistId: "PLcached",
+      artistName: "Lilly Palmer",
+      processedTracklistUrls: ["https://x/tracklist/old"],
+      tracklistVideos: { "https://x/tracklist/old": fresh("vidOld12345") },
+    });
+    mockCrawl(["https://x/tracklist/old", "https://x/tracklist/new"], "Lilly Palmer");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidNew11234");
 
-    await syncOne(env, sub, 'tok')
+    await syncOne(env, sub, "tok");
 
-    // The artist playlist comes straight from state — the only title looked up
+    // The artist playlist comes straight from state - the only title looked up
     // is the combined playlist's, which has no cached id in this state row.
     expect((findPlaylistByTitle as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
-      'All tracked artists (1001tklists)',
-    ])
-    expect(createPlaylist).not.toHaveBeenCalled()
+      "All tracked artists (1001tklists)",
+    ]);
+    expect(createPlaylist).not.toHaveBeenCalled();
     // Only the *new* tracklist URL is fetched / processed.
-    expect(parseSetYouTubeId).toHaveBeenCalledTimes(1)
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLcached', 'vidNew11234', 'tok')
-  })
+    expect(parseSetYouTubeId).toHaveBeenCalledTimes(1);
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PLcached", "vidNew11234", "tok");
+  });
 
-  it('skips videos already in the playlist (defense against wiped state)', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a'], 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
-    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set(['alreadyIn12']))
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('alreadyIn12')
+  it("skips videos already in the playlist (defense against wiped state)", async () => {
+    const env = makeEnv();
+    mockCrawl(["https://x/tracklist/a"], "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "X (1001tklists)",
+    });
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set(["alreadyIn12"]));
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("alreadyIn12");
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-    expect(r.stats.videoIdsFound).toBe(1)
-    expect(r.stats.videoIdsAdded).toBe(0)
-  })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    expect(r.stats.videoIdsFound).toBe(1);
+    expect(r.stats.videoIdsAdded).toBe(0);
+  });
 
-  it('caps to maxSetsPerRun and leaves remaining URLs unprocessed for next run', async () => {
-    const env = makeEnv()
-    const urls = Array.from({ length: 50 }, (_, i) => `https://x/tracklist/${i}`)
-    mockCrawl(urls, 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+  it("caps to maxSetsPerRun and leaves remaining URLs unprocessed for next run", async () => {
+    const env = makeEnv();
+    const urls = Array.from({ length: 50 }, (_, i) => `https://x/tracklist/${i}`);
+    mockCrawl(urls, "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "X (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
 
-    await syncOne(env, sub, 'tok', { maxSetsPerRun: 5 })
+    await syncOne(env, sub, "tok", { maxSetsPerRun: 5 });
 
-    expect(parseSetYouTubeId).toHaveBeenCalledTimes(5)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.processedTracklistUrls.length).toBe(5)
-    expect(state.processedTracklistUrls).toEqual(urls.slice(0, 5))
-  })
+    expect(parseSetYouTubeId).toHaveBeenCalledTimes(5);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.processedTracklistUrls.length).toBe(5);
+    expect(state.processedTracklistUrls).toEqual(urls.slice(0, 5));
+  });
 
-  it('continues past a per-set fetch failure without marking that URL processed', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b'], 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
+  it("continues past a per-set fetch failure without marking that URL processed", async () => {
+    const env = makeEnv();
+    mockCrawl(["https://x/tracklist/a", "https://x/tracklist/b"], "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "X (1001tklists)",
+    });
     // The DJ-index walk is mocked above; here we mock per-set fetches:
     // /a fails, /b succeeds.
-    ;(fetch1001Html as ReturnType<typeof vi.fn>)
-      .mockRejectedValueOnce(new Error('transient'))
-      .mockResolvedValueOnce({ html: '<set>', via: 'direct', state: { cookie: '' } })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('goodVid1234')
+    (fetch1001Html as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce({ html: "<set>", via: "direct", state: { cookie: "" } });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("goodVid1234");
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(r.stats.tracklistsProcessed).toBe(1)
-    expect(r.stats.videoIdsAdded).toBe(1)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.processedTracklistUrls).toEqual(['https://x/tracklist/b'])
-  })
+    expect(r.stats.tracklistsProcessed).toBe(1);
+    expect(r.stats.videoIdsAdded).toBe(1);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.processedTracklistUrls).toEqual(["https://x/tracklist/b"]);
+  });
 
-  it('falls back to the cached artistName when the DJ page parse misses the H1', async () => {
-    const env = makeEnv()
+  it("falls back to the cached artistName when the DJ page parse misses the H1", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'Lilly Palmer',
+      playlistId: "PL",
+      artistName: "Lilly Palmer",
       processedTracklistUrls: [],
-    } satisfies SubState)
-    mockCrawl([], null)
+    } satisfies SubState);
+    mockCrawl([], null);
 
-    const r = await syncOne(env, sub, 'tok')
-    expect(r.artistName).toBe('Lilly Palmer')
-  })
+    const r = await syncOne(env, sub, "tok");
+    expect(r.artistName).toBe("Lilly Palmer");
+  });
 
-  it('recovers when the cached playlistId 404s on listPlaylistVideoIds (stale state)', async () => {
-    const env = makeEnv()
+  it("recovers when the cached playlistId 404s on listPlaylistVideoIds (stale state)", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLdeleted',
-      artistName: 'X',
+      playlistId: "PLdeleted",
+      artistName: "X",
       processedTracklistUrls: [],
-    })
-    mockCrawl(['https://x/tracklist/a'], 'X')
-    // First list call → 404, recovery flow re-resolves and returns empty.
-    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>)
-      .mockRejectedValueOnce(new PlaylistNotFoundError('playlistItems.list', 'PLdeleted'))
-      .mockResolvedValueOnce(new Set())
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLrecovered', title: 'X (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('newVid12345')
+    });
+    mockCrawl(["https://x/tracklist/a"], "X");
+    // First list call -> 404, recovery flow re-resolves and returns empty.
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new PlaylistNotFoundError("playlistItems.list", "PLdeleted"))
+      .mockResolvedValueOnce(new Set());
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLrecovered",
+      title: "X (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("newVid12345");
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(r.ok).toBe(true)
-    expect(r.playlistId).toBe('PLrecovered')
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLrecovered', 'newVid12345', 'tok')
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.playlistId).toBe('PLrecovered')
-  })
+    expect(r.ok).toBe(true);
+    expect(r.playlistId).toBe("PLrecovered");
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PLrecovered", "newVid12345", "tok");
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.playlistId).toBe("PLrecovered");
+  });
 
-  it('recovers when the playlist disappears mid-run on the first add', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b'], 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ id: 'PL1', title: 'X (1001tklists)' })
-      .mockResolvedValueOnce({ id: 'PL2', title: 'X (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>)
-      .mockReturnValueOnce('vidFirst123')
-      .mockReturnValueOnce('vidSecond12')
-    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>)
-      .mockRejectedValueOnce(new PlaylistNotFoundError('playlistItems.insert', 'PL1'))
-      .mockResolvedValue(undefined)
+  it("recovers when the playlist disappears mid-run on the first add", async () => {
+    const env = makeEnv();
+    mockCrawl(["https://x/tracklist/a", "https://x/tracklist/b"], "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ id: "PL1", title: "X (1001tklists)" })
+      .mockResolvedValueOnce({ id: "PL2", title: "X (1001tklists)" });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce("vidFirst123")
+      .mockReturnValueOnce("vidSecond12");
+    (addVideoToPlaylist as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new PlaylistNotFoundError("playlistItems.insert", "PL1"))
+      .mockResolvedValue(undefined);
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
     // Both videos end up in the recovered playlist.
-    expect(r.playlistId).toBe('PL2')
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(3) // failed insert on PL1 + retry on PL2 + second set on PL2
-    const calls = (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])
+    expect(r.playlistId).toBe("PL2");
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(3); // failed insert on PL1 + retry on PL2 + second set on PL2
+    const calls = (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [
+      c[0],
+      c[1],
+    ]);
     expect(calls).toEqual([
-      ['PL1', 'vidFirst123'],
-      ['PL2', 'vidFirst123'],
-      ['PL2', 'vidSecond12'],
-    ])
-    expect(r.stats.videoIdsAdded).toBe(2)
-  })
+      ["PL1", "vidFirst123"],
+      ["PL2", "vidFirst123"],
+      ["PL2", "vidSecond12"],
+    ]);
+    expect(r.stats.videoIdsAdded).toBe(2);
+  });
 
-  it('skips the DJ crawl when skipDjCrawl=true and uses state.discoveredTracklistUrls instead', async () => {
-    const env = makeEnv()
+  it("skips the DJ crawl when skipDjCrawl=true and uses state.discoveredTracklistUrls instead", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLcached',
-      artistName: 'Lilly Palmer',
-      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
-      processedTracklistUrls: ['https://x/tracklist/a'],
-    })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidB12345678')
+      playlistId: "PLcached",
+      artistName: "Lilly Palmer",
+      discoveredTracklistUrls: ["https://x/tracklist/a", "https://x/tracklist/b"],
+      processedTracklistUrls: ["https://x/tracklist/a"],
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidB12345678");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(crawlDjIndex).not.toHaveBeenCalled()
-    expect(r.artistName).toBe('Lilly Palmer')
-    expect(r.stats.tracklistsSeen).toBe(2)
-    expect(r.stats.tracklistsProcessed).toBe(1) // only /b was pending
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLcached', 'vidB12345678', 'tok')
-  })
+    expect(crawlDjIndex).not.toHaveBeenCalled();
+    expect(r.artistName).toBe("Lilly Palmer");
+    expect(r.stats.tracklistsSeen).toBe(2);
+    expect(r.stats.tracklistsProcessed).toBe(1); // only /b was pending
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PLcached", "vidB12345678", "tok");
+  });
 
-  it('records one playlist-addition audit row per set, with the outcome of each', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'], 'Lilly Palmer')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Lilly Palmer (1001tklists)' })
-    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set(['dupeVid1234']))
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>)
-      .mockReturnValueOnce('newVid12345') // a → added
-      .mockReturnValueOnce('dupeVid1234') // b → already in the playlist
-      .mockReturnValueOnce(null) // c → set page has no YouTube recording
+  it("records one playlist-addition audit row per set, with the outcome of each", async () => {
+    const env = makeEnv();
+    mockCrawl(
+      ["https://x/tracklist/a", "https://x/tracklist/b", "https://x/tracklist/c"],
+      "Lilly Palmer",
+    );
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "Lilly Palmer (1001tklists)",
+    });
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set(["dupeVid1234"]));
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce("newVid12345") // a -> added
+      .mockReturnValueOnce("dupeVid1234") // b -> already in the playlist
+      .mockReturnValueOnce(null); // c -> set page has no YouTube recording
 
-    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
+    await syncOne(env, sub, "tok", { trigger: "manual.one" });
 
-    const rows = await playlistAdditions(env)
+    const rows = await playlistAdditions(env);
     expect(rows.map((r) => [r.record.setUrl, r.record.status])).toEqual([
-      ['https://x/tracklist/c', 'no_youtube'],
-      ['https://x/tracklist/b', 'duplicate'],
-      ['https://x/tracklist/a', 'added'],
-    ])
+      ["https://x/tracklist/c", "no_youtube"],
+      ["https://x/tracklist/b", "duplicate"],
+      ["https://x/tracklist/a", "added"],
+    ]);
     expect(rows[2]!.record).toMatchObject({
-      slug: 'lillypalmer',
-      artistName: 'Lilly Palmer',
-      status: 'added',
-      videoId: 'newVid12345',
-      videoUrl: 'https://www.youtube.com/watch?v=newVid12345',
-      playlistId: 'PL',
-      playlistTitle: 'Lilly Palmer (1001tklists)',
-      via: 'direct',
-      trigger: 'manual.one',
-    })
+      slug: "lillypalmer",
+      artistName: "Lilly Palmer",
+      status: "added",
+      videoId: "newVid12345",
+      videoUrl: "https://www.youtube.com/watch?v=newVid12345",
+      playlistId: "PL",
+      playlistTitle: "Lilly Palmer (1001tklists)",
+      via: "direct",
+      trigger: "manual.one",
+    });
     // Summary duplicated into KV metadata so the panel lists rows without a get.
     expect(rows[2]!.metadata).toMatchObject({
-      status: 'added',
-      slug: 'lillypalmer',
-      artist: 'Lilly Palmer',
-      set: 'https://x/tracklist/a',
-      vid: 'newVid12345',
-      trg: 'manual.one',
-    })
+      status: "added",
+      slug: "lillypalmer",
+      artist: "Lilly Palmer",
+      set: "https://x/tracklist/a",
+      vid: "newVid12345",
+      trg: "manual.one",
+    });
     // Each row is addressed by its D1 id (what the detail endpoint takes).
-    expect(rows.every((r) => /^\d+$/.test(r.key))).toBe(true)
-  })
+    expect(rows.every((r) => /^\d+$/.test(r.key))).toBe(true);
+  });
 
-  it('records a failed row per set error, and an abandoned row once it gives up', async () => {
-    const env = makeEnv()
+  it("records a failed row per set error, and an abandoned row once it gives up", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/bad'],
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/bad"],
       processedTracklistUrls: [],
-      // Two prior failures — this run's failure is the third and abandons it.
-      failureCounts: { 'https://x/tracklist/bad': 2 },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('ip_blocked (1.2.3.4)'))
+      // Two prior failures - this run's failure is the third and abandons it.
+      failureCounts: { "https://x/tracklist/bad": 2 },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("ip_blocked (1.2.3.4)"),
+    );
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true, trigger: 'cron.pending' })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true, trigger: "cron.pending" });
 
-    const rows = await playlistAdditions(env)
-    expect(rows).toHaveLength(1)
+    const rows = await playlistAdditions(env);
+    expect(rows).toHaveLength(1);
     expect(rows[0]!.record).toMatchObject({
-      status: 'abandoned',
-      setUrl: 'https://x/tracklist/bad',
-      message: 'ip_blocked (1.2.3.4)',
+      status: "abandoned",
+      setUrl: "https://x/tracklist/bad",
+      message: "ip_blocked (1.2.3.4)",
       failureCount: 3,
       videoId: null,
-      trigger: 'cron.pending',
-    })
-  })
+      trigger: "cron.pending",
+    });
+  });
 
-  it('writes no audit rows when a run processes nothing', async () => {
-    const env = makeEnv()
-    mockCrawl([], 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
+  it("writes no audit rows when a run processes nothing", async () => {
+    const env = makeEnv();
+    mockCrawl([], "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "X (1001tklists)",
+    });
 
-    await syncOne(env, sub, 'tok')
+    await syncOne(env, sub, "tok");
 
-    expect(await playlistAdditions(env)).toEqual([])
-  })
+    expect(await playlistAdditions(env)).toEqual([]);
+  });
 
-  it('keeps syncing when the audit write fails (diagnostics never break a run)', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a'], 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
-    const realPrepare = env.DB.prepare.bind(env.DB)
-    vi.spyOn(env.DB, 'prepare').mockImplementation((sql: string) => {
-      if (sql.includes('INTO playlist_additions')) throw new Error('D1 write limit')
-      return realPrepare(sql)
-    })
+  it("keeps syncing when the audit write fails (diagnostics never break a run)", async () => {
+    const env = makeEnv();
+    mockCrawl(["https://x/tracklist/a"], "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "X (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
+    const realPrepare = env.DB.prepare.bind(env.DB);
+    vi.spyOn(env.DB, "prepare").mockImplementation((sql: string) => {
+      if (sql.includes("INTO playlist_additions")) throw new Error("D1 write limit");
+      return realPrepare(sql);
+    });
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(r.ok).toBe(true)
-    expect(r.stats.videoIdsAdded).toBe(1)
-  })
+    expect(r.ok).toBe(true);
+    expect(r.stats.videoIdsAdded).toBe(1);
+  });
 
-  // ── Combined "all tracked artists" playlist mirror ────────────────────────
+  // -- Combined "all tracked artists" playlist mirror ------------------------
 
-  it('mirrors every new video into the combined playlist and records the outcome', async () => {
-    const env = makeEnv()
+  it("mirrors every new video into the combined playlist and records the outcome", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      playlistId: "PLartist",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
       processedTracklistUrls: [],
-    })
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: 'PLcombined',
-      title: 'All tracked artists (1001tklists)',
-    })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    });
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLartist', 'vidA1234567'],
-      ['PLcombined', 'vidA1234567'],
-    ])
-    expect(r.combinedPlaylistId).toBe('PLcombined')
-    expect(r.stats.combinedVideoIdsAdded).toBe(1)
-    const rows = await playlistAdditions(env)
-    expect(rows[0]!.record).toMatchObject({ status: 'added', combinedStatus: 'added' })
-    expect(rows[0]!.metadata).toMatchObject({ cmb: 'added' })
-  })
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLartist", "vidA1234567"],
+      ["PLcombined", "vidA1234567"],
+    ]);
+    expect(r.combinedPlaylistId).toBe("PLcombined");
+    expect(r.stats.combinedVideoIdsAdded).toBe(1);
+    const rows = await playlistAdditions(env);
+    expect(rows[0]!.record).toMatchObject({ status: "added", combinedStatus: "added" });
+    expect(rows[0]!.metadata).toMatchObject({ cmb: "added" });
+  });
 
-  it('mirrors a set already in the artist playlist but missing from the combined one', async () => {
+  it("mirrors a set already in the artist playlist but missing from the combined one", async () => {
     // This is the shape of the backfill at the per-set level: the artist
     // playlist has had this video since before the combined playlist existed.
-    const env = makeEnv()
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      playlistId: "PLartist",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
       processedTracklistUrls: [],
-    })
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: 'PLcombined',
-      title: 'All tracked artists (1001tklists)',
-    })
-    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async (playlistId: string) =>
-      new Set(playlistId === 'PLartist' ? ['oldVid12345'] : []),
-    )
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('oldVid12345')
+    });
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(
+      async (playlistId: string) => new Set(playlistId === "PLartist" ? ["oldVid12345"] : []),
+    );
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("oldVid12345");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLcombined', 'oldVid12345'],
-    ])
-    expect(r.stats.videoIdsAdded).toBe(0)
-    expect(r.stats.combinedVideoIdsAdded).toBe(1)
-    const rows = await playlistAdditions(env)
-    expect(rows[0]!.record).toMatchObject({ status: 'duplicate', combinedStatus: 'added' })
-  })
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([["PLcombined", "oldVid12345"]]);
+    expect(r.stats.videoIdsAdded).toBe(0);
+    expect(r.stats.combinedVideoIdsAdded).toBe(1);
+    const rows = await playlistAdditions(env);
+    expect(rows[0]!.record).toMatchObject({ status: "duplicate", combinedStatus: "added" });
+  });
 
-  it('keeps syncing when the combined playlist cannot be opened', async () => {
-    const env = makeEnv()
+  it("keeps syncing when the combined playlist cannot be opened", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
+      playlistId: "PLartist",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a", "https://x/tracklist/b"],
       processedTracklistUrls: [],
-    })
+    });
     // Only the combined playlist needs a title lookup here (the artist one is
     // cached in state), so this fails exactly that resolution.
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error('youtube playlists.list 403: quotaExceeded'),
-    )
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("youtube playlists.list 403: quotaExceeded"),
+    );
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(r.ok).toBe(true)
-    expect(r.stats.tracklistsProcessed).toBe(2)
-    expect(r.stats.combinedVideoIdsAdded).toBe(0)
+    expect(r.ok).toBe(true);
+    expect(r.stats.tracklistsProcessed).toBe(2);
+    expect(r.stats.combinedVideoIdsAdded).toBe(0);
     // Resolution is attempted once, not once per set.
-    expect(findPlaylistByTitle).toHaveBeenCalledTimes(1)
-    const rows = await playlistAdditions(env)
-    expect(rows.map((x) => x.record.combinedStatus)).toEqual(['unavailable', 'unavailable'])
-  })
+    expect(findPlaylistByTitle).toHaveBeenCalledTimes(1);
+    const rows = await playlistAdditions(env);
+    expect(rows.map((x) => x.record.combinedStatus)).toEqual(["unavailable", "unavailable"]);
+  });
 
-  it('falls back to a prettified slug when no name is available anywhere', async () => {
-    const env = makeEnv()
-    mockCrawl([], null)
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null)
-    ;(createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'Lillypalmer (1001tklists)' })
+  it("falls back to a prettified slug when no name is available anywhere", async () => {
+    const env = makeEnv();
+    mockCrawl([], null);
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLx",
+      title: "Lillypalmer (1001tklists)",
+    });
 
-    const r = await syncOne(env, sub, 'tok')
-    expect(r.artistName).toBe('Lillypalmer')
+    const r = await syncOne(env, sub, "tok");
+    expect(r.artistName).toBe("Lillypalmer");
     expect((createPlaylist as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
-      title: 'Lillypalmer (1001tklists)',
-    })
-  })
-  // ── Rechecks: re-fetch processed sets to catch a swapped recording ────────
+      title: "Lillypalmer (1001tklists)",
+    });
+  });
+  // -- Rechecks: re-fetch processed sets to catch a swapped recording --------
 
   /** A synced sub with one processed set, ready for the recheck loop. */
-  async function seedProcessed(env: Env, tracklistVideos: SubState['tracklistVideos'], extra: Partial<SubState> = {}) {
-    const urls = Object.keys(tracklistVideos ?? {})
+  async function seedProcessed(
+    env: Env,
+    tracklistVideos: SubState["tracklistVideos"],
+    extra: Partial<SubState> = {},
+  ) {
+    const urls = Object.keys(tracklistVideos ?? {});
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
+      playlistId: "PLartist",
+      artistName: "X",
       discoveredTracklistUrls: urls,
       processedTracklistUrls: urls,
       tracklistVideos,
       ...extra,
-    })
+    });
   }
 
   function combinedExists(videoIds: string[] = []) {
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: 'PLcombined',
-      title: 'All tracked artists (1001tklists)',
-    })
-    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set(videoIds))
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => new Set(videoIds),
+    );
   }
 
-  it('leaves a set alone until its record is older than the recheck interval', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': fresh('vidA1234567') })
+  it("leaves a set alone until its record is older than the recheck interval", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": fresh("vidA1234567") });
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(fetch1001Html).not.toHaveBeenCalled()
-    expect(r.stats.tracklistsRechecked).toBe(0)
-    expect(r.stats.rechecksPending).toBe(0)
-  })
+    expect(fetch1001Html).not.toHaveBeenCalled();
+    expect(r.stats.tracklistsRechecked).toBe(0);
+    expect(r.stats.rechecksPending).toBe(0);
+  });
 
-  it('rechecks a stale set and, when nothing changed, touches neither YouTube nor the audit trail', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') })
-    combinedExists(['vidA1234567'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
+  it("rechecks a stale set and, when nothing changed, touches neither YouTube nor the audit trail", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": stale("vidA1234567") });
+    combinedExists(["vidA1234567"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(fetch1001Html).toHaveBeenCalledWith('https://x/tracklist/a', expect.anything())
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect(r.stats).toMatchObject({ tracklistsRechecked: 1, videosReplaced: 0, rechecksPending: 0 })
-    expect(await playlistAdditions(env)).toEqual([])
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('vidA1234567')
-    expect(state.tracklistVideos!['https://x/tracklist/a']!.checkedAt).toBeGreaterThanOrEqual(NOW)
-  })
+    expect(fetch1001Html).toHaveBeenCalledWith("https://x/tracklist/a", expect.anything());
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect(r.stats).toMatchObject({
+      tracklistsRechecked: 1,
+      videosReplaced: 0,
+      rechecksPending: 0,
+    });
+    expect(await playlistAdditions(env)).toEqual([]);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.tracklistVideos!["https://x/tracklist/a"]!.videoId).toBe("vidA1234567");
+    expect(state.tracklistVideos!["https://x/tracklist/a"]!.checkedAt).toBeGreaterThanOrEqual(NOW);
+  });
 
-  it('replaces a swapped recording: old out of both playlists, new into both', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('phoneVid123') })
-    combinedExists(['phoneVid123'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+  it("replaces a swapped recording: old out of both playlists, new into both", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": stale("phoneVid123") });
+    combinedExists(["phoneVid123"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("officialV12");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, trigger: 'cron.pending' })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true, trigger: "cron.pending" });
 
-    expect((removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLartist', 'phoneVid123'],
-      ['PLcombined', 'phoneVid123'],
-    ])
-    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLartist', 'officialV12'],
-      ['PLcombined', 'officialV12'],
-    ])
-    expect(r.stats).toMatchObject({ videoIdsAdded: 1, tracklistsRechecked: 1, videosReplaced: 1, combinedVideoIdsAdded: 1 })
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('officialV12')
+    expect(
+      (removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLartist", "phoneVid123"],
+      ["PLcombined", "phoneVid123"],
+    ]);
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLartist", "officialV12"],
+      ["PLcombined", "officialV12"],
+    ]);
+    expect(r.stats).toMatchObject({
+      videoIdsAdded: 1,
+      tracklistsRechecked: 1,
+      videosReplaced: 1,
+      combinedVideoIdsAdded: 1,
+    });
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.tracklistVideos!["https://x/tracklist/a"]!.videoId).toBe("officialV12");
     // Both membership caches reflect the swap, so the next tick doesn't re-list.
-    expect(await env.CACHE.get('yt:plvids:PLartist', 'json')).toEqual({ videoIds: ['officialV12'] })
-    expect(await env.CACHE.get('yt:plvids:PLcombined', 'json')).toEqual({ videoIds: ['officialV12'] })
-    const rows = await playlistAdditions(env)
-    expect(rows).toHaveLength(1)
+    expect(await env.CACHE.get("yt:plvids:PLartist", "json")).toEqual({
+      videoIds: ["officialV12"],
+    });
+    expect(await env.CACHE.get("yt:plvids:PLcombined", "json")).toEqual({
+      videoIds: ["officialV12"],
+    });
+    const rows = await playlistAdditions(env);
+    expect(rows).toHaveLength(1);
     expect(rows[0]!.record).toMatchObject({
-      status: 'replaced',
-      videoId: 'officialV12',
-      previousVideoId: 'phoneVid123',
-      combinedStatus: 'added',
-      trigger: 'cron.pending',
-    })
-    expect(rows[0]!.metadata).toMatchObject({ status: 'replaced', vid: 'officialV12', prev: 'phoneVid123' })
+      status: "replaced",
+      videoId: "officialV12",
+      previousVideoId: "phoneVid123",
+      combinedStatus: "added",
+      trigger: "cron.pending",
+    });
+    expect(rows[0]!.metadata).toMatchObject({
+      status: "replaced",
+      vid: "officialV12",
+      prev: "phoneVid123",
+    });
     // Membership evidence for the comparison (W6 review M1): the confirmed insert is 'in', the sync's own removal 'out'.
-    expect(Object.fromEntries(await confirmedMembership(env, 'PLartist'))).toEqual({ officialV12: 'in', phoneVid123: 'out' })
-  })
+    expect(Object.fromEntries(await confirmedMembership(env, "PLartist"))).toEqual({
+      officialV12: "in",
+      phoneVid123: "out",
+    });
+  });
 
-  it('still swaps when the old video was already removed by hand', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('phoneVid123') })
-    combinedExists([]) // neither playlist has the phone recording any more
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+  it("still swaps when the old video was already removed by hand", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": stale("phoneVid123") });
+    combinedExists([]); // neither playlist has the phone recording any more
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("officialV12");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLartist', 'officialV12'],
-      ['PLcombined', 'officialV12'],
-    ])
-    expect(r.stats.videosReplaced).toBe(1)
-  })
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLartist", "officialV12"],
+      ["PLcombined", "officialV12"],
+    ]);
+    expect(r.stats.videosReplaced).toBe(1);
+  });
 
-  it('never re-adds an unchanged video the user removed from the playlist', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('phoneVid123') })
-    combinedExists([]) // user pruned it from both playlists
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('phoneVid123')
+  it("never re-adds an unchanged video the user removed from the playlist", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": stale("phoneVid123") });
+    combinedExists([]); // user pruned it from both playlists
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("phoneVid123");
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-  })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+  });
 
-  it('keeps the existing video when the set page no longer has one', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') })
-    combinedExists(['vidA1234567'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+  it("keeps the existing video when the set page no longer has one", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": stale("vidA1234567") });
+    combinedExists(["vidA1234567"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect(r.stats.videosReplaced).toBe(0)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.tracklistVideos!['https://x/tracklist/a']).toEqual({ videoId: 'vidA1234567', checkedAt: expect.any(Number) })
-    expect(dueRechecks(state)).toEqual([])
-  })
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect(r.stats.videosReplaced).toBe(0);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.tracklistVideos!["https://x/tracklist/a"]).toEqual({
+      videoId: "vidA1234567",
+      checkedAt: expect.any(Number),
+    });
+    expect(dueRechecks(state)).toEqual([]);
+  });
 
-  it('adds the video when a set that had none gains one', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale(null) })
-    combinedExists([])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('newVid12345')
+  it("adds the video when a set that had none gains one", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": stale(null) });
+    combinedExists([]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("newVid12345");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLartist', 'newVid12345'],
-      ['PLcombined', 'newVid12345'],
-    ])
-    expect(r.stats).toMatchObject({ videoIdsAdded: 1, videosReplaced: 0, tracklistsRechecked: 1 })
-    const rows = await playlistAdditions(env)
-    expect(rows[0]!.record).toMatchObject({ status: 'added', videoId: 'newVid12345', combinedStatus: 'added' })
-  })
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLartist", "newVid12345"],
+      ["PLcombined", "newVid12345"],
+    ]);
+    expect(r.stats).toMatchObject({ videoIdsAdded: 1, videosReplaced: 0, tracklistsRechecked: 1 });
+    const rows = await playlistAdditions(env);
+    expect(rows[0]!.record).toMatchObject({
+      status: "added",
+      videoId: "newVid12345",
+      combinedStatus: "added",
+    });
+  });
 
-  it('only records a baseline for a set processed before rechecks existed (no audit row to seed from)', async () => {
-    const env = makeEnv()
+  it("only records a baseline for a set processed before rechecks existed (no audit row to seed from)", async () => {
+    const env = makeEnv();
     // Legacy state: processed, but no tracklistVideos at all.
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a'],
-      processedTracklistUrls: ['https://x/tracklist/a'],
-    })
-    combinedExists([]) // whatever it once had is gone — we can't tell "never added" from "removed by hand"
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('someVid1234')
+      playlistId: "PLartist",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
+      processedTracklistUrls: ["https://x/tracklist/a"],
+    });
+    combinedExists([]); // whatever it once had is gone - we can't tell "never added" from "removed by hand"
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("someVid1234");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect(r.stats).toMatchObject({ tracklistsRechecked: 1, videosReplaced: 0, videoIdsAdded: 0 })
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.tracklistVideos).toEqual({ 'https://x/tracklist/a': { videoId: 'someVid1234', checkedAt: expect.any(Number) } })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 1, videosReplaced: 0, videoIdsAdded: 0 });
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.tracklistVideos).toEqual({
+      "https://x/tracklist/a": { videoId: "someVid1234", checkedAt: expect.any(Number) },
+    });
     // Next time it's a real comparison.
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('betterVid12')
-    await invalidateVideoCache(env, sub.slug, makeLogger({ task: 'test' }))
-    const r2 = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
-    expect(r2.stats.videosReplaced).toBe(1)
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLartist', 'betterVid12', 'tok')
-  })
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("betterVid12");
+    await invalidateVideoCache(env, sub.slug, makeLogger({ task: "test" }));
+    const r2 = await syncOne(env, sub, "tok", { skipDjCrawl: true });
+    expect(r2.stats.videosReplaced).toBe(1);
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PLartist", "betterVid12", "tok");
+  });
 
-  it('seeds the baseline from the audit trail on the first run after upgrade, so an old swap is caught', async () => {
-    const env = makeEnv()
+  it("seeds the baseline from the audit trail on the first run after upgrade, so an old swap is caught", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'],
-      processedTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'],
-    })
+      playlistId: "PLartist",
+      artistName: "X",
+      discoveredTracklistUrls: [
+        "https://x/tracklist/a",
+        "https://x/tracklist/b",
+        "https://x/tracklist/c",
+      ],
+      processedTracklistUrls: [
+        "https://x/tracklist/a",
+        "https://x/tracklist/b",
+        "https://x/tracklist/c",
+      ],
+    });
     // Audit rows from an earlier run: /a was added with the phone recording,
     // /b had no video, /c has no surviving row.
-    const t = new Date(Date.now() - 6 * 86400 * 1000).toISOString()
+    const t = new Date(Date.now() - 6 * 86400 * 1000).toISOString();
     await seedAdditionRows(env, [
-      { t, status: 'added', slug: 'lillypalmer', set: 'https://x/tracklist/a', vid: 'phoneVid123' },
-      { t, status: 'no_youtube', slug: 'lillypalmer', set: 'https://x/tracklist/b', vid: null },
+      { t, status: "added", slug: "lillypalmer", set: "https://x/tracklist/a", vid: "phoneVid123" },
+      { t, status: "no_youtube", slug: "lillypalmer", set: "https://x/tracklist/b", vid: null },
       // A row for another DJ's set with the same URL shape must not bleed in.
-      { t, status: 'added', slug: 'other', set: 'https://x/tracklist/c', vid: 'otherVid123' },
-    ])
-    combinedExists(['phoneVid123'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockImplementation(() => 'officialV12')
+      { t, status: "added", slug: "other", set: "https://x/tracklist/c", vid: "otherVid123" },
+    ]);
+    combinedExists(["phoneVid123"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockImplementation(() => "officialV12");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
     // All three are stale (6 days / never), so all three get rechecked; only
     // /a has a baseline that differs, /b gains a video, /c just records.
-    expect(r.stats).toMatchObject({ tracklistsRechecked: 3, videosReplaced: 1 })
-    expect((removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLartist', 'phoneVid123'],
-      ['PLcombined', 'phoneVid123'],
-    ])
-    // Skip the planted seed rows (their bodies are empty) — only this run's rows matter.
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 3, videosReplaced: 1 });
+    expect(
+      (removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLartist", "phoneVid123"],
+      ["PLcombined", "phoneVid123"],
+    ]);
+    // Skip the planted seed rows (their bodies are empty) - only this run's rows matter.
     // /b's row is `duplicate`: every page here resolves to the same video, and
     // /a's swap had already inserted it by the time /b was rechecked.
-    const rows = (await playlistAdditions(env)).filter((x) => x.record.status)
+    const rows = (await playlistAdditions(env)).filter((x) => x.record.status);
     expect(rows.map((x) => [x.record.setUrl, x.record.status])).toEqual([
-      ['https://x/tracklist/b', 'duplicate'],
-      ['https://x/tracklist/a', 'replaced'],
-    ])
-  })
+      ["https://x/tracklist/b", "duplicate"],
+      ["https://x/tracklist/a", "replaced"],
+    ]);
+  });
 
-  it('keeps the old video when another set of the same DJ still resolves to it', async () => {
-    const env = makeEnv()
+  it("keeps the old video when another set of the same DJ still resolves to it", async () => {
+    const env = makeEnv();
     await seedProcessed(env, {
-      'https://x/tracklist/a': stale('sharedVid12'),
-      'https://x/tracklist/b': fresh('sharedVid12'),
-    })
-    combinedExists(['sharedVid12'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+      "https://x/tracklist/a": stale("sharedVid12"),
+      "https://x/tracklist/b": fresh("sharedVid12"),
+    });
+    combinedExists(["sharedVid12"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("officialV12");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PLartist', 'officialV12', 'tok')
-    expect(r.stats.videosReplaced).toBe(1)
-  })
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PLartist", "officialV12", "tok");
+    expect(r.stats.videosReplaced).toBe(1);
+  });
 
   it("keeps the old video in the combined playlist when another DJ's set still resolves to it", async () => {
-    const env = makeEnv()
-    await env.SUBS.put('subs:list', JSON.stringify(['lillypalmer', 'b2bpartner']))
-    await env.SUBS.put('subs:item:lillypalmer', JSON.stringify({ sourceUrl: 'x', addedAt: 0 }))
-    await env.SUBS.put('subs:item:b2bpartner', JSON.stringify({ sourceUrl: 'x', addedAt: 0 }))
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('b2bVid12345') })
-    await saveSubState(env, 'b2bpartner', {
-      playlistId: 'PLpartner',
-      processedTracklistUrls: ['https://x/tracklist/same-set'],
-      tracklistVideos: { 'https://x/tracklist/same-set': fresh('b2bVid12345') },
-    })
-    combinedExists(['b2bVid12345'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+    const env = makeEnv();
+    await env.SUBS.put("subs:list", JSON.stringify(["lillypalmer", "b2bpartner"]));
+    await env.SUBS.put("subs:item:lillypalmer", JSON.stringify({ sourceUrl: "x", addedAt: 0 }));
+    await env.SUBS.put("subs:item:b2bpartner", JSON.stringify({ sourceUrl: "x", addedAt: 0 }));
+    await seedProcessed(env, { "https://x/tracklist/a": stale("b2bVid12345") });
+    await saveSubState(env, "b2bpartner", {
+      playlistId: "PLpartner",
+      processedTracklistUrls: ["https://x/tracklist/same-set"],
+      tracklistVideos: { "https://x/tracklist/same-set": fresh("b2bVid12345") },
+    });
+    combinedExists(["b2bVid12345"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("officialV12");
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    // Removed from this DJ's playlist only — the combined one still needs it.
-    expect((removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['PLartist', 'b2bVid12345'],
-    ])
-  })
+    // Removed from this DJ's playlist only - the combined one still needs it.
+    expect(
+      (removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([["PLartist", "b2bVid12345"]]);
+  });
 
-  it('caps rechecks per run and reports the rest as pending', async () => {
-    const env = makeEnv()
-    const map: NonNullable<SubState['tracklistVideos']> = {}
-    for (let i = 0; i < 7; i++) map[`https://x/tracklist/${i}`] = stale(`vid${i}12345678`.slice(0, 11))
-    await seedProcessed(env, map)
-    combinedExists([])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockImplementation(() => null)
+  it("caps rechecks per run and reports the rest as pending", async () => {
+    const env = makeEnv();
+    const map: NonNullable<SubState["tracklistVideos"]> = {};
+    for (let i = 0; i < 7; i++)
+      map[`https://x/tracklist/${i}`] = stale(`vid${i}12345678`.slice(0, 11));
+    await seedProcessed(env, map);
+    combinedExists([]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockImplementation(() => null);
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, maxRechecksPerRun: 3 })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true, maxRechecksPerRun: 3 });
 
-    expect(fetch1001Html).toHaveBeenCalledTimes(3)
-    expect(r.stats).toMatchObject({ tracklistsRechecked: 3, rechecksPending: 4 })
-  })
+    expect(fetch1001Html).toHaveBeenCalledTimes(3);
+    expect(r.stats).toMatchObject({ tracklistsRechecked: 3, rechecksPending: 4 });
+  });
 
-  it('processes new sets before rechecks, so a backfill is never starved', async () => {
-    const env = makeEnv()
+  it("processes new sets before rechecks, so a backfill is never starved", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/old', 'https://x/tracklist/new'],
-      processedTracklistUrls: ['https://x/tracklist/old'],
-      tracklistVideos: { 'https://x/tracklist/old': stale('oldVid12345') },
-    })
-    combinedExists(['oldVid12345'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValueOnce('newVid12345').mockReturnValueOnce('oldVid12345')
+      playlistId: "PLartist",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/old", "https://x/tracklist/new"],
+      processedTracklistUrls: ["https://x/tracklist/old"],
+      tracklistVideos: { "https://x/tracklist/old": stale("oldVid12345") },
+    });
+    combinedExists(["oldVid12345"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce("newVid12345")
+      .mockReturnValueOnce("oldVid12345");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
     expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
-      'https://x/tracklist/new',
-      'https://x/tracklist/old',
-    ])
-    expect(r.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 1, tracklistsRechecked: 1, videosReplaced: 0 })
-  })
+      "https://x/tracklist/new",
+      "https://x/tracklist/old",
+    ]);
+    expect(r.stats).toMatchObject({
+      tracklistsProcessed: 1,
+      videoIdsAdded: 1,
+      tracklistsRechecked: 1,
+      videosReplaced: 0,
+    });
+  });
 
-  it('defers a set whose recheck keeps failing instead of abandoning it', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') }, {
-      failureCounts: { 'https://x/tracklist/a': 2 },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cf shell'))
+  it("defers a set whose recheck keeps failing instead of abandoning it", async () => {
+    const env = makeEnv();
+    await seedProcessed(
+      env,
+      { "https://x/tracklist/a": stale("vidA1234567") },
+      {
+        failureCounts: { "https://x/tracklist/a": 2 },
+      },
+    );
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("cf shell"));
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(r.stats.tracklistsRechecked).toBe(0)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.abandonedTracklistUrls).toEqual([])
-    expect(state.failureCounts).toEqual({})
+    expect(r.stats.tracklistsRechecked).toBe(0);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.abandonedTracklistUrls).toEqual([]);
+    expect(state.failureCounts).toEqual({});
     // Video kept, timestamp bumped: due again next interval, not next tick.
-    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('vidA1234567')
-    expect(dueRechecks(state)).toEqual([])
-    const rows = await playlistAdditions(env)
-    expect(rows[0]!.record).toMatchObject({ status: 'failed', videoId: 'vidA1234567', failureCount: 3 })
-  })
+    expect(state.tracklistVideos!["https://x/tracklist/a"]!.videoId).toBe("vidA1234567");
+    expect(dueRechecks(state)).toEqual([]);
+    const rows = await playlistAdditions(env);
+    expect(rows[0]!.record).toMatchObject({
+      status: "failed",
+      videoId: "vidA1234567",
+      failureCount: 3,
+    });
+  });
 
-  it('a daily-quota reply mid-swap leaves that swap due, uncharged and held out until the quota is back; a manual run fetches no further recheck', async () => {
-    const env = makeEnv()
+  it("a daily-quota reply mid-swap leaves that swap due, uncharged and held out until the quota is back; a manual run fetches no further recheck", async () => {
+    const env = makeEnv();
     await seedProcessed(env, {
-      'https://x/tracklist/a': stale('phoneVid123'),
-      'https://x/tracklist/b': stale('vidB1234567'),
-    })
-    combinedExists(['phoneVid123', 'vidB1234567'])
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
-    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'),
-    )
+      "https://x/tracklist/a": stale("phoneVid123"),
+      "https://x/tracklist/b": stale("vidB1234567"),
+    });
+    combinedExists(["phoneVid123", "vidB1234567"]);
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("officialV12");
+    (addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new YouTubeApiError("playlistItems.insert", 403, "quotaExceeded", "{}"),
+    );
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
     // /a's swap got as far as the removals, then the insert hit quota; /b was never fetched (a button press
     // does not spend a fetch on a recheck that could only be left waiting).
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
-    expect(r.stats).toMatchObject({ tracklistsRechecked: 0, videosReplaced: 0, rechecksPending: 2 })
-    expect(r.quota).toEqual({ out: true, hit: true, deferred: ['https://x/tracklist/a'] })
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.failureCounts).toEqual({})
-    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('phoneVid123')
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1);
+    expect(r.stats).toMatchObject({
+      tracklistsRechecked: 0,
+      videosReplaced: 0,
+      rechecksPending: 2,
+    });
+    expect(r.quota).toEqual({ out: true, hit: true, deferred: ["https://x/tracklist/a"] });
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.failureCounts).toEqual({});
+    expect(state.tracklistVideos!["https://x/tracklist/a"]!.videoId).toBe("phoneVid123");
     // Due again when the quota day ends, not a recheck interval later, and not picked before that.
-    const due = (await env.DB.prepare('SELECT url, next_due_at, retry_at FROM set_schedule ORDER BY url').all<{ url: string; next_due_at: number; retry_at: number }>()).results
-    expect(due).toEqual([{ url: 'https://x/tracklist/a', next_due_at: quotaDayEnd(Date.now()), retry_at: quotaDayEnd(Date.now()) }])
+    const due = (
+      await env.DB.prepare("SELECT url, next_due_at, retry_at FROM set_schedule ORDER BY url").all<{
+        url: string;
+        next_due_at: number;
+        retry_at: number;
+      }>()
+    ).results;
+    expect(due).toEqual([
+      {
+        url: "https://x/tracklist/a",
+        next_due_at: quotaDayEnd(Date.now()),
+        retry_at: quotaDayEnd(Date.now()),
+      },
+    ]);
     // One failed row, uncharged (no failure count), like a new set's: Activity shows it as the quota wait.
-    const rows = await playlistAdditions(env)
-    expect(rows).toHaveLength(1)
-    expect(rows[0]!.record).toMatchObject({ status: 'failed', failureCount: null })
-    expect(rows[0]!.record.message).toMatch(/^recheck: youtube playlistItems\.insert 403 quotaExceeded/)
-    expect(await getQuotaOut(env)).not.toBeNull()
+    const rows = await playlistAdditions(env);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.record).toMatchObject({ status: "failed", failureCount: null });
+    expect(rows[0]!.record.message).toMatch(
+      /^recheck: youtube playlistItems\.insert 403 quotaExceeded/,
+    );
+    expect(await getQuotaOut(env)).not.toBeNull();
     // The row still names the old video, which the sync itself took out: the comparison must not read it as the owner's removal.
-    expect((await confirmedMembership(env, 'PLartist')).get('phoneVid123')).toBe('out')
-  })
+    expect((await confirmedMembership(env, "PLartist")).get("phoneVid123")).toBe("out");
+  });
 
-  it('leaves a transiently failing recheck due for the next tick', async () => {
-    const env = makeEnv()
-    await seedProcessed(env, { 'https://x/tracklist/a': stale('vidA1234567') })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('transient'))
+  it("leaves a transiently failing recheck due for the next tick", async () => {
+    const env = makeEnv();
+    await seedProcessed(env, { "https://x/tracklist/a": stale("vidA1234567") });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("transient"));
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(r.stats.rechecksPending).toBe(1)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 1 })
-    expect(dueRechecks(state)).toEqual(['https://x/tracklist/a'])
-  })
-})
+    expect(r.stats.rechecksPending).toBe(1);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.failureCounts).toEqual({ "https://x/tracklist/a": 1 });
+    expect(dueRechecks(state)).toEqual(["https://x/tracklist/a"]);
+  });
+});
 
-describe('legacy KV state import inside a sync', () => {
-  it('a DJ whose blob is still only in KV is imported first, so nothing already processed is re-fetched', async () => {
-    const env = makeEnv()
+describe("legacy KV state import inside a sync", () => {
+  it("a DJ whose blob is still only in KV is imported first, so nothing already processed is re-fetched", async () => {
+    const env = makeEnv();
     await env.SUBS.put(
-      'subs:state:lillypalmer',
+      "subs:state:lillypalmer",
       JSON.stringify({
-        playlistId: 'PL',
-        artistName: 'X',
-        discoveredTracklistUrls: ['https://x/tracklist/old', 'https://x/tracklist/new'],
-        processedTracklistUrls: ['https://x/tracklist/old'],
-        tracklistVideos: { 'https://x/tracklist/old': fresh('oldVid12345') },
+        playlistId: "PL",
+        artistName: "X",
+        discoveredTracklistUrls: ["https://x/tracklist/old", "https://x/tracklist/new"],
+        processedTracklistUrls: ["https://x/tracklist/old"],
+        tracklistVideos: { "https://x/tracklist/old": fresh("oldVid12345") },
       }),
-    )
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('newVid12345')
+    );
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("newVid12345");
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(r.stats.tracklistsProcessed).toBe(1)
-    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual(['https://x/tracklist/new'])
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
-  })
+    expect(r.stats.tracklistsProcessed).toBe(1);
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
+      "https://x/tracklist/new",
+    ]);
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1);
+  });
 
-  it('an import failure fails the run loudly instead of syncing against an empty state', async () => {
-    const env = makeEnv()
+  it("an import failure fails the run loudly instead of syncing against an empty state", async () => {
+    const env = makeEnv();
     await env.SUBS.put(
-      'subs:state:lillypalmer',
+      "subs:state:lillypalmer",
       JSON.stringify({
-        playlistId: 'PL',
-        discoveredTracklistUrls: ['https://x/tracklist/old'],
-        processedTracklistUrls: ['https://x/tracklist/old'],
+        playlistId: "PL",
+        discoveredTracklistUrls: ["https://x/tracklist/old"],
+        processedTracklistUrls: ["https://x/tracklist/old"],
       }),
-    )
-    vi.spyOn(env.DB, 'batch').mockRejectedValue(new Error('D1 unavailable'))
+    );
+    vi.spyOn(env.DB, "batch").mockRejectedValue(new Error("D1 unavailable"));
 
-    await expect(syncOne(env, sub, 'tok', { skipDjCrawl: true })).rejects.toThrow('D1 unavailable')
-    expect(fetch1001Html).not.toHaveBeenCalled()
-    expect(crawlDjIndex).not.toHaveBeenCalled()
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-  })
-})
+    await expect(syncOne(env, sub, "tok", { skipDjCrawl: true })).rejects.toThrow("D1 unavailable");
+    expect(fetch1001Html).not.toHaveBeenCalled();
+    expect(crawlDjIndex).not.toHaveBeenCalled();
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+  });
+});
 
-describe('mkvid bridge inside a sync', () => {
+describe("mkvid bridge inside a sync", () => {
   // A real set page with a SoundCloud recording and a full tracklist; the
   // YouTube-id parser is mocked, so the same page can play "no recording".
-  const soundcloudPage = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-maxstyler.html'), 'utf8')
-  const setUrl = 'https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html'
-  const withMkvid = () => ({ ...makeEnv(), MKVID_TOKEN: 'mk' }) as Env
+  const soundcloudPage = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "fixtures", "tracklist-maxstyler.html"),
+    "utf8",
+  );
+  const setUrl = "https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html";
+  const withMkvid = () => ({ ...makeEnv(), MKVID_TOKEN: "mk" }) as Env;
 
-  it('queues a set with no YouTube recording but a SoundCloud one, and notes it on the audit row', async () => {
-    const env = withMkvid()
-    mockCrawl([setUrl], 'Max Styler')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Max Styler (1001tklists)' })
-    const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600_000).toISOString()
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'pool', state: { cookie: '' }, accountId: 'acct-1', fetchedAt: at(3) })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+  it("queues a set with no YouTube recording but a SoundCloud one, and notes it on the audit row", async () => {
+    const env = withMkvid();
+    mockCrawl([setUrl], "Max Styler");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "Max Styler (1001tklists)",
+    });
+    const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600_000).toISOString();
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "pool",
+      state: { cookie: "" },
+      accountId: "acct-1",
+      fetchedAt: at(3),
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
 
-    await syncOne(env, sub, 'tok')
-    // First fetch: queued, list stored, but NOT trusted — the list is not verified yet (quest decision 2).
-    const first = (await getMkvidRequestForSet(env, setUrl))!
-    expect((await getMkvidTracks(env, first.id)).tracksTrusted).toBe(false)
-    // The scheduler's verification fetch: another account, 3 h later, same rows → verified, and the stored list upgrades.
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'pool', state: { cookie: '' }, accountId: 'acct-2', fetchedAt: at(0) })
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true, priority: 'verify', excludeAccounts: ['acct-1'], selection: { newUrls: [], recheckUrls: [setUrl] } })
-    expect(await isVerified(env, setUrl)).toBe(true)
+    await syncOne(env, sub, "tok");
+    // First fetch: queued, list stored, but NOT trusted - the list is not verified yet (quest decision 2).
+    const first = (await getMkvidRequestForSet(env, setUrl))!;
+    expect((await getMkvidTracks(env, first.id)).tracksTrusted).toBe(false);
+    // The scheduler's verification fetch: another account, 3 h later, same rows -> verified, and the stored list upgrades.
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "pool",
+      state: { cookie: "" },
+      accountId: "acct-2",
+      fetchedAt: at(0),
+    });
+    await syncOne(env, sub, "tok", {
+      skipDjCrawl: true,
+      priority: "verify",
+      excludeAccounts: ["acct-1"],
+      selection: { newUrls: [], recheckUrls: [setUrl] },
+    });
+    expect(await isVerified(env, setUrl)).toBe(true);
 
-    const req = await getMkvidRequestForSet(env, setUrl)
+    const req = await getMkvidRequestForSet(env, setUrl);
     expect(req).toMatchObject({
-      slug: 'lillypalmer',
-      status: 'pending',
-      source: 'soundcloud',
-      sourceUrl: 'https://api.soundcloud.com/tracks/2099378310',
-      artistName: 'Max Styler',
-      setTitle: 'Max Styler @ circuitGROUNDS, EDC Las Vegas, United States 2025-05-16',
+      slug: "lillypalmer",
+      status: "pending",
+      source: "soundcloud",
+      sourceUrl: "https://api.soundcloud.com/tracks/2099378310",
+      artistName: "Max Styler",
+      setTitle: "Max Styler @ circuitGROUNDS, EDC Las Vegas, United States 2025-05-16",
       // No date in this URL, so it comes from the page's date-only datePublished meta.
-      setDate: '2025-05-16',
-    })
-    expect(req!.trackCount).toBeGreaterThan(10)
-    expect(req!.lastCueSeconds).toBeGreaterThan(0)
+      setDate: "2025-05-16",
+    });
+    expect(req!.trackCount).toBeGreaterThan(10);
+    expect(req!.lastCueSeconds).toBeGreaterThan(0);
     // The track list is stored for the claim, names included: this page passed the decoy check twice, from two accounts.
-    const list = await getMkvidTracks(env, req!.id)
-    expect(list.tracksTrusted).toBe(true)
-    expect(list.tracks).toHaveLength(req!.trackCount!)
-    expect(list.tracks.some((t) => t.artist && t.title)).toBe(true)
+    const list = await getMkvidTracks(env, req!.id);
+    expect(list.tracksTrusted).toBe(true);
+    expect(list.tracks).toHaveLength(req!.trackCount!);
+    expect(list.tracks.some((t) => t.artist && t.title)).toBe(true);
     // The one 'w/' row on this page (Let Em' Know over Mokba) is stored layered, without a cue of its own,
     // and counted in trackCount like any other row.
-    expect(list.tracks.filter((t) => t.layered)).toEqual([expect.objectContaining({ title: "Let Em' Know", cueSeconds: null })])
-    const rows = await playlistAdditions(env)
-    expect(rows[0]!.record).toMatchObject({ status: 'no_youtube', message: 'queued for mkvid (soundcloud)' })
+    expect(list.tracks.filter((t) => t.layered)).toEqual([
+      expect.objectContaining({ title: "Let Em' Know", cueSeconds: null }),
+    ]);
+    const rows = await playlistAdditions(env);
+    expect(rows[0]!.record).toMatchObject({
+      status: "no_youtube",
+      message: "queued for mkvid (soundcloud)",
+    });
     // Nothing went to YouTube.
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-  })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+  });
 
-  it('stores anonymous ID rows in the list for mkvid and counts them: in trackCount, not in idedCount', async () => {
-    const env = withMkvid()
-    const decoyPage = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-decoy-dcr839.html'), 'utf8')
-    mockCrawl([setUrl], 'Adam Beyer')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Adam Beyer (1001tklists)' })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: decoyPage, via: 'home-proxy', state: { cookie: '' } })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
-    await syncOne(env, sub, 'tok')
-    const req = (await getMkvidRequestForSet(env, setUrl))!
+  it("stores anonymous ID rows in the list for mkvid and counts them: in trackCount, not in idedCount", async () => {
+    const env = withMkvid();
+    const decoyPage = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "fixtures", "tracklist-decoy-dcr839.html"),
+      "utf8",
+    );
+    mockCrawl([setUrl], "Adam Beyer");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "Adam Beyer (1001tklists)",
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: decoyPage,
+      via: "home-proxy",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    await syncOne(env, sub, "tok");
+    const req = (await getMkvidRequestForSet(env, setUrl))!;
     // Every page row counts (the anonymous "ID - ID" rows used to be in neither count).
-    expect(req.trackCount).toBe(41)
-    const list = await getMkvidTracks(env, req.id)
-    expect(list.tracksTrusted).toBe(false)
-    expect(list.tracks).toHaveLength(41)
-    const idRows = list.tracks.filter((t) => t.isId).length
-    expect(idRows).toBeGreaterThanOrEqual(16)
-    expect(req.idedCount).toBe(41 - idRows)
-    expect(await env.DB.prepare('SELECT id_rows FROM mkvid_request_tracks WHERE request_id = ?').bind(req.id).first()).toEqual({ id_rows: idRows })
-  })
+    expect(req.trackCount).toBe(41);
+    const list = await getMkvidTracks(env, req.id);
+    expect(list.tracksTrusted).toBe(false);
+    expect(list.tracks).toHaveLength(41);
+    const idRows = list.tracks.filter((t) => t.isId).length;
+    expect(idRows).toBeGreaterThanOrEqual(16);
+    expect(req.idedCount).toBe(41 - idRows);
+    expect(
+      await env.DB.prepare("SELECT id_rows FROM mkvid_request_tracks WHERE request_id = ?")
+        .bind(req.id)
+        .first(),
+    ).toEqual({ id_rows: idRows });
+  });
 
-  it('does nothing without MKVID_TOKEN, or for a page with no audio source', async () => {
-    const env = makeEnv()
-    mockCrawl([setUrl], 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
-    await syncOne(env, sub, 'tok')
-    expect(await getMkvidRequestForSet(env, setUrl)).toBeNull()
+  it("does nothing without MKVID_TOKEN, or for a page with no audio source", async () => {
+    const env = makeEnv();
+    mockCrawl([setUrl], "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "X (1001tklists)",
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "direct",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    await syncOne(env, sub, "tok");
+    expect(await getMkvidRequestForSet(env, setUrl)).toBeNull();
 
-    const env2 = withMkvid()
-    mockCrawl([setUrl], 'X')
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: '<html><div class="tlpItem"></div></html>', via: 'direct', state: { cookie: '' } })
-    await syncOne(env2, sub, 'tok')
-    expect(await getMkvidRequestForSet(env2, setUrl)).toBeNull()
-    expect((await playlistAdditions(env2))[0]!.record.message).toBeNull()
-  })
+    const env2 = withMkvid();
+    mockCrawl([setUrl], "X");
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: '<html><div class="tlpItem"></div></html>',
+      via: "direct",
+      state: { cookie: "" },
+    });
+    await syncOne(env2, sub, "tok");
+    expect(await getMkvidRequestForSet(env2, setUrl)).toBeNull();
+    expect((await playlistAdditions(env2))[0]!.record.message).toBeNull();
+  });
 
-  it('queues a partial tracklist too (the claim does the ID wait now; MKVID_REQUIRE_FULL_TRACKLIST is gone)', async () => {
-    const env = { ...withMkvid(), MKVID_REQUIRE_FULL_TRACKLIST: '1' } as Env
-    mockCrawl([setUrl], 'X')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'X (1001tklists)' })
+  it("queues a partial tracklist too (the claim does the ID wait now; MKVID_REQUIRE_FULL_TRACKLIST is gone)", async () => {
+    const env = { ...withMkvid(), MKVID_REQUIRE_FULL_TRACKLIST: "1" } as Env;
+    mockCrawl([setUrl], "X");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "X (1001tklists)",
+    });
     // The fixture has anonymous "ID" rows.
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
-    await syncOne(env, sub, 'tok')
-    const req = (await getMkvidRequestForSet(env, setUrl))!
-    expect(req.status).toBe('pending')
-    expect(req.idedCount!).toBeLessThan(req.trackCount!)
-  })
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "direct",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    await syncOne(env, sub, "tok");
+    const req = (await getMkvidRequestForSet(env, setUrl))!;
+    expect(req.status).toBe("pending");
+    expect(req.idedCount!).toBeLessThan(req.trackCount!);
+  });
 
-  it('a recheck of a set whose video is an mkvid upload refreshes its stored list (for a recreation)', async () => {
-    const env = withMkvid()
+  it("a recheck of a set whose video is an mkvid upload refreshes its stored list (for a recreation)", async () => {
+    const env = withMkvid();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
+      playlistId: "PL",
+      artistName: "X",
       discoveredTracklistUrls: [setUrl],
       processedTracklistUrls: [setUrl],
-      tracklistVideos: { [setUrl]: stale('mkvidVid001') },
-    })
+      tracklistVideos: { [setUrl]: stale("mkvidVid001") },
+    });
     await enqueueMkvidRequest(env, {
-      slug: sub.slug, setUrl, artistName: 'X', setTitle: null, setDate: null,
-      source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1' }, lastCueSeconds: null, trackCount: 1, idedCount: 1,
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
-    const req = (await getMkvidRequestForSet(env, setUrl))!
-    expect((await getMkvidTracks(env, req.id)).tracks.length).toBeGreaterThan(1)
-    expect(req.trackCount).toBeGreaterThan(1)
-  })
+      slug: sub.slug,
+      setUrl,
+      artistName: "X",
+      setTitle: null,
+      setDate: null,
+      source: { kind: "soundcloud", url: "https://api.soundcloud.com/tracks/1" },
+      lastCueSeconds: null,
+      trackCount: 1,
+      idedCount: 1,
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "direct",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
+    const req = (await getMkvidRequestForSet(env, setUrl))!;
+    expect((await getMkvidTracks(env, req.id)).tracks.length).toBeGreaterThan(1);
+    expect(req.trackCount).toBeGreaterThan(1);
+  });
 
-  it('a recheck of a set that still has no recording queues it too (idempotently)', async () => {
-    const env = withMkvid()
+  it("a recheck of a set that still has no recording queues it too (idempotently)", async () => {
+    const env = withMkvid();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
+      playlistId: "PL",
+      artistName: "X",
       discoveredTracklistUrls: [setUrl],
       processedTracklistUrls: [setUrl],
       tracklistVideos: { [setUrl]: stale(null) },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'pool', state: { cookie: '' }, accountId: 'acct-1', fetchedAt: new Date(Date.now() - 3 * 3600_000).toISOString() })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "pool",
+      state: { cookie: "" },
+      accountId: "acct-1",
+      fetchedAt: new Date(Date.now() - 3 * 3600_000).toISOString(),
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
-    expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe('pending')
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'pool', state: { cookie: '' }, accountId: 'acct-2', fetchedAt: new Date().toISOString() })
-    // A later recheck leaves the existing request alone…
-    const req = (await getMkvidRequestForSet(env, setUrl))!
-    await env.DB.prepare('DELETE FROM mkvid_request_tracks').run()
-    await saveSubState(env, sub.slug, { ...(await loadSubState(env, sub.slug))!, tracklistVideos: { [setUrl]: stale(null) } })
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
-    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM mkvid_requests').first<{ n: number }>()).toEqual({ n: 1 })
-    // …but fills in its track list, which is how requests queued before lists were stored get one.
-    expect((await getMkvidTracks(env, req.id)).tracksTrusted).toBe(true)
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
+    expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe("pending");
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "pool",
+      state: { cookie: "" },
+      accountId: "acct-2",
+      fetchedAt: new Date().toISOString(),
+    });
+    // A later recheck leaves the existing request alone...
+    const req = (await getMkvidRequestForSet(env, setUrl))!;
+    await env.DB.prepare("DELETE FROM mkvid_request_tracks").run();
+    await saveSubState(env, sub.slug, {
+      ...(await loadSubState(env, sub.slug))!,
+      tracklistVideos: { [setUrl]: stale(null) },
+    });
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
+    expect(
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM mkvid_requests").first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    // ...but fills in its track list, which is how requests queued before lists were stored get one.
+    expect((await getMkvidTracks(env, req.id)).tracksTrusted).toBe(true);
     // No audit row for a recheck that changed nothing.
-    expect(await playlistAdditions(env)).toEqual([])
-  })
+    expect(await playlistAdditions(env)).toEqual([]);
+  });
 
-  it('a recheck that finds a real recording supersedes the pending request', async () => {
-    const env = withMkvid()
+  it("a recheck that finds a real recording supersedes the pending request", async () => {
+    const env = withMkvid();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
+      playlistId: "PL",
+      artistName: "X",
       discoveredTracklistUrls: [setUrl],
       processedTracklistUrls: [setUrl],
       tracklistVideos: { [setUrl]: stale(null) },
-    })
+    });
     await enqueueMkvidRequest(env, {
-      slug: sub.slug, setUrl, artistName: 'X', setTitle: null, setDate: null,
-      source: { kind: 'soundcloud', url: 'https://api.soundcloud.com/tracks/1' }, lastCueSeconds: null, trackCount: 1, idedCount: 1,
-    })
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLcombined', title: 'All tracked artists (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('officialV12')
+      slug: sub.slug,
+      setUrl,
+      artistName: "X",
+      setTitle: null,
+      setDate: null,
+      source: { kind: "soundcloud", url: "https://api.soundcloud.com/tracks/1" },
+      lastCueSeconds: null,
+      trackCount: 1,
+      idedCount: 1,
+    });
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("officialV12");
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
-    expect(addVideoToPlaylist).toHaveBeenCalledWith('PL', 'officialV12', 'tok')
-    expect((await getMkvidRequestForSet(env, setUrl))!).toMatchObject({ status: 'superseded', error: '1001tracklists now has officialV12' })
-  })
-})
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
+    expect(addVideoToPlaylist).toHaveBeenCalledWith("PL", "officialV12", "tok");
+    expect((await getMkvidRequestForSet(env, setUrl))!).toMatchObject({
+      status: "superseded",
+      error: "1001tracklists now has officialV12",
+    });
+  });
+});
 
-describe('seedTracklistVideosFromAudit', () => {
-  it('takes the newest row per set, only for this slug and only for processed URLs', async () => {
-    const env = makeEnv()
+describe("seedTracklistVideosFromAudit", () => {
+  it("takes the newest row per set, only for this slug and only for processed URLs", async () => {
+    const env = makeEnv();
     // Inserted oldest-first: "newest" must come from the timestamp, not insertion order.
     await seedAdditionRows(env, [
-      { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'u1', vid: 'oldVid12345' },
-      { t: '2026-09-01T00:00:00Z', status: 'replaced', slug: 's', set: 'u1', vid: 'newVid12345' },
-      { t: '2026-08-01T00:00:00Z', status: 'no_youtube', slug: 's', set: 'u2', vid: null },
-      { t: '2026-08-01T00:00:00Z', status: 'failed', slug: 's', set: 'u3', vid: null },
-      { t: '2026-08-01T00:00:00Z', status: 'added', slug: 's', set: 'unprocessed', vid: 'x1234567890' },
-      { t: '2026-08-01T00:00:00Z', status: 'added', slug: 't', set: 'u3', vid: 'otherVid123' },
-    ])
+      { t: "2026-08-01T00:00:00Z", status: "added", slug: "s", set: "u1", vid: "oldVid12345" },
+      { t: "2026-09-01T00:00:00Z", status: "replaced", slug: "s", set: "u1", vid: "newVid12345" },
+      { t: "2026-08-01T00:00:00Z", status: "no_youtube", slug: "s", set: "u2", vid: null },
+      { t: "2026-08-01T00:00:00Z", status: "failed", slug: "s", set: "u3", vid: null },
+      {
+        t: "2026-08-01T00:00:00Z",
+        status: "added",
+        slug: "s",
+        set: "unprocessed",
+        vid: "x1234567890",
+      },
+      { t: "2026-08-01T00:00:00Z", status: "added", slug: "t", set: "u3", vid: "otherVid123" },
+    ]);
 
-    const seeded = await seedTracklistVideosFromAudit(env, 's', new Set(['u1', 'u2', 'u3']), makeLogger({ task: 'test' }))
+    const seeded = await seedTracklistVideosFromAudit(
+      env,
+      "s",
+      new Set(["u1", "u2", "u3"]),
+      makeLogger({ task: "test" }),
+    );
 
     expect(seeded).toEqual({
-      u1: { videoId: 'newVid12345', checkedAt: Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1000) },
-      u2: { videoId: null, checkedAt: Math.floor(Date.parse('2026-08-01T00:00:00Z') / 1000) },
-    })
-  })
+      u1: {
+        videoId: "newVid12345",
+        checkedAt: Math.floor(Date.parse("2026-09-01T00:00:00Z") / 1000),
+      },
+      u2: { videoId: null, checkedAt: Math.floor(Date.parse("2026-08-01T00:00:00Z") / 1000) },
+    });
+  });
 
-  it('returns what it has when the list call throws', async () => {
-    const env = makeEnv()
-    vi.spyOn(env.CACHE, 'list').mockRejectedValue(new Error('kv down'))
-    expect(await seedTracklistVideosFromAudit(env, 's', new Set(['u1']), makeLogger({ task: 'test' }))).toEqual({})
-  })
-})
+  it("returns what it has when the list call throws", async () => {
+    const env = makeEnv();
+    vi.spyOn(env.CACHE, "list").mockRejectedValue(new Error("kv down"));
+    expect(
+      await seedTracklistVideosFromAudit(env, "s", new Set(["u1"]), makeLogger({ task: "test" })),
+    ).toEqual({});
+  });
+});
 
-describe('invalidateVideoCache', () => {
-  it('marks every processed set due, keeps its recorded video, clears abandons, and drops both membership caches', async () => {
-    const env = makeEnv()
+describe("invalidateVideoCache", () => {
+  it("marks every processed set due, keeps its recorded video, clears abandons, and drops both membership caches", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/dead'],
-      processedTracklistUrls: ['https://x/tracklist/a'],
-      abandonedTracklistUrls: ['https://x/tracklist/dead'],
-      failureCounts: { 'https://x/tracklist/dead': 3 },
-      tracklistVideos: { 'https://x/tracklist/a': fresh('vidA1234567') },
-    })
-    await env.SUBS.put('subs:combined', JSON.stringify({ playlistId: 'PLcombined' }))
-    await env.CACHE.put('yt:plvids:PLartist', JSON.stringify({ videoIds: ['vidA1234567'] }))
-    await env.CACHE.put('yt:plvids:PLcombined', JSON.stringify({ videoIds: ['vidA1234567'] }))
+      playlistId: "PLartist",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a", "https://x/tracklist/dead"],
+      processedTracklistUrls: ["https://x/tracklist/a"],
+      abandonedTracklistUrls: ["https://x/tracklist/dead"],
+      failureCounts: { "https://x/tracklist/dead": 3 },
+      tracklistVideos: { "https://x/tracklist/a": fresh("vidA1234567") },
+    });
+    await env.SUBS.put("subs:combined", JSON.stringify({ playlistId: "PLcombined" }));
+    await env.CACHE.put("yt:plvids:PLartist", JSON.stringify({ videoIds: ["vidA1234567"] }));
+    await env.CACHE.put("yt:plvids:PLcombined", JSON.stringify({ videoIds: ["vidA1234567"] }));
 
-    const r = await invalidateVideoCache(env, sub.slug, makeLogger({ task: 'test' }))
+    const r = await invalidateVideoCache(env, sub.slug, makeLogger({ task: "test" }));
 
-    expect(r).toEqual({ slug: sub.slug, tracklistsMarked: 1, abandonedCleared: 1 })
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.tracklistVideos).toEqual({ 'https://x/tracklist/a': { videoId: 'vidA1234567', checkedAt: 0 } })
-    expect(state.abandonedTracklistUrls).toEqual([])
-    expect(state.failureCounts).toEqual({})
-    expect(dueRechecks(state)).toEqual(['https://x/tracklist/a'])
-    expect(await env.CACHE.get('yt:plvids:PLartist')).toBeNull()
-    expect(await env.CACHE.get('yt:plvids:PLcombined')).toBeNull()
+    expect(r).toEqual({ slug: sub.slug, tracklistsMarked: 1, abandonedCleared: 1 });
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.tracklistVideos).toEqual({
+      "https://x/tracklist/a": { videoId: "vidA1234567", checkedAt: 0 },
+    });
+    expect(state.abandonedTracklistUrls).toEqual([]);
+    expect(state.failureCounts).toEqual({});
+    expect(dueRechecks(state)).toEqual(["https://x/tracklist/a"]);
+    expect(await env.CACHE.get("yt:plvids:PLartist")).toBeNull();
+    expect(await env.CACHE.get("yt:plvids:PLcombined")).toBeNull();
     // The formerly-abandoned set is pending again.
-    expect(state.discoveredTracklistUrls!.filter((u) => !state.processedTracklistUrls.includes(u))).toEqual([
-      'https://x/tracklist/dead',
-    ])
-  })
+    expect(
+      state.discoveredTracklistUrls!.filter((u) => !state.processedTracklistUrls.includes(u)),
+    ).toEqual(["https://x/tracklist/dead"]);
+  });
 
-  it('is a no-op for a sub that was never synced', async () => {
-    const env = makeEnv()
-    expect(await invalidateVideoCache(env, 'nobody', makeLogger({ task: 'test' }))).toEqual({
-      slug: 'nobody',
+  it("is a no-op for a sub that was never synced", async () => {
+    const env = makeEnv();
+    expect(await invalidateVideoCache(env, "nobody", makeLogger({ task: "test" }))).toEqual({
+      slug: "nobody",
       tracklistsMarked: 0,
       abandonedCleared: 0,
-    })
-  })
-})
+    });
+  });
+});
 
+describe("block handling (2026-09 IP-ban resilience)", () => {
+  beforeEach(() => _resetTallyForTests());
 
-
-describe('block handling (2026-09 IP-ban resilience)', () => {
-  beforeEach(() => _resetTallyForTests())
-
-  it('stops the set loop on UpstreamPausedError without charging any set a failure', async () => {
-    const env = makeEnv()
+  it("stops the set loop on UpstreamPausedError without charging any set a failure", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b', 'https://x/tracklist/c'],
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: [
+        "https://x/tracklist/a",
+        "https://x/tracklist/b",
+        "https://x/tracklist/c",
+      ],
       processedTracklistUrls: [],
-      failureCounts: { 'https://x/tracklist/a': 2 },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new UpstreamPausedError('every forwarder route blocked', '2026-09-10T16:00:00.000Z'))
+      failureCounts: { "https://x/tracklist/a": 2 },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new UpstreamPausedError("every forwarder route blocked", "2026-09-10T16:00:00.000Z"),
+    );
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, trigger: 'cron.pending' })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true, trigger: "cron.pending" });
 
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(r.stats.tracklistsProcessed).toBe(0)
-    expect(r.stats.tracklistsPending).toBe(3)
-    const state = (await loadSubState(env, sub.slug))!
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    expect(r.stats.tracklistsProcessed).toBe(0);
+    expect(r.stats.tracklistsPending).toBe(3);
+    const state = (await loadSubState(env, sub.slug))!;
     // No failure charged, nothing abandoned, the run's stop reason is recorded.
-    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 2 })
-    expect(state.abandonedTracklistUrls).toEqual([])
+    expect(state.failureCounts).toEqual({ "https://x/tracklist/a": 2 });
+    expect(state.abandonedTracklistUrls).toEqual([]);
     // The owner's own pause is never an error.
-    expect(state.lastError).toBeUndefined()
-    expect(state.lastRunStats!.stop).toMatchObject({ level: 'hold', runs: 1 })
-    expect(state.lastRunStats!.stop!.reason).toMatch(/^paused: /)
-    expect(await playlistAdditions(env)).toEqual([])
-  })
+    expect(state.lastError).toBeUndefined();
+    expect(state.lastRunStats!.stop).toMatchObject({ level: "hold", runs: 1 });
+    expect(state.lastRunStats!.stop!.reason).toMatch(/^paused: /);
+    expect(await playlistAdditions(env)).toEqual([]);
+  });
 
-  it('stops on IPBlockedError too, and skips the recheck window for that run', async () => {
-    const env = makeEnv()
+  it("stops on IPBlockedError too, and skips the recheck window for that run", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/new', 'https://x/tracklist/old'],
-      processedTracklistUrls: ['https://x/tracklist/old'],
-      tracklistVideos: { 'https://x/tracklist/old': stale('vidOLD00000') },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new IPBlockedError('1.2.3.4'))
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/new", "https://x/tracklist/old"],
+      processedTracklistUrls: ["https://x/tracklist/old"],
+      tracklistVideos: { "https://x/tracklist/old": stale("vidOLD00000") },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new IPBlockedError("1.2.3.4"));
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(r.stats.tracklistsRechecked).toBe(0)
-    expect(r.stats.rechecksPending).toBe(1)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.failureCounts).toEqual({})
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    expect(r.stats.tracklistsRechecked).toBe(0);
+    expect(r.stats.rechecksPending).toBe(1);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.failureCounts).toEqual({});
     // 1001tracklists blocking us needs the owner: an error at once.
-    expect(state.lastError).toMatch(/^ip_blocked: /)
-    expect(state.lastRunStats!.stop).toMatchObject({ level: 'error', runs: 1 })
-  })
+    expect(state.lastError).toMatch(/^ip_blocked: /);
+    expect(state.lastRunStats!.stop).toMatchObject({ level: "error", runs: 1 });
+  });
 
-  it('a block during the recheck window stops it without deferring the set', async () => {
-    const env = makeEnv()
+  it("a block during the recheck window stops it without deferring the set", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/old1', 'https://x/tracklist/old2'],
-      processedTracklistUrls: ['https://x/tracklist/old1', 'https://x/tracklist/old2'],
-      tracklistVideos: { 'https://x/tracklist/old1': stale('vidOLD00001'), 'https://x/tracklist/old2': stale('vidOLD00002') },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new UpstreamPausedError('paused', null))
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/old1", "https://x/tracklist/old2"],
+      processedTracklistUrls: ["https://x/tracklist/old1", "https://x/tracklist/old2"],
+      tracklistVideos: {
+        "https://x/tracklist/old1": stale("vidOLD00001"),
+        "https://x/tracklist/old2": stale("vidOLD00002"),
+      },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new UpstreamPausedError("paused", null),
+    );
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    const state = (await loadSubState(env, sub.slug))!
-    // checkedAt untouched → both still due next tick.
-    expect(dueRechecks(state)).toEqual(['https://x/tracklist/old1', 'https://x/tracklist/old2'])
-    expect(state.failureCounts).toEqual({})
-  })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    const state = (await loadSubState(env, sub.slug))!;
+    // checkedAt untouched -> both still due next tick.
+    expect(dueRechecks(state)).toEqual(["https://x/tracklist/old1", "https://x/tracklist/old2"]);
+    expect(state.failureCounts).toEqual({});
+  });
+});
 
-})
+describe("requeueBanVictims", () => {
+  const log = makeLogger({ task: "test" });
 
-describe('requeueBanVictims', () => {
-  const log = makeLogger({ task: 'test' })
-
-  async function seedAudit(env: Env, rows: Array<{ t: string; status: string; slug: string; set: string; msg: string | null }>) {
-    await seedAdditionRows(env, rows)
+  async function seedAudit(
+    env: Env,
+    rows: Array<{ t: string; status: string; slug: string; set: string; msg: string | null }>,
+  ) {
+    await seedAdditionRows(env, rows);
   }
 
-  it('re-queues sets abandoned with block-shaped errors inside the window, leaves everything else alone', async () => {
-    const env = makeEnv()
-    const now = Date.now()
-    const iso = (agoDays: number) => new Date(now - agoDays * 86_400_000).toISOString()
-    await saveSubState(env, 'lillypalmer', {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/ban1', 'https://x/tracklist/ban2', 'https://x/tracklist/broken', 'https://x/tracklist/ancient', 'https://x/tracklist/counting'],
+  it("re-queues sets abandoned with block-shaped errors inside the window, leaves everything else alone", async () => {
+    const env = makeEnv();
+    const now = Date.now();
+    const iso = (agoDays: number) => new Date(now - agoDays * 86_400_000).toISOString();
+    await saveSubState(env, "lillypalmer", {
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: [
+        "https://x/tracklist/ban1",
+        "https://x/tracklist/ban2",
+        "https://x/tracklist/broken",
+        "https://x/tracklist/ancient",
+        "https://x/tracklist/counting",
+      ],
       processedTracklistUrls: [],
-      abandonedTracklistUrls: ['https://x/tracklist/ban1', 'https://x/tracklist/ban2', 'https://x/tracklist/broken', 'https://x/tracklist/ancient'],
-      failureCounts: { 'https://x/tracklist/counting': 2 },
-    })
+      abandonedTracklistUrls: [
+        "https://x/tracklist/ban1",
+        "https://x/tracklist/ban2",
+        "https://x/tracklist/broken",
+        "https://x/tracklist/ancient",
+      ],
+      failureCounts: { "https://x/tracklist/counting": 2 },
+    });
     await seedAudit(env, [
-      { t: iso(1), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/ban1', msg: 'unlocker fetched a CF shell for https://x/tracklist/ban1 (59211 bytes)' },
-      { t: iso(2), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/ban2', msg: '1001tracklists rate-limited IP 68.1.2.3' },
-      { t: iso(2), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/broken', msg: 'youtube videos.list 404: not found' },
-      { t: iso(40), status: 'abandoned', slug: 'lillypalmer', set: 'https://x/tracklist/ancient', msg: 'home proxy 403: blocked' },
-      { t: iso(1), status: 'failed', slug: 'lillypalmer', set: 'https://x/tracklist/counting', msg: 'unlocker fetch failed for https://x/tracklist/counting — reject_block: ' },
-      { t: iso(1), status: 'abandoned', slug: 'nobody', set: 'https://x/tracklist/orphan', msg: 'ip_blocked' },
-    ])
+      {
+        t: iso(1),
+        status: "abandoned",
+        slug: "lillypalmer",
+        set: "https://x/tracklist/ban1",
+        msg: "unlocker fetched a CF shell for https://x/tracklist/ban1 (59211 bytes)",
+      },
+      {
+        t: iso(2),
+        status: "abandoned",
+        slug: "lillypalmer",
+        set: "https://x/tracklist/ban2",
+        msg: "1001tracklists rate-limited IP 68.1.2.3",
+      },
+      {
+        t: iso(2),
+        status: "abandoned",
+        slug: "lillypalmer",
+        set: "https://x/tracklist/broken",
+        msg: "youtube videos.list 404: not found",
+      },
+      {
+        t: iso(40),
+        status: "abandoned",
+        slug: "lillypalmer",
+        set: "https://x/tracklist/ancient",
+        msg: "home proxy 403: blocked",
+      },
+      {
+        t: iso(1),
+        status: "failed",
+        slug: "lillypalmer",
+        set: "https://x/tracklist/counting",
+        msg: "unlocker fetch failed for https://x/tracklist/counting - reject_block: ",
+      },
+      {
+        t: iso(1),
+        status: "abandoned",
+        slug: "nobody",
+        set: "https://x/tracklist/orphan",
+        msg: "ip_blocked",
+      },
+    ]);
 
-    const dry = await requeueBanVictims(env, { days: 14, dryRun: true, log })
-    expect(dry.requeuedCount).toBe(3)
-    expect((await loadSubState(env, 'lillypalmer'))!.abandonedTracklistUrls).toHaveLength(4)
+    const dry = await requeueBanVictims(env, { days: 14, dryRun: true, log });
+    expect(dry.requeuedCount).toBe(3);
+    expect((await loadSubState(env, "lillypalmer"))!.abandonedTracklistUrls).toHaveLength(4);
 
-    const r = await requeueBanVictims(env, { days: 14, log })
-    expect(r.requeued).toEqual({ lillypalmer: ['https://x/tracklist/ban1', 'https://x/tracklist/ban2', 'https://x/tracklist/counting'] })
-    const state = (await loadSubState(env, 'lillypalmer'))!
-    expect(state.abandonedTracklistUrls).toEqual(['https://x/tracklist/broken', 'https://x/tracklist/ancient'])
-    expect(state.failureCounts).toEqual({})
-    expect(r.candidates.nobody).toEqual(['https://x/tracklist/orphan'])
-  })
-})
+    const r = await requeueBanVictims(env, { days: 14, log });
+    expect(r.requeued).toEqual({
+      lillypalmer: [
+        "https://x/tracklist/ban1",
+        "https://x/tracklist/ban2",
+        "https://x/tracklist/counting",
+      ],
+    });
+    const state = (await loadSubState(env, "lillypalmer"))!;
+    expect(state.abandonedTracklistUrls).toEqual([
+      "https://x/tracklist/broken",
+      "https://x/tracklist/ancient",
+    ]);
+    expect(state.failureCounts).toEqual({});
+    expect(r.candidates.nobody).toEqual(["https://x/tracklist/orphan"]);
+  });
+});
 
-describe('route faults are not the set\'s fault', () => {
-  it('forwarder down + paid fallback serving Cloudflare shells stops the batch without charging any set', async () => {
-    const env = makeEnv()
+describe("route faults are not the set's fault", () => {
+  it("forwarder down + paid fallback serving Cloudflare shells stops the batch without charging any set", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'],
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a", "https://x/tracklist/b"],
       processedTracklistUrls: [],
-      failureCounts: { 'https://x/tracklist/a': 2 },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new UpstreamUnavailableError('forwarder transport: fetch failed; BrightData returned Cloudflare challenge pages (2 attempts)'),
-    )
+      failureCounts: { "https://x/tracklist/a": 2 },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new UpstreamUnavailableError(
+        "forwarder transport: fetch failed; BrightData returned Cloudflare challenge pages (2 attempts)",
+      ),
+    );
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
     // Stopped after the first set: the second one is never attempted.
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(r.stats.tracklistsPending).toBe(2)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.lastError).toBeUndefined()
-    expect(state.lastRunStats!.stop!.reason).toMatch(/^unavailable: 1001tracklists unreachable/)
-    expect(state.failureCounts).toEqual({ 'https://x/tracklist/a': 2 })
-    expect(state.abandonedTracklistUrls).toEqual([])
-    expect(await playlistAdditions(env)).toEqual([])
-  })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    expect(r.stats.tracklistsPending).toBe(2);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastError).toBeUndefined();
+    expect(state.lastRunStats!.stop!.reason).toMatch(/^unavailable: 1001tracklists unreachable/);
+    expect(state.failureCounts).toEqual({ "https://x/tracklist/a": 2 });
+    expect(state.abandonedTracklistUrls).toEqual([]);
+    expect(await playlistAdditions(env)).toEqual([]);
+  });
 
-  it('a Cloudflare shell behind a healthy forwarder IS charged like any other fetch failure', async () => {
-    const env = makeEnv()
+  it("a Cloudflare shell behind a healthy forwarder IS charged like any other fetch failure", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
       processedTracklistUrls: [],
-      failureCounts: { 'https://x/tracklist/a': 2 },
-    })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new CloudflareChallengeError('unlocker fetched a CF shell page'))
+      failureCounts: { "https://x/tracklist/a": 2 },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new CloudflareChallengeError("unlocker fetched a CF shell page"),
+    );
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.abandonedTracklistUrls).toEqual(['https://x/tracklist/a'])
-    const rows = await playlistAdditions(env)
-    expect(rows.map((x) => x.record.status)).toEqual(['abandoned'])
-  })
-})
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.abandonedTracklistUrls).toEqual(["https://x/tracklist/a"]);
+    const rows = await playlistAdditions(env);
+    expect(rows.map((x) => x.record.status)).toEqual(["abandoned"]);
+  });
+});
 
-describe('manual-run fetch budget (the pool paces, a button press is still bounded)', () => {
-  beforeEach(() => _resetTallyForTests())
+describe("manual-run fetch budget (the pool paces, a button press is still bounded)", () => {
+  beforeEach(() => _resetTallyForTests());
   /** Two subscribed DJs, each with N unprocessed sets, YouTube connected. */
   async function twoSubs(env: Env, perSub: number, lastRunAt: [number, number]) {
-    await env.SUBS.put('subs:list', JSON.stringify(['alpha', 'beta']))
-    for (const [i, slug] of (['alpha', 'beta'] as const).entries()) {
-      await env.SUBS.put('subs:item:' + slug, JSON.stringify({ sourceUrl: 'https://www.1001tracklists.com/dj/' + slug + '/', addedAt: 0 }))
+    await env.SUBS.put("subs:list", JSON.stringify(["alpha", "beta"]));
+    for (const [i, slug] of (["alpha", "beta"] as const).entries()) {
+      await env.SUBS.put(
+        "subs:item:" + slug,
+        JSON.stringify({
+          sourceUrl: "https://www.1001tracklists.com/dj/" + slug + "/",
+          addedAt: 0,
+        }),
+      );
       await saveSubState(env, slug, {
-        playlistId: 'PL' + slug,
+        playlistId: "PL" + slug,
         artistName: slug,
-        discoveredTracklistUrls: Array.from({ length: perSub }, (_, k) => 'https://x/tracklist/' + slug + k),
+        discoveredTracklistUrls: Array.from(
+          { length: perSub },
+          (_, k) => "https://x/tracklist/" + slug + k,
+        ),
         processedTracklistUrls: [],
         tracklistVideos: {},
         lastRunAt: lastRunAt[i],
-      })
+      });
     }
     await env.SUBS.put(
-      'oauth:google',
-      JSON.stringify({ accessToken: 'tok', refreshToken: 'refresh', expiresAt: Math.floor(Date.now() / 1000) + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }),
-    )
+      "oauth:google",
+      JSON.stringify({
+        accessToken: "tok",
+        refreshToken: "refresh",
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        scope: "s",
+        channelId: null,
+        channelTitle: null,
+        connectedAt: 0,
+      }),
+    );
   }
 
-  it('resync-all runs one pass over every DJ on a single shared budget (the per-row browser loop was unpaced)', async () => {
-    const env = makeEnv()
-    await env.SUBS.put('pool:settings', JSON.stringify({ manualMaxFetches: 3 }))
-    await twoSubs(env, 5, [200, 100])
-    mockCrawl([], null)
-    const r = await resyncAll(env)
-    expect(r.invalidated.map((x) => x.slug).sort()).toEqual(['alpha', 'beta'])
+  it("resync-all runs one pass over every DJ on a single shared budget (the per-row browser loop was unpaced)", async () => {
+    const env = makeEnv();
+    await env.SUBS.put("pool:settings", JSON.stringify({ manualMaxFetches: 3 }));
+    await twoSubs(env, 5, [200, 100]);
+    mockCrawl([], null);
+    const r = await resyncAll(env);
+    expect(r.invalidated.map((x) => x.slug).sort()).toEqual(["alpha", "beta"]);
     // Three page views across BOTH DJs, not three per DJ: beta (older run)
-    // takes the whole budget — its DJ page, then two sets — and alpha waits
+    // takes the whole budget - its DJ page, then two sets - and alpha waits
     // for the scheduler.
-    expect(crawlDjIndex).toHaveBeenCalledTimes(1)
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect(r.results.map((x) => x.slug)).toEqual(['beta'])
-    expect((await loadSubState(env, 'beta'))!.processedTracklistUrls).toHaveLength(2)
-    expect((await loadSubState(env, 'alpha'))!.processedTracklistUrls).toHaveLength(0)
-  })
+    expect(crawlDjIndex).toHaveBeenCalledTimes(1);
+    expect(fetch1001Html).toHaveBeenCalledTimes(2);
+    expect(r.results.map((x) => x.slug)).toEqual(["beta"]);
+    expect((await loadSubState(env, "beta"))!.processedTracklistUrls).toHaveLength(2);
+    expect((await loadSubState(env, "alpha"))!.processedTracklistUrls).toHaveLength(0);
+  });
 
-  it('a manual single-DJ run stops at its budget', async () => {
-    const env = makeEnv()
-    await twoSubs(env, 5, [200, 100])
-    mockCrawl([], null)
-    const budget = newFetchBudget(3)
-    await syncOne(env, { slug: 'alpha', sourceUrl: 'https://www.1001tracklists.com/dj/alpha/', addedAt: 0 }, 'tok', { trigger: 'manual.one', fetchBudget: budget })
+  it("a manual single-DJ run stops at its budget", async () => {
+    const env = makeEnv();
+    await twoSubs(env, 5, [200, 100]);
+    mockCrawl([], null);
+    const budget = newFetchBudget(3);
+    await syncOne(
+      env,
+      { slug: "alpha", sourceUrl: "https://www.1001tracklists.com/dj/alpha/", addedAt: 0 },
+      "tok",
+      { trigger: "manual.one", fetchBudget: budget },
+    );
     // The DJ page is one of the three.
-    expect(crawlDjIndex).toHaveBeenCalledTimes(1)
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect(budget).toMatchObject({ spent: 3, remaining: 0 })
+    expect(crawlDjIndex).toHaveBeenCalledTimes(1);
+    expect(fetch1001Html).toHaveBeenCalledTimes(2);
+    expect(budget).toMatchObject({ spent: 3, remaining: 0 });
     // A spent budget skips the crawl too.
-    await syncOne(env, { slug: 'alpha', sourceUrl: 'https://www.1001tracklists.com/dj/alpha/', addedAt: 0 }, 'tok', { trigger: 'manual.one', fetchBudget: budget })
-    expect(crawlDjIndex).toHaveBeenCalledTimes(1)
-  })
+    await syncOne(
+      env,
+      { slug: "alpha", sourceUrl: "https://www.1001tracklists.com/dj/alpha/", addedAt: 0 },
+      "tok",
+      { trigger: "manual.one", fetchBudget: budget },
+    );
+    expect(crawlDjIndex).toHaveBeenCalledTimes(1);
+  });
 
-  it('manualFetchBudget comes from the pool settings (default 10); newFetchBudget clamps garbage', async () => {
-    const env = makeEnv()
-    expect(await manualFetchBudget(env)).toEqual({ remaining: 10, limit: 10, spent: 0 })
-    await env.SUBS.put('pool:settings', JSON.stringify({ manualMaxFetches: 4 }))
-    expect((await manualFetchBudget(env)).limit).toBe(4)
-    expect(newFetchBudget(-3).limit).toBe(0)
-    expect(newFetchBudget(Number.NaN).limit).toBe(0)
-  })
-})
+  it("manualFetchBudget comes from the pool settings (default 10); newFetchBudget clamps garbage", async () => {
+    const env = makeEnv();
+    expect(await manualFetchBudget(env)).toEqual({ remaining: 10, limit: 10, spent: 0 });
+    await env.SUBS.put("pool:settings", JSON.stringify({ manualMaxFetches: 4 }));
+    expect((await manualFetchBudget(env)).limit).toBe(4);
+    expect(newFetchBudget(-3).limit).toBe(0);
+    expect(newFetchBudget(Number.NaN).limit).toBe(0);
+  });
+});
 
-describe('dead YouTube videos settle on the first strike', () => {
-  beforeEach(() => _resetTallyForTests())
+describe("dead YouTube videos settle on the first strike", () => {
+  beforeEach(() => _resetTallyForTests());
 
   it("a videoNotFound on insert marks the set processed as no_youtube with the rejected id, no failure credit", async () => {
-    const env = makeEnv()
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/dead', 'https://x/tracklist/next'],
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/dead", "https://x/tracklist/next"],
       processedTracklistUrls: [],
       tracklistVideos: {},
-    })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValueOnce('deadVid1234').mockReturnValueOnce(null)
-    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new YouTubeApiError('playlistItems.insert', 404, 'videoNotFound', '{"error":{"code":404,"message":"Video not found."}}'),
-    )
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce("deadVid1234")
+      .mockReturnValueOnce(null);
+    (addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new YouTubeApiError(
+        "playlistItems.insert",
+        404,
+        "videoNotFound",
+        '{"error":{"code":404,"message":"Video not found."}}',
+      ),
+    );
 
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    const r = await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
     // Both sets were handled in ONE tick; the dead one did not stop the loop.
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect(r.stats.tracklistsProcessed).toBe(2)
-    expect(r.stats.tracklistsPending).toBe(0)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.processedTracklistUrls).toEqual(['https://x/tracklist/dead', 'https://x/tracklist/next'])
-    expect(state.failureCounts).toEqual({})
-    expect(state.abandonedTracklistUrls).toEqual([])
+    expect(fetch1001Html).toHaveBeenCalledTimes(2);
+    expect(r.stats.tracklistsProcessed).toBe(2);
+    expect(r.stats.tracklistsPending).toBe(0);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.processedTracklistUrls).toEqual([
+      "https://x/tracklist/dead",
+      "https://x/tracklist/next",
+    ]);
+    expect(state.failureCounts).toEqual({});
+    expect(state.abandonedTracklistUrls).toEqual([]);
     // The dead id is remembered so a recheck notices a replacement recording.
-    expect(state.tracklistVideos!['https://x/tracklist/dead']!.videoId).toBe('deadVid1234')
-    const rows = await playlistAdditions(env)
-    const dead = rows.find((x) => x.record.setUrl === 'https://x/tracklist/dead')!
-    expect(dead.record.status).toBe('no_youtube')
-    expect(dead.record.videoId).toBe('deadVid1234')
-    expect(dead.record.message).toMatch(/rejected deadVid1234 as unavailable/)
-  })
+    expect(state.tracklistVideos!["https://x/tracklist/dead"]!.videoId).toBe("deadVid1234");
+    const rows = await playlistAdditions(env);
+    const dead = rows.find((x) => x.record.setUrl === "https://x/tracklist/dead")!;
+    expect(dead.record.status).toBe("no_youtube");
+    expect(dead.record.videoId).toBe("deadVid1234");
+    expect(dead.record.message).toMatch(/rejected deadVid1234 as unavailable/);
+  });
 
-  it('a quota error on insert is retried, not settled, and costs the set nothing', async () => {
-    const env = makeEnv()
+  it("a quota error on insert is retried, not settled, and costs the set nothing", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/a'],
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
       processedTracklistUrls: [],
       tracklistVideos: {},
-    })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
-    ;(addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', '{}'))
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
+    (addVideoToPlaylist as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new YouTubeApiError("playlistItems.insert", 403, "quotaExceeded", "{}"),
+    );
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.processedTracklistUrls).toEqual([])
-    expect(state.failureCounts).toEqual({})
-  })
-})
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.processedTracklistUrls).toEqual([]);
+    expect(state.failureCounts).toEqual({});
+  });
+});
 
-describe('DJ-index crawl wiring', () => {
-  const crawl = crawlDjIndex as ReturnType<typeof vi.fn>
+describe("DJ-index crawl wiring", () => {
+  const crawl = crawlDjIndex as ReturnType<typeof vi.fn>;
 
-  it('a crawl is the head walk only (the backfill is the scheduler\'s), at priority new, and leaves its scroll keys for the paced backfill', async () => {
-    const env = makeEnv()
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'X (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
-    const keys = { type: 'artist', idScrollObject: 'q43lgd', subtype: 'tracklists' }
-    crawl.mockResolvedValue({ artistName: 'X', tracklistUrls: ['https://x/tracklist/a'], pagesWalked: 1, stopReason: 'known', tail: { pos: 15, id: 'a' }, keys })
-    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
-    expect(crawl.mock.calls[0]![1].backfill).toBeUndefined()
-    expect(crawl.mock.calls[0]![1].maxPages).toBe(4)
-    expect(crawl.mock.calls[0]![1].priority).toBe('new')
-    expect(await env.SUBS.get('djbackfill:lillypalmer', 'json')).toMatchObject({ cursor: { pos: 15, id: 'a' }, done: false, keys })
+  it("a crawl is the head walk only (the backfill is the scheduler's), at priority new, and leaves its scroll keys for the paced backfill", async () => {
+    const env = makeEnv();
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLx",
+      title: "X (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    const keys = { type: "artist", idScrollObject: "q43lgd", subtype: "tracklists" };
+    crawl.mockResolvedValue({
+      artistName: "X",
+      tracklistUrls: ["https://x/tracklist/a"],
+      pagesWalked: 1,
+      stopReason: "known",
+      tail: { pos: 15, id: "a" },
+      keys,
+    });
+    await syncOne(env, sub, "tok", { trigger: "manual.one" });
+    expect(crawl.mock.calls[0]![1].backfill).toBeUndefined();
+    expect(crawl.mock.calls[0]![1].maxPages).toBe(4);
+    expect(crawl.mock.calls[0]![1].priority).toBe("new");
+    expect(await env.SUBS.get("djbackfill:lillypalmer", "json")).toMatchObject({
+      cursor: { pos: 15, id: "a" },
+      done: false,
+      keys,
+    });
 
     // An existing cursor (from the old daily backfill) keeps its place and gains the keys.
-    await env.SUBS.put('djbackfill:lillypalmer', JSON.stringify({ cursor: { pos: 95, id: 'z' }, done: false, at: 1 }))
-    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
-    expect(await env.SUBS.get('djbackfill:lillypalmer', 'json')).toMatchObject({ cursor: { pos: 95, id: 'z' }, done: false, keys })
-  })
+    await env.SUBS.put(
+      "djbackfill:lillypalmer",
+      JSON.stringify({ cursor: { pos: 95, id: "z" }, done: false, at: 1 }),
+    );
+    await syncOne(env, sub, "tok", { trigger: "manual.one" });
+    expect(await env.SUBS.get("djbackfill:lillypalmer", "json")).toMatchObject({
+      cursor: { pos: 95, id: "z" },
+      done: false,
+      keys,
+    });
+  });
 
-  it('a head walk that reached the end of the list marks the backfill done', async () => {
-    const env = makeEnv()
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'X (1001tklists)' })
-    crawl.mockResolvedValue({ artistName: 'X', tracklistUrls: [], pagesWalked: 2, stopReason: 'end', tail: null, keys: { type: 'artist', idScrollObject: 'q', subtype: 'tracklists' } })
-    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
-    expect(await env.SUBS.get('djbackfill:lillypalmer', 'json')).toMatchObject({ cursor: null, done: true })
-  })
-})
+  it("a head walk that reached the end of the list marks the backfill done", async () => {
+    const env = makeEnv();
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLx",
+      title: "X (1001tklists)",
+    });
+    crawl.mockResolvedValue({
+      artistName: "X",
+      tracklistUrls: [],
+      pagesWalked: 2,
+      stopReason: "end",
+      tail: null,
+      keys: { type: "artist", idScrollObject: "q", subtype: "tracklists" },
+    });
+    await syncOne(env, sub, "tok", { trigger: "manual.one" });
+    expect(await env.SUBS.get("djbackfill:lillypalmer", "json")).toMatchObject({
+      cursor: null,
+      done: true,
+    });
+  });
+});
 
-describe('pool priorities and explicit selections', () => {
-  const OLD = 'https://www.1001tracklists.com/tracklist/o1/dj-old-set-2024-01-01.html'
-  const NEW = `https://www.1001tracklists.com/tracklist/n1/dj-new-set-${new Date(Date.now() - 86400000).toISOString().slice(0, 10)}.html`
+describe("pool priorities and explicit selections", () => {
+  const OLD = "https://www.1001tracklists.com/tracklist/o1/dj-old-set-2024-01-01.html";
+  const NEW = `https://www.1001tracklists.com/tracklist/n1/dj-new-set-${new Date(Date.now() - 86400000).toISOString().slice(0, 10)}.html`;
 
-  it('a manual run fetches a young pending set at `new`, an old one at `backfill`, a recheck at `recheck`', async () => {
-    const env = makeEnv()
+  it("a manual run fetches a young pending set at `new`, an old one at `backfill`, a recheck at `recheck`", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: [NEW, OLD, 'https://x/tracklist/done'],
-      processedTracklistUrls: ['https://x/tracklist/done'],
-      tracklistVideos: { 'https://x/tracklist/done': stale('vidA1234567') },
-    })
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
-    const byUrl = Object.fromEntries((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1].priority]))
-    expect(byUrl).toEqual({ [NEW]: 'new', [OLD]: 'backfill', 'https://x/tracklist/done': 'recheck' })
-    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.every((c) => c[1].kind === 'set')).toBe(true)
-  })
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: [NEW, OLD, "https://x/tracklist/done"],
+      processedTracklistUrls: ["https://x/tracklist/done"],
+      tracklistVideos: { "https://x/tracklist/done": stale("vidA1234567") },
+    });
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
+    const byUrl = Object.fromEntries(
+      (fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1].priority]),
+    );
+    expect(byUrl).toEqual({
+      [NEW]: "new",
+      [OLD]: "backfill",
+      "https://x/tracklist/done": "recheck",
+    });
+    expect(
+      (fetch1001Html as ReturnType<typeof vi.fn>).mock.calls.every((c) => c[1].kind === "set"),
+    ).toBe(true);
+  });
 
-  it('a selection fetches exactly the named sets, at the given priority, avoiding the given accounts', async () => {
-    const env = makeEnv()
+  it("a selection fetches exactly the named sets, at the given priority, avoiding the given accounts", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PL',
-      artistName: 'X',
-      discoveredTracklistUrls: ['https://x/tracklist/p1', 'https://x/tracklist/p2', 'https://x/tracklist/r1', 'https://x/tracklist/r2'],
-      processedTracklistUrls: ['https://x/tracklist/r1', 'https://x/tracklist/r2'],
-      tracklistVideos: { 'https://x/tracklist/r1': fresh('vidA1234567'), 'https://x/tracklist/r2': stale('vidB1234567') },
-    })
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, priority: 'verify', excludeAccounts: ['acct-1'], selection: { newUrls: [], recheckUrls: ['https://x/tracklist/r1'] } })
-    const calls = (fetch1001Html as ReturnType<typeof vi.fn>).mock.calls
-    expect(calls.map((c) => c[0])).toEqual(['https://x/tracklist/r1'])
-    expect(calls[0]![1]).toMatchObject({ priority: 'verify', excludeAccounts: ['acct-1'] })
-    expect(r.stats.tracklistsRechecked).toBe(1)
-  })
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: [
+        "https://x/tracklist/p1",
+        "https://x/tracklist/p2",
+        "https://x/tracklist/r1",
+        "https://x/tracklist/r2",
+      ],
+      processedTracklistUrls: ["https://x/tracklist/r1", "https://x/tracklist/r2"],
+      tracklistVideos: {
+        "https://x/tracklist/r1": fresh("vidA1234567"),
+        "https://x/tracklist/r2": stale("vidB1234567"),
+      },
+    });
+    const r = await syncOne(env, sub, "tok", {
+      skipDjCrawl: true,
+      priority: "verify",
+      excludeAccounts: ["acct-1"],
+      selection: { newUrls: [], recheckUrls: ["https://x/tracklist/r1"] },
+    });
+    const calls = (fetch1001Html as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.map((c) => c[0])).toEqual(["https://x/tracklist/r1"]);
+    expect(calls[0]![1]).toMatchObject({ priority: "verify", excludeAccounts: ["acct-1"] });
+    expect(r.stats.tracklistsRechecked).toBe(1);
+  });
 
-  it('a pool refusal stops the run, charges nothing and reports the retry-after', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: ['https://x/tracklist/a'], processedTracklistUrls: [] })
-    const { PoolPausedError } = await import('../src/lib/pool')
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(new PoolPausedError('budget_exhausted', 1200))
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, selection: { newUrls: ['https://x/tracklist/a'], recheckUrls: [] } })
-    expect(r.stoppedBy).toMatchObject({ retryAfterSeconds: 1200 })
-    expect(r.stoppedBy!.reason).toMatch(/budget_exhausted/)
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.failureCounts).toEqual({})
-    expect(state.processedTracklistUrls).toEqual([])
-  })
-})
+  it("a pool refusal stops the run, charges nothing and reports the retry-after", async () => {
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, {
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
+      processedTracklistUrls: [],
+    });
+    const { PoolPausedError } = await import("../src/lib/pool");
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PoolPausedError("budget_exhausted", 1200),
+    );
+    const r = await syncOne(env, sub, "tok", {
+      skipDjCrawl: true,
+      selection: { newUrls: ["https://x/tracklist/a"], recheckUrls: [] },
+    });
+    expect(r.stoppedBy).toMatchObject({ retryAfterSeconds: 1200 });
+    expect(r.stoppedBy!.reason).toMatch(/budget_exhausted/);
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.failureCounts).toEqual({});
+    expect(state.processedTracklistUrls).toEqual([]);
+  });
+});
 
-describe('tracklist cache write-through from sync fetches', () => {
+describe("tracklist cache write-through from sync fetches", () => {
   // A real-shaped set URL: the cache is keyed by its /tracklist/<slug>/ id.
-  const REAL = 'https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-1001tracklists-x-dj-lovers-club-pres.-waterways-amsterdam-dance-event-netherlands-2024-11-11.html'
-  const KEY = 'tl:v4:18kll1h1'
-  const fx = (name: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
+  const REAL =
+    "https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-1001tracklists-x-dj-lovers-club-pres.-waterways-amsterdam-dance-event-netherlands-2024-11-11.html";
+  const KEY = "tl:v4:18kll1h1";
+  const fx = (name: string) =>
+    readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "fixtures", name), "utf8");
   const serve = (name: string) =>
-    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: fx(name), via: 'pool', state: { cookie: '' }, accountId: 'acct-1', exitLabel: 'exit-a', fetchedAt: new Date().toISOString() })
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: fx(name),
+      via: "pool",
+      state: { cookie: "" },
+      accountId: "acct-1",
+      exitLabel: "exit-a",
+      fetchedAt: new Date().toISOString(),
+    });
 
-  it('a new-set fetch fills the parsed-list cache, so the phone button after it costs no request', async () => {
-    const env = makeEnv()
-    mockCrawl([REAL], 'Habstrakt')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'Habstrakt (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
-    serve('tracklist-habstrakt.html')
+  it("a new-set fetch fills the parsed-list cache, so the phone button after it costs no request", async () => {
+    const env = makeEnv();
+    mockCrawl([REAL], "Habstrakt");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLx",
+      title: "Habstrakt (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
+    serve("tracklist-habstrakt.html");
 
-    await syncOne(env, sub, 'tok')
+    await syncOne(env, sub, "tok");
 
-    const v = JSON.parse((await env.CACHE.get(KEY))!)
-    expect(v.tracks).toHaveLength(31)
-    expect(v).toMatchObject({ tracklistUrl: REAL, setDate: '2024-11-11', ttlSeconds: TRACKLIST_TTL.FULL })
-    expect(Date.now() - Date.parse(v.fetchedAt)).toBeLessThan(60_000)
+    const v = JSON.parse((await env.CACHE.get(KEY))!);
+    expect(v.tracks).toHaveLength(31);
+    expect(v).toMatchObject({
+      tracklistUrl: REAL,
+      setDate: "2024-11-11",
+      ttlSeconds: TRACKLIST_TTL.FULL,
+    });
+    expect(Date.now() - Date.parse(v.fetchedAt)).toBeLessThan(60_000);
 
     // The phone path now reads the entry; any network call would throw.
     const net = vi.fn(async () => {
-      throw new Error('no network expected')
-    })
-    vi.stubGlobal('fetch', net)
+      throw new Error("no network expected");
+    });
+    vi.stubGlobal("fetch", net);
     try {
-      const r = await resolveTracklistPage(env, REAL, makeLogger({ task: 'test' }))
-      expect(r.tracks).toHaveLength(31)
-      expect(net).not.toHaveBeenCalled()
+      const r = await resolveTracklistPage(env, REAL, makeLogger({ task: "test" }));
+      expect(r.tracks).toHaveLength(31);
+      expect(net).not.toHaveBeenCalled();
     } finally {
-      vi.unstubAllGlobals()
+      vi.unstubAllGlobals();
     }
-  })
+  });
 
-  it('a recheck fetch writes through too', async () => {
-    const env = makeEnv()
+  it("a recheck fetch writes through too", async () => {
+    const env = makeEnv();
     await saveSubState(env, sub.slug, {
-      playlistId: 'PLartist',
-      artistName: 'X',
+      playlistId: "PLartist",
+      artistName: "X",
       discoveredTracklistUrls: [REAL],
       processedTracklistUrls: [REAL],
-      tracklistVideos: { [REAL]: stale('vidA1234567') },
-    })
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLcombined', title: 'All tracked artists (1001tklists)' })
-    ;(listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(async () => new Set(['vidA1234567']))
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
-    serve('tracklist-maxstyler.html') // 2 ID rows → the short TTL
+      tracklistVideos: { [REAL]: stale("vidA1234567") },
+    });
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => new Set(["vidA1234567"]),
+    );
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
+    serve("tracklist-maxstyler.html"); // 2 ID rows -> the short TTL
 
     // A 2024 set with a video is past the age bands' "never" line, so the
     // recheck comes from the scheduler's selection (as a verify fetch does).
-    const r = await syncOne(env, sub, 'tok', { skipDjCrawl: true, selection: { newUrls: [], recheckUrls: [REAL] } })
+    const r = await syncOne(env, sub, "tok", {
+      skipDjCrawl: true,
+      selection: { newUrls: [], recheckUrls: [REAL] },
+    });
 
-    expect(r.stats.tracklistsRechecked).toBe(1)
-    const v = JSON.parse((await env.CACHE.get(KEY))!)
-    expect(v.tracks).toHaveLength(30)
-    expect(v.ttlSeconds).toBe(TRACKLIST_TTL.SHORT)
-  })
+    expect(r.stats.tracklistsRechecked).toBe(1);
+    const v = JSON.parse((await env.CACHE.get(KEY))!);
+    expect(v.tracks).toHaveLength(30);
+    expect(v.ttlSeconds).toBe(TRACKLIST_TTL.SHORT);
+  });
 
-  it('a decoy or empty page from the sync is never cached, and the set is still processed', async () => {
-    const env = makeEnv()
-    mockCrawl([REAL], 'Habstrakt')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PLx', title: 'Habstrakt (1001tklists)' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('vidA1234567')
-    serve('tracklist-decoy-dcr839.html')
+  it("a decoy or empty page from the sync is never cached, and the set is still processed", async () => {
+    const env = makeEnv();
+    mockCrawl([REAL], "Habstrakt");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLx",
+      title: "Habstrakt (1001tklists)",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("vidA1234567");
+    serve("tracklist-decoy-dcr839.html");
 
-    const r = await syncOne(env, sub, 'tok')
+    const r = await syncOne(env, sub, "tok");
 
-    expect(r.stats.tracklistsProcessed).toBe(1)
-    expect(await env.CACHE.get(KEY)).toBeNull()
-  })
-})
+    expect(r.stats.tracklistsProcessed).toBe(1);
+    expect(await env.CACHE.get(KEY)).toBeNull();
+  });
+});
 
-describe('full-recording gate inside a sync (lib/playlist-hygiene.ts)', () => {
-  const soundcloudPage = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'tracklist-maxstyler.html'), 'utf8')
-  const setUrl = 'https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html'
-  const withMkvid = () => ({ ...makeEnv(), MKVID_TOKEN: 'mk' }) as Env
+describe("full-recording gate inside a sync (lib/playlist-hygiene.ts)", () => {
+  const soundcloudPage = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "fixtures", "tracklist-maxstyler.html"),
+    "utf8",
+  );
+  const setUrl = "https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html";
+  const withMkvid = () => ({ ...makeEnv(), MKVID_TOKEN: "mk" }) as Env;
   /** videos.list answer for one id: a 10-minute clip of a 76-minute set (cues past 1 h, SoundCloud 76 min). */
-  const clipMeta = (id: string) => new Map([[id, { videoId: id, durationSeconds: 600, embedWidth: 1280, embedHeight: 720, privacy: 'public', uploadStatus: 'processed', alive: true, fetchedAt: 0 }]])
+  const clipMeta = (id: string) =>
+    new Map([
+      [
+        id,
+        {
+          videoId: id,
+          durationSeconds: 600,
+          embedWidth: 1280,
+          embedHeight: 720,
+          privacy: "public",
+          uploadStatus: "processed",
+          alive: true,
+          fetchedAt: 0,
+        },
+      ],
+    ]);
 
-  it('never adds a video that is not a full recording; the set goes to mkvid instead', async () => {
-    const env = withMkvid()
-    mockCrawl([setUrl], 'Max Styler')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Max Styler (1001tklists)' })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'home-proxy', state: { cookie: '' } })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('clip0000001')
-    ;(getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(clipMeta('clip0000001'))
+  it("never adds a video that is not a full recording; the set goes to mkvid instead", async () => {
+    const env = withMkvid();
+    mockCrawl([setUrl], "Max Styler");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "Max Styler (1001tklists)",
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "home-proxy",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("clip0000001");
+    (getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(clipMeta("clip0000001"));
 
-    await syncOne(env, sub, 'tok')
+    await syncOne(env, sub, "tok");
 
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.tracklistVideos![setUrl]!.videoId).toBeNull()
-    expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe('pending')
-    const rows = await playlistAdditions(env)
-    expect(rows[0]!.record.status).toBe('no_youtube')
-    expect(rows[0]!.record.message).toMatch(/^not added: clip0000001 video is more than 5 min shorter than the last cue .*; queued for mkvid \(soundcloud\)$/)
-  })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.tracklistVideos![setUrl]!.videoId).toBeNull();
+    expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe("pending");
+    const rows = await playlistAdditions(env);
+    expect(rows[0]!.record.status).toBe("no_youtube");
+    expect(rows[0]!.record.message).toMatch(
+      /^not added: clip0000001 video is more than 5 min shorter than the last cue .*; queued for mkvid \(soundcloud\)$/,
+    );
+  });
 
-  it('a recheck never swaps an mkvid render for a rejected page video', async () => {
-    const env = withMkvid()
-    await saveSubState(env, sub.slug, { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: [setUrl], processedTracklistUrls: [setUrl], tracklistVideos: { [setUrl]: stale('mkvidRender') } })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html: soundcloudPage, via: 'direct', state: { cookie: '' } })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('clip0000001')
-    ;(getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(clipMeta('clip0000001'))
+  it("a recheck never swaps an mkvid render for a rejected page video", async () => {
+    const env = withMkvid();
+    await saveSubState(env, sub.slug, {
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: [setUrl],
+      processedTracklistUrls: [setUrl],
+      tracklistVideos: { [setUrl]: stale("mkvidRender") },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "direct",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("clip0000001");
+    (getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(clipMeta("clip0000001"));
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-    expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-    expect((await loadSubState(env, sub.slug))!.tracklistVideos![setUrl]!.videoId).toBe('mkvidRender')
-  })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect((await loadSubState(env, sub.slug))!.tracklistVideos![setUrl]!.videoId).toBe(
+      "mkvidRender",
+    );
+  });
 
-  it('a recheck never re-adds a video removed from the artist playlist', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: ['https://x/tracklist/a'], processedTracklistUrls: ['https://x/tracklist/a'], tracklistVideos: { 'https://x/tracklist/a': stale(null) } })
-    await recordRemoved(env, { playlistId: 'PL', videoId: 'ownerGone01', slug: sub.slug, setUrl: 'https://x/tracklist/a', reason: 'owner' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('ownerGone01')
+  it("a recheck never re-adds a video removed from the artist playlist", async () => {
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, {
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
+      processedTracklistUrls: ["https://x/tracklist/a"],
+      tracklistVideos: { "https://x/tracklist/a": stale(null) },
+    });
+    await recordRemoved(env, {
+      playlistId: "PL",
+      videoId: "ownerGone01",
+      slug: sub.slug,
+      setUrl: "https://x/tracklist/a",
+      reason: "owner",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("ownerGone01");
 
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true })
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
-    expect(addVideoToPlaylist).not.toHaveBeenCalled()
-    expect((await loadSubState(env, sub.slug))!.tracklistVideos!['https://x/tracklist/a']!.videoId).toBeNull()
-  })
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    expect(
+      (await loadSubState(env, sub.slug))!.tracklistVideos!["https://x/tracklist/a"]!.videoId,
+    ).toBeNull();
+  });
 
-  it('the live mirror skips a video the owner took out of the combined playlist', async () => {
-    const env = makeEnv()
-    mockCrawl(['https://x/tracklist/a'])
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockImplementation(async (title: string) =>
-      title === 'All tracked artists (1001tklists)' ? { id: 'PLcombined', title } : { id: 'PLartist', title },
-    )
-    await recordRemoved(env, { playlistId: 'PLcombined', videoId: 'goodVid0001', slug: null, setUrl: null, reason: 'owner' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue('goodVid0001')
+  it("the live mirror skips a video the owner took out of the combined playlist", async () => {
+    const env = makeEnv();
+    mockCrawl(["https://x/tracklist/a"]);
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockImplementation(async (title: string) =>
+      title === "All tracked artists (1001tklists)"
+        ? { id: "PLcombined", title }
+        : { id: "PLartist", title },
+    );
+    await recordRemoved(env, {
+      playlistId: "PLcombined",
+      videoId: "goodVid0001",
+      slug: null,
+      setUrl: null,
+      reason: "owner",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("goodVid0001");
 
-    await syncOne(env, sub, 'tok')
+    await syncOne(env, sub, "tok");
 
-    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual(['PLartist'])
-    expect((await playlistAdditions(env))[0]!.record.combinedStatus).toBe('unavailable')
-  })
-})
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
+      "PLartist",
+    ]);
+    expect((await playlistAdditions(env))[0]!.record.combinedStatus).toBe("unavailable");
+  });
+});
 
-describe('BLOCK_SHAPED_FAILURE', () => {
-  it('matches a bare 403 as a word (it held literal backspace bytes, so this alternative never matched)', () => {
-    expect(BLOCK_SHAPED_FAILURE.source).not.toMatch(/[ -]/)
-    expect(BLOCK_SHAPED_FAILURE.test('1001tracklists answered 403 to acct-1')).toBe(true)
-    expect(BLOCK_SHAPED_FAILURE.test('HTTP 403')).toBe(true)
-    expect(BLOCK_SHAPED_FAILURE.test('set id 14031 not found')).toBe(false)
-    expect(BLOCK_SHAPED_FAILURE.test('parse error on row 4030')).toBe(false)
-  })
-})
+describe("BLOCK_SHAPED_FAILURE", () => {
+  it("matches a bare 403 as a word (it held literal backspace bytes, so this alternative never matched)", () => {
+    // eslint-disable-next-line no-control-regex -- looking for stray control bytes is the point
+    expect(BLOCK_SHAPED_FAILURE.source).not.toMatch(/[ -]/);
+    expect(BLOCK_SHAPED_FAILURE.test("1001tracklists answered 403 to acct-1")).toBe(true);
+    expect(BLOCK_SHAPED_FAILURE.test("HTTP 403")).toBe(true);
+    expect(BLOCK_SHAPED_FAILURE.test("set id 14031 not found")).toBe(false);
+    expect(BLOCK_SHAPED_FAILURE.test("parse error on row 4030")).toBe(false);
+  });
+});
 
-describe('manual syncs queue for a pool browser; pool faults read as what they are (2026-10-07)', () => {
-  beforeEach(() => _resetTallyForTests())
-  const pending = { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'], processedTracklistUrls: [] }
+describe("manual syncs queue for a pool browser; pool faults read as what they are (2026-10-07)", () => {
+  beforeEach(() => _resetTallyForTests());
+  const pending = {
+    playlistId: "PL",
+    artistName: "X",
+    discoveredTracklistUrls: ["https://x/tracklist/a", "https://x/tracklist/b"],
+    processedTracklistUrls: [],
+  };
 
-  it('a manual.* run asks with queueSeconds = manualQueueSeconds (crawl included); the scheduler does not', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, pending)
-    mockCrawl([])
-    await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
-    expect((crawlDjIndex as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({ queueSeconds: 600 })
-    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({ queueSeconds: 600 })
+  it("a manual.* run asks with queueSeconds = manualQueueSeconds (crawl included); the scheduler does not", async () => {
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, pending);
+    mockCrawl([]);
+    await syncOne(env, sub, "tok", { trigger: "manual.one" });
+    expect((crawlDjIndex as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({
+      queueSeconds: 600,
+    });
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({
+      queueSeconds: 600,
+    });
 
-    vi.mocked(fetch1001Html).mockClear()
-    await env.SUBS.put(POOL_SETTINGS_KEY, JSON.stringify({ manualQueueSeconds: 120 }))
-    await saveSubState(env, 'other', pending)
-    await syncOne(env, { ...sub, slug: 'other' }, 'tok', { trigger: 'manual.resync', skipDjCrawl: true })
-    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({ queueSeconds: 120 })
+    vi.mocked(fetch1001Html).mockClear();
+    await env.SUBS.put(POOL_SETTINGS_KEY, JSON.stringify({ manualQueueSeconds: 120 }));
+    await saveSubState(env, "other", pending);
+    await syncOne(env, { ...sub, slug: "other" }, "tok", {
+      trigger: "manual.resync",
+      skipDjCrawl: true,
+    });
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toMatchObject({
+      queueSeconds: 120,
+    });
 
-    vi.mocked(fetch1001Html).mockClear()
-    await saveSubState(env, 'cron', pending)
-    await syncOne(env, { ...sub, slug: 'cron' }, 'tok', { trigger: 'cron.tick', skipDjCrawl: true, selection: { newUrls: ['https://x/tracklist/a'], recheckUrls: [] } })
-    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).not.toHaveProperty('queueSeconds')
-  })
+    vi.mocked(fetch1001Html).mockClear();
+    await saveSubState(env, "cron", pending);
+    await syncOne(env, { ...sub, slug: "cron" }, "tok", {
+      trigger: "cron.tick",
+      skipDjCrawl: true,
+      selection: { newUrls: ["https://x/tracklist/a"], recheckUrls: [] },
+    });
+    expect((fetch1001Html as ReturnType<typeof vi.fn>).mock.calls[0]![1]).not.toHaveProperty(
+      "queueSeconds",
+    );
+  });
 
   it('a pool timeout stops the run with the pool\'s own words as the stop reason, not "1001tracklists unreachable", and is not an error', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, pending)
-    vi.mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('timeout', undefined, 0, { reason: 'queued', waitedSeconds: 600 }))
-    const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(r.stoppedBy).toMatchObject({ reason: 'pool busy: waited 600 s for a free browser (other fetches were running)', poolCode: 'timeout' })
-    expect(r.stoppedBy!.level).toBe('retry')
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.lastError).toBeUndefined()
-    expect(state.lastRunStats!.stop).toMatchObject({ reason: 'pool busy: waited 600 s for a free browser (other fetches were running)', code: 'timeout', level: 'retry', runs: 1 })
-  })
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, pending);
+    vi.mocked(fetch1001Html).mockRejectedValue(
+      new PoolUnavailableError("timeout", undefined, 0, { reason: "queued", waitedSeconds: 600 }),
+    );
+    const r = await syncOne(env, sub, "tok", { trigger: "manual.one", skipDjCrawl: true });
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    expect(r.stoppedBy).toMatchObject({
+      reason: "pool busy: waited 600 s for a free browser (other fetches were running)",
+      poolCode: "timeout",
+    });
+    expect(r.stoppedBy!.level).toBe("retry");
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastError).toBeUndefined();
+    expect(state.lastRunStats!.stop).toMatchObject({
+      reason: "pool busy: waited 600 s for a free browser (other fetches were running)",
+      code: "timeout",
+      level: "retry",
+      runs: 1,
+    });
+  });
 
-  it('stopped runs count up in a row, become lastError only after STOP_ERROR_RUNS over STOP_ERROR_SECONDS, and a clean run clears them', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, pending)
-    vi.mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError('no_healthy_account'))
-    const run = () => syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-    for (let i = 1; i < STOP_ERROR_RUNS; i++) await run()
-    let state = (await loadSubState(env, sub.slug))!
-    expect(state.lastRunStats!.stop).toMatchObject({ runs: STOP_ERROR_RUNS - 1, level: 'retry' })
-    expect(state.lastError).toBeUndefined()
+  it("stopped runs count up in a row, become lastError only after STOP_ERROR_RUNS over STOP_ERROR_SECONDS, and a clean run clears them", async () => {
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, pending);
+    vi.mocked(fetch1001Html).mockRejectedValue(new PoolUnavailableError("no_healthy_account"));
+    const run = () => syncOne(env, sub, "tok", { trigger: "cron.tick", skipDjCrawl: true });
+    for (let i = 1; i < STOP_ERROR_RUNS; i++) await run();
+    let state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastRunStats!.stop).toMatchObject({ runs: STOP_ERROR_RUNS - 1, level: "retry" });
+    expect(state.lastError).toBeUndefined();
     // Enough runs, but not for long enough yet.
-    await run()
-    state = (await loadSubState(env, sub.slug))!
-    expect(state.lastRunStats!.stop!.runs).toBe(STOP_ERROR_RUNS)
-    expect(state.lastError).toBeUndefined()
+    await run();
+    state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastRunStats!.stop!.runs).toBe(STOP_ERROR_RUNS);
+    expect(state.lastError).toBeUndefined();
     // The same row of stops, begun more than STOP_ERROR_SECONDS ago.
-    const since = state.lastRunStats!.stop!.since - STOP_ERROR_SECONDS - 60
-    await saveSubState(env, sub.slug, { ...state, lastRunStats: { ...state.lastRunStats!, stop: { ...state.lastRunStats!.stop!, since } } })
-    await run()
-    state = (await loadSubState(env, sub.slug))!
-    expect(state.lastRunStats!.stop).toMatchObject({ runs: STOP_ERROR_RUNS + 1, since })
-    expect(state.lastError).toMatch(new RegExp(`^pool: no healthy account free for this fetch \\(${STOP_ERROR_RUNS + 1} runs in a row since `))
+    const since = state.lastRunStats!.stop!.since - STOP_ERROR_SECONDS - 60;
+    await saveSubState(env, sub.slug, {
+      ...state,
+      lastRunStats: { ...state.lastRunStats!, stop: { ...state.lastRunStats!.stop!, since } },
+    });
+    await run();
+    state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastRunStats!.stop).toMatchObject({ runs: STOP_ERROR_RUNS + 1, since });
+    expect(state.lastError).toMatch(
+      new RegExp(
+        `^pool: no healthy account free for this fetch \\(${STOP_ERROR_RUNS + 1} runs in a row since `,
+      ),
+    );
     // A captcha waiting for the owner is an error on the first run.
-    vi.mocked(fetch1001Html).mockRejectedValue(new PoolPausedError('challenge_pending', 600))
-    await saveSubState(env, 'captcha', pending)
-    await syncOne(env, { ...sub, slug: 'captcha' }, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-    expect((await loadSubState(env, 'captcha'))!.lastError).toMatch(/challenge_pending/)
+    vi.mocked(fetch1001Html).mockRejectedValue(new PoolPausedError("challenge_pending", 600));
+    await saveSubState(env, "captcha", pending);
+    await syncOne(env, { ...sub, slug: "captcha" }, "tok", {
+      trigger: "cron.tick",
+      skipDjCrawl: true,
+    });
+    expect((await loadSubState(env, "captcha"))!.lastError).toMatch(/challenge_pending/);
     // A run the pool serves clears the row.
-    vi.mocked(fetch1001Html).mockResolvedValue({ html: '<set/>', via: 'direct', state: { cookie: '' } } as never)
-    await run()
-    state = (await loadSubState(env, sub.slug))!
-    expect(state.lastError).toBeUndefined()
-    expect(state.lastRunStats!.stop).toBeUndefined()
-  })
+    vi.mocked(fetch1001Html).mockResolvedValue({
+      html: "<set/>",
+      via: "direct",
+      state: { cookie: "" },
+    } as never);
+    await run();
+    state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastError).toBeUndefined();
+    expect(state.lastRunStats!.stop).toBeUndefined();
+  });
 
-  it('a YouTube 401 is a blip until AUTH_ERROR_RUNS runs in a row end with one; then it is the lastError, and a good run clears it', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: ['https://x/tracklist/a'] })
-    vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
-    vi.mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 401, 'authError', '{"error":{"code":401}}'))
-    const run = () => syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-    for (let i = 1; i < AUTH_ERROR_RUNS; i++) await run()
-    let state = (await loadSubState(env, sub.slug))!
-    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS - 1)
-    expect(state.lastError).toBeUndefined()
+  it("a YouTube 401 is a blip until AUTH_ERROR_RUNS runs in a row end with one; then it is the lastError, and a good run clears it", async () => {
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, {
+      ...pending,
+      discoveredTracklistUrls: ["https://x/tracklist/a"],
+    });
+    vi.mocked(parseSetYouTubeId).mockReturnValue("vidA1234567");
+    vi.mocked(addVideoToPlaylist).mockRejectedValue(
+      new YouTubeApiError("playlistItems.insert", 401, "authError", '{"error":{"code":401}}'),
+    );
+    const run = () => syncOne(env, sub, "tok", { trigger: "cron.tick", skipDjCrawl: true });
+    for (let i = 1; i < AUTH_ERROR_RUNS; i++) await run();
+    let state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS - 1);
+    expect(state.lastError).toBeUndefined();
     // Never charged to the set, so it is never abandoned.
-    expect(state.failureCounts).toEqual({})
+    expect(state.failureCounts).toEqual({});
     // A run the pool stopped did not reach YouTube: the count holds.
-    vi.mocked(fetch1001Html).mockRejectedValueOnce(new PoolUnavailableError('no_healthy_account'))
-    await run()
-    state = (await loadSubState(env, sub.slug))!
-    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS - 1)
-    expect(state.lastError).toBeUndefined()
-    await run()
-    state = (await loadSubState(env, sub.slug))!
-    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS)
-    expect(state.lastError).toMatch(new RegExp(`^YouTube refused the login on ${AUTH_ERROR_RUNS} runs in a row: `))
-    expect(state.abandonedTracklistUrls).toEqual([])
-    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
-    await run()
-    state = (await loadSubState(env, sub.slug))!
-    expect(state.lastError).toBeUndefined()
-    expect(state.lastRunStats!.authFails).toBeUndefined()
-    expect(state.processedTracklistUrls).toEqual(['https://x/tracklist/a'])
-  })
+    vi.mocked(fetch1001Html).mockRejectedValueOnce(new PoolUnavailableError("no_healthy_account"));
+    await run();
+    state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS - 1);
+    expect(state.lastError).toBeUndefined();
+    await run();
+    state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastRunStats!.authFails).toBe(AUTH_ERROR_RUNS);
+    expect(state.lastError).toMatch(
+      new RegExp(`^YouTube refused the login on ${AUTH_ERROR_RUNS} runs in a row: `),
+    );
+    expect(state.abandonedTracklistUrls).toEqual([]);
+    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never);
+    await run();
+    state = (await loadSubState(env, sub.slug))!;
+    expect(state.lastError).toBeUndefined();
+    expect(state.lastRunStats!.authFails).toBeUndefined();
+    expect(state.processedTracklistUrls).toEqual(["https://x/tracklist/a"]);
+  });
 
-  it('a YouTube quota reply is never charged to the set, stops the inserts, and the videos are added later without fetching the pages again', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'] })
-    vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
-    const body = JSON.stringify({ error: { code: 403, message: 'The request cannot be completed because you have exceeded your <a href="/youtube/v3/getting-started#quota">quota</a>.', errors: [{ message: '...', domain: 'youtube.quota', reason: 'quotaExceeded' }] } })
-    vi.mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'quotaExceeded', body))
-    const run = () => syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
+  it("a YouTube quota reply is never charged to the set, stops the inserts, and the videos are added later without fetching the pages again", async () => {
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, {
+      ...pending,
+      discoveredTracklistUrls: ["https://x/tracklist/a", "https://x/tracklist/b"],
+    });
+    vi.mocked(parseSetYouTubeId).mockReturnValue("vidA1234567");
+    const body = JSON.stringify({
+      error: {
+        code: 403,
+        message:
+          'The request cannot be completed because you have exceeded your <a href="/youtube/v3/getting-started#quota">quota</a>.',
+        errors: [{ message: "...", domain: "youtube.quota", reason: "quotaExceeded" }],
+      },
+    });
+    vi.mocked(addVideoToPlaylist).mockRejectedValue(
+      new YouTubeApiError("playlistItems.insert", 403, "quotaExceeded", body),
+    );
+    const run = () => syncOne(env, sub, "tok", { trigger: "manual.one", skipDjCrawl: true });
     // More runs than ABANDON_AFTER_FAILURES: a charged failure would have abandoned both sets by now.
-    for (let i = 0; i < 4; i++) await run()
-    const state = (await loadSubState(env, sub.slug))!
-    expect(state.failureCounts).toEqual({})
-    expect(state.abandonedTracklistUrls).toEqual([])
-    expect(state.processedTracklistUrls).toEqual([])
+    for (let i = 0; i < 4; i++) await run();
+    const state = (await loadSubState(env, sub.slug))!;
+    expect(state.failureCounts).toEqual({});
+    expect(state.abandonedTracklistUrls).toEqual([]);
+    expect(state.processedTracklistUrls).toEqual([]);
     // One insert in all: the second set was not tried once YouTube said so, and the three runs after it asked nothing.
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1)
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1);
     // Each page was fetched once, in the first run; both sets keep the video that waits.
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect(state.tracklistVideos!['https://x/tracklist/a']!.videoId).toBe('vidA1234567')
-    expect(state.tracklistVideos!['https://x/tracklist/b']!.videoId).toBe('vidA1234567')
-    const rows = await playlistAdditions(env)
-    expect(rows).toHaveLength(1)
+    expect(fetch1001Html).toHaveBeenCalledTimes(2);
+    expect(state.tracklistVideos!["https://x/tracklist/a"]!.videoId).toBe("vidA1234567");
+    expect(state.tracklistVideos!["https://x/tracklist/b"]!.videoId).toBe("vidA1234567");
+    const rows = await playlistAdditions(env);
+    expect(rows).toHaveLength(1);
     for (const r of rows) {
-      expect(r.record).toMatchObject({ status: 'failed', failureCount: null })
-      expect(r.record.message).toMatch(/^youtube playlistItems\.insert 403 quotaExceeded: The request cannot be completed because you have exceeded your quota\.\n/)
+      expect(r.record).toMatchObject({ status: "failed", failureCount: null });
+      expect(r.record.message).toMatch(
+        /^youtube playlistItems\.insert 403 quotaExceeded: The request cannot be completed because you have exceeded your quota\.\n/,
+      );
     }
     // The quota day rolls over: the next run adds both, from what it kept. No pool fetch is spent twice.
-    await clearQuotaOut(env)
-    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
-    const after = await run()
-    expect(after.quota).toBeUndefined()
-    expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual(['https://x/tracklist/a', 'https://x/tracklist/b'])
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect(addVideoToPlaylist).toHaveBeenCalledTimes(2)
-    expect((await playlistAdditions(env)).map((r) => r.record.status).sort()).toEqual(['added', 'duplicate', 'failed'])
-  })
+    await clearQuotaOut(env);
+    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never);
+    const after = await run();
+    expect(after.quota).toBeUndefined();
+    expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([
+      "https://x/tracklist/a",
+      "https://x/tracklist/b",
+    ]);
+    expect(fetch1001Html).toHaveBeenCalledTimes(2);
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(2);
+    expect((await playlistAdditions(env)).map((r) => r.record.status).sort()).toEqual([
+      "added",
+      "duplicate",
+      "failed",
+    ]);
+  });
 
-  describe('while the quota hold is set', () => {
-    const A = 'https://x/tracklist/a'
-    const B = 'https://x/tracklist/b'
-    const hold = (env: Env) => env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW, until: NOW + 3600 }))
+  describe("while the quota hold is set", () => {
+    const A = "https://x/tracklist/a";
+    const B = "https://x/tracklist/b";
+    const hold = (env: Env) =>
+      env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW, until: NOW + 3600 }));
     const noYouTube = () => {
-      expect(addVideoToPlaylist).not.toHaveBeenCalled()
-      expect(removeVideoFromPlaylist).not.toHaveBeenCalled()
-      expect(listPlaylistVideoIds).not.toHaveBeenCalled()
-      expect(findPlaylistByTitle).not.toHaveBeenCalled()
-      expect(createPlaylist).not.toHaveBeenCalled()
-      expect(getVideoMeta).not.toHaveBeenCalled()
-    }
+      expect(addVideoToPlaylist).not.toHaveBeenCalled();
+      expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+      expect(listPlaylistVideoIds).not.toHaveBeenCalled();
+      expect(findPlaylistByTitle).not.toHaveBeenCalled();
+      expect(createPlaylist).not.toHaveBeenCalled();
+      expect(getVideoMeta).not.toHaveBeenCalled();
+    };
 
-    it('a first-time set with no YouTube recording is fetched and settled as usual, with no YouTube call', async () => {
-      const env = makeEnv()
-      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
-      await hold(env)
-      vi.mocked(parseSetYouTubeId).mockReturnValue(null)
-      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true, selection: { newUrls: [A], recheckUrls: [] } })
-      expect(fetch1001Html).toHaveBeenCalledTimes(1)
-      expect(r.stats).toMatchObject({ tracklistsProcessed: 1, tracklistsPending: 0 })
-      expect(r.quota).toEqual({ out: true, hit: false, deferred: [] })
-      expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([A])
-      expect((await playlistAdditions(env)).map((x) => x.record.status)).toEqual(['no_youtube'])
+    it("a first-time set with no YouTube recording is fetched and settled as usual, with no YouTube call", async () => {
+      const env = makeEnv();
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] });
+      await hold(env);
+      vi.mocked(parseSetYouTubeId).mockReturnValue(null);
+      const r = await syncOne(env, sub, "tok", {
+        trigger: "cron.tick",
+        skipDjCrawl: true,
+        selection: { newUrls: [A], recheckUrls: [] },
+      });
+      expect(fetch1001Html).toHaveBeenCalledTimes(1);
+      expect(r.stats).toMatchObject({ tracklistsProcessed: 1, tracklistsPending: 0 });
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [] });
+      expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([A]);
+      expect((await playlistAdditions(env)).map((x) => x.record.status)).toEqual(["no_youtube"]);
       // The fetch was recorded like any other: the set has its next recheck.
-      expect((await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(A).first<{ next_due_at: number | null }>())!.next_due_at).toBeGreaterThan(NOW)
-      noYouTube()
-    })
+      expect(
+        (await env.DB.prepare("SELECT next_due_at FROM set_schedule WHERE url = ?")
+          .bind(A)
+          .first<{ next_due_at: number | null }>())!.next_due_at,
+      ).toBeGreaterThan(NOW);
+      noYouTube();
+    });
 
-    it('a first-time set whose video is already in the playlist is settled as a duplicate (from the cached membership)', async () => {
-      const env = makeEnv()
-      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
-      await env.CACHE.put('yt:plvids:PL', JSON.stringify({ videoIds: ['vidA1234567'] }))
-      await hold(env)
-      vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
-      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-      expect(r.quota).toEqual({ out: true, hit: false, deferred: [] })
-      expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([A])
-      expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: 'duplicate', combinedStatus: null })
-      noYouTube()
-    })
+    it("a first-time set whose video is already in the playlist is settled as a duplicate (from the cached membership)", async () => {
+      const env = makeEnv();
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] });
+      await env.CACHE.put("yt:plvids:PL", JSON.stringify({ videoIds: ["vidA1234567"] }));
+      await hold(env);
+      vi.mocked(parseSetYouTubeId).mockReturnValue("vidA1234567");
+      const r = await syncOne(env, sub, "tok", { trigger: "cron.tick", skipDjCrawl: true });
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [] });
+      expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([A]);
+      expect((await playlistAdditions(env))[0]!.record).toMatchObject({
+        status: "duplicate",
+        combinedStatus: null,
+      });
+      noYouTube();
+    });
 
-    it('a first-time set that needs an insert is deferred: no YouTube call, no failure, its video kept; the insert is made later without a second fetch', async () => {
-      const env = makeEnv()
-      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
-      await env.CACHE.put('yt:plvids:PL', JSON.stringify({ videoIds: [] }))
-      await hold(env)
-      vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
-      const run = () => syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
-      const r = await run()
-      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] })
-      expect(r.stats).toMatchObject({ tracklistsProcessed: 0, videoIdsAdded: 0, tracklistsPending: 1 })
-      let state = (await loadSubState(env, sub.slug))!
-      expect(state.processedTracklistUrls).toEqual([])
-      expect(state.failureCounts).toEqual({})
-      expect(state.tracklistVideos![A]!.videoId).toBe('vidA1234567')
-      expect(await playlistAdditions(env)).toEqual([])
-      noYouTube()
+    it("a first-time set that needs an insert is deferred: no YouTube call, no failure, its video kept; the insert is made later without a second fetch", async () => {
+      const env = makeEnv();
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] });
+      await env.CACHE.put("yt:plvids:PL", JSON.stringify({ videoIds: [] }));
+      await hold(env);
+      vi.mocked(parseSetYouTubeId).mockReturnValue("vidA1234567");
+      const run = () => syncOne(env, sub, "tok", { trigger: "manual.one", skipDjCrawl: true });
+      const r = await run();
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] });
+      expect(r.stats).toMatchObject({
+        tracklistsProcessed: 0,
+        videoIdsAdded: 0,
+        tracklistsPending: 1,
+      });
+      let state = (await loadSubState(env, sub.slug))!;
+      expect(state.processedTracklistUrls).toEqual([]);
+      expect(state.failureCounts).toEqual({});
+      expect(state.tracklistVideos![A]!.videoId).toBe("vidA1234567");
+      expect(await playlistAdditions(env)).toEqual([]);
+      noYouTube();
       // Still held: the set is not fetched again, and nothing is asked.
-      expect((await run()).quota).toEqual({ out: true, hit: false, deferred: [A] })
-      expect(fetch1001Html).toHaveBeenCalledTimes(1)
-      noYouTube()
+      expect((await run()).quota).toEqual({ out: true, hit: false, deferred: [A] });
+      expect(fetch1001Html).toHaveBeenCalledTimes(1);
+      noYouTube();
       // The hold ends: the video goes in, judged again now that YouTube can be asked, and the page is not fetched again.
-      await clearQuotaOut(env)
-      const done = await run()
-      expect(done.quota).toBeUndefined()
-      expect(done.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 1, tracklistsPending: 0 })
-      expect(fetch1001Html).toHaveBeenCalledTimes(1)
-      expect(getVideoMeta).toHaveBeenCalledTimes(1)
-      expect(vi.mocked(addVideoToPlaylist).mock.calls.map((c) => c.slice(0, 2))).toContainEqual(['PL', 'vidA1234567'])
-      state = (await loadSubState(env, sub.slug))!
-      expect(state.processedTracklistUrls).toEqual([A])
-      expect((await playlistAdditions(env)).map((x) => x.record.status)).toEqual(['added'])
-    })
+      await clearQuotaOut(env);
+      const done = await run();
+      expect(done.quota).toBeUndefined();
+      expect(done.stats).toMatchObject({
+        tracklistsProcessed: 1,
+        videoIdsAdded: 1,
+        tracklistsPending: 0,
+      });
+      expect(fetch1001Html).toHaveBeenCalledTimes(1);
+      expect(getVideoMeta).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(addVideoToPlaylist).mock.calls.map((c) => c.slice(0, 2))).toContainEqual([
+        "PL",
+        "vidA1234567",
+      ]);
+      state = (await loadSubState(env, sub.slug))!;
+      expect(state.processedTracklistUrls).toEqual([A]);
+      expect((await playlistAdditions(env)).map((x) => x.record.status)).toEqual(["added"]);
+    });
 
-    it('with no cached membership nothing is called a duplicate: the video waits', async () => {
-      const env = makeEnv()
-      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] })
-      await hold(env)
-      vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
-      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] })
-      noYouTube()
-    })
+    it("with no cached membership nothing is called a duplicate: the video waits", async () => {
+      const env = makeEnv();
+      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A] });
+      await hold(env);
+      vi.mocked(parseSetYouTubeId).mockReturnValue("vidA1234567");
+      const r = await syncOne(env, sub, "tok", { trigger: "cron.tick", skipDjCrawl: true });
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] });
+      noYouTube();
+    });
 
-    it('a DJ with no playlist yet gets none while it is set, and its sets without a recording are still handled', async () => {
-      const env = makeEnv()
-      await saveSubState(env, sub.slug, { artistName: 'X', discoveredTracklistUrls: [A, B], processedTracklistUrls: [] })
-      await hold(env)
-      vi.mocked(parseSetYouTubeId).mockImplementation(((html: string) => (html === '<a/>' ? 'vidA1234567' : null)) as never)
-      vi.mocked(fetch1001Html).mockImplementation((async (url: string) => ({ html: url === A ? '<a/>' : '<b/>', via: 'direct', state: { cookie: '' } })) as never)
-      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-      expect(r.playlistId).toBeUndefined()
-      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] })
-      const state = (await loadSubState(env, sub.slug))!
-      expect(state.playlistId).toBeUndefined()
-      expect(state.processedTracklistUrls).toEqual([B])
-      noYouTube()
-    })
+    it("a DJ with no playlist yet gets none while it is set, and its sets without a recording are still handled", async () => {
+      const env = makeEnv();
+      await saveSubState(env, sub.slug, {
+        artistName: "X",
+        discoveredTracklistUrls: [A, B],
+        processedTracklistUrls: [],
+      });
+      await hold(env);
+      vi.mocked(parseSetYouTubeId).mockImplementation(((html: string) =>
+        html === "<a/>" ? "vidA1234567" : null) as never);
+      vi.mocked(fetch1001Html).mockImplementation((async (url: string) => ({
+        html: url === A ? "<a/>" : "<b/>",
+        via: "direct",
+        state: { cookie: "" },
+      })) as never);
+      const r = await syncOne(env, sub, "tok", { trigger: "cron.tick", skipDjCrawl: true });
+      expect(r.playlistId).toBeUndefined();
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [A] });
+      const state = (await loadSubState(env, sub.slug))!;
+      expect(state.playlistId).toBeUndefined();
+      expect(state.processedTracklistUrls).toEqual([B]);
+      noYouTube();
+    });
 
-    it('a video kept too long is not trusted: the page is fetched again', async () => {
-      const env = makeEnv()
-      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A], tracklistVideos: { [A]: { videoId: 'oldVid12345', checkedAt: NOW - 3 * 86400 } } })
-      vi.mocked(parseSetYouTubeId).mockReturnValue('newVid12345')
-      await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-      expect(fetch1001Html).toHaveBeenCalledTimes(1)
-      expect(vi.mocked(addVideoToPlaylist).mock.calls.map((c) => c[1])).toEqual(['newVid12345'])
-    })
+    it("a video kept too long is not trusted: the page is fetched again", async () => {
+      const env = makeEnv();
+      await saveSubState(env, sub.slug, {
+        ...pending,
+        discoveredTracklistUrls: [A],
+        tracklistVideos: { [A]: { videoId: "oldVid12345", checkedAt: NOW - 3 * 86400 } },
+      });
+      vi.mocked(parseSetYouTubeId).mockReturnValue("newVid12345");
+      await syncOne(env, sub, "tok", { trigger: "cron.tick", skipDjCrawl: true });
+      expect(fetch1001Html).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(addVideoToPlaylist).mock.calls.map((c) => c[1])).toEqual(["newVid12345"]);
+    });
 
-    it('a kept video turned down on the second look is not inserted, and the set is settled without one', async () => {
-      const env = makeEnv()
-      await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: [A], tracklistVideos: { [A]: { videoId: 'vidA1234567', checkedAt: NOW - 600 } } })
-      await recordRemoved(env, { playlistId: 'PL', videoId: 'vidA1234567', slug: sub.slug, setUrl: A, reason: 'owner' })
-      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true })
-      expect(fetch1001Html).not.toHaveBeenCalled()
-      expect(addVideoToPlaylist).not.toHaveBeenCalled()
-      expect(r.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 0 })
+    it("a kept video turned down on the second look is not inserted, and the set is settled without one", async () => {
+      const env = makeEnv();
+      await saveSubState(env, sub.slug, {
+        ...pending,
+        discoveredTracklistUrls: [A],
+        tracklistVideos: { [A]: { videoId: "vidA1234567", checkedAt: NOW - 600 } },
+      });
+      await recordRemoved(env, {
+        playlistId: "PL",
+        videoId: "vidA1234567",
+        slug: sub.slug,
+        setUrl: A,
+        reason: "owner",
+      });
+      const r = await syncOne(env, sub, "tok", { trigger: "cron.tick", skipDjCrawl: true });
+      expect(fetch1001Html).not.toHaveBeenCalled();
+      expect(addVideoToPlaylist).not.toHaveBeenCalled();
+      expect(r.stats).toMatchObject({ tracklistsProcessed: 1, videoIdsAdded: 0 });
       // No page was at hand to look for an audio source in: the set is due now, so its first recheck queues it for mkvid.
-      expect((await env.DB.prepare('SELECT next_due_at FROM set_schedule WHERE url = ?').bind(A).first<{ next_due_at: number }>())!.next_due_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
-      const state = (await loadSubState(env, sub.slug))!
-      expect(state.processedTracklistUrls).toEqual([A])
-      expect(state.tracklistVideos![A]!.videoId).toBeNull()
-      expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: 'no_youtube' })
-    })
+      expect(
+        (await env.DB.prepare("SELECT next_due_at FROM set_schedule WHERE url = ?")
+          .bind(A)
+          .first<{ next_due_at: number }>())!.next_due_at,
+      ).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
+      const state = (await loadSubState(env, sub.slug))!;
+      expect(state.processedTracklistUrls).toEqual([A]);
+      expect(state.tracklistVideos![A]!.videoId).toBeNull();
+      expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: "no_youtube" });
+    });
 
-    it('a recheck that finds nothing to write goes on as usual; one that finds a swap leaves it waiting, due when the quota is back', async () => {
-      const env = makeEnv()
+    it("a recheck that finds nothing to write goes on as usual; one that finds a swap leaves it waiting, due when the quota is back", async () => {
+      const env = makeEnv();
       await saveSubState(env, sub.slug, {
-        playlistId: 'PL',
-        artistName: 'X',
+        playlistId: "PL",
+        artistName: "X",
         discoveredTracklistUrls: [A, B],
         processedTracklistUrls: [A, B],
-        tracklistVideos: { [A]: stale('sameVid1234'), [B]: stale('phoneVid123') },
-      })
-      await env.CACHE.put('yt:plvids:PL', JSON.stringify({ videoIds: ['sameVid1234', 'phoneVid123'] }))
-      await hold(env)
-      vi.mocked(parseSetYouTubeId).mockImplementation(((html: string) => (html === '<a/>' ? 'sameVid1234' : 'officialV12')) as never)
-      vi.mocked(fetch1001Html).mockImplementation((async (url: string) => ({ html: url === A ? '<a/>' : '<b/>', via: 'direct', state: { cookie: '' } })) as never)
+        tracklistVideos: { [A]: stale("sameVid1234"), [B]: stale("phoneVid123") },
+      });
+      await env.CACHE.put(
+        "yt:plvids:PL",
+        JSON.stringify({ videoIds: ["sameVid1234", "phoneVid123"] }),
+      );
+      await hold(env);
+      vi.mocked(parseSetYouTubeId).mockImplementation(((html: string) =>
+        html === "<a/>" ? "sameVid1234" : "officialV12") as never);
+      vi.mocked(fetch1001Html).mockImplementation((async (url: string) => ({
+        html: url === A ? "<a/>" : "<b/>",
+        via: "direct",
+        state: { cookie: "" },
+      })) as never);
       // As the scheduler hands rechecks over: named, one run.
-      const r = await syncOne(env, sub, 'tok', { trigger: 'cron.tick', skipDjCrawl: true, selection: { newUrls: [], recheckUrls: [A, B] } })
-      expect(fetch1001Html).toHaveBeenCalledTimes(2)
-      expect(r.stats).toMatchObject({ tracklistsRechecked: 2, videosReplaced: 0 })
-      expect(r.quota).toEqual({ out: true, hit: false, deferred: [B] })
-      const state = (await loadSubState(env, sub.slug))!
-      expect(state.failureCounts).toEqual({})
+      const r = await syncOne(env, sub, "tok", {
+        trigger: "cron.tick",
+        skipDjCrawl: true,
+        selection: { newUrls: [], recheckUrls: [A, B] },
+      });
+      expect(fetch1001Html).toHaveBeenCalledTimes(2);
+      expect(r.stats).toMatchObject({ tracklistsRechecked: 2, videosReplaced: 0 });
+      expect(r.quota).toEqual({ out: true, hit: false, deferred: [B] });
+      const state = (await loadSubState(env, sub.slug))!;
+      expect(state.failureCounts).toEqual({});
       // /a is settled; /b still resolves to the old video, so its recheck redoes the swap.
-      expect(state.tracklistVideos![A]!.checkedAt).toBeGreaterThanOrEqual(NOW)
-      expect(state.tracklistVideos![B]).toMatchObject({ videoId: 'phoneVid123', checkedAt: stale('x').checkedAt })
-      const sched = async (u: string) => (await env.DB.prepare('SELECT next_due_at, retry_at FROM set_schedule WHERE url = ?').bind(u).first<{ next_due_at: number | null; retry_at: number | null }>())!
+      expect(state.tracklistVideos![A]!.checkedAt).toBeGreaterThanOrEqual(NOW);
+      expect(state.tracklistVideos![B]).toMatchObject({
+        videoId: "phoneVid123",
+        checkedAt: stale("x").checkedAt,
+      });
+      const sched = async (u: string) =>
+        (await env.DB.prepare("SELECT next_due_at, retry_at FROM set_schedule WHERE url = ?")
+          .bind(u)
+          .first<{ next_due_at: number | null; retry_at: number | null }>())!;
       // /b is held out until the quota is back (retry_at, which also holds out a set marked due by hand); /a is not.
-      expect(await sched(B)).toEqual({ next_due_at: quotaDayEnd(Date.now()), retry_at: quotaDayEnd(Date.now()) })
-      expect((await sched(A)).retry_at).toBeNull()
-      expect(await playlistAdditions(env)).toEqual([])
-      noYouTube()
-    })
+      expect(await sched(B)).toEqual({
+        next_due_at: quotaDayEnd(Date.now()),
+        retry_at: quotaDayEnd(Date.now()),
+      });
+      expect((await sched(A)).retry_at).toBeNull();
+      expect(await playlistAdditions(env)).toEqual([]);
+      noYouTube();
+    });
 
-    it('a manual run makes no rechecks at all: a button press does not spend its fetches on what could only be left waiting', async () => {
-      const env = makeEnv()
+    it("a manual run makes no rechecks at all: a button press does not spend its fetches on what could only be left waiting", async () => {
+      const env = makeEnv();
       await saveSubState(env, sub.slug, {
-        playlistId: 'PL',
-        artistName: 'X',
+        playlistId: "PL",
+        artistName: "X",
         discoveredTracklistUrls: [A, B],
         processedTracklistUrls: [A, B],
-        tracklistVideos: { [A]: { videoId: null, checkedAt: 0 }, [B]: stale('phoneVid123') },
-      })
-      await hold(env)
-      vi.mocked(parseSetYouTubeId).mockReturnValue('officialV12')
-      const budget = newFetchBudget(10)
-      const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true, fetchBudget: budget })
-      expect(fetch1001Html).not.toHaveBeenCalled()
-      expect(budget.spent).toBe(0)
-      expect(r.stats).toMatchObject({ tracklistsRechecked: 0, rechecksPending: 2 })
-      noYouTube()
-    })
+        tracklistVideos: { [A]: { videoId: null, checkedAt: 0 }, [B]: stale("phoneVid123") },
+      });
+      await hold(env);
+      vi.mocked(parseSetYouTubeId).mockReturnValue("officialV12");
+      const budget = newFetchBudget(10);
+      const r = await syncOne(env, sub, "tok", {
+        trigger: "manual.one",
+        skipDjCrawl: true,
+        fetchBudget: budget,
+      });
+      expect(fetch1001Html).not.toHaveBeenCalled();
+      expect(budget.spent).toBe(0);
+      expect(r.stats).toMatchObject({ tracklistsRechecked: 0, rechecksPending: 2 });
+      noYouTube();
+    });
 
-    it('Resync all is not started: nothing is invalidated, nothing fetched, and the answer says why', async () => {
-      const env = makeEnv()
-      await env.DB.prepare('INSERT INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, 0, 0)').bind(sub.slug, sub.sourceUrl).run()
-      await env.SUBS.put('subs:migrated', '{}')
-      await env.SUBS.put('oauth:google', JSON.stringify({ accessToken: 'tok', refreshToken: 'r', expiresAt: NOW + 3600, scope: 's', channelId: null, channelTitle: null, connectedAt: 0 }))
-      await saveSubState(env, sub.slug, { playlistId: 'PL', artistName: 'X', discoveredTracklistUrls: [A], processedTracklistUrls: [A], tracklistVideos: { [A]: fresh('vidA1234567') } })
-      await hold(env)
-      const r = await resyncAll(env, { log: makeLogger({ task: 'test' }) })
-      expect(r).toEqual({ results: [], invalidated: [], quotaHeld: { until: NOW + 3600 } })
-      expect((await loadSubState(env, sub.slug))!.tracklistVideos![A]!.checkedAt).toBe(NOW)
-      expect(fetch1001Html).not.toHaveBeenCalled()
-      expect(crawlDjIndex).not.toHaveBeenCalled()
-      noYouTube()
-    })
-  })
+    it("Resync all is not started: nothing is invalidated, nothing fetched, and the answer says why", async () => {
+      const env = makeEnv();
+      await env.DB.prepare(
+        "INSERT INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, 0, 0)",
+      )
+        .bind(sub.slug, sub.sourceUrl)
+        .run();
+      await env.SUBS.put("subs:migrated", "{}");
+      await env.SUBS.put(
+        "oauth:google",
+        JSON.stringify({
+          accessToken: "tok",
+          refreshToken: "r",
+          expiresAt: NOW + 3600,
+          scope: "s",
+          channelId: null,
+          channelTitle: null,
+          connectedAt: 0,
+        }),
+      );
+      await saveSubState(env, sub.slug, {
+        playlistId: "PL",
+        artistName: "X",
+        discoveredTracklistUrls: [A],
+        processedTracklistUrls: [A],
+        tracklistVideos: { [A]: fresh("vidA1234567") },
+      });
+      await hold(env);
+      const r = await resyncAll(env, { log: makeLogger({ task: "test" }) });
+      expect(r).toEqual({ results: [], invalidated: [], quotaHeld: { until: NOW + 3600 } });
+      expect((await loadSubState(env, sub.slug))!.tracklistVideos![A]!.checkedAt).toBe(NOW);
+      expect(fetch1001Html).not.toHaveBeenCalled();
+      expect(crawlDjIndex).not.toHaveBeenCalled();
+      noYouTube();
+    });
+  });
 
-  it('a per-minute rate limit ends the run\'s fetches (it is over by the next tick) and sets no hold; the video is kept for the retry', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, { ...pending, discoveredTracklistUrls: ['https://x/tracklist/a', 'https://x/tracklist/b'] })
-    vi.mocked(parseSetYouTubeId).mockReturnValue('vidA1234567')
-    vi.mocked(addVideoToPlaylist).mockRejectedValue(new YouTubeApiError('playlistItems.insert', 403, 'rateLimitExceeded', '{}'))
-    const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-    expect(r.quota).toEqual({ out: false, hit: true, deferred: ['https://x/tracklist/a'] })
-    expect(await getQuotaOut(env)).toBeNull()
-    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never)
-    await syncOne(env, sub, 'tok', { trigger: 'manual.one', skipDjCrawl: true })
+  it("a per-minute rate limit ends the run's fetches (it is over by the next tick) and sets no hold; the video is kept for the retry", async () => {
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, {
+      ...pending,
+      discoveredTracklistUrls: ["https://x/tracklist/a", "https://x/tracklist/b"],
+    });
+    vi.mocked(parseSetYouTubeId).mockReturnValue("vidA1234567");
+    vi.mocked(addVideoToPlaylist).mockRejectedValue(
+      new YouTubeApiError("playlistItems.insert", 403, "rateLimitExceeded", "{}"),
+    );
+    const r = await syncOne(env, sub, "tok", { trigger: "manual.one", skipDjCrawl: true });
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+    expect(r.quota).toEqual({ out: false, hit: true, deferred: ["https://x/tracklist/a"] });
+    expect(await getQuotaOut(env)).toBeNull();
+    vi.mocked(addVideoToPlaylist).mockResolvedValue(undefined as never);
+    await syncOne(env, sub, "tok", { trigger: "manual.one", skipDjCrawl: true });
     // /a from what was kept, /b fetched for the first time.
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual(['https://x/tracklist/a', 'https://x/tracklist/b'])
-  })
+    expect(fetch1001Html).toHaveBeenCalledTimes(2);
+    expect((await loadSubState(env, sub.slug))!.processedTracklistUrls).toEqual([
+      "https://x/tracklist/a",
+      "https://x/tracklist/b",
+    ]);
+  });
 
   it('a pool refusal on the DJ page stops the run there and is recorded (it used to say "synced, 0 sets")', async () => {
-    const env = makeEnv()
-    await saveSubState(env, sub.slug, pending)
-    const page1Error = new PoolUnavailableError('timeout', undefined, null, { reason: 'running', accountId: 'acct-34', waitedSeconds: 600 })
-    ;(crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({ artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error })
-    const r = await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
-    expect(fetch1001Html).not.toHaveBeenCalled()
-    expect(r.crawlStopReason).toBe('fetch_failed')
-    expect(r.stoppedBy).toMatchObject({ reason: "pool slow: acct-34's page load had not finished after 600 s", poolCode: 'timeout' })
-    const stopped = (await loadSubState(env, sub.slug))!
-    expect(stopped.lastError).toBeUndefined()
-    expect(stopped.lastRunStats!.stop).toMatchObject({ reason: "pool slow: acct-34's page load had not finished after 600 s", runs: 1 })
+    const env = makeEnv();
+    await saveSubState(env, sub.slug, pending);
+    const page1Error = new PoolUnavailableError("timeout", undefined, null, {
+      reason: "running",
+      accountId: "acct-34",
+      waitedSeconds: 600,
+    });
+    (crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+      artistName: null,
+      tracklistUrls: [],
+      pagesWalked: 0,
+      stopReason: "fetch_failed",
+      tail: null,
+      page1Error,
+    });
+    const r = await syncOne(env, sub, "tok", { trigger: "manual.one" });
+    expect(fetch1001Html).not.toHaveBeenCalled();
+    expect(r.crawlStopReason).toBe("fetch_failed");
+    expect(r.stoppedBy).toMatchObject({
+      reason: "pool slow: acct-34's page load had not finished after 600 s",
+      poolCode: "timeout",
+    });
+    const stopped = (await loadSubState(env, sub.slug))!;
+    expect(stopped.lastError).toBeUndefined();
+    expect(stopped.lastRunStats!.stop).toMatchObject({
+      reason: "pool slow: acct-34's page load had not finished after 600 s",
+      runs: 1,
+    });
 
     // A page-1 failure that is not a route fault (a parse problem, a 404) still just carries on.
-    ;(crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({ artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error: new Error('boom') })
-    const r2 = await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
-    expect(r2.stoppedBy).toBeUndefined()
-    expect(fetch1001Html).toHaveBeenCalled()
-  })
-})
+    (crawlDjIndex as ReturnType<typeof vi.fn>).mockResolvedValue({
+      artistName: null,
+      tracklistUrls: [],
+      pagesWalked: 0,
+      stopReason: "fetch_failed",
+      tail: null,
+      page1Error: new Error("boom"),
+    });
+    const r2 = await syncOne(env, sub, "tok", { trigger: "manual.one" });
+    expect(r2.stoppedBy).toBeUndefined();
+    expect(fetch1001Html).toHaveBeenCalled();
+  });
+});
 
-describe('link pre-warm queue inside a sync', () => {
-  const fixture = (name: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
-  const page = fixture('tracklist-maxstyler.html')
-  const setUrl = 'https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html'
-  const queuedIds = async (env: Env) => (await env.DB.prepare('SELECT track_id FROM link_prewarm ORDER BY queued_at, rowid').all<{ track_id: string }>()).results.map((r) => r.track_id)
+describe("link pre-warm queue inside a sync", () => {
+  const fixture = (name: string) =>
+    readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "fixtures", name), "utf8");
+  const page = fixture("tracklist-maxstyler.html");
+  const setUrl = "https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html";
+  const queuedIds = async (env: Env) =>
+    (
+      await env.DB.prepare("SELECT track_id FROM link_prewarm ORDER BY queued_at, rowid").all<{
+        track_id: string;
+      }>()
+    ).results.map((r) => r.track_id);
 
   function newSet(html: string) {
-    mockCrawl([setUrl], 'Max Styler')
-    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Max Styler (1001tklists)' })
-    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html, via: 'pool', state: { cookie: '' }, accountId: 'acct-1' })
-    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    mockCrawl([setUrl], "Max Styler");
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PL",
+      title: "Max Styler (1001tklists)",
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html,
+      via: "pool",
+      state: { cookie: "" },
+      accountId: "acct-1",
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null);
   }
 
   it("a new set's page queues its identified tracks' medialink ids, with no pool fetch of its own", async () => {
-    const env = makeEnv()
-    newSet(page)
-    await syncOne(env, sub, 'tok')
-    const ids = prewarmIds(parseTracklist(setUrl, page))
-    expect(ids.length).toBeGreaterThan(10)
-    expect(await queuedIds(env)).toEqual(ids)
+    const env = makeEnv();
+    newSet(page);
+    await syncOne(env, sub, "tok");
+    const ids = prewarmIds(parseTracklist(setUrl, page));
+    expect(ids.length).toBeGreaterThan(10);
+    expect(await queuedIds(env)).toEqual(ids);
     // The set page was the only 1001tracklists fetch.
-    expect(fetch1001Html).toHaveBeenCalledTimes(1)
-  })
+    expect(fetch1001Html).toHaveBeenCalledTimes(1);
+  });
 
-  it('a recheck queues the page too; a track already queued is not queued twice', async () => {
-    const env = makeEnv()
-    newSet(page)
-    await syncOne(env, sub, 'tok')
-    const before = await queuedIds(env)
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [setUrl] } })
-    expect(fetch1001Html).toHaveBeenCalledTimes(2)
-    expect(await queuedIds(env)).toEqual(before)
+  it("a recheck queues the page too; a track already queued is not queued twice", async () => {
+    const env = makeEnv();
+    newSet(page);
+    await syncOne(env, sub, "tok");
+    const before = await queuedIds(env);
+    await syncOne(env, sub, "tok", {
+      skipDjCrawl: true,
+      priority: "recheck",
+      selection: { newUrls: [], recheckUrls: [setUrl] },
+    });
+    expect(fetch1001Html).toHaveBeenCalledTimes(2);
+    expect(await queuedIds(env)).toEqual(before);
     // Once a lookup has drained the queue, the next recheck queues the page again (the drain skips cached ids).
-    await env.DB.prepare('DELETE FROM link_prewarm').run()
-    await syncOne(env, sub, 'tok', { skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [setUrl] } })
-    expect(await queuedIds(env)).toEqual(before)
-  })
+    await env.DB.prepare("DELETE FROM link_prewarm").run();
+    await syncOne(env, sub, "tok", {
+      skipDjCrawl: true,
+      priority: "recheck",
+      selection: { newUrls: [], recheckUrls: [setUrl] },
+    });
+    expect(await queuedIds(env)).toEqual(before);
+  });
 
-  it('a decoy page (never cached) queues nothing, nor does a sync with linkPrewarm off', async () => {
-    const env = makeEnv()
-    newSet(fixture('tracklist-decoy-dcr839.html'))
-    await syncOne(env, sub, 'tok')
-    expect(await queuedIds(env)).toEqual([])
+  it("a decoy page (never cached) queues nothing, nor does a sync with linkPrewarm off", async () => {
+    const env = makeEnv();
+    newSet(fixture("tracklist-decoy-dcr839.html"));
+    await syncOne(env, sub, "tok");
+    expect(await queuedIds(env)).toEqual([]);
 
-    const env2 = makeEnv()
-    await updateAppSettings(env2, { linkPrewarm: { enabled: false } })
-    newSet(page)
-    await syncOne(env2, sub, 'tok')
-    expect(await queuedIds(env2)).toEqual([])
-  })
+    const env2 = makeEnv();
+    await updateAppSettings(env2, { linkPrewarm: { enabled: false } });
+    newSet(page);
+    await syncOne(env2, sub, "tok");
+    expect(await queuedIds(env2)).toEqual([]);
+  });
 
-  it('a queue that cannot be written never fails the set', async () => {
-    const env = makeEnv()
-    const db = env.DB
-    const prepare = db.prepare.bind(db)
-    ;(env as { DB: unknown }).DB = new Proxy(db, {
-      get: (t, k) => (k === 'prepare' ? (sql: string) => { if (sql.includes('link_prewarm')) throw new Error('D1_ERROR: no such table: link_prewarm'); return prepare(sql) } : Reflect.get(t, k)),
-    })
-    newSet(page)
-    const r = await syncOne(env, sub, 'tok')
-    expect(r.ok).toBe(true)
-    expect(r.stats.tracklistsProcessed).toBe(1)
-    expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: 'no_youtube' })
-  })
-})
+  it("a queue that cannot be written never fails the set", async () => {
+    const env = makeEnv();
+    const db = env.DB;
+    const prepare = db.prepare.bind(db);
+    (env as { DB: unknown }).DB = new Proxy(db, {
+      get: (t, k) =>
+        k === "prepare"
+          ? (sql: string) => {
+              if (sql.includes("link_prewarm"))
+                throw new Error("D1_ERROR: no such table: link_prewarm");
+              return prepare(sql);
+            }
+          : Reflect.get(t, k),
+    });
+    newSet(page);
+    const r = await syncOne(env, sub, "tok");
+    expect(r.ok).toBe(true);
+    expect(r.stats.tracklistsProcessed).toBe(1);
+    expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: "no_youtube" });
+  });
+});

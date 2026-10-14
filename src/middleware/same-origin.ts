@@ -16,32 +16,41 @@
  * Bearer-token routes (Tasker, /mkvid, /pool/events, /tracklist/purge) are
  * outside `/ui/api/` and not affected.
  */
-import type { MiddlewareHandler } from 'hono'
+import type { MiddlewareHandler } from "hono";
 
-const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-export function sameOriginCheck(req: Request): { ok: true } | { ok: false; status: 403 | 415; error: 'cross_origin' | 'json_required' } {
-  if (SAFE_METHODS.has(req.method.toUpperCase())) return { ok: true }
-  const self = new URL(req.url).origin
-  const site = req.headers.get('sec-fetch-site')
-  const origin = req.headers.get('origin')
-  const sameOrigin = site !== null ? site.toLowerCase() === 'same-origin' : origin !== null && origin === self
-  if (!sameOrigin) return { ok: false, status: 403, error: 'cross_origin' }
-  const ct = (req.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
-  if (ct !== 'application/json') return { ok: false, status: 415, error: 'json_required' }
-  return { ok: true }
+export function sameOriginCheck(
+  req: Request,
+): { ok: true } | { ok: false; status: 403 | 415; error: "cross_origin" | "json_required" } {
+  if (SAFE_METHODS.has(req.method.toUpperCase())) return { ok: true };
+  const self = new URL(req.url).origin;
+  const site = req.headers.get("sec-fetch-site");
+  const origin = req.headers.get("origin");
+  const sameOrigin =
+    site !== null ? site.toLowerCase() === "same-origin" : origin !== null && origin === self;
+  if (!sameOrigin) return { ok: false, status: 403, error: "cross_origin" };
+  const ct = (req.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (ct !== "application/json") return { ok: false, status: 415, error: "json_required" };
+  return { ok: true };
 }
 
 export const sameOriginJson: MiddlewareHandler = async (c, next) => {
-  const r = sameOriginCheck(c.req.raw)
+  const r = sameOriginCheck(c.req.raw);
   if (!r.ok) {
     return c.json(
-      { error: r.error, message: r.error === 'cross_origin' ? 'state-changing admin requests must come from this site' : 'send Content-Type: application/json' },
+      {
+        error: r.error,
+        message:
+          r.error === "cross_origin"
+            ? "state-changing admin requests must come from this site"
+            : "send Content-Type: application/json",
+      },
       r.status,
-    )
+    );
   }
-  return next()
-}
+  return next();
+};
 
 /**
  * Anti-framing for every admin response under /ui: no other site
@@ -50,20 +59,27 @@ export const sameOriginJson: MiddlewareHandler = async (c, next) => {
  * which the captcha page itself frames: it may be framed by this origin only.
  * A 101 websocket upgrade is passed through untouched.
  */
-export const LIVE_VIEW_PATH = /^\/ui\/api\/pool\/challenges\/[A-Za-z0-9_-]{1,64}\/live(\/|$)/
+export const LIVE_VIEW_PATH = /^\/ui\/api\/pool\/challenges\/[A-Za-z0-9_-]{1,64}\/live(\/|$)/;
 
 export const noFraming: MiddlewareHandler = async (c, next) => {
-  await next()
-  if (c.res.status === 101) return
-  const live = LIVE_VIEW_PATH.test(new URL(c.req.url).pathname)
+  await next();
+  if (c.res.status === 101) return;
+  const live = LIVE_VIEW_PATH.test(new URL(c.req.url).pathname);
   try {
-    c.res.headers.set('X-Frame-Options', live ? 'SAMEORIGIN' : 'DENY')
-    if (!c.res.headers.has('Content-Security-Policy')) c.res.headers.set('Content-Security-Policy', live ? "frame-ancestors 'self'" : "frame-ancestors 'none'")
+    c.res.headers.set("X-Frame-Options", live ? "SAMEORIGIN" : "DENY");
+    if (!c.res.headers.has("Content-Security-Policy"))
+      c.res.headers.set(
+        "Content-Security-Policy",
+        live ? "frame-ancestors 'self'" : "frame-ancestors 'none'",
+      );
   } catch {
     // Immutable headers (a response passed straight through): rebuild it once.
-    const res = new Response(c.res.body, c.res)
-    res.headers.set('X-Frame-Options', live ? 'SAMEORIGIN' : 'DENY')
-    res.headers.set('Content-Security-Policy', live ? "frame-ancestors 'self'" : "frame-ancestors 'none'")
-    c.res = res
+    const res = new Response(c.res.body, c.res);
+    res.headers.set("X-Frame-Options", live ? "SAMEORIGIN" : "DENY");
+    res.headers.set(
+      "Content-Security-Policy",
+      live ? "frame-ancestors 'self'" : "frame-ancestors 'none'",
+    );
+    c.res = res;
   }
-}
+};

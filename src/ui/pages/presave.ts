@@ -3,11 +3,11 @@
 // Pre-saves list. Big artwork, the one-click YouTube Music button, every
 // linked site, the timeline, the track upload when mkvid has one, and the
 // check history (a TKTable over GET /ui/api/presaves/:id/checks).
-// Data: GET /ui/api/presaves/:id → { presave, upload }.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { PRESAVE_SETTINGS_HREF, PRESAVE_UI_CSS, PRESAVE_UI_JS } from './presaves'
+// Data: GET /ui/api/presaves/:id -> { presave, upload }.
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { PRESAVE_SETTINGS_HREF, PRESAVE_UI_CSS, PRESAVE_UI_JS } from "./presaves";
 
 const BODY = /* html */ `
   <div id="pv-root"><div class="tk-card"><span class="skel" style="width: 16rem"></span></div></div>
@@ -15,7 +15,7 @@ const BODY = /* html */ `
     <h2>Check history</h2>
     <div id="pc-table"></div>
   </section>
-`
+`;
 
 const CSS = /* css */ `
   ${PRESAVE_UI_CSS}
@@ -61,7 +61,7 @@ const CSS = /* css */ `
     .pv-title { font-size: 1.4rem; }
     .pv-cta .btn { flex: 1 1 100%; }
   }
-`
+`;
 
 const JS = /* js */ `
 (() => {
@@ -133,10 +133,10 @@ ${PRESAVE_UI_JS}
   const at = (ms) => (ms == null ? '' : '<span' + TK.tip(when(ms)) + '>' + esc(rel(ms)) + '</span>');
   // The like on the YouTube account (lib/presave-like.ts). Red only where the owner has to do something.
   const LIKE_WHY = {
-    quota: ['Waiting: today’s YouTube quota is used'], budget: ['Waiting: today’s units for likes are used'], rate_limit: ['Waiting: YouTube is limiting requests'],
+    quota: ['Waiting: today\u2019s YouTube quota is used'], budget: ['Waiting: today\u2019s units for likes are used'], rate_limit: ['Waiting: YouTube is limiting requests'],
     transient: ['Waiting: YouTube did not take it'], gone: ['The video is not on YouTube'], rating_disabled: ['Ratings are off for this video'],
     purchase_required: ['The video has to be bought to rate it'], rejected: ['YouTube does not take a like for this video'], disliked: ['Left alone: you disliked it'],
-    not_connected: ['Connect YouTube in Settings to like it', 1], forbidden: ['YouTube refused: connect the account again in Settings', 1], email_not_verified: ['Verify the YouTube account’s email to like it', 1],
+    not_connected: ['Connect YouTube in Settings to like it', 1], forbidden: ['YouTube refused: connect the account again in Settings', 1], email_not_verified: ['Verify the YouTube account\u2019s email to like it', 1],
   };
   function likeLine(p) {
     if (p.likedAt) return dt('Liked', at(p.likedAt), 'on YouTube');
@@ -280,16 +280,16 @@ ${PRESAVE_UI_JS}
 
   load();
 })();
-`
+`;
 
 export const PRESAVE_PAGE: UiPage = {
-  path: '/presave',
+  path: "/presave",
   html: shell({
-    nav: 'presaves',
-    title: 'Pre-saved track',
-    actions: `<a class="btn" href="/ui/presaves"${tipAttr('Every pre-saved track.')}>All pre-saves</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr('How often tracks are looked up, pushes, giving up.')}>Settings</a>`,
+    nav: "presaves",
+    title: "Pre-saved track",
+    actions: `<a class="btn" href="/ui/presaves"${tipAttr("Every pre-saved track.")}>All pre-saves</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr("How often tracks are looked up, pushes, giving up.")}>Settings</a>`,
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

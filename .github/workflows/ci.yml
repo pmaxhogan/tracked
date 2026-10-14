@@ -1,20 +1,69 @@
+# stack-template: ci/node-ts@1 a59d1f6b3480
 name: CI
 
+# Standard Node + TypeScript CI (stack standard ci.node-ts). One job, in the order a
+# failure is cheapest to read: typecheck, lint, format, ASCII, then tests with coverage.
+#   - runs on every PR and on every push to main (repos that ship by
+#     direct push would otherwise never be checked)
+#   - workflow_dispatch exists on purpose: a Dependabot merge made with GITHUB_TOKEN
+#     triggers no push workflows, so the auto-merge fallback dispatches this one
+#   - least privilege: read-only contents, nothing else
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes an older run. Never cancel a push run on the
+# default branch, which may be the one computing a coverage baseline.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+
+      # .node-version is the single source of truth for local dev and CI.
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version-file: .node-version
           cache: npm
+
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npx eslint .
+
+      - name: Prettier
+        run: npx prettier --check .
+
+      # Em/en dashes and other non-ASCII punctuation break terminals and email clients.
+      - name: ASCII check
+        run: node scripts/check-ascii.mjs
+
+      # json-summary feeds the coverage compare job; cobertura feeds GitHub Code
+      # Quality's native coverage rule.
+      - name: Test with coverage
+        run: >-
+          npx vitest run --coverage
+          --coverage.reporter=text
+          --coverage.reporter=json-summary
+          --coverage.reporter=cobertura
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
+          if-no-files-found: ignore

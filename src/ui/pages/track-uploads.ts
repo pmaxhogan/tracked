@@ -3,10 +3,10 @@
 // the "Track uploads" playlist (lib/track-uploads.ts). Two tabs: the requests
 // (a TKTable over GET /ui/api/track-uploads, with counts and today's claims)
 // and the banned source URLs (GET /ui/api/track-uploads/bans).
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { PRESAVE_UI_CSS, PRESAVE_UI_JS, TRACK_UPLOADS_SETTINGS_HREF } from './presaves'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { PRESAVE_UI_CSS, PRESAVE_UI_JS, TRACK_UPLOADS_SETTINGS_HREF } from "./presaves";
 
 const BODY = /* html */ `
   <div id="tu-sum" class="ps-headline" role="status"><span class="skel" style="width: 14rem"></span></div>
@@ -19,12 +19,12 @@ const BODY = /* html */ `
     <form id="tu-ban" class="tk-card tu-ban" autocomplete="off" novalidate>
       <label class="tu-ban-url"><span class="lbl">Ban a source URL</span><input id="tu-ban-url" type="text" inputmode="url" placeholder="https://soundcloud.com/artist/track" aria-label="Source URL to ban"></label>
       <label class="tu-ban-why"><span class="lbl">Reason (optional)</span><input id="tu-ban-why" type="text" maxlength="500" placeholder="preview clip, wrong track" aria-label="Why it is banned"></label>
-      <button type="submit" id="tu-ban-go" class="btn danger"${tipAttr('mkvid never rips this URL. Requests waiting on it are banned and the next allowed source is queued.')}>Ban</button>
+      <button type="submit" id="tu-ban-go" class="btn danger"${tipAttr("mkvid never rips this URL. Requests waiting on it are banned and the next allowed source is queued.")}>Ban</button>
       <p id="tu-ban-msg" class="tu-ban-msg" role="status"></p>
     </form>
     <div id="tb-table"></div>
   </div>
-`
+`;
 
 const CSS = /* css */ `
   ${PRESAVE_UI_CSS}
@@ -53,7 +53,7 @@ const CSS = /* css */ `
   .tu-dact input { font: inherit; font-size: var(--fs-sm); color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); padding: 8px 10px; }
   .tu-dact .tk-row .btn { flex: 1 1 auto; }
   .tu-dact .bad { color: var(--danger); font-size: var(--fs-sm); }
-`
+`;
 
 const JS = /* js */ `
 (() => {
@@ -75,7 +75,7 @@ ${PRESAVE_UI_JS}
   const count = (k) => (resp) => (resp && resp.counts ? Number(resp.counts[k]) || 0 : 0);
   const canBan = (u) => !u.sourceBanned && u.status !== 'banned' && u.status !== 'superseded' && u.status !== 'done';
 
-  // ── header: today's claims, the playlist, the settings ──
+  // -- header: today's claims, the playlist, the settings --
   const $head = $('tu-sum');
   let today = null, playlist = null;
   function paintHead() {
@@ -91,7 +91,7 @@ ${PRESAVE_UI_JS}
   }
   TK.api.get('/ui/api/track-uploads/playlist').then((r) => { if (r && r.ok && r.data) { playlist = r.data; paintHead(); } }).catch(() => {});
 
-  // ── uploads ──
+  // -- uploads --
   const uploads = TKTable.create($('tu-table'), {
     id: 'tu',
     source: { url: '/ui/api/track-uploads' },
@@ -166,7 +166,7 @@ ${PRESAVE_UI_JS}
     });
   }
 
-  // ── one request in the drawer ──
+  // -- one request in the drawer --
   function openUpload(u) {
     const src = TK.safeHref(u.sourceUrl), v = TK.safeHref(u.youtubeMusicUrl);
     const dt = (k, val) => (val ? '<dt>' + esc(k) + '</dt><dd>' + val + '</dd>' : '');
@@ -205,7 +205,7 @@ ${PRESAVE_UI_JS}
     };
   }
 
-  // ── banned links ──
+  // -- banned links --
   let bans = null;
   function makeBans() {
     if (bans) return bans;
@@ -254,7 +254,7 @@ ${PRESAVE_UI_JS}
     });
   });
 
-  // ── tabs ──
+  // -- tabs --
   const TABS = ['up', 'bans'];
   function showTab(t, save) {
     for (const k of TABS) {
@@ -273,17 +273,18 @@ ${PRESAVE_UI_JS}
   showTab(TKTable.qs.get('tab') === 'bans' ? 'bans' : 'up', false);
   paintHead();
 })();
-`
+`;
 
 export const TRACK_UPLOADS_PAGE: UiPage = {
-  path: '/track-uploads',
+  path: "/track-uploads",
   html: shell({
-    nav: 'track-uploads',
-    title: 'Track uploads',
-    description: 'Pre-saved tracks YouTube never got, ripped by mkvid from another site and uploaded into one playlist.',
-    actions: `<a class="btn" href="/ui/presaves"${tipAttr('Every pre-saved track.')}>Pre-saves</a><a class="btn ghost" href="${TRACK_UPLOADS_SETTINGS_HREF}"${tipAttr('Daily cap, sources, playlist, retries.')}>Settings</a>`,
+    nav: "track-uploads",
+    title: "Track uploads",
+    description:
+      "Pre-saved tracks YouTube never got, ripped by mkvid from another site and uploaded into one playlist.",
+    actions: `<a class="btn" href="/ui/presaves"${tipAttr("Every pre-saved track.")}>Pre-saves</a><a class="btn ghost" href="${TRACK_UPLOADS_SETTINGS_HREF}"${tipAttr("Daily cap, sources, playlist, retries.")}>Settings</a>`,
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

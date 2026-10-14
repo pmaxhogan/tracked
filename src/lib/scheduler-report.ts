@@ -9,22 +9,31 @@
  * upstream, so both pass through `redactText` first: no URL other than
  * 1001tracklists, no bearer or token value.
  */
-import type { Env } from '../types'
-import { dbOf, parseJson } from './db'
-import { labelFromSetUrl } from './activity'
-import { listSchedulerTicks, type TickHistoryRow } from './tick-history'
-import { linkPrewarmPending } from './link-prewarm'
-import type { TableDef } from './table-query'
+import type { Env } from "../types";
+import { dbOf, parseJson } from "./db";
+import { labelFromSetUrl } from "./activity";
+import { listSchedulerTicks, type TickHistoryRow } from "./tick-history";
+import { linkPrewarmPending } from "./link-prewarm";
+import type { TableDef } from "./table-query";
 
-export const SCHEDULER_CLASSES = ['new', 'verify', 'recheck', 'backfill'] as const
-export const SCHEDULER_KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'index_catchup', 'dj_backfill', 'presave'] as const
-const DAY = 86400
+export const SCHEDULER_CLASSES = ["new", "verify", "recheck", "backfill"] as const;
+export const SCHEDULER_KINDS = [
+  "discovery",
+  "set",
+  "verify",
+  "render_feed",
+  "recheck",
+  "index_catchup",
+  "dj_backfill",
+  "presave",
+] as const;
+const DAY = 86400;
 /** Ticks scanned back (newest first) for "last ran" beyond the 24 h window: 14 days of 5-minute ticks. */
-const LAST_RUN_SCAN = 4100
-const MAX_TEXT = 300
+const LAST_RUN_SCAN = 4100;
+const MAX_TEXT = 300;
 
 /** Outcomes that mean the item did its job (sync 'ok', a backfill step that moved or finished). */
-const GOOD_OUTCOMES = new Set(['ok', 'stepped', 'done', 'no_cursor'])
+const GOOD_OUTCOMES = new Set(["ok", "stepped", "done", "no_cursor"]);
 
 /**
  * Strips anything secret-looking from a free-text reason or error: URLs other
@@ -32,40 +41,44 @@ const GOOD_OUTCOMES = new Set(['ok', 'stepped', 'done', 'no_cursor'])
  * `Bearer x`, `token=x` style pairs. Caps the length.
  */
 export function redactText(s: string | null | undefined): string | null {
-  if (s == null) return null
+  if (s == null) return null;
   let out = String(s)
     .replace(/\bhttps?:\/\/[^\s"'<>]+/gi, (u) => {
       try {
-        const h = new URL(u).hostname.toLowerCase()
-        if (h === '1001tracklists.com' || h.endsWith('.1001tracklists.com')) return u.split(/[?#]/)[0]!
+        const h = new URL(u).hostname.toLowerCase();
+        if (h === "1001tracklists.com" || h.endsWith(".1001tracklists.com"))
+          return u.split(/[?#]/)[0]!;
       } catch {
         // not a URL after all: redact it anyway
       }
-      return '[url]'
+      return "[url]";
     })
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
-    .replace(/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
-    .replace(/\b(token|key|secret|password|passwd|pwd|auth|authorization|apikey|api_key|sig|signature)\s*[=:]\s*[^\s&,;"']+/gi, '$1=[redacted]')
-  if (out.length > MAX_TEXT) out = out.slice(0, MAX_TEXT) + '…'
-  return out
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+    .replace(/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [redacted]")
+    .replace(
+      /\b(token|key|secret|password|passwd|pwd|auth|authorization|apikey|api_key|sig|signature)\s*[=:]\s*[^\s&,;"']+/gi,
+      "$1=[redacted]",
+    );
+  if (out.length > MAX_TEXT) out = out.slice(0, MAX_TEXT) + "…";
+  return out;
 }
 
 export type TickItemView = {
-  kind: string
-  cls: string
-  slug: string
-  url: string | null
+  kind: string;
+  cls: string;
+  slug: string;
+  url: string | null;
   /** The set's label from its URL, or null for a DJ-level item (discovery, backfill). */
-  label: string | null
-  outcome: string
-  stopReason: string | null
-}
+  label: string | null;
+  outcome: string;
+  stopReason: string | null;
+};
 
-export type TickView = Omit<TickHistoryRow, 'items' | 'stoppedBy' | 'error'> & {
-  stoppedBy: string | null
-  error: string | null
-  items: TickItemView[]
-}
+export type TickView = Omit<TickHistoryRow, "items" | "stoppedBy" | "error"> & {
+  stoppedBy: string | null;
+  error: string | null;
+  items: TickItemView[];
+};
 
 function viewOf(t: TickHistoryRow): TickView {
   return {
@@ -79,22 +92,33 @@ function viewOf(t: TickHistoryRow): TickView {
     stoppedBy: redactText(t.stoppedBy),
     error: redactText(t.error),
     items: (Array.isArray(t.items) ? t.items : []).map((x) => {
-      const url = typeof x.url === 'string' && x.url ? x.url : null
+      const url = typeof x.url === "string" && x.url ? x.url : null;
       return {
-        kind: String(x.kind ?? ''),
-        cls: String(x.cls ?? ''),
-        slug: String(x.slug ?? ''),
+        kind: String(x.kind ?? ""),
+        cls: String(x.cls ?? ""),
+        slug: String(x.slug ?? ""),
         url,
         label: url ? labelFromSetUrl(url) : null,
-        outcome: String(x.outcome ?? ''),
+        outcome: String(x.outcome ?? ""),
         stopReason: redactText(x.stopReason),
-      }
+      };
     }),
-  }
+  };
 }
 
 /** A raw `scheduler_ticks` row, as the table query selects it. */
-type TickDbRow = { id: number; at: number; ms: number | null; skipped: string | null; drawn: number; ran: number; stopped_by: string | null; due: string | null; items: string | null; error: string | null }
+type TickDbRow = {
+  id: number;
+  at: number;
+  ms: number | null;
+  skipped: string | null;
+  drawn: number;
+  ran: number;
+  stopped_by: string | null;
+  due: string | null;
+  items: string | null;
+  error: string | null;
+};
 
 /** A tick row ready for a browser: parsed, labelled and redacted (viewOf). */
 export function tickViewFromDb(x: TickDbRow): TickView {
@@ -107,13 +131,14 @@ export function tickViewFromDb(x: TickDbRow): TickView {
     ran: x.ran,
     stoppedBy: x.stopped_by,
     due: parseJson<Record<string, number> | null>(x.due, null),
-    items: parseJson<TickHistoryRow['items']>(x.items, []),
+    items: parseJson<TickHistoryRow["items"]>(x.items, []),
     error: x.error,
-  })
+  });
 }
 
 /** An outcome that means an item failed (counts against it, or threw). */
-const FAILED_ITEMS_SQL = "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) WHERE json_extract(value, '$.outcome') IN ('failed', 'threw'))"
+const FAILED_ITEMS_SQL =
+  "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) WHERE json_extract(value, '$.outcome') IN ('failed', 'threw'))";
 
 /**
  * The tick list (GET /ui/api/scheduler/ticks), a data-table endpoint
@@ -123,66 +148,71 @@ const FAILED_ITEMS_SQL = "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(i
  * passes through viewOf, so the error and stop reasons are redacted.
  */
 export const TICKS_TABLE: TableDef<TickDbRow, TickView> = {
-  from: 'scheduler_ticks',
-  primaryKey: 'id',
-  defaultSort: '-at',
+  from: "scheduler_ticks",
+  primaryKey: "id",
+  defaultSort: "-at",
   columns: {
-    id: { type: 'number', filterable: false },
-    at: { type: 'datetime', storage: 's' },
-    ms: { type: 'number' },
-    drawn: { type: 'number' },
-    ran: { type: 'number' },
-    dueNew: { sql: "json_extract(due, '$.new')", type: 'number' },
-    dueVerify: { sql: "json_extract(due, '$.verify')", type: 'number' },
-    dueRecheck: { sql: "json_extract(due, '$.recheck')", type: 'number' },
-    dueBackfill: { sql: "json_extract(due, '$.backfill')", type: 'number' },
-    items: { type: 'text', sortable: false, filterable: false, searchable: true },
-    skipped: { type: 'enum' },
-    stoppedBy: { sql: 'stopped_by', type: 'text', sortable: false },
-    error: { type: 'text', sortable: false },
-    failedItems: { sql: FAILED_ITEMS_SQL, type: 'bool', sortable: false },
+    id: { type: "number", filterable: false },
+    at: { type: "datetime", storage: "s" },
+    ms: { type: "number" },
+    drawn: { type: "number" },
+    ran: { type: "number" },
+    dueNew: { sql: "json_extract(due, '$.new')", type: "number" },
+    dueVerify: { sql: "json_extract(due, '$.verify')", type: "number" },
+    dueRecheck: { sql: "json_extract(due, '$.recheck')", type: "number" },
+    dueBackfill: { sql: "json_extract(due, '$.backfill')", type: "number" },
+    items: { type: "text", sortable: false, filterable: false, searchable: true },
+    skipped: { type: "enum" },
+    stoppedBy: { sql: "stopped_by", type: "text", sortable: false },
+    error: { type: "text", sortable: false },
+    failedItems: { sql: FAILED_ITEMS_SQL, type: "bool", sortable: false },
   },
   mapRow: tickViewFromDb,
-}
+};
 
-type Counts = Record<string, number>
-const bump = (m: Counts, k: string, n = 1) => { m[k] = (m[k] ?? 0) + n }
-const zeros = (keys: readonly string[]): Counts => Object.fromEntries(keys.map((k) => [k, 0]))
+type Counts = Record<string, number>;
+const bump = (m: Counts, k: string, n = 1) => {
+  m[k] = (m[k] ?? 0) + n;
+};
+const zeros = (keys: readonly string[]): Counts => Object.fromEntries(keys.map((k) => [k, 0]));
 
-export type LastRun = { picked: number | null; ok: number | null }
+export type LastRun = { picked: number | null; ok: number | null };
 
 export type SchedulerSummary = {
-  now: number
-  windowSeconds: number
-  ticks: number
+  now: number;
+  windowSeconds: number;
+  ticks: number;
   /** Ticks that picked at least one item. */
-  ranTicks: number
-  skippedTicks: number
-  skipped: Counts
+  ranTicks: number;
+  skippedTicks: number;
+  skipped: Counts;
   /** Ticks that threw (recorded with an error and no result). */
-  errored: number
-  drawn: number
-  items: number
-  byClass: Counts
-  byKind: Counts
-  outcomes: Counts
+  errored: number;
+  drawn: number;
+  items: number;
+  byClass: Counts;
+  byKind: Counts;
+  outcomes: Counts;
   /** Outcomes per kind: where the failures are. */
-  outcomesByKind: Record<string, Counts>
-  stopReasons: Counts
+  outcomesByKind: Record<string, Counts>;
+  stopReasons: Counts;
   /** When an item of each class / kind was last picked, and last went well (unix seconds), over the whole history. */
-  lastRun: { byClass: Record<string, LastRun>; byKind: Record<string, LastRun> }
+  lastRun: { byClass: Record<string, LastRun>; byKind: Record<string, LastRun> };
   /** The newest tick that counted what was due (a floor per class), or null. */
-  latestDue: { at: number; due: Record<string, number> } | null
+  latestDue: { at: number; due: Record<string, number> } | null;
   /** The oldest tick on record (history is kept 14 days), or null when there is none. */
-  oldestTickAt: number | null
+  oldestTickAt: number | null;
   /** Track ids waiting for a link pre-warm lookup (lib/link-prewarm.ts), null when unknown. */
-  linkPrewarmPending: number | null
-}
+  linkPrewarmPending: number | null;
+};
 
-export async function schedulerSummary(env: Env, nowSec = Math.floor(Date.now() / 1000)): Promise<SchedulerSummary> {
-  const db = dbOf(env)
-  const since = nowSec - DAY
-  const recent = await listWindow(env, since)
+export async function schedulerSummary(
+  env: Env,
+  nowSec = Math.floor(Date.now() / 1000),
+): Promise<SchedulerSummary> {
+  const db = dbOf(env);
+  const since = nowSec - DAY;
+  const recent = await listWindow(env, since);
   const s: SchedulerSummary = {
     now: nowSec,
     windowSeconds: DAY,
@@ -202,86 +232,113 @@ export async function schedulerSummary(env: Env, nowSec = Math.floor(Date.now() 
     latestDue: null,
     oldestTickAt: null,
     linkPrewarmPending: null,
-  }
+  };
   for (const t of recent) {
-    s.drawn += t.drawn || 0
-    if (t.error) s.errored++
-    if (t.skipped) { s.skippedTicks++; bump(s.skipped, t.skipped) }
-    if (t.items.length) s.ranTicks++
-    const stop = redactText(t.stoppedBy)
-    if (stop) bump(s.stopReasons, stop)
+    s.drawn += t.drawn || 0;
+    if (t.error) s.errored++;
+    if (t.skipped) {
+      s.skippedTicks++;
+      bump(s.skipped, t.skipped);
+    }
+    if (t.items.length) s.ranTicks++;
+    const stop = redactText(t.stoppedBy);
+    if (stop) bump(s.stopReasons, stop);
     for (const x of t.items) {
-      s.items++
-      bump(s.byClass, String(x.cls))
-      bump(s.byKind, String(x.kind))
-      bump(s.outcomes, String(x.outcome))
-      bump((s.outcomesByKind[String(x.kind)] ??= {}), String(x.outcome))
+      s.items++;
+      bump(s.byClass, String(x.cls));
+      bump(s.byKind, String(x.kind));
+      bump(s.outcomes, String(x.outcome));
+      bump((s.outcomesByKind[String(x.kind)] ??= {}), String(x.outcome));
     }
   }
 
   // Last run per class/kind: newest ticks that ran anything, until every one is seen.
-  for (const k of SCHEDULER_CLASSES) s.lastRun.byClass[k] = { picked: null, ok: null }
-  for (const k of SCHEDULER_KINDS) s.lastRun.byKind[k] = { picked: null, ok: null }
-  const open = () => [...Object.values(s.lastRun.byClass), ...Object.values(s.lastRun.byKind)].some((r) => r.picked === null || r.ok === null)
+  for (const k of SCHEDULER_CLASSES) s.lastRun.byClass[k] = { picked: null, ok: null };
+  for (const k of SCHEDULER_KINDS) s.lastRun.byKind[k] = { picked: null, ok: null };
+  const open = () =>
+    [...Object.values(s.lastRun.byClass), ...Object.values(s.lastRun.byKind)].some(
+      (r) => r.picked === null || r.ok === null,
+    );
   const scan = await db
-    .prepare('SELECT at, items FROM scheduler_ticks WHERE ran > 0 ORDER BY id DESC LIMIT ?')
+    .prepare("SELECT at, items FROM scheduler_ticks WHERE ran > 0 ORDER BY id DESC LIMIT ?")
     .bind(LAST_RUN_SCAN)
-    .all<{ at: number; items: string | null }>()
+    .all<{ at: number; items: string | null }>();
   for (const r of scan.results) {
-    let items: TickHistoryRow['items'] = []
-    try { const v = JSON.parse(r.items || '[]'); if (Array.isArray(v)) items = v } catch { /* skip a bad row */ }
+    let items: TickHistoryRow["items"] = [];
+    try {
+      const v = JSON.parse(r.items || "[]");
+      if (Array.isArray(v)) items = v;
+    } catch {
+      /* skip a bad row */
+    }
     for (const x of items) {
-      const good = GOOD_OUTCOMES.has(String(x.outcome))
-      for (const rec of [(s.lastRun.byClass[String(x.cls)] ??= { picked: null, ok: null }), (s.lastRun.byKind[String(x.kind)] ??= { picked: null, ok: null })]) {
-        if (rec.picked === null) rec.picked = r.at
-        if (good && rec.ok === null) rec.ok = r.at
+      const good = GOOD_OUTCOMES.has(String(x.outcome));
+      for (const rec of [
+        (s.lastRun.byClass[String(x.cls)] ??= { picked: null, ok: null }),
+        (s.lastRun.byKind[String(x.kind)] ??= { picked: null, ok: null }),
+      ]) {
+        if (rec.picked === null) rec.picked = r.at;
+        if (good && rec.ok === null) rec.ok = r.at;
       }
     }
-    if (!open()) break
+    if (!open()) break;
   }
 
-  const due = await db.prepare('SELECT at, due FROM scheduler_ticks WHERE due IS NOT NULL ORDER BY id DESC LIMIT 1').first<{ at: number; due: string }>()
+  const due = await db
+    .prepare("SELECT at, due FROM scheduler_ticks WHERE due IS NOT NULL ORDER BY id DESC LIMIT 1")
+    .first<{ at: number; due: string }>();
   if (due) {
     try {
-      const d = JSON.parse(due.due)
-      if (d && typeof d === 'object') s.latestDue = { at: due.at, due: Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Number(v) || 0])) }
-    } catch { /* leave null */ }
+      const d = JSON.parse(due.due);
+      if (d && typeof d === "object")
+        s.latestDue = {
+          at: due.at,
+          due: Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Number(v) || 0])),
+        };
+    } catch {
+      /* leave null */
+    }
   }
-  const oldest = await db.prepare('SELECT MIN(at) AS at FROM scheduler_ticks').first<{ at: number | null }>()
-  s.oldestTickAt = oldest?.at ?? null
-  s.linkPrewarmPending = await linkPrewarmPending(env)
-  return s
+  const oldest = await db
+    .prepare("SELECT MIN(at) AS at FROM scheduler_ticks")
+    .first<{ at: number | null }>();
+  s.oldestTickAt = oldest?.at ?? null;
+  s.linkPrewarmPending = await linkPrewarmPending(env);
+  return s;
 }
 
 /** Every tick since `since`, newest first, paged through listSchedulerTicks (288 a day at a 5-minute cron). */
 async function listWindow(env: Env, since: number): Promise<TickHistoryRow[]> {
-  const out: TickHistoryRow[] = []
-  let before: number | null = null
+  const out: TickHistoryRow[] = [];
+  let before: number | null = null;
   for (let i = 0; i < 10; i++) {
-    const page = await listSchedulerTicks(env, { limit: 500, before })
+    const page = await listSchedulerTicks(env, { limit: 500, before });
     for (const t of page) {
-      if (t.at < since) return out
-      out.push(t)
+      if (t.at < since) return out;
+      out.push(t);
     }
-    if (page.length < 500) return out
-    before = page[page.length - 1]!.id
+    if (page.length < 500) return out;
+    before = page[page.length - 1]!.id;
   }
-  return out
+  return out;
 }
 
 export type DjStarvationRow = {
-  slug: string
+  slug: string;
   /** The DJ's name as the last sync saw it, or null. */
-  name: string | null
-  nextDiscoveryAt: number | null
-  nextBackfillAt: number | null
-  /** now − next_*_at when that time has passed (seconds), 0 or less when not yet due, null when not scheduled. */
-  discoveryOverdue: number | null
-  backfillOverdue: number | null
-}
+  name: string | null;
+  nextDiscoveryAt: number | null;
+  nextBackfillAt: number | null;
+  /** now - next_*_at when that time has passed (seconds), 0 or less when not yet due, null when not scheduled. */
+  discoveryOverdue: number | null;
+  backfillOverdue: number | null;
+};
 
 /** Every subscribed DJ's discovery and backfill due times, most overdue first. */
-export async function djStarvation(env: Env, nowSec = Math.floor(Date.now() / 1000)): Promise<DjStarvationRow[]> {
+export async function djStarvation(
+  env: Env,
+  nowSec = Math.floor(Date.now() / 1000),
+): Promise<DjStarvationRow[]> {
   const res = await dbOf(env)
     .prepare(
       `SELECT s.slug AS slug, ss.artist_name AS name, d.next_discovery_at AS nd, d.next_backfill_at AS nb
@@ -290,7 +347,7 @@ export async function djStarvation(env: Env, nowSec = Math.floor(Date.now() / 10
          LEFT JOIN sub_sync ss ON ss.slug = s.slug
         ORDER BY s.position`,
     )
-    .all<{ slug: string; name: string | null; nd: number | null; nb: number | null }>()
+    .all<{ slug: string; name: string | null; nd: number | null; nb: number | null }>();
   const rows = res.results.map((r) => ({
     slug: r.slug,
     name: r.name ?? null,
@@ -298,7 +355,8 @@ export async function djStarvation(env: Env, nowSec = Math.floor(Date.now() / 10
     nextBackfillAt: r.nb ?? null,
     discoveryOverdue: r.nd == null ? null : nowSec - r.nd,
     backfillOverdue: r.nb == null ? null : nowSec - r.nb,
-  }))
-  const worst = (r: DjStarvationRow) => Math.max(r.discoveryOverdue ?? -Infinity, r.backfillOverdue ?? -Infinity)
-  return rows.sort((a, b) => worst(b) - worst(a) || a.slug.localeCompare(b.slug))
+  }));
+  const worst = (r: DjStarvationRow) =>
+    Math.max(r.discoveryOverdue ?? -Infinity, r.backfillOverdue ?? -Infinity);
+  return rows.sort((a, b) => worst(b) - worst(a) || a.slug.localeCompare(b.slug));
 }

@@ -1,9 +1,9 @@
-import type { Env, ParsedTrack } from '../types'
-import { getJson, putJson } from './cache'
-import type { Logger } from './log'
-import { errorFields } from './log'
-import { extractSetDate } from './mkvid'
-import { parseTracklist, type PageRow, type ScrapedTracklist } from './tracklists1001'
+import type { Env, ParsedTrack } from "../types";
+import { getJson, putJson } from "./cache";
+import type { Logger } from "./log";
+import { errorFields } from "./log";
+import { extractSetDate } from "./mkvid";
+import { parseTracklist, type PageRow, type ScrapedTracklist } from "./tracklists1001";
 
 /**
  * The parsed-tracklist KV cache (`tl:v<N>:<slug>`), shared by every path that
@@ -30,7 +30,7 @@ import { parseTracklist, type PageRow, type ScrapedTracklist } from './tracklist
  *      2026-09-29: entries also carry `fetchedAt`, `ttlSeconds`, `tracklistUrl`
  *      (additive, older v4 entries still read; their age is unknown).
  */
-export const TRACKLIST_CACHE_VERSION = 4
+export const TRACKLIST_CACHE_VERSION = 4;
 
 export const TRACKLIST_TTL = {
   /** Every row identified and the set at least 2 days old. */
@@ -44,46 +44,49 @@ export const TRACKLIST_TTL = {
    * background, so a set page that went cold costs no wait on the phone.
    */
   STALE_KEEP: 60 * 60 * 24 * 7,
-} as const
+} as const;
 
 /** A set younger than this is cached for the short TTL whatever its rows say. */
-export const NEW_SET_AGE_SECONDS = 60 * 60 * 24 * 2
+export const NEW_SET_AGE_SECONDS = 60 * 60 * 24 * 2;
 
 export type CachedTracklist = {
-  tracks: ParsedTrack[]
+  tracks: ParsedTrack[];
   /**
    * Every page row, anonymous "ID - ID" rows included (ScrapedTracklist.rows).
    * Only /now-playing reads it, to end a track's slot where an anonymous row
    * starts. Absent on entries written before it existed.
    */
-  rows?: PageRow[]
-  setAppleLink: string | null
-  setYoutubeLink: string | null
-  setSoundcloudLink: string | null
+  rows?: PageRow[];
+  setAppleLink: string | null;
+  setYoutubeLink: string | null;
+  setSoundcloudLink: string | null;
   /** ISO time the page was fetched. Absent on entries written before 2026-09-29. */
-  fetchedAt?: string
+  fetchedAt?: string;
   /** TTL the entry was written with. */
-  ttlSeconds?: number
+  ttlSeconds?: number;
   /** The tracklist URL the entry was fetched from (lets a purge by slug refetch). */
-  tracklistUrl?: string
+  tracklistUrl?: string;
   /** Set date (YYYY-MM-DD) when one could be read, else null. */
-  setDate?: string | null
-}
+  setDate?: string | null;
+};
 
-/** 1001tracklists' short id from a tracklist URL (`/tracklist/<slug>/…`), or the input. */
+/** 1001tracklists' short id from a tracklist URL (`/tracklist/<slug>/...`), or the input. */
 export function tracklistSlug(tracklistUrl: string): string {
-  return tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
+  return tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl;
 }
 
 export function tracklistCacheKey(slug: string): string {
-  return `tl:v${TRACKLIST_CACHE_VERSION}:${slug}`
+  return `tl:v${TRACKLIST_CACHE_VERSION}:${slug}`;
 }
 
 /** Whether every row of the list is identified: no "ID" track and no anonymous row. */
-export function fullyIdentified(list: { tracks: readonly ParsedTrack[]; rows?: readonly PageRow[] }): boolean {
-  if (list.tracks.some((t) => t.isUnidentified)) return false
-  if (list.rows?.some((r) => r.anonymous || r.isUnidentified)) return false
-  return true
+export function fullyIdentified(list: {
+  tracks: readonly ParsedTrack[];
+  rows?: readonly PageRow[];
+}): boolean {
+  if (list.tracks.some((t) => t.isUnidentified)) return false;
+  if (list.rows?.some((r) => r.anonymous || r.isUnidentified)) return false;
+  return true;
 }
 
 /** The TTL decision 19 gives a list. `setDate` is YYYY-MM-DD or null (unknown = not new). */
@@ -92,18 +95,18 @@ export function tracklistCacheTtl(
   setDate: string | null,
   nowMs: number = Date.now(),
 ): number {
-  if (!fullyIdentified(list)) return TRACKLIST_TTL.SHORT
+  if (!fullyIdentified(list)) return TRACKLIST_TTL.SHORT;
   if (setDate) {
-    const t = Date.parse(`${setDate}T00:00:00Z`)
-    if (Number.isFinite(t) && nowMs - t < NEW_SET_AGE_SECONDS * 1000) return TRACKLIST_TTL.SHORT
+    const t = Date.parse(`${setDate}T00:00:00Z`);
+    if (Number.isFinite(t) && nowMs - t < NEW_SET_AGE_SECONDS * 1000) return TRACKLIST_TTL.SHORT;
   }
-  return TRACKLIST_TTL.FULL
+  return TRACKLIST_TTL.FULL;
 }
 
 /** Why a parse was not cached, or the entry that was. */
 export type CacheWriteResult =
   | { cached: true; key: string; value: CachedTracklist; ttlSeconds: number }
-  | { cached: false; key: string; reason: 'decoy' | 'empty' }
+  | { cached: false; key: string; reason: "decoy" | "empty" };
 
 /**
  * Write one parsed page to the cache (the only writer of `tl:` entries).
@@ -114,22 +117,34 @@ export type CacheWriteResult =
 export async function cacheParsedTracklist(
   env: Env,
   tracklistUrl: string,
-  scraped: Pick<ScrapedTracklist, 'tracks' | 'rows' | 'setAppleLink' | 'setYoutubeLink' | 'setSoundcloudLink' | 'decoy'>,
+  scraped: Pick<
+    ScrapedTracklist,
+    "tracks" | "rows" | "setAppleLink" | "setYoutubeLink" | "setSoundcloudLink" | "decoy"
+  >,
   log: Logger,
   opts: { html?: string; source?: string; nowMs?: number } = {},
 ): Promise<CacheWriteResult> {
-  const key = tracklistCacheKey(tracklistSlug(tracklistUrl))
+  const key = tracklistCacheKey(tracklistSlug(tracklistUrl));
   if (scraped.decoy.suspected) {
-    log.warn('cache.skip_decoy', { key, source: opts.source ?? null, named: scraped.decoy.named, mismatched: scraped.decoy.mismatched })
-    return { cached: false, key, reason: 'decoy' }
+    log.warn("cache.skip_decoy", {
+      key,
+      source: opts.source ?? null,
+      named: scraped.decoy.named,
+      mismatched: scraped.decoy.mismatched,
+    });
+    return { cached: false, key, reason: "decoy" };
   }
   if (scraped.tracks.length === 0) {
-    log.warn('cache.skip_empty', { key, source: opts.source ?? null, reason: 'parsed 0 tracks; likely a transient captcha — not caching' })
-    return { cached: false, key, reason: 'empty' }
+    log.warn("cache.skip_empty", {
+      key,
+      source: opts.source ?? null,
+      reason: "parsed 0 tracks; likely a transient captcha - not caching",
+    });
+    return { cached: false, key, reason: "empty" };
   }
-  const nowMs = opts.nowMs ?? Date.now()
-  const setDate = extractSetDate(tracklistUrl, opts.html ?? '')
-  const ttlSeconds = tracklistCacheTtl(scraped, setDate, nowMs)
+  const nowMs = opts.nowMs ?? Date.now();
+  const setDate = extractSetDate(tracklistUrl, opts.html ?? "");
+  const ttlSeconds = tracklistCacheTtl(scraped, setDate, nowMs);
   const value: CachedTracklist = {
     tracks: scraped.tracks,
     rows: scraped.rows,
@@ -140,17 +155,17 @@ export async function cacheParsedTracklist(
     ttlSeconds,
     tracklistUrl,
     setDate,
-  }
-  await putJson(env.CACHE, key, value, ttlSeconds + TRACKLIST_TTL.STALE_KEEP)
-  log.info('cache.put', {
+  };
+  await putJson(env.CACHE, key, value, ttlSeconds + TRACKLIST_TTL.STALE_KEEP);
+  log.info("cache.put", {
     key,
     source: opts.source ?? null,
     trackCount: scraped.tracks.length,
     unidentifiedCount: scraped.tracks.filter((t) => t.isUnidentified).length,
     setDate,
     ttlSeconds,
-  })
-  return { cached: true, key, value, ttlSeconds }
+  });
+  return { cached: true, key, value, ttlSeconds };
 }
 
 /**
@@ -167,40 +182,64 @@ export async function cacheTracklistFromHtml(
   /** The caller's parse of `html` (null = no rows: nothing to cache); undefined = parse here. */
   parsed?: ScrapedTracklist | null,
 ): Promise<CacheWriteResult | null> {
-  if (!/\/tracklist\/[^/]+\//.test(tracklistUrl)) return null
-  if (parsed === null) return null
+  if (!/\/tracklist\/[^/]+\//.test(tracklistUrl)) return null;
+  if (parsed === null) return null;
   try {
-    return await cacheParsedTracklist(env, tracklistUrl, parsed ?? parseTracklist(tracklistUrl, html), log, { html, source })
+    return await cacheParsedTracklist(
+      env,
+      tracklistUrl,
+      parsed ?? parseTracklist(tracklistUrl, html),
+      log,
+      { html, source },
+    );
   } catch (e) {
-    log.warn('cache.write_through_failed', { tracklistUrl, source, ...errorFields(e) })
-    return null
+    log.warn("cache.write_through_failed", { tracklistUrl, source, ...errorFields(e) });
+    return null;
   }
 }
 
 /** Seconds since `fetchedAt`, or null when the entry predates the stamp. */
-export function cacheAgeSeconds(value: Pick<CachedTracklist, 'fetchedAt'>, nowMs: number = Date.now()): number | null {
-  if (!value.fetchedAt) return null
-  const t = Date.parse(value.fetchedAt)
-  return Number.isFinite(t) ? Math.max(0, Math.round((nowMs - t) / 1000)) : null
+export function cacheAgeSeconds(
+  value: Pick<CachedTracklist, "fetchedAt">,
+  nowMs: number = Date.now(),
+): number | null {
+  if (!value.fetchedAt) return null;
+  const t = Date.parse(value.fetchedAt);
+  return Number.isFinite(t) ? Math.max(0, Math.round((nowMs - t) / 1000)) : null;
 }
 
 /** Whether an entry is past the TTL it was written with (entries without the stamps never are: KV expired them). */
-export function isStaleTracklist(value: Pick<CachedTracklist, 'fetchedAt' | 'ttlSeconds'>, nowMs: number = Date.now()): boolean {
-  const age = cacheAgeSeconds(value, nowMs)
-  return age !== null && typeof value.ttlSeconds === 'number' && age > value.ttlSeconds
+export function isStaleTracklist(
+  value: Pick<CachedTracklist, "fetchedAt" | "ttlSeconds">,
+  nowMs: number = Date.now(),
+): boolean {
+  const age = cacheAgeSeconds(value, nowMs);
+  return age !== null && typeof value.ttlSeconds === "number" && age > value.ttlSeconds;
 }
 
 /** The KV entry for a slug and whether it is past its TTL. Legacy bare-array entries are normalized. */
-export async function readCachedTracklistEntry(env: Env, slug: string, nowMs: number = Date.now()): Promise<{ value: CachedTracklist; stale: boolean } | undefined> {
-  const cached = await getJson<CachedTracklist | ParsedTrack[]>(env.CACHE, tracklistCacheKey(slug))
-  if (!cached) return undefined
-  if (Array.isArray(cached)) return { value: { tracks: cached, setAppleLink: null, setYoutubeLink: null, setSoundcloudLink: null }, stale: false }
-  return { value: cached, stale: isStaleTracklist(cached, nowMs) }
+export async function readCachedTracklistEntry(
+  env: Env,
+  slug: string,
+  nowMs: number = Date.now(),
+): Promise<{ value: CachedTracklist; stale: boolean } | undefined> {
+  const cached = await getJson<CachedTracklist | ParsedTrack[]>(env.CACHE, tracklistCacheKey(slug));
+  if (!cached) return undefined;
+  if (Array.isArray(cached))
+    return {
+      value: { tracks: cached, setAppleLink: null, setYoutubeLink: null, setSoundcloudLink: null },
+      stale: false,
+    };
+  return { value: cached, stale: isStaleTracklist(cached, nowMs) };
 }
 
 /** The cached entry for a slug, if any and within its TTL (`allowStale`: also one past it). */
-export async function readCachedTracklist(env: Env, slug: string, opts: { allowStale?: boolean } = {}): Promise<CachedTracklist | undefined> {
-  const e = await readCachedTracklistEntry(env, slug)
-  if (!e || (e.stale && !opts.allowStale)) return undefined
-  return e.value
+export async function readCachedTracklist(
+  env: Env,
+  slug: string,
+  opts: { allowStale?: boolean } = {},
+): Promise<CachedTracklist | undefined> {
+  const e = await readCachedTracklistEntry(env, slug);
+  if (!e || (e.stale && !opts.allowStale)) return undefined;
+  return e.value;
 }

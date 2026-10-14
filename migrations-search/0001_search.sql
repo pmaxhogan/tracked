@@ -1,4 +1,4 @@
--- Search index (docs/superpowers/specs/2026-09-30-tracked-ui-redesign-design.md §9),
+-- Search index (docs/superpowers/specs/2026-09-30-tracked-ui-redesign-design.md section 9),
 -- in its own D1 database: FTS5 virtual tables would stop `wrangler d1 export`
 -- working for the main database. Everything here is rebuildable from verified
 -- lists (src/lib/search/index.ts), so this database is never exported.

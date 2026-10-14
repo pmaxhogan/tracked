@@ -1,8 +1,8 @@
 // Captchas page: every pending challenge, polled every 15 s, as a data table
 // (TKTable, local mode: tlpool answers the whole list). A row opens its
 // captcha; every poll hands the table the new rows, keeping its sort.
-import { shell } from '../shell'
-import { POOL_CSS, COMMON_JS } from './pool-common'
+import { shell } from "../shell";
+import { POOL_CSS, COMMON_JS } from "./pool-common";
 
 const JS = /* js */ `
 (() => {
@@ -35,7 +35,7 @@ ${COMMON_JS}
       defaultSort: 'expiresAt',
       search: false,
       onRowClick: (c) => { if (typeof location !== 'undefined') location.href = '/ui/captcha/' + encodeURIComponent(c.id); },
-      actions: (c) => '<a class="btn small primary" href="/ui/captcha/' + encodeURIComponent(c.id) + '">Solve →</a>',
+      actions: (c) => '<a class="btn small primary" href="/ui/captcha/' + encodeURIComponent(c.id) + '">Solve -></a>',
       empty: 'No pending challenges. Nothing is waiting for you.',
     });
     return r;
@@ -44,13 +44,13 @@ ${COMMON_JS}
   const note = (t) => { $('list-note').hidden = false; $('list-note').innerHTML = '<div class="banner info">' + esc(t) + '</div>'; };
   poller(load, 15000, { onAuth: () => note(SIGN_IN_AGAIN), onTimeout: () => note(STOPPED_15) });
 })();
-`
+`;
 
 export const CAPTCHA_LIST_HTML = shell({
-  nav: 'captcha',
-  title: 'Captchas',
+  nav: "captcha",
+  title: "Captchas",
   body: '<div id="list-note" hidden></div><div id="list-err" hidden></div><div id="list"><div class="empty">loading…</div></div>',
   css: POOL_CSS,
   js: JS,
   ownNavCount: true,
-})
+});

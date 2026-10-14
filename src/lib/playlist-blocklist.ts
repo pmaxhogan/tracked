@@ -15,30 +15,40 @@
  * import it without a cycle through lib/playlist-hygiene.ts.
  */
 
-import type { Env } from '../types'
-import { batchChunked, dbOf } from './db'
+import type { Env } from "../types";
+import { batchChunked, dbOf } from "./db";
 
-export type RemovedReason = 'owner' | 'dead' | 'button'
+export type RemovedReason = "owner" | "dead" | "button";
 
-const nowSeconds = () => Math.floor(Date.now() / 1000)
+const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 /** Video ids that must never be (re-)added to `playlistId`. */
 export async function blockedIds(env: Env, playlistId: string): Promise<Set<string>> {
-  const res = await dbOf(env).prepare('SELECT video_id FROM removed_videos WHERE playlist_id = ?').bind(playlistId).all<{ video_id: string }>()
-  return new Set(res.results.map((r) => r.video_id))
+  const res = await dbOf(env)
+    .prepare("SELECT video_id FROM removed_videos WHERE playlist_id = ?")
+    .bind(playlistId)
+    .all<{ video_id: string }>();
+  return new Set(res.results.map((r) => r.video_id));
 }
 
 export async function isBlocked(env: Env, playlistId: string, videoId: string): Promise<boolean> {
   const row = await dbOf(env)
-    .prepare('SELECT 1 AS x FROM removed_videos WHERE playlist_id = ? AND video_id = ?')
+    .prepare("SELECT 1 AS x FROM removed_videos WHERE playlist_id = ? AND video_id = ?")
     .bind(playlistId, videoId)
-    .first<{ x: number }>()
-  return !!row
+    .first<{ x: number }>();
+  return !!row;
 }
 
 export async function recordRemoved(
   env: Env,
-  r: { playlistId: string; videoId: string; slug: string | null; setUrl: string | null; reason: RemovedReason; at?: number },
+  r: {
+    playlistId: string;
+    videoId: string;
+    slug: string | null;
+    setUrl: string | null;
+    reason: RemovedReason;
+    at?: number;
+  },
 ): Promise<void> {
   await dbOf(env)
     .prepare(
@@ -46,27 +56,52 @@ export async function recordRemoved(
        ON CONFLICT(playlist_id, video_id) DO NOTHING`,
     )
     .bind(r.playlistId, r.videoId, r.slug, r.setUrl, r.reason, r.at ?? nowSeconds())
-    .run()
+    .run();
 }
 
 export async function unblock(env: Env, playlistId: string, videoId: string): Promise<void> {
-  await dbOf(env).prepare('DELETE FROM removed_videos WHERE playlist_id = ? AND video_id = ?').bind(playlistId, videoId).run()
+  await dbOf(env)
+    .prepare("DELETE FROM removed_videos WHERE playlist_id = ? AND video_id = ?")
+    .bind(playlistId, videoId)
+    .run();
 }
 
 /** Last complete listing of `playlistId`, as recorded by the comparison. */
 export async function playlistMembers(env: Env, playlistId: string): Promise<Set<string>> {
-  const res = await dbOf(env).prepare('SELECT video_id FROM playlist_members WHERE playlist_id = ?').bind(playlistId).all<{ video_id: string }>()
-  return new Set(res.results.map((r) => r.video_id))
+  const res = await dbOf(env)
+    .prepare("SELECT video_id FROM playlist_members WHERE playlist_id = ?")
+    .bind(playlistId)
+    .all<{ video_id: string }>();
+  return new Set(res.results.map((r) => r.video_id));
 }
 
 /** Replace the recorded listing of `playlistId` with `present` (diff-only writes). */
-export async function savePlaylistMembers(env: Env, playlistId: string, present: ReadonlySet<string>, at = nowSeconds()): Promise<void> {
-  const db = dbOf(env)
-  const before = await playlistMembers(env, playlistId)
-  const stmts: D1PreparedStatement[] = []
-  for (const id of before) if (!present.has(id)) stmts.push(db.prepare('DELETE FROM playlist_members WHERE playlist_id = ? AND video_id = ?').bind(playlistId, id))
-  for (const id of present) if (!before.has(id)) stmts.push(db.prepare('INSERT OR IGNORE INTO playlist_members (playlist_id, video_id, seen_at) VALUES (?, ?, ?)').bind(playlistId, id, at))
-  await batchChunked(db, stmts)
+export async function savePlaylistMembers(
+  env: Env,
+  playlistId: string,
+  present: ReadonlySet<string>,
+  at = nowSeconds(),
+): Promise<void> {
+  const db = dbOf(env);
+  const before = await playlistMembers(env, playlistId);
+  const stmts: D1PreparedStatement[] = [];
+  for (const id of before)
+    if (!present.has(id))
+      stmts.push(
+        db
+          .prepare("DELETE FROM playlist_members WHERE playlist_id = ? AND video_id = ?")
+          .bind(playlistId, id),
+      );
+  for (const id of present)
+    if (!before.has(id))
+      stmts.push(
+        db
+          .prepare(
+            "INSERT OR IGNORE INTO playlist_members (playlist_id, video_id, seen_at) VALUES (?, ?, ?)",
+          )
+          .bind(playlistId, id, at),
+      );
+  await batchChunked(db, stmts);
 }
 
 /**
@@ -74,46 +109,70 @@ export async function savePlaylistMembers(env: Env, playlistId: string, present:
  * at the last complete listing and absent from `current` now (removed since;
  * the comparison decides whether by the owner or because it died).
  */
-export async function combinedSkipIds(env: Env, combinedPlaylistId: string, current: ReadonlySet<string>): Promise<Set<string>> {
-  const skip = await blockedIds(env, combinedPlaylistId)
-  for (const id of await playlistMembers(env, combinedPlaylistId)) if (!current.has(id)) skip.add(id)
-  return skip
+export async function combinedSkipIds(
+  env: Env,
+  combinedPlaylistId: string,
+  current: ReadonlySet<string>,
+): Promise<Set<string>> {
+  const skip = await blockedIds(env, combinedPlaylistId);
+  for (const id of await playlistMembers(env, combinedPlaylistId))
+    if (!current.has(id)) skip.add(id);
+  return skip;
 }
 
 /** Single-id form of `combinedSkipIds`, for the sync's live mirror. */
-export async function combinedRefuses(env: Env, combinedPlaylistId: string, videoId: string, current: ReadonlySet<string>): Promise<boolean> {
-  if (current.has(videoId)) return false
-  if (await isBlocked(env, combinedPlaylistId, videoId)) return true
+export async function combinedRefuses(
+  env: Env,
+  combinedPlaylistId: string,
+  videoId: string,
+  current: ReadonlySet<string>,
+): Promise<boolean> {
+  if (current.has(videoId)) return false;
+  if (await isBlocked(env, combinedPlaylistId, videoId)) return true;
   const row = await dbOf(env)
-    .prepare('SELECT 1 AS x FROM playlist_members WHERE playlist_id = ? AND video_id = ?')
+    .prepare("SELECT 1 AS x FROM playlist_members WHERE playlist_id = ? AND video_id = ?")
     .bind(combinedPlaylistId, videoId)
-    .first<{ x: number }>()
-  return !!row
+    .first<{ x: number }>();
+  return !!row;
 }
 
 export async function overriddenIds(env: Env): Promise<Set<string>> {
-  const res = await dbOf(env).prepare('SELECT video_id FROM video_overrides WHERE allow = 1').all<{ video_id: string }>()
-  return new Set(res.results.map((r) => r.video_id))
+  const res = await dbOf(env)
+    .prepare("SELECT video_id FROM video_overrides WHERE allow = 1")
+    .all<{ video_id: string }>();
+  return new Set(res.results.map((r) => r.video_id));
 }
 
 export async function isOverridden(env: Env, videoId: string): Promise<boolean> {
-  const row = await dbOf(env).prepare('SELECT 1 AS x FROM video_overrides WHERE video_id = ? AND allow = 1').bind(videoId).first<{ x: number }>()
-  return !!row
+  const row = await dbOf(env)
+    .prepare("SELECT 1 AS x FROM video_overrides WHERE video_id = ? AND allow = 1")
+    .bind(videoId)
+    .first<{ x: number }>();
+  return !!row;
 }
 
 export async function setOverride(env: Env, videoId: string, at = nowSeconds()): Promise<void> {
   await dbOf(env)
-    .prepare('INSERT INTO video_overrides (video_id, allow, at) VALUES (?, 1, ?) ON CONFLICT(video_id) DO UPDATE SET allow = 1, at = excluded.at')
+    .prepare(
+      "INSERT INTO video_overrides (video_id, allow, at) VALUES (?, 1, ?) ON CONFLICT(video_id) DO UPDATE SET allow = 1, at = excluded.at",
+    )
     .bind(videoId, at)
-    .run()
+    .run();
 }
 
-// ─── confirmed membership (migrations/0011) ─────────────────────────────────
+// --- confirmed membership (migrations/0011) ---------------------------------
 
-export type MembershipSource = 'sync' | 'mkvid' | 'undo' | 'listing' | 'sweep' | 'button' | 'swap' | 'recreate' | 'dead'
+export type MembershipSource =
+  "sync" | "mkvid" | "undo" | "listing" | "sweep" | "button" | "swap" | "recreate" | "dead";
 
 /** tracked put `videoId` into `playlistId` (a confirmed insert), or saw it there in a complete listing. Best effort: never throws. */
-export async function markInPlaylist(env: Env, playlistId: string, videoId: string, source: MembershipSource, at = nowSeconds()): Promise<void> {
+export async function markInPlaylist(
+  env: Env,
+  playlistId: string,
+  videoId: string,
+  source: MembershipSource,
+  at = nowSeconds(),
+): Promise<void> {
   try {
     await dbOf(env)
       .prepare(
@@ -121,14 +180,20 @@ export async function markInPlaylist(env: Env, playlistId: string, videoId: stri
          ON CONFLICT(playlist_id, video_id) DO UPDATE SET state = 'in', source = excluded.source, at = excluded.at`,
       )
       .bind(playlistId, videoId, source, at)
-      .run()
+      .run();
   } catch {
     /* a missing table (migration 0011 not applied) must not fail an insert that already happened */
   }
 }
 
 /** tracked itself took `videoId` out of `playlistId` (sweep, button, swap, recreate): its absence is not the owner's doing. Never throws. */
-export async function markOutOfPlaylist(env: Env, playlistId: string, videoId: string, source: MembershipSource, at = nowSeconds()): Promise<void> {
+export async function markOutOfPlaylist(
+  env: Env,
+  playlistId: string,
+  videoId: string,
+  source: MembershipSource,
+  at = nowSeconds(),
+): Promise<void> {
   try {
     await dbOf(env)
       .prepare(
@@ -136,14 +201,20 @@ export async function markOutOfPlaylist(env: Env, playlistId: string, videoId: s
          ON CONFLICT(playlist_id, video_id) DO UPDATE SET state = 'out', source = excluded.source, at = excluded.at`,
       )
       .bind(playlistId, videoId, source, at)
-      .run()
+      .run();
   } catch {
     /* see markInPlaylist */
   }
 }
 
-/** Every membership record of `playlistId`: video id → 'in' | 'out'. */
-export async function confirmedMembership(env: Env, playlistId: string): Promise<Map<string, 'in' | 'out'>> {
-  const res = await dbOf(env).prepare('SELECT video_id, state FROM playlist_confirmed WHERE playlist_id = ?').bind(playlistId).all<{ video_id: string; state: 'in' | 'out' }>()
-  return new Map(res.results.map((r) => [r.video_id, r.state]))
+/** Every membership record of `playlistId`: video id -> 'in' | 'out'. */
+export async function confirmedMembership(
+  env: Env,
+  playlistId: string,
+): Promise<Map<string, "in" | "out">> {
+  const res = await dbOf(env)
+    .prepare("SELECT video_id, state FROM playlist_confirmed WHERE playlist_id = ?")
+    .bind(playlistId)
+    .all<{ video_id: string; state: "in" | "out" }>();
+  return new Map(res.results.map((r) => [r.video_id, r.state]));
 }

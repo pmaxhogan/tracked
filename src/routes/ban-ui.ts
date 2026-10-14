@@ -4,7 +4,7 @@
  * page's alerts and history panels, and the service worker that turns a Web
  * Push into a Notification. The styles live in the shell CSS (src/ui/base.ts).
  *
- * Everything is inline (no bundler, no static assets — same as the pages
+ * Everything is inline (no bundler, no static assets - same as the pages
  * themselves). The shell interpolates these constants; `BAN_JS` reads
  * `document.body.dataset.banPage` to know what to do:
  *   main      history + auto-prompt (no page emits it since Home replaced the old main page; kept for the tests)
@@ -15,7 +15,7 @@
  * classList), so those accesses are guarded.
  */
 
-export const UNBLOCK_URL = 'https://www.1001tracklists.com/info/unblock_ip.html'
+export const UNBLOCK_URL = "https://www.1001tracklists.com/info/unblock_ip.html";
 
 export const BAN_BANNER_HTML = /* html */ `
   <div id="ban-banner" class="ban-alert" role="alert" hidden>
@@ -32,7 +32,7 @@ export const BAN_BANNER_HTML = /* html */ `
       <button id="ban-dismiss" class="ban-btn subtle" type="button" hidden data-tip="Hides this banner. It does not lift a fetching pause or change the ban record.">Dismiss</button>
     </div>
     <div class="ban-foot" id="ban-foot"></div>
-  </div>`
+  </div>`;
 
 export const BAN_JS = /* js */ `
 (() => {
@@ -49,11 +49,11 @@ export const BAN_JS = /* js */ `
 
   const api = (path, init) => fetch('/ui' + path, { credentials: 'same-origin', ...(init || {}) });
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-  const fmtTime = (iso) => { if (!iso) return '—'; const d = new Date(iso); const sameDay = d.toDateString() === new Date().toDateString(); return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
-  const fmtDur = (ms) => { if (ms == null) return '—'; const m = Math.round(ms / 60000); if (m < 60) return m + ' min'; const h = Math.floor(m / 60); return h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : ''); };
+  const fmtTime = (iso) => { if (!iso) return '-'; const d = new Date(iso); const sameDay = d.toDateString() === new Date().toDateString(); return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
+  const fmtDur = (ms) => { if (ms == null) return '-'; const m = Math.round(ms / 60000); if (m < 60) return m + ' min'; const h = Math.floor(m / 60); return h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : ''); };
   const ago = (iso) => fmtDur(Date.now() - Date.parse(iso)) + ' ago';
 
-  // ── banner ──────────────────────────────────────────────────────────────
+  // -- banner --------------------------------------------------------------
   let lastStatus = null;
   function renderBanner(s) {
     if (!$banner) return;
@@ -71,7 +71,7 @@ export const BAN_JS = /* js */ `
     const ip = home && home.ip ? ' <code>' + esc(home.ip) + '</code>' : '';
     if (pause) {
       $icon.textContent = '⛔';
-      $title.innerHTML = '1001tracklists is blocking every tracked account — fetching is paused' + (simulated ? '<span class="ban-badge">simulated</span>' : '');
+      $title.innerHTML = '1001tracklists is blocking every tracked account - fetching is paused' + (simulated ? '<span class="ban-badge">simulated</span>' : '');
       $sub.innerHTML = 'Nothing is fetched from 1001tracklists until <b>' + esc(fmtTime(pause.until)) + '</b> (' + esc(pause.reason) + '). The pool (tlpool) owns accounts, budgets and captchas; this switch stops the Worker from asking it at all. The operator lifts it (Dismiss only hides this banner).';
     } else {
       $icon.textContent = '🚫';
@@ -102,7 +102,7 @@ export const BAN_JS = /* js */ `
     try { await api('/api/ban/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await refresh(history); } finally { $dismiss.disabled = false; }
   });
 
-  // ── Web Push ────────────────────────────────────────────────────────────
+  // -- Web Push ------------------------------------------------------------
   const pushSupported = typeof navigator !== 'undefined' && typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.isSecureContext;
   let pushConfig = null; // { configured, publicKey }
   let regPromise = null;
@@ -186,7 +186,7 @@ export const BAN_JS = /* js */ `
     if (!cfg.configured) { setAlertsUI(await pushState(), 'Set VAPID_* secrets on the Worker first.'); return; }
     // Already granted (the recovery in syncPush below): no prompt, so no request.
     const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
-    if (perm !== 'granted') { setAlertsUI(await pushState(), perm === 'denied' ? 'Permission denied — allow notifications for this site in the browser.' : ''); return; }
+    if (perm !== 'granted') { setAlertsUI(await pushState(), perm === 'denied' ? 'Permission denied - allow notifications for this site in the browser.' : ''); return; }
     const reg = await getReg();
     let sub = await reg.pushManager.getSubscription();
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(cfg.publicKey) });
@@ -236,7 +236,7 @@ export const BAN_JS = /* js */ `
     finally { $aTest.disabled = false; }
   });
 
-  // ── main page: live route + history ─────────────────────────────────────
+  // -- main page: live route + history -------------------------------------
   function renderRoute(s) {
     if (!$route) return;
     const parts = [];
@@ -271,8 +271,8 @@ export const BAN_JS = /* js */ `
         { key: 'device', label: 'Device', type: 'text', render: (d) => '<span' + tipOf(d.ua || 'Unknown browser') + '>' + esc(d.device) + '</span>' },
         { key: 'state', label: 'Delivery', type: 'enum', options: ['ok', 'failing', 'untested'],
           render: (d) => d.state === 'failing' ? '<span class="bad"' + tipOf('Last delivery failed: ' + d.lastError) + '>⚠ failing</span>' : d.state === 'ok' ? '<span class="ok">✓ ok</span>' : '<span class="muted">not tested yet</span>' },
-        { key: 'lastOkAt', label: 'Last delivered', type: 'datetime', storage: 'iso', render: (d) => esc(d.lastOkAt ? fmtTime(d.lastOkAt) : '—') },
-        { key: 'createdAt', label: 'Added', type: 'datetime', storage: 'iso', hideOn: 'phone', render: (d) => esc(d.createdAt ? fmtTime(d.createdAt) : '—') },
+        { key: 'lastOkAt', label: 'Last delivered', type: 'datetime', storage: 'iso', render: (d) => esc(d.lastOkAt ? fmtTime(d.lastOkAt) : '-') },
+        { key: 'createdAt', label: 'Added', type: 'datetime', storage: 'iso', hideOn: 'phone', render: (d) => esc(d.createdAt ? fmtTime(d.createdAt) : '-') },
       ],
     });
   }
@@ -307,12 +307,12 @@ export const BAN_JS = /* js */ `
         { key: 'lasted', label: 'Lasted', type: 'number', render: (e) => esc(e.open ? fmtDur(e.lasted) + '…' : fmtDur(e.lasted)) },
         { key: 'open', label: 'Open', type: 'bool', hideOn: 'phone', render: (e) => (e.open ? '<span class="bad">yes</span>' : '<span class="muted">no</span>') },
         { key: 'kind', label: 'Kind', type: 'enum', options: ['real', 'simulated'], hideOn: 'phone' },
-        { key: 'ip', label: 'IP', type: 'text', tip: 'The address 1001tracklists blocked, when it was known.', render: (e) => '<span class="mono">' + esc(e.ip || '—') + '</span>' },
-        { key: 'source', label: 'Seen by / cleared', type: 'text', tip: 'What noticed the block, and what cleared it.', render: (e) => esc(e.source) + (e.clearedBy ? ' → ' + esc(e.clearedBy) : '') },
+        { key: 'ip', label: 'IP', type: 'text', tip: 'The address 1001tracklists blocked, when it was known.', render: (e) => '<span class="mono">' + esc(e.ip || '-') + '</span>' },
+        { key: 'source', label: 'Seen by / cleared', type: 'text', tip: 'What noticed the block, and what cleared it.', render: (e) => esc(e.source) + (e.clearedBy ? ' -> ' + esc(e.clearedBy) : '') },
         { key: 'requests', label: 'Pool / BrightData req', type: 'number', tip: 'Requests sent through the browser pool and through BrightData during the episode.',
           render: (e) => esc(e.poolRequests) + ' / ' + esc(e.brightdataRequests) + (e.allBlockedHits ? ' <span class="bad"' + tipOf('Times every route was blocked during this episode.') + '>' + esc(e.allBlockedHits) + '⛔</span>' : '') },
         { key: 'push', label: 'Push start · clear', sortable: false, filterable: false, tip: 'Push notifications delivered when the ban started, and when it ended (sent out of devices).',
-          render: (e) => '<span class="muted">' + esc((e.pushStart ? e.pushStart.sent + '/' + e.pushStart.total : '—') + (e.pushClear ? ' · ' + e.pushClear.sent + '/' + e.pushClear.total : '')) + '</span>' },
+          render: (e) => '<span class="muted">' + esc((e.pushStart ? e.pushStart.sent + '/' + e.pushStart.total : '-') + (e.pushClear ? ' · ' + e.pushClear.sent + '/' + e.pushClear.total : '')) + '</span>' },
       ],
       empty: 'No ban episodes recorded.',
     });
@@ -327,7 +327,7 @@ export const BAN_JS = /* js */ `
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 
-  // ── boot ────────────────────────────────────────────────────────────────
+  // -- boot ----------------------------------------------------------------
   refresh(history);
   syncPush();
   // Status poll: every 15 s while the tab is visible, doubling (to 60 s) on
@@ -350,7 +350,7 @@ export const BAN_JS = /* js */ `
   pollTimer = setTimeout(pollOnce, 15000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollStopped && !pollTimer && !polling) pollOnce(); });
 })();
-`
+`;
 
 /** Served at /ui/sw.js. Turns a push into a Notification; tap opens the payload URL. */
 export const SW_JS = /* js */ `
@@ -386,4 +386,4 @@ self.addEventListener('notificationclick', (event) => {
     return self.clients.openWindow(target);
   })());
 });
-`
+`;

@@ -2,15 +2,15 @@
 -- not yet) that has no YouTube link, watched until one turns up.
 --
 -- Identity is what was known when it was saved:
---   * track_id   — 1001tracklists' numeric medialink id. Rechecked with the
+--   * track_id   - 1001tracklists' numeric medialink id. Rechecked with the
 --                  medialink AJAX (one pool view). Unique while set.
---   * set_url + row_index (+ cue_seconds, prev/next track ids as anchors) —
+--   * set_url + row_index (+ cue_seconds, prev/next track ids as anchors) -
 --                  a row of a set that has no id yet (anonymous "ID - ID", or
 --                  "Artist - ID"). Rechecked by re-reading the set page; once
 --                  the row is identified the presave takes its track_id and
 --                  moves on to the links stage.
 --
--- stage: identify (no track id yet) → links (waiting for a YouTube link) →
+-- stage: identify (no track id yet) -> links (waiting for a YouTube link) ->
 --        found (1001tracklists has a YouTube link) | uploaded (mkvid ripped and
 --        uploaded it, track_uploads) ; dismissed (the owner stopped watching).
 CREATE TABLE IF NOT EXISTS presaves (
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS presaves (
   dj_slug TEXT,                      -- the set's DJ, when known
   stage TEXT NOT NULL DEFAULT 'links',
   links TEXT,                        -- JSON [{ source, name, url, playerId, duration }] from the last good lookup
-  link_sources TEXT,                 -- ',spotify,apple,' — the link names, for filtering
+  link_sources TEXT,                 -- ',spotify,apple,' - the link names, for filtering
   link_count INTEGER NOT NULL DEFAULT 0,
   duration_seconds INTEGER,          -- from the medialink entries (max of the reported durations)
   youtube_video_id TEXT,             -- the video, found on 1001tl or uploaded by mkvid

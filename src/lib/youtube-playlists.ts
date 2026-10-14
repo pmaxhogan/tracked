@@ -1,5 +1,5 @@
 /**
- * YouTube Data API v3 playlist client. Authenticated calls only — uses an
+ * YouTube Data API v3 playlist client. Authenticated calls only - uses an
  * OAuth access token (from src/lib/google-oauth.ts) for everything; the
  * read-only YOUTUBE_API_KEY is reserved for unauthenticated `resolveVideo`.
  *
@@ -15,50 +15,58 @@
  * sites.
  */
 
-import { isQuotaReason, parseErrorBody } from './youtube-error'
+import { isQuotaReason, parseErrorBody } from "./youtube-error";
 
-const API = 'https://www.googleapis.com/youtube/v3'
+const API = "https://www.googleapis.com/youtube/v3";
 
-export type Playlist = { id: string; title: string }
+export type Playlist = { id: string; title: string };
 
 /**
  * Mints a fresh access token after YouTube rejected `stale` with a 401 (null when
  * none can be had). Registered once per worker entry (src/index.ts) so every
  * call site that holds a token string gets the retry without threading env through.
  */
-export type AccessTokenRefresher = (stale: string) => Promise<string | null>
+export type AccessTokenRefresher = (stale: string) => Promise<string | null>;
 
-let refresher: AccessTokenRefresher | null = null
-type AuthRetryOpts = { log?: { warn: (e: string, f?: Record<string, unknown>) => void }; delaysMs?: number[] }
-let authRetry: Required<Pick<AuthRetryOpts, 'delaysMs'>> & AuthRetryOpts = { delaysMs: [1000, 3000] }
-/** stale token → its replacement, so later calls holding the stale string skip the 401. */
-const replaced = new Map<string, string>()
+let refresher: AccessTokenRefresher | null = null;
+type AuthRetryOpts = {
+  log?: { warn: (e: string, f?: Record<string, unknown>) => void };
+  delaysMs?: number[];
+};
+let authRetry: Required<Pick<AuthRetryOpts, "delaysMs">> & AuthRetryOpts = {
+  delaysMs: [1000, 3000],
+};
+/** stale token -> its replacement, so later calls holding the stale string skip the 401. */
+const replaced = new Map<string, string>();
 /** One refresh per stale token, however many calls hit the 401 at once. */
-const inflight = new Map<string, Promise<string | null>>()
+const inflight = new Map<string, Promise<string | null>>();
 
-export function setAccessTokenRefresher(r: AccessTokenRefresher | null, opts: AuthRetryOpts = {}): void {
-  refresher = r
-  authRetry = { delaysMs: opts.delaysMs ?? [1000, 3000], log: opts.log }
-  replaced.clear()
-  inflight.clear()
+export function setAccessTokenRefresher(
+  r: AccessTokenRefresher | null,
+  opts: AuthRetryOpts = {},
+): void {
+  refresher = r;
+  authRetry = { delaysMs: opts.delaysMs ?? [1000, 3000], log: opts.log };
+  replaced.clear();
+  inflight.clear();
 }
 
 function refreshOnce(stale: string): Promise<string | null> {
-  let p = inflight.get(stale)
+  let p = inflight.get(stale);
   if (!p) {
     p = refresher!(stale)
       .catch(() => null)
-      .finally(() => inflight.delete(stale))
-    inflight.set(stale, p)
+      .finally(() => inflight.delete(stale));
+    inflight.set(stale, p);
   }
-  return p
+  return p;
 }
 
 /**
  * Since 2026-10-07 Google has intermittently answered 401 "Invalid Credentials"
  * for an access token well inside its lifetime (calls either side of the 401
  * succeed with the same token). A 401 means nothing was done, so the request is
- * retried with a force-refreshed token, and — when that is refused too — up to
+ * retried with a force-refreshed token, and - when that is refused too - up to
  * twice more with it after a pause.
  */
 export async function authedFetch(
@@ -68,29 +76,34 @@ export async function authedFetch(
   fetcher: typeof fetch = fetch,
 ): Promise<Response> {
   const send = (token: string) => {
-    const headers = new Headers(init.headers ?? {})
-    headers.set('Authorization', `Bearer ${token}`)
-    if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-    return fetcher(url, { ...init, headers })
-  }
-  const token = replaced.get(accessToken) ?? accessToken
-  const res = await send(token)
-  if (res.status !== 401 || !refresher) return res
-  const fresh = await refreshOnce(token)
-  if (!fresh || fresh === token) return res
-  replaced.set(accessToken, fresh)
+    const headers = new Headers(init.headers ?? {});
+    headers.set("Authorization", `Bearer ${token}`);
+    if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    return fetcher(url, { ...init, headers });
+  };
+  const token = replaced.get(accessToken) ?? accessToken;
+  const res = await send(token);
+  if (res.status !== 401 || !refresher) return res;
+  const fresh = await refreshOnce(token);
+  if (!fresh || fresh === token) return res;
+  replaced.set(accessToken, fresh);
   // A brand-new token has been seen rejected too (2026-10-08 20:59, a playlistItems.insert):
   // the 401 is Google's flake, not the token's, so the same request goes again after a pause.
-  let again = await send(fresh)
-  const statuses = [res.status, again.status]
+  let again = await send(fresh);
+  const statuses = [res.status, again.status];
   for (const ms of authRetry.delaysMs) {
-    if (again.status !== 401) break
-    await new Promise((r) => setTimeout(r, ms))
-    again = await send(fresh)
-    statuses.push(again.status)
+    if (again.status !== 401) break;
+    await new Promise((r) => setTimeout(r, ms));
+    again = await send(fresh);
+    statuses.push(again.status);
   }
-  if (statuses.length > 2) authRetry.log?.warn('youtube.auth_401_persisted', { url: url.split('?')[0], statuses, final: again.status })
-  return again
+  if (statuses.length > 2)
+    authRetry.log?.warn("youtube.auth_401_persisted", {
+      url: url.split("?")[0],
+      statuses,
+      final: again.status,
+    });
+  return again;
 }
 
 /**
@@ -100,9 +113,12 @@ export async function authedFetch(
  * orchestrator catches this and re-resolves by title (or creates fresh).
  */
 export class PlaylistNotFoundError extends Error {
-  constructor(public readonly op: string, public readonly playlistId?: string) {
-    super(`youtube ${op}: playlist not found${playlistId ? ` (${playlistId})` : ''}`)
-    this.name = 'PlaylistNotFoundError'
+  constructor(
+    public readonly op: string,
+    public readonly playlistId?: string,
+  ) {
+    super(`youtube ${op}: playlist not found${playlistId ? ` (${playlistId})` : ""}`);
+    this.name = "PlaylistNotFoundError";
   }
 }
 
@@ -121,48 +137,48 @@ export class YouTubeApiError extends Error {
   ) {
     // First line: `youtube <op> <status> <reason>: <Google's message, plain>`, what a
     // row's one-liner shows; the raw body follows (parseYouTubeErrorText reads both).
-    const cleaned = parseErrorBody(body).message
-    super(`youtube ${op} ${status}${reason ? ` ${reason}` : ''}: ${cleaned ?? ''}
-${body.slice(0, 500)}`)
-    this.name = 'YouTubeApiError'
+    const cleaned = parseErrorBody(body).message;
+    super(`youtube ${op} ${status}${reason ? ` ${reason}` : ""}: ${cleaned ?? ""}
+${body.slice(0, 500)}`);
+    this.name = "YouTubeApiError";
   }
 }
 
 /**
- * Out of quota (or per-minute rate limit) — retrying anything else this run is
+ * Out of quota (or per-minute rate limit) - retrying anything else this run is
  * pointless and the item is not at fault. The reason test is `isQuotaReason`
  * (lib/youtube-error.ts), which also reads a stored error text's reason; use
  * this one for a caught error.
  */
 export function isQuotaError(e: unknown): boolean {
-  return e instanceof YouTubeApiError && e.status === 403 && isQuotaReason(e.reason)
+  return e instanceof YouTubeApiError && e.status === 403 && isQuotaReason(e.reason);
 }
 
 /**
  * A playlistItems.insert failure that will never succeed on retry for this
  * video: the video is deleted/private/otherwise uninsertable (404
  * videoNotFound, 400 invalid resource) or forbidden for a non-quota reason.
- * 5xx and network errors are NOT permanent — those retry.
+ * 5xx and network errors are NOT permanent - those retry.
  */
 export function isPermanentInsertError(e: unknown): boolean {
-  if (!(e instanceof YouTubeApiError)) return false
-  if (isQuotaError(e)) return false
-  return e.status === 400 || e.status === 404 || e.status === 403
+  if (!(e instanceof YouTubeApiError)) return false;
+  if (isQuotaError(e)) return false;
+  return e.status === 400 || e.status === 404 || e.status === 403;
 }
 
 export async function expectOk(res: Response, op: string, playlistIdHint?: string): Promise<void> {
-  if (res.ok) return
-  const body = await res.text().catch(() => '')
+  if (res.ok) return;
+  const body = await res.text().catch(() => "");
   if (res.status === 404 && /playlistNotFound/.test(body)) {
-    throw new PlaylistNotFoundError(op, playlistIdHint)
+    throw new PlaylistNotFoundError(op, playlistIdHint);
   }
   // A non-JSON body (proxy error page etc.) has no reason: the status alone classifies.
-  throw new YouTubeApiError(op, res.status, parseErrorBody(body).reason, body)
+  throw new YouTubeApiError(op, res.status, parseErrorBody(body).reason, body);
 }
 
 /**
  * Walk the user's own playlists and return the first one whose snippet.title
- * matches `title` exactly (case-sensitive — YouTube allows duplicate titles
+ * matches `title` exactly (case-sensitive - YouTube allows duplicate titles
  * but we treat the first as the canonical one). Returns null if no match.
  */
 export async function findPlaylistByTitle(
@@ -170,41 +186,41 @@ export async function findPlaylistByTitle(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<Playlist | null> {
-  let pageToken: string | undefined
+  let pageToken: string | undefined;
   for (;;) {
-    const params = new URLSearchParams({ part: 'snippet', mine: 'true', maxResults: '50' })
-    if (pageToken) params.set('pageToken', pageToken)
-    const res = await authedFetch(`${API}/playlists?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'playlists.list')
+    const params = new URLSearchParams({ part: "snippet", mine: "true", maxResults: "50" });
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await authedFetch(`${API}/playlists?${params}`, accessToken, {}, fetcher);
+    await expectOk(res, "playlists.list");
     const data = (await res.json()) as {
-      items?: Array<{ id: string; snippet?: { title?: string } }>
-      nextPageToken?: string
-    }
-    const hit = data.items?.find((p) => p.snippet?.title === title)
-    if (hit) return { id: hit.id, title: hit.snippet?.title ?? title }
-    if (!data.nextPageToken) return null
-    pageToken = data.nextPageToken
+      items?: Array<{ id: string; snippet?: { title?: string } }>;
+      nextPageToken?: string;
+    };
+    const hit = data.items?.find((p) => p.snippet?.title === title);
+    if (hit) return { id: hit.id, title: hit.snippet?.title ?? title };
+    if (!data.nextPageToken) return null;
+    pageToken = data.nextPageToken;
   }
 }
 
 export async function createPlaylist(
-  opts: { title: string; description?: string; privacyStatus?: 'private' | 'unlisted' | 'public' },
+  opts: { title: string; description?: string; privacyStatus?: "private" | "unlisted" | "public" },
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<Playlist> {
   const body = {
-    snippet: { title: opts.title, description: opts.description ?? '' },
-    status: { privacyStatus: opts.privacyStatus ?? 'public' },
-  }
+    snippet: { title: opts.title, description: opts.description ?? "" },
+    status: { privacyStatus: opts.privacyStatus ?? "public" },
+  };
   const res = await authedFetch(
     `${API}/playlists?part=snippet,status`,
     accessToken,
-    { method: 'POST', body: JSON.stringify(body) },
+    { method: "POST", body: JSON.stringify(body) },
     fetcher,
-  )
-  await expectOk(res, 'playlists.insert')
-  const data = (await res.json()) as { id: string; snippet?: { title?: string } }
-  return { id: data.id, title: data.snippet?.title ?? opts.title }
+  );
+  await expectOk(res, "playlists.insert");
+  const data = (await res.json()) as { id: string; snippet?: { title?: string } };
+  return { id: data.id, title: data.snippet?.title ?? opts.title };
 }
 
 /**
@@ -218,27 +234,27 @@ export async function listPlaylistVideoIds(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<Set<string>> {
-  const out = new Set<string>()
-  let pageToken: string | undefined
+  const out = new Set<string>();
+  let pageToken: string | undefined;
   for (;;) {
     const params = new URLSearchParams({
-      part: 'contentDetails',
+      part: "contentDetails",
       playlistId,
-      maxResults: '50',
-    })
-    if (pageToken) params.set('pageToken', pageToken)
-    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'playlistItems.list', playlistId)
+      maxResults: "50",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher);
+    await expectOk(res, "playlistItems.list", playlistId);
     const data = (await res.json()) as {
-      items?: Array<{ contentDetails?: { videoId?: string } }>
-      nextPageToken?: string
-    }
+      items?: Array<{ contentDetails?: { videoId?: string } }>;
+      nextPageToken?: string;
+    };
     for (const it of data.items ?? []) {
-      const id = it.contentDetails?.videoId
-      if (id) out.add(id)
+      const id = it.contentDetails?.videoId;
+      if (id) out.add(id);
     }
-    if (!data.nextPageToken) return out
-    pageToken = data.nextPageToken
+    if (!data.nextPageToken) return out;
+    pageToken = data.nextPageToken;
   }
 }
 
@@ -257,17 +273,17 @@ export async function addVideoToPlaylist(
   const body = {
     snippet: {
       playlistId,
-      resourceId: { kind: 'youtube#video', videoId },
-      ...(typeof opts.position === 'number' ? { position: opts.position } : {}),
+      resourceId: { kind: "youtube#video", videoId },
+      ...(typeof opts.position === "number" ? { position: opts.position } : {}),
     },
-  }
+  };
   const res = await authedFetch(
     `${API}/playlistItems?part=snippet`,
     accessToken,
-    { method: 'POST', body: JSON.stringify(body) },
+    { method: "POST", body: JSON.stringify(body) },
     fetcher,
-  )
-  await expectOk(res, 'playlistItems.insert', playlistId)
+  );
+  await expectOk(res, "playlistItems.insert", playlistId);
 }
 
 /**
@@ -285,17 +301,21 @@ export async function movePlaylistItem(
 ): Promise<number | null> {
   const body = {
     id: item.itemId,
-    snippet: { playlistId: item.playlistId, resourceId: { kind: 'youtube#video', videoId: item.videoId }, position },
-  }
+    snippet: {
+      playlistId: item.playlistId,
+      resourceId: { kind: "youtube#video", videoId: item.videoId },
+      position,
+    },
+  };
   const res = await authedFetch(
     `${API}/playlistItems?part=snippet`,
     accessToken,
-    { method: 'PUT', body: JSON.stringify(body) },
+    { method: "PUT", body: JSON.stringify(body) },
     fetcher,
-  )
-  await expectOk(res, 'playlistItems.update', item.playlistId)
-  const data = (await res.json().catch(() => null)) as { snippet?: { position?: unknown } } | null
-  return typeof data?.snippet?.position === 'number' ? data.snippet.position : null
+  );
+  await expectOk(res, "playlistItems.update", item.playlistId);
+  const data = (await res.json().catch(() => null)) as { snippet?: { position?: unknown } } | null;
+  return typeof data?.snippet?.position === "number" ? data.snippet.position : null;
 }
 
 /**
@@ -310,19 +330,21 @@ export async function getPlaylistItemPosition(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<number | null> {
-  const params = new URLSearchParams({ part: 'snippet', playlistId, videoId, maxResults: '50' })
-  const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
-  await expectOk(res, 'playlistItems.list', playlistId)
-  const data = (await res.json()) as { items?: Array<{ id?: string; snippet?: { position?: unknown } }> }
-  const position = data.items?.find((it) => it.id === itemId)?.snippet?.position
-  return typeof position === 'number' ? position : null
+  const params = new URLSearchParams({ part: "snippet", playlistId, videoId, maxResults: "50" });
+  const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher);
+  await expectOk(res, "playlistItems.list", playlistId);
+  const data = (await res.json()) as {
+    items?: Array<{ id?: string; snippet?: { position?: unknown } }>;
+  };
+  const position = data.items?.find((it) => it.id === itemId)?.snippet?.position;
+  return typeof position === "number" ? position : null;
 }
 
 /**
  * playlistItems.list filtered by `videoId` (1 unit): the playlistItem ids that
  * hold `videoId` in `playlistId`. Usually zero or one, but YouTube allows the
  * same video in a playlist more than once, so it's a list. Deleting needs the
- * item id, not the video id — this is the lookup that bridges the two.
+ * item id, not the video id - this is the lookup that bridges the two.
  */
 export async function findPlaylistItemIds(
   playlistId: string,
@@ -330,17 +352,17 @@ export async function findPlaylistItemIds(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<string[]> {
-  const out: string[] = []
-  let pageToken: string | undefined
+  const out: string[] = [];
+  let pageToken: string | undefined;
   for (;;) {
-    const params = new URLSearchParams({ part: 'id', playlistId, videoId, maxResults: '50' })
-    if (pageToken) params.set('pageToken', pageToken)
-    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'playlistItems.list', playlistId)
-    const data = (await res.json()) as { items?: Array<{ id?: string }>; nextPageToken?: string }
-    for (const it of data.items ?? []) if (it.id) out.push(it.id)
-    if (!data.nextPageToken) return out
-    pageToken = data.nextPageToken
+    const params = new URLSearchParams({ part: "id", playlistId, videoId, maxResults: "50" });
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher);
+    await expectOk(res, "playlistItems.list", playlistId);
+    const data = (await res.json()) as { items?: Array<{ id?: string }>; nextPageToken?: string };
+    for (const it of data.items ?? []) if (it.id) out.push(it.id);
+    if (!data.nextPageToken) return out;
+    pageToken = data.nextPageToken;
   }
 }
 
@@ -354,10 +376,15 @@ export async function deletePlaylistItem(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
-  const params = new URLSearchParams({ id: playlistItemId })
-  const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, { method: 'DELETE' }, fetcher)
-  if (res.status === 404) return
-  await expectOk(res, 'playlistItems.delete')
+  const params = new URLSearchParams({ id: playlistItemId });
+  const res = await authedFetch(
+    `${API}/playlistItems?${params}`,
+    accessToken,
+    { method: "DELETE" },
+    fetcher,
+  );
+  if (res.status === 404) return;
+  await expectOk(res, "playlistItems.delete");
 }
 
 /**
@@ -371,9 +398,9 @@ export async function removeVideoFromPlaylist(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<number> {
-  const itemIds = await findPlaylistItemIds(playlistId, videoId, accessToken, fetcher)
-  for (const id of itemIds) await deletePlaylistItem(id, accessToken, fetcher)
-  return itemIds.length
+  const itemIds = await findPlaylistItemIds(playlistId, videoId, accessToken, fetcher);
+  for (const id of itemIds) await deletePlaylistItem(id, accessToken, fetcher);
+  return itemIds.length;
 }
 
 /**
@@ -388,38 +415,49 @@ export async function removeListedVideosFromPlaylist(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<Map<string, number>> {
-  const found: Array<{ itemId: string; videoId: string }> = []
-  let pageToken: string | undefined
+  const found: Array<{ itemId: string; videoId: string }> = [];
+  let pageToken: string | undefined;
   for (;;) {
-    const params = new URLSearchParams({ part: 'id,snippet,contentDetails', playlistId, maxResults: '50' })
-    if (pageToken) params.set('pageToken', pageToken)
-    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'playlistItems.list', playlistId)
-    const data = (await res.json()) as { items?: Array<{ id?: string; snippet?: { resourceId?: { videoId?: string } }; contentDetails?: { videoId?: string } }>; nextPageToken?: string }
+    const params = new URLSearchParams({
+      part: "id,snippet,contentDetails",
+      playlistId,
+      maxResults: "50",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher);
+    await expectOk(res, "playlistItems.list", playlistId);
+    const data = (await res.json()) as {
+      items?: Array<{
+        id?: string;
+        snippet?: { resourceId?: { videoId?: string } };
+        contentDetails?: { videoId?: string };
+      }>;
+      nextPageToken?: string;
+    };
     for (const it of data.items ?? []) {
-      const v = it.contentDetails?.videoId || it.snippet?.resourceId?.videoId
-      if (it.id && v && videoIds.has(v)) found.push({ itemId: it.id, videoId: v })
+      const v = it.contentDetails?.videoId || it.snippet?.resourceId?.videoId;
+      if (it.id && v && videoIds.has(v)) found.push({ itemId: it.id, videoId: v });
     }
-    if (!data.nextPageToken) break
-    pageToken = data.nextPageToken
+    if (!data.nextPageToken) break;
+    pageToken = data.nextPageToken;
   }
-  const out = new Map<string, number>()
+  const out = new Map<string, number>();
   for (const f of found) {
-    await deletePlaylistItem(f.itemId, accessToken, fetcher)
-    out.set(f.videoId, (out.get(f.videoId) ?? 0) + 1)
+    await deletePlaylistItem(f.itemId, accessToken, fetcher);
+    out.set(f.videoId, (out.get(f.videoId) ?? 0) + 1);
   }
-  return out
+  return out;
 }
 
-/** YouTube's alias for the authenticated user's "Liked videos" playlist — what YouTube Music shows as "Liked songs". */
-export const LIKED_VIDEOS_PLAYLIST_ID = 'LL'
+/** YouTube's alias for the authenticated user's "Liked videos" playlist - what YouTube Music shows as "Liked songs". */
+export const LIKED_VIDEOS_PLAYLIST_ID = "LL";
 
 /** A raw `youtube#playlistItem` resource, passed through untouched. */
 export type RawPlaylistItem = Record<string, unknown> & {
-  id?: string
-  snippet?: { resourceId?: { videoId?: string } }
-  contentDetails?: { videoId?: string }
-}
+  id?: string;
+  snippet?: { resourceId?: { videoId?: string } };
+  contentDetails?: { videoId?: string };
+};
 
 /**
  * Is this playlist item the husk of a video nobody can play any more: deleted,
@@ -436,18 +474,19 @@ export type RawPlaylistItem = Record<string, unknown> & {
  * and neither is an item whose listing left any of this out.
  */
 export function isUnavailableItem(it: RawPlaylistItem): boolean {
-  const snippet = it.snippet as { title?: unknown; videoOwnerChannelTitle?: unknown } | undefined
-  const privacy = (it.status as { privacyStatus?: unknown } | undefined)?.privacyStatus
-  if (privacy === 'public' || privacy === 'unlisted') return false
-  if (snippet?.videoOwnerChannelTitle) return false
-  if ((it.contentDetails as { videoPublishedAt?: unknown } | undefined)?.videoPublishedAt) return false
-  if (snippet?.title === 'Deleted video') return true
-  return snippet?.title === 'Private video' && privacy === 'private'
+  const snippet = it.snippet as { title?: unknown; videoOwnerChannelTitle?: unknown } | undefined;
+  const privacy = (it.status as { privacyStatus?: unknown } | undefined)?.privacyStatus;
+  if (privacy === "public" || privacy === "unlisted") return false;
+  if (snippet?.videoOwnerChannelTitle) return false;
+  if ((it.contentDetails as { videoPublishedAt?: unknown } | undefined)?.videoPublishedAt)
+    return false;
+  if (snippet?.title === "Deleted video") return true;
+  return snippet?.title === "Private video" && privacy === "private";
 }
 
 /**
  * Page through `playlistId` and return every playlistItem verbatim, asking for
- * every part (`id,snippet,contentDetails,status`) — cost is 1 unit per page of
+ * every part (`id,snippet,contentDetails,status`) - cost is 1 unit per page of
  * 50 regardless of parts, so there is no reason to skimp. Newest-added first
  * (YouTube's order). `maxPages` bounds subrequests; when the cap is hit the
  * returned `nextPageToken` lets the caller resume. `pageToken` starts mid-walk.
@@ -458,24 +497,24 @@ export async function listPlaylistItems(
   opts: { pageToken?: string; maxPages?: number } = {},
   fetcher: typeof fetch = fetch,
 ): Promise<{ items: RawPlaylistItem[]; nextPageToken: string | null; pages: number }> {
-  const items: RawPlaylistItem[] = []
-  let pageToken = opts.pageToken
-  let pages = 0
+  const items: RawPlaylistItem[] = [];
+  let pageToken = opts.pageToken;
+  let pages = 0;
   for (;;) {
     const params = new URLSearchParams({
-      part: 'id,snippet,contentDetails,status',
+      part: "id,snippet,contentDetails,status",
       playlistId,
-      maxResults: '50',
-    })
-    if (pageToken) params.set('pageToken', pageToken)
-    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'playlistItems.list', playlistId)
-    const data = (await res.json()) as { items?: RawPlaylistItem[]; nextPageToken?: string }
-    items.push(...(data.items ?? []))
-    pages++
-    pageToken = data.nextPageToken
-    if (!pageToken) return { items, nextPageToken: null, pages }
-    if (opts.maxPages && pages >= opts.maxPages) return { items, nextPageToken: pageToken, pages }
+      maxResults: "50",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await authedFetch(`${API}/playlistItems?${params}`, accessToken, {}, fetcher);
+    await expectOk(res, "playlistItems.list", playlistId);
+    const data = (await res.json()) as { items?: RawPlaylistItem[]; nextPageToken?: string };
+    items.push(...(data.items ?? []));
+    pages++;
+    pageToken = data.nextPageToken;
+    if (!pageToken) return { items, nextPageToken: null, pages };
+    if (opts.maxPages && pages >= opts.maxPages) return { items, nextPageToken: pageToken, pages };
   }
 }
 
@@ -484,12 +523,12 @@ export async function listPlaylistItems(
  * `P1DT2H`). Returns null for anything unparseable.
  */
 export function parseIsoDuration(iso: string | undefined | null): number | null {
-  if (!iso) return null
-  const m = iso.match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/)
-  if (!m) return null
-  const [, d, h, mi, s] = m
-  if (d === undefined && h === undefined && mi === undefined && s === undefined) return null
-  return Number(d ?? 0) * 86400 + Number(h ?? 0) * 3600 + Number(mi ?? 0) * 60 + Number(s ?? 0)
+  if (!iso) return null;
+  const m = iso.match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+  if (!m) return null;
+  const [, d, h, mi, s] = m;
+  if (d === undefined && h === undefined && mi === undefined && s === undefined) return null;
+  return Number(d ?? 0) * 86400 + Number(h ?? 0) * 3600 + Number(mi ?? 0) * 60 + Number(s ?? 0);
 }
 
 /**
@@ -503,18 +542,25 @@ export async function getVideoDurations(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<Map<string, { duration: string; durationSeconds: number | null }>> {
-  const out = new Map<string, { duration: string; durationSeconds: number | null }>()
-  const ids = [...new Set(videoIds)]
+  const out = new Map<string, { duration: string; durationSeconds: number | null }>();
+  const ids = [...new Set(videoIds)];
   for (let i = 0; i < ids.length; i += 50) {
-    const chunk = ids.slice(i, i + 50)
-    const params = new URLSearchParams({ part: 'contentDetails', id: chunk.join(','), maxResults: '50' })
-    const res = await authedFetch(`${API}/videos?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'videos.list')
-    const data = (await res.json()) as { items?: Array<{ id?: string; contentDetails?: { duration?: string } }> }
+    const chunk = ids.slice(i, i + 50);
+    const params = new URLSearchParams({
+      part: "contentDetails",
+      id: chunk.join(","),
+      maxResults: "50",
+    });
+    const res = await authedFetch(`${API}/videos?${params}`, accessToken, {}, fetcher);
+    await expectOk(res, "videos.list");
+    const data = (await res.json()) as {
+      items?: Array<{ id?: string; contentDetails?: { duration?: string } }>;
+    };
     for (const it of data.items ?? []) {
-      const duration = it.contentDetails?.duration
-      if (it.id && duration) out.set(it.id, { duration, durationSeconds: parseIsoDuration(duration) })
+      const duration = it.contentDetails?.duration;
+      if (it.id && duration)
+        out.set(it.id, { duration, durationSeconds: parseIsoDuration(duration) });
     }
   }
-  return out
+  return out;
 }

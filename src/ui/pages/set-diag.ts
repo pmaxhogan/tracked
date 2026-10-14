@@ -12,7 +12,7 @@ export const SET_DIAG_JS = /* js */ `
   function diagRel(sec) { return sec ? TK.fmt.rel(diagIso(sec * 1000)) : 'never'; }
   // A future time as "in 3h 5m", a past one as "5m ago".
   function diagWhen(sec) { return sec * 1000 > Date.now() ? TK.fmt.until(sec) : diagRel(sec); }
-  function diagClock(s) { return s == null ? '—' : TK.fmt.clock(s); }
+  function diagClock(s) { return s == null ? '-' : TK.fmt.clock(s); }
   const diagYes = (b) => (b ? 'yes' : 'no');
   const DIAG_REMOVED = { owner: 'removed by you', dead: 'video died', button: 'remove and replace' };
 
@@ -85,10 +85,10 @@ export const SET_DIAG_JS = /* js */ `
     const facts = v ? [
       ['Video duration', diagClock(meta && meta.durationSeconds)],
       ['Last cue', diagClock(m && m.lastCueSeconds)],
-      ['Longest audio', m && m.audioMaxSeconds != null ? diagClock(m.audioMaxSeconds) + (m.audioKind ? ' (' + m.audioKind + ')' : '') : '—'],
-      ['Notice', m ? (m.noFullNotice ? 'says it is not the full set' : 'none') : '—'],
-      ['Embed size', meta && meta.embedWidth && meta.embedHeight ? meta.embedWidth + '×' + meta.embedHeight : '—'],
-      ['Alive', meta ? diagYes(meta.alive) : '—'],
+      ['Longest audio', m && m.audioMaxSeconds != null ? diagClock(m.audioMaxSeconds) + (m.audioKind ? ' (' + m.audioKind + ')' : '') : '-'],
+      ['Notice', m ? (m.noFullNotice ? 'says it is not the full set' : 'none') : '-'],
+      ['Embed size', meta && meta.embedWidth && meta.embedHeight ? meta.embedWidth + 'x' + meta.embedHeight : '-'],
+      ['Alive', meta ? diagYes(meta.alive) : '-'],
     ] : [];
     return { key: 'rule', label: 'Full-recording rule', tone, finding, facts };
   }
@@ -153,7 +153,7 @@ export const SET_DIAG_JS = /* js */ `
     const facts = [
       ['Attempts', String(m.attempts)],
       ...(m.outcomeLine && m.error ? [['mkvid said', m.error]] : []),
-      ['Account', m.account || '—'],
+      ['Account', m.account || '-'],
       ['Style', m.style || 'default'],
       ['Skip ID wait', diagYes(m.skipIdWait)],
       ['Stored list', l ? l.trackCount + ' rows, ' + (l.idRows == null ? '?' : l.idRows) + ' ID rows, ' + (l.trusted ? 'trusted' : 'untrusted') + ', ' + l.named + ' named, ' + l.mismatched + ' mismatched, scraped ' + diagRel(l.scrapedAt) : 'none'],
@@ -195,7 +195,7 @@ export const SET_DIAG_JS = /* js */ `
         '</details>';
       }).join('');
   }
-`
+`;
 
 export const SET_DIAG_CSS = /* css */ `
   .set-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
@@ -218,4 +218,4 @@ export const SET_DIAG_CSS = /* css */ `
   .diag-facts dd { margin: 0; overflow-wrap: anywhere; }
   .diag-link { margin: 0 0 var(--sp-2); font-size: var(--fs-xs); }
   .diag-err { color: var(--danger); font-size: var(--fs-sm); margin: 0; }
-`
+`;

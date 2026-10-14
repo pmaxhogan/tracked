@@ -6,8 +6,8 @@
  * tracked artists (see lib/combined-playlist.ts).
  *
  * Runs from two triggers (both gated by Cloudflare Access at the route level):
- *   - Cron (`scheduled` worker handler) — daily sweep of every subscription.
- *   - Manual POST `/ui/api/sync[/<slug>]` — opportunistic single
+ *   - Cron (`scheduled` worker handler) - daily sweep of every subscription.
+ *   - Manual POST `/ui/api/sync[/<slug>]` - opportunistic single
  *     run, used for the initial backfill when a subscription is added.
  *
  * **Idempotency contract.** A run may be killed mid-way (CPU limit, transient
@@ -21,23 +21,23 @@
  *
  * **Recheck contract.** A set's YouTube recording on 1001tracklists is not
  * final: the first video attached is often a phone recording, replaced by an
- * official upload days later. So "resolved" is not "done" — every processed
- * tracklist is re-fetched when it is due — by set age (quest decision 13,
+ * official upload days later. So "resolved" is not "done" - every processed
+ * tracklist is re-fetched when it is due - by set age (quest decision 13,
  * lib/pool-settings.ts): the scheduler (lib/fetch-scheduler.ts) keeps a
  * jittered due time per set; a manual run uses the same intervals against
  * `state.tracklistVideos`. A recheck compares the video the page has
  * now against the one recorded then:
- *   - same video, or the page lost its video → nothing changes (a set that
+ *   - same video, or the page lost its video -> nothing changes (a set that
  *     drops its recording keeps the one already in the playlist)
- *   - the set had none and now has one → added, as on first processing
- *   - a different video → the old one is removed from the artist playlist and
+ *   - the set had none and now has one -> added, as on first processing
+ *   - a different video -> the old one is removed from the artist playlist and
  *     the combined playlist (unless another set still resolves to it) and the
  *     new one inserted. New is always taken to be strictly better.
  *   - no recorded baseline (processed before rechecks existed, no audit row
- *     survived to seed one) → the recheck only records what the page has now.
+ *     survived to seed one) -> the recheck only records what the page has now.
  *     It never re-adds, because we can't tell "never added" from "the user
  *     removed it by hand", and the second must stick.
- * Rechecks that change nothing write no audit row — see lib/playlist-audit.ts.
+ * Rechecks that change nothing write no audit row - see lib/playlist-audit.ts.
  *
  * **Fetch contract.** Every 1001tracklists page comes from tlpool, the NAS
  * browser pool (lib/pool.ts), which owns the budget. The cron no longer runs
@@ -46,36 +46,51 @@
  * windows, bounded by `manualMaxFetches` (lib/pool-settings.ts).
  */
 
-import { notifyPlaylistAdd } from './playlist-add-push'
-import type { Env } from '../types'
-import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
-import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
-import { fetchOptsFromEnv, isStopTheBatchError, UpstreamPausedError, UpstreamUnavailableError, type Fetch1001Opts, type Via } from './upstream1001'
-import { isPaused } from './ban-state'
-import { poolCodeOf, PoolUnavailableError, type PoolFaultCode, type PoolPriority } from './pool'
-import { DEFAULT_POOL_SETTINGS, firstFetchClass, getPoolSettings, recheckIntervalSeconds, setAgeDays, setDateFromUrl, type PoolSettings } from './pool-settings'
-import { holdSetOut, markSetDue, recordSetFetch, rememberDjScrollKeys } from './fetch-scheduler'
-import { isVerified } from './verification'
-import { artistPlaylistTitle } from './playlist-rename'
-import { dbOf } from './db'
-import { prettifySlug } from './prettify-slug'
+import { notifyPlaylistAdd } from "./playlist-add-push";
+import type { Env } from "../types";
+import { listSubscriptions, type Subscription } from "./subscriptions";
+import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from "./dj-index";
+import {
+  fetchOptsFromEnv,
+  isStopTheBatchError,
+  UpstreamPausedError,
+  UpstreamUnavailableError,
+  type Fetch1001Opts,
+  type Via,
+} from "./upstream1001";
+import { isPaused } from "./ban-state";
+import { poolCodeOf, PoolUnavailableError, type PoolFaultCode, type PoolPriority } from "./pool";
+import {
+  DEFAULT_POOL_SETTINGS,
+  firstFetchClass,
+  getPoolSettings,
+  recheckIntervalSeconds,
+  setAgeDays,
+  setDateFromUrl,
+  type PoolSettings,
+} from "./pool-settings";
+import { holdSetOut, markSetDue, recordSetFetch, rememberDjScrollKeys } from "./fetch-scheduler";
+import { isVerified } from "./verification";
+import { artistPlaylistTitle } from "./playlist-rename";
+import { dbOf } from "./db";
+import { prettifySlug } from "./prettify-slug";
 
-import { getAccessToken } from './google-oauth'
+import { getAccessToken } from "./google-oauth";
 import {
   isPermanentInsertError,
   isQuotaError,
   PlaylistNotFoundError,
   removeVideoFromPlaylist,
   YouTubeApiError,
-} from './youtube-playlists'
-import { insertInOrder, type OrderKeyCache } from './playlist-order-store'
+} from "./youtube-playlists";
+import { insertInOrder, type OrderKeyCache } from "./playlist-order-store";
 import {
   cachePlaylistVideoIds,
   findOrCreatePlaylist,
   getCachedPlaylistVideoIds,
   invalidatePlaylistVideoIds,
   peekCachedPlaylistVideoIds,
-} from './playlist-cache'
+} from "./playlist-cache";
 import {
   addToCombined,
   flushCombined,
@@ -90,24 +105,38 @@ import {
   type CombinedMergeResult,
   type CombinedStatus,
   type PlaylistSource,
-} from './combined-playlist'
-import { makeLogger, errorFields, type Logger } from './log'
-import { getQuotaOut, noteQuotaOut } from './youtube-quota'
-import { quotaKind } from './youtube-error'
-import { pickSetVideo, rejectionNote } from './playlist-hygiene'
-import { combinedRefuses, markInPlaylist, markOutOfPlaylist } from './playlist-blocklist'
-import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
-import { cacheTracklistFromHtml } from './tracklist-cache'
-import { enqueueLinkPrewarm } from './link-prewarm'
-import { findRenamedTracklists, mergeRenamedState, retireRenamedTracklists } from './tracklist-renames'
-import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, quotaDayEnd, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
+} from "./combined-playlist";
+import { makeLogger, errorFields, type Logger } from "./log";
+import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
+import { quotaKind } from "./youtube-error";
+import { pickSetVideo, rejectionNote } from "./playlist-hygiene";
+import { combinedRefuses, markInPlaylist, markOutOfPlaylist } from "./playlist-blocklist";
+import { parseTracklist, type ScrapedTracklist } from "./tracklists1001";
+import { cacheTracklistFromHtml } from "./tracklist-cache";
+import { enqueueLinkPrewarm } from "./link-prewarm";
+import {
+  findRenamedTracklists,
+  mergeRenamedState,
+  retireRenamedTracklists,
+} from "./tracklist-renames";
+import {
+  enqueueMkvidRequest,
+  extractSetAudioSource,
+  extractSetDate,
+  extractSetTitle,
+  lastCueSeconds,
+  mkvidRowCounts,
+  quotaDayEnd,
+  saveMkvidTracks,
+  supersedeMkvidRequestForSet,
+} from "./mkvid";
 import {
   failureRowsSince,
   flushPlaylistAdditions,
   latestAdditionPerSet,
   type PlaylistAdditionRecord,
   type PlaylistAdditionStatus,
-} from './playlist-audit'
+} from "./playlist-audit";
 import {
   invalidateSubTracklists,
   listSubSync,
@@ -117,26 +146,26 @@ import {
   slugsReferencingVideo,
   type SubState,
   type TracklistVideo,
-} from './sync-store'
+} from "./sync-store";
 
 // The state shape and its D1 persistence live in lib/sync-store.ts; re-exported
 // so callers (routes, tests) keep importing them from here.
-export { loadSubState, saveSubState, type SubState, type TracklistVideo }
+export { loadSubState, saveSubState, type SubState, type TracklistVideo };
 
 /** Human label for why a batch stopped early (surfaces as the sub's lastError). */
 function stopReasonFor(e: unknown): string {
   // The pool's own line already says what happened ("pool busy: waited 600 s
   // for a free browser ..."); an "unavailable:" prefix made it read like an outage.
-  if (e instanceof PoolUnavailableError) return e.message
-  if (e instanceof UpstreamPausedError) return `paused: ${e.message}`
-  if (e instanceof UpstreamUnavailableError) return `unavailable: ${e.message}`
-  return `ip_blocked: ${e instanceof Error ? e.message : String(e)}`
+  if (e instanceof PoolUnavailableError) return e.message;
+  if (e instanceof UpstreamPausedError) return `paused: ${e.message}`;
+  if (e instanceof UpstreamUnavailableError) return `unavailable: ${e.message}`;
+  return `ip_blocked: ${e instanceof Error ? e.message : String(e)}`;
 }
 
 /** The pool error behind a stop, if it said when to come back. */
 function retryAfterOf(e: unknown): number | null {
-  const r = (e as { retryAfterSeconds?: unknown } | null)?.retryAfterSeconds
-  return typeof r === 'number' && Number.isFinite(r) ? r : null
+  const r = (e as { retryAfterSeconds?: unknown } | null)?.retryAfterSeconds;
+  return typeof r === "number" && Number.isFinite(r) ? r : null;
 }
 
 /**
@@ -148,75 +177,88 @@ function retryAfterOf(e: unknown): number | null {
  * itself, and it only becomes lastError once it has gone on for
  * STOP_ERROR_RUNS runs in a row over STOP_ERROR_SECONDS.
  */
-export type StopLevel = 'error' | 'retry' | 'hold'
-const OWNER_POOL_CODES: ReadonlySet<PoolFaultCode> = new Set(['challenge_pending', 'unauthorized', 'not_configured', 'bad_response'])
+export type StopLevel = "error" | "retry" | "hold";
+const OWNER_POOL_CODES: ReadonlySet<PoolFaultCode> = new Set([
+  "challenge_pending",
+  "unauthorized",
+  "not_configured",
+  "bad_response",
+]);
 function stopLevelFor(e: unknown): StopLevel {
-  const code = poolCodeOf(e)
-  if (code) return OWNER_POOL_CODES.has(code) ? 'error' : 'retry'
-  if (e instanceof UpstreamPausedError) return 'hold'
-  return e instanceof UpstreamUnavailableError ? 'retry' : 'error'
+  const code = poolCodeOf(e);
+  if (code) return OWNER_POOL_CODES.has(code) ? "error" : "retry";
+  if (e instanceof UpstreamPausedError) return "hold";
+  return e instanceof UpstreamUnavailableError ? "retry" : "error";
 }
 /**
  * In the 6 days to 2026-10-11 a DJ had a run of stopped syncs 463 times: the
  * longest was 7 runs, none lasted 11 hours and a later tick cleared every one.
  * Past both of these limits it is not routine any more.
  */
-export const STOP_ERROR_RUNS = 5
-export const STOP_ERROR_SECONDS = 12 * 60 * 60
+export const STOP_ERROR_RUNS = 5;
+export const STOP_ERROR_SECONDS = 12 * 60 * 60;
 /**
  * A YouTube 401 is never charged to the set (Google refuses a valid token now
  * and then), so its rows stay `failed` and are never `abandoned`. Runs in a
  * row that ended with one are counted instead: at this many it is not a blip
  * but a login YouTube keeps refusing, and it becomes the DJ's lastError.
  */
-export const AUTH_ERROR_RUNS = 3
+export const AUTH_ERROR_RUNS = 3;
 
 /** A run's `stoppedBy` for a stop-the-batch error. */
-function stoppedByOf(e: unknown): NonNullable<SyncOneResult['stoppedBy']> {
-  return { reason: stopReasonFor(e), retryAfterSeconds: retryAfterOf(e), poolCode: poolCodeOf(e), level: stopLevelFor(e) }
+function stoppedByOf(e: unknown): NonNullable<SyncOneResult["stoppedBy"]> {
+  return {
+    reason: stopReasonFor(e),
+    retryAfterSeconds: retryAfterOf(e),
+    poolCode: poolCodeOf(e),
+    level: stopLevelFor(e),
+  };
 }
 
-const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`
+const watchUrl = (videoId: string) => `https://www.youtube.com/watch?v=${videoId}`;
 const playlistDescription = (artistName: string) =>
-  `Every set ${artistName} has a YouTube recording for on 1001tracklists.`
+  `Every set ${artistName} has a YouTube recording for on 1001tracklists.`;
 // Upper bound on a manual run's new-set window; the fetch budget
 // (manualMaxFetches) is what really binds now.
-const DEFAULT_MAX_SETS_PER_RUN = 30
+const DEFAULT_MAX_SETS_PER_RUN = 30;
 // DJ-index head walk: page 1 plus at most 3 infinite-scroll steps (10 sets
-// each), stopping at the first page that shows an already-known set — which
+// each), stopping at the first page that shows an already-known set - which
 // for a DJ already in the database is page 1 itself, so a normal daily run
 // costs no scroll request at all. A brand-new subscription gets its newest
 // 45 sets here; older history comes from the backfill below.
-const DEFAULT_MAX_DJ_PAGES = 4
+const DEFAULT_MAX_DJ_PAGES = 4;
 // Soft wall-clock deadline: no new fetch starts after it, so a run returns in
 // reasonable time. Workers do not limit an HTTP request's wall clock while the
 // client is connected (CPU time is what counts), so a manual run that may queue
 // for the pool gets its queue time on top (see syncOne).
-const SYNC_DEADLINE_MS = 25_000
+const SYNC_DEADLINE_MS = 25_000;
 /**
  * The recheck interval of a set whose date cannot be read from its URL (the
  * default `recheck.unknownAgeIntervalHours`). Dated sets follow the age bands
  * of quest decision 13 (lib/pool-settings.ts).
  */
-export const RECHECK_INTERVAL_SECONDS = DEFAULT_POOL_SETTINGS.recheck.unknownAgeIntervalHours * 60 * 60
+export const RECHECK_INTERVAL_SECONDS =
+  DEFAULT_POOL_SETTINGS.recheck.unknownAgeIntervalHours * 60 * 60;
 // Rechecks are cheaper than first-time processing (a changed video is rare,
 // so almost none of them touch the YouTube API), but each is still a
 // budgeted page view in the pool. Bounds a manual run's recheck window.
-const DEFAULT_MAX_RECHECKS_PER_RUN = 20
-const nowSeconds = () => Math.floor(Date.now() / 1000)
+const DEFAULT_MAX_RECHECKS_PER_RUN = 20;
+const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 /** Tracklists discovered but never processed (and not given up on). */
 export function pendingTracklistUrls(state: SubState): string[] {
-  const processed = new Set(state.processedTracklistUrls)
-  const abandoned = new Set(state.abandonedTracklistUrls ?? [])
-  return (state.discoveredTracklistUrls ?? []).filter((u) => !processed.has(u) && !abandoned.has(u))
+  const processed = new Set(state.processedTracklistUrls);
+  const abandoned = new Set(state.abandonedTracklistUrls ?? []);
+  return (state.discoveredTracklistUrls ?? []).filter(
+    (u) => !processed.has(u) && !abandoned.has(u),
+  );
 }
 
 /**
  * Processed tracklists whose recorded video is older than their recheck
  * interval by set age (or that have no record at all; a set too old to
- * recheck — decision 13's "never" — is never due here). Order follows
- * `processedTracklistUrls`, which is discovery order — newest sets first —
+ * recheck - decision 13's "never" - is never due here). Order follows
+ * `processedTracklistUrls`, which is discovery order - newest sets first -
  * so the sets most likely to have had their recording swapped are rechecked
  * first when the per-run cap binds.
  */
@@ -229,42 +271,51 @@ export function dueRecheckUrls(
   /** Sets whose last fetch had unidentified rows (set_schedule.has_id_rows): decision 13's 90-day exception. */
   idRowUrls: ReadonlySet<string> = new Set(),
 ): string[] {
-  const out: string[] = []
+  const out: string[] = [];
   for (const u of processed) {
-    if (abandoned.has(u)) continue
-    const entry = tracklistVideos[u]
+    if (abandoned.has(u)) continue;
+    const entry = tracklistVideos[u];
     if (!entry) {
-      out.push(u)
-      continue
+      out.push(u);
+      continue;
     }
-    const interval = recheckIntervalSeconds(settings, setAgeDays(setDateFromUrl(u), now), { noGoodVideo: !entry.videoId, hasIdRows: idRowUrls.has(u) })
-    if (interval !== null && now - entry.checkedAt >= interval) out.push(u)
+    const interval = recheckIntervalSeconds(settings, setAgeDays(setDateFromUrl(u), now), {
+      noGoodVideo: !entry.videoId,
+      hasIdRows: idRowUrls.has(u),
+    });
+    if (interval !== null && now - entry.checkedAt >= interval) out.push(u);
   }
-  return out
+  return out;
 }
 
 /** Set URLs whose last fetch had ID rows (set_schedule.has_id_rows). Empty on any read error. */
 async function idRowSets(env: Env, log?: Logger): Promise<Set<string>> {
   try {
-    const r = await dbOf(env).prepare('SELECT url FROM set_schedule WHERE has_id_rows = 1').all<{ url: string }>()
-    return new Set(r.results.map((x) => x.url))
+    const r = await dbOf(env)
+      .prepare("SELECT url FROM set_schedule WHERE has_id_rows = 1")
+      .all<{ url: string }>();
+    return new Set(r.results.map((x) => x.url));
   } catch (e) {
-    log?.warn('sync.id_rows_unreadable', errorFields(e))
-    return new Set()
+    log?.warn("sync.id_rows_unreadable", errorFields(e));
+    return new Set();
   }
 }
 
-export function dueRechecks(state: SubState, now = nowSeconds(), settings: PoolSettings = DEFAULT_POOL_SETTINGS): string[] {
+export function dueRechecks(
+  state: SubState,
+  now = nowSeconds(),
+  settings: PoolSettings = DEFAULT_POOL_SETTINGS,
+): string[] {
   return dueRecheckUrls(
     state.processedTracklistUrls,
     new Set(state.abandonedTracklistUrls ?? []),
     state.tracklistVideos ?? {},
     now,
     settings,
-  )
+  );
 }
 
-const ABANDON_AFTER_FAILURES = 3
+const ABANDON_AFTER_FAILURES = 3;
 
 /**
  * Whether the whole run should stand down before touching 1001tracklists:
@@ -272,10 +323,10 @@ const ABANDON_AFTER_FAILURES = 3
  * per-set loop never even starts, so nothing gets charged a failure.
  */
 async function pausedForRun(env: Env, log: Logger, task: string): Promise<boolean> {
-  const pause = await isPaused(env)
-  if (!pause) return false
-  log.warn(`${task}.paused`, { until: pause.until, reason: pause.reason, since: pause.since })
-  return true
+  const pause = await isPaused(env);
+  if (!pause) return false;
+  log.warn(`${task}.paused`, { until: pause.until, reason: pause.reason, since: pause.since });
+  return true;
 }
 
 /**
@@ -284,36 +335,36 @@ async function pausedForRun(env: Env, log: Logger, task: string): Promise<boolea
  * quota back inserts it from there without fetching the page again. A record
  * older than this is fetched afresh (the hold itself lasts a day at most).
  */
-export const DEFERRED_INSERT_MAX_AGE_SECONDS = 2 * 24 * 60 * 60
+export const DEFERRED_INSERT_MAX_AGE_SECONDS = 2 * 24 * 60 * 60;
 /** A recheck whose write was refused by a per-minute limit is due again this soon (a daily one: when the quota day ends). */
-const RATE_LIMIT_RECHECK_SECONDS = 15 * 60
+const RATE_LIMIT_RECHECK_SECONDS = 15 * 60;
 
 export type SyncOpts = {
-  log?: Logger
+  log?: Logger;
   /** Cap how many *new* tracklist pages we fetch+process for this sub. */
-  maxSetsPerRun?: number
+  maxSetsPerRun?: number;
   /**
    * Skip the DJ-page crawl entirely and process pending tracklists from
    * `state.discoveredTracklistUrls`. The scheduler's set items do this;
    * discovery is its own item (lib/fetch-scheduler.ts).
    */
-  skipDjCrawl?: boolean
+  skipDjCrawl?: boolean;
   /**
    * Exactly which sets to fetch (the scheduler): `newUrls` must be pending,
    * `recheckUrls` processed. Replaces the run's own todo and recheck windows.
    * Absent = a manual run: the pending window and the sets due by age.
    */
-  selection?: { newUrls: string[]; recheckUrls: string[] }
+  selection?: { newUrls: string[]; recheckUrls: string[] };
   /**
    * Pool priority for every fetch of this run. Absent = by kind: a pending
    * set's first fetch is `new` (or `backfill` when older than
    * `newSetMaxAgeDays`), a recheck is `recheck`, the DJ crawl is `new`.
    */
-  priority?: PoolPriority
+  priority?: PoolPriority;
   /** Accounts the fetches must not use (verification second fetch). */
-  excludeAccounts?: string[]
+  excludeAccounts?: string[];
   /** Settings to use (the scheduler passes the ones it read); read from KV when absent. */
-  settings?: PoolSettings
+  settings?: PoolSettings;
   /**
    * YouTube's daily quota is out (lib/youtube-quota.ts): the run makes no
    * YouTube call, does everything that needs none, and defers every playlist
@@ -321,21 +372,21 @@ export type SyncOpts = {
    * reply seen a moment ago counts although KV may still answer "not set";
    * absent = the flag is read once here.
    */
-  quotaHeld?: boolean
+  quotaHeld?: boolean;
   /**
    * How long each fetch may wait for a free pool browser (lib/pool.ts
    * `queueSeconds`). Absent = `manualQueueSeconds` for a `manual.*` trigger,
    * else 0.
    */
-  queueSeconds?: number
+  queueSeconds?: number;
   /** Cap how many already-processed tracklists we re-fetch to look for a swapped video. */
-  maxRechecksPerRun?: number
+  maxRechecksPerRun?: number;
   /**
    * What kicked off this run (`cron.daily`, `cron.pending`, `manual.all`,
    * `manual.one`, `manual.resync`). Recorded on every playlist-addition audit
    * row so the panel can tell a cron sweep's work apart from a button press.
    */
-  trigger?: string
+  trigger?: string;
   /**
    * Shared, mutable budget of 1001tracklists page fetches for this whole run
    * (all subs). Each set fetch / recheck decrements it; when it hits zero the
@@ -343,62 +394,70 @@ export type SyncOpts = {
    * button press should still not queue hundreds of fetches): see
    * `manualFetchBudget`. The scheduler passes an explicit selection instead.
    */
-  fetchBudget?: FetchBudget
-}
+  fetchBudget?: FetchBudget;
+};
 
-export type FetchBudget = { remaining: number; limit: number; spent: number }
+export type FetchBudget = { remaining: number; limit: number; spent: number };
 
 export function newFetchBudget(limit: number): FetchBudget {
-  const n = Math.max(0, Math.floor(limit) || 0)
-  return { remaining: n, limit: n, spent: 0 }
+  const n = Math.max(0, Math.floor(limit) || 0);
+  return { remaining: n, limit: n, spent: 0 };
 }
 
 /** Take one fetch from the budget; false when it is spent. */
 function takeFetch(budget: FetchBudget | undefined): boolean {
-  if (!budget) return true
-  if (budget.remaining <= 0) return false
-  budget.remaining -= 1
-  budget.spent += 1
-  return true
+  if (!budget) return true;
+  if (budget.remaining <= 0) return false;
+  budget.remaining -= 1;
+  budget.spent += 1;
+  return true;
 }
 
 /** Oldest-synced first, so a budget that runs out mid-tick starves nobody. */
-export function orderByLastRun<T extends { slug: string }>(subs: T[], lastRunAt: Map<string, number | null | undefined>): T[] {
-  return [...subs].sort((a, b) => (lastRunAt.get(a.slug) ?? 0) - (lastRunAt.get(b.slug) ?? 0))
+export function orderByLastRun<T extends { slug: string }>(
+  subs: T[],
+  lastRunAt: Map<string, number | null | undefined>,
+): T[] {
+  return [...subs].sort((a, b) => (lastRunAt.get(a.slug) ?? 0) - (lastRunAt.get(b.slug) ?? 0));
 }
 
-/** `slug → lastRunAt` for every sub with a sync row, from one D1 query. */
+/** `slug -> lastRunAt` for every sub with a sync row, from one D1 query. */
 async function lastRunMap(env: Env): Promise<Map<string, number | null | undefined>> {
-  return new Map((await listSubSync(env)).map((s) => [s.slug, s.lastRunAt] as const))
+  return new Map((await listSubSync(env)).map((s) => [s.slug, s.lastRunAt] as const));
 }
 
 export type SyncOneResult = {
-  slug: string
-  ok: boolean
-  error?: string
-  artistName: string
-  playlistId?: string
+  slug: string;
+  ok: boolean;
+  error?: string;
+  artistName: string;
+  playlistId?: string;
   /** The combined all-artists playlist, when this run touched it. */
-  combinedPlaylistId?: string
+  combinedPlaylistId?: string;
   stats: {
-    tracklistsSeen: number
-    tracklistsProcessed: number
-    videoIdsFound: number
-    videoIdsAdded: number
+    tracklistsSeen: number;
+    tracklistsProcessed: number;
+    videoIdsFound: number;
+    videoIdsAdded: number;
     /** Tracklists discovered on the DJ page but not yet processed (cap or
      *  per-set failure). Run sync again to chip away at them. */
-    tracklistsPending: number
+    tracklistsPending: number;
     /** Videos this run mirrored into the combined all-artists playlist. */
-    combinedVideoIdsAdded: number
+    combinedVideoIdsAdded: number;
     /** Already-processed tracklists re-fetched this run to look for a swapped video. */
-    tracklistsRechecked: number
+    tracklistsRechecked: number;
     /** Rechecks that found a different video: old removed, new inserted. */
-    videosReplaced: number
+    videosReplaced: number;
     /** Processed tracklists still due for a recheck after this run. */
-    rechecksPending: number
-  }
+    rechecksPending: number;
+  };
   /** Set when a pool refusal / pause stopped the run early (charged nothing). */
-  stoppedBy?: { reason: string; retryAfterSeconds: number | null; poolCode?: PoolFaultCode | null; level?: StopLevel }
+  stoppedBy?: {
+    reason: string;
+    retryAfterSeconds: number | null;
+    poolCode?: PoolFaultCode | null;
+    level?: StopLevel;
+  };
   /**
    * Set when YouTube's quota kept this run from writing to a playlist: `out` =
    * the daily quota is used up (the hold was set, or this run was told so),
@@ -407,12 +466,12 @@ export type SyncOneResult = {
    * a first-time set's video is kept for the retry, a recheck is due again
    * when the quota is back). Not an error: it continues by itself.
    */
-  quota?: { out: boolean; hit: boolean; deferred: string[] }
+  quota?: { out: boolean; hit: boolean; deferred: string[] };
   /** Why the DJ-page crawl stopped, when this run crawled. */
-  crawlStopReason?: string
-}
+  crawlStopReason?: string;
+};
 
-const EMPTY_STATS: SyncOneResult['stats'] = {
+const EMPTY_STATS: SyncOneResult["stats"] = {
   tracklistsSeen: 0,
   tracklistsProcessed: 0,
   videoIdsFound: 0,
@@ -422,67 +481,75 @@ const EMPTY_STATS: SyncOneResult['stats'] = {
   tracklistsRechecked: 0,
   videosReplaced: 0,
   rechecksPending: 0,
-}
+};
 
 /**
  * Sync every subscription. Errors per sub are isolated (logged + surfaced in
  * the result, but don't kill the rest of the sweep). A missing OAuth
  * connection or missing CACHE/SUBS bindings is a global failure.
  */
-export async function syncAll(env: Env, opts: SyncOpts = {}): Promise<{ results: SyncOneResult[]; paused?: boolean }> {
-  const log = opts.log ?? makeLogger({ task: 'sync.all' })
-  const tokenInfo = await getAccessToken(env)
+export async function syncAll(
+  env: Env,
+  opts: SyncOpts = {},
+): Promise<{ results: SyncOneResult[]; paused?: boolean }> {
+  const log = opts.log ?? makeLogger({ task: "sync.all" });
+  const tokenInfo = await getAccessToken(env);
   if (!tokenInfo) {
-    log.error('sync.no_oauth_tokens')
-    throw new Error('YouTube account not connected — visit /ui/oauth/start first')
+    log.error("sync.no_oauth_tokens");
+    throw new Error("YouTube account not connected - visit /ui/oauth/start first");
   }
-  const allSubs = await listSubscriptions(env)
-  const subs = orderByLastRun(allSubs, await lastRunMap(env))
-  const fetchBudget = opts.fetchBudget ?? (await manualFetchBudget(env, log))
-  log.info('sync.start', { subCount: subs.length, fetchBudget: fetchBudget.limit })
-  const results: SyncOneResult[] = []
-  if (await pausedForRun(env, log, 'sync')) return { results, paused: true }
+  const allSubs = await listSubscriptions(env);
+  const subs = orderByLastRun(allSubs, await lastRunMap(env));
+  const fetchBudget = opts.fetchBudget ?? (await manualFetchBudget(env, log));
+  log.info("sync.start", { subCount: subs.length, fetchBudget: fetchBudget.limit });
+  const results: SyncOneResult[] = [];
+  if (await pausedForRun(env, log, "sync")) return { results, paused: true };
   // Read once and carried from DJ to DJ: a quota reply one DJ's run got holds the writes of the ones after it.
-  let quotaHeld = opts.quotaHeld ?? !!(await getQuotaOut(env))
+  let quotaHeld = opts.quotaHeld ?? !!(await getQuotaOut(env));
   for (const sub of subs) {
     if (fetchBudget.remaining <= 0) {
-      log.info('sync.fetch_budget_exhausted', { slug: sub.slug, spent: fetchBudget.spent, limit: fetchBudget.limit, subsLeft: subs.length - results.length })
-      break
+      log.info("sync.fetch_budget_exhausted", {
+        slug: sub.slug,
+        spent: fetchBudget.spent,
+        limit: fetchBudget.limit,
+        subsLeft: subs.length - results.length,
+      });
+      break;
     }
     try {
-      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, fetchBudget, quotaHeld })
-      if (r.quota?.out) quotaHeld = true
-      results.push(r)
+      const r = await syncOne(env, sub, tokenInfo.accessToken, { ...opts, fetchBudget, quotaHeld });
+      if (r.quota?.out) quotaHeld = true;
+      results.push(r);
     } catch (e) {
-      log.error('sync.sub_threw', { slug: sub.slug, ...errorFields(e) })
+      log.error("sync.sub_threw", { slug: sub.slug, ...errorFields(e) });
       results.push({
         slug: sub.slug,
         ok: false,
         error: e instanceof Error ? e.message : String(e),
         artistName: sub.slug,
         stats: { ...EMPTY_STATS },
-      })
+      });
     }
   }
-  log.info('sync.done', {
+  log.info("sync.done", {
     subCount: subs.length,
     okCount: results.filter((r) => r.ok).length,
     totalNewVideos: results.reduce((a, r) => a + r.stats.videoIdsAdded, 0),
     fetchesSpent: fetchBudget.spent,
     fetchBudget: fetchBudget.limit,
-  })
-  return { results }
+  });
+  return { results };
 }
 
 /**
  * The fetch budget a manual run (panel button) gets: `manualMaxFetches` from
  * the pool settings (default 10). Every entry point that calls syncOne outside
- * the scheduler must pass one — without a budget takeFetch() always says yes.
+ * the scheduler must pass one - without a budget takeFetch() always says yes.
  */
 export async function manualFetchBudget(env: Env, log?: Logger): Promise<FetchBudget> {
-  const budget = newFetchBudget((await getPoolSettings(env)).manualMaxFetches)
-  log?.info('sync.manual_fetch_budget', { limit: budget.limit })
-  return budget
+  const budget = newFetchBudget((await getPoolSettings(env)).manualMaxFetches);
+  log?.info("sync.manual_fetch_budget", { limit: budget.limit });
+  return budget;
 }
 
 /**
@@ -490,7 +557,7 @@ export async function manualFetchBudget(env: Env, log?: Logger): Promise<FetchBu
  * due now (see invalidateVideoCache), then ONE sync pass runs over all of them
  * with a single shared fetch budget. Until 2026-09-14 the panel did this by
  * calling the per-DJ resync once per row from the browser, and each of those
- * calls ran unpaced — ~360 fetches in 11 minutes on 2026-09-10, ~40 in 16 s
+ * calls ran unpaced - ~360 fetches in 11 minutes on 2026-09-10, ~40 in 16 s
  * on 2026-09-14, a 429 on every account both times. The pass stops when the
  * budget is spent; the 5-minute cron drains the remaining rechecks.
  *
@@ -502,23 +569,36 @@ export async function manualFetchBudget(env: Env, log?: Logger): Promise<FetchBu
 export async function resyncAll(
   env: Env,
   opts: SyncOpts = {},
-): Promise<{ results: SyncOneResult[]; paused?: boolean; invalidated: InvalidateResult[]; quotaHeld?: { until: number } }> {
-  const log = opts.log ?? makeLogger({ task: 'sync.resync_all' })
-  const hold = await getQuotaOut(env)
+): Promise<{
+  results: SyncOneResult[];
+  paused?: boolean;
+  invalidated: InvalidateResult[];
+  quotaHeld?: { until: number };
+}> {
+  const log = opts.log ?? makeLogger({ task: "sync.resync_all" });
+  const hold = await getQuotaOut(env);
   if (hold) {
-    log.info('sync.resync_all.quota_held', { until: new Date(hold.until * 1000).toISOString() })
-    return { results: [], invalidated: [], quotaHeld: { until: hold.until } }
+    log.info("sync.resync_all.quota_held", { until: new Date(hold.until * 1000).toISOString() });
+    return { results: [], invalidated: [], quotaHeld: { until: hold.until } };
   }
-  const subs = await listSubscriptions(env)
-  const invalidated: InvalidateResult[] = []
-  for (const sub of subs) invalidated.push(await invalidateVideoCache(env, sub.slug, log))
-  log.info('sync.resync_all.invalidated', { subCount: subs.length, tracklistsMarked: invalidated.reduce((a, r) => a + r.tracklistsMarked, 0) })
-  const fetchBudget = opts.fetchBudget ?? (await manualFetchBudget(env, log))
-  const r = await syncAll(env, { ...opts, log, trigger: opts.trigger ?? 'manual.resync', fetchBudget })
-  return { ...r, invalidated }
+  const subs = await listSubscriptions(env);
+  const invalidated: InvalidateResult[] = [];
+  for (const sub of subs) invalidated.push(await invalidateVideoCache(env, sub.slug, log));
+  log.info("sync.resync_all.invalidated", {
+    subCount: subs.length,
+    tracklistsMarked: invalidated.reduce((a, r) => a + r.tracklistsMarked, 0),
+  });
+  const fetchBudget = opts.fetchBudget ?? (await manualFetchBudget(env, log));
+  const r = await syncAll(env, {
+    ...opts,
+    log,
+    trigger: opts.trigger ?? "manual.resync",
+    fetchBudget,
+  });
+  return { ...r, invalidated };
 }
 
-// ─── Combined "all tracked artists" playlist ────────────────────────────────
+// --- Combined "all tracked artists" playlist --------------------------------
 
 /**
  * The artist playlists that feed the combined one: every subscription that has
@@ -527,24 +607,24 @@ export async function resyncAll(
  * makes deterministic progress.
  */
 export async function collectCombinedSources(env: Env): Promise<PlaylistSource[]> {
-  const subs = await listSubscriptions(env)
-  const syncRows = new Map((await listSubSync(env)).map((s) => [s.slug, s] as const))
-  const sources: PlaylistSource[] = []
+  const subs = await listSubscriptions(env);
+  const syncRows = new Map((await listSubSync(env)).map((s) => [s.slug, s] as const));
+  const sources: PlaylistSource[] = [];
   for (const sub of subs) {
-    const s = syncRows.get(sub.slug)
-    if (!s?.playlistId) continue
-    sources.push({ slug: sub.slug, artistName: s.artistName ?? null, playlistId: s.playlistId })
+    const s = syncRows.get(sub.slug);
+    if (!s?.playlistId) continue;
+    sources.push({ slug: sub.slug, artistName: s.artistName ?? null, playlistId: s.playlistId });
   }
-  return sources
+  return sources;
 }
 
 export type CombinedBackfillResult =
   | ({ ok: true } & CombinedMergeResult)
-  | { ok: false; reason: 'youtube_not_connected' | 'no_sources' }
+  | { ok: false; reason: "youtube_not_connected" | "no_sources" };
 
 /**
  * Reconcile the combined playlist against every artist playlist, inserting
- * whatever it's missing (bounded — see lib/combined-playlist.ts). This is the
+ * whatever it's missing (bounded - see lib/combined-playlist.ts). This is the
  * path that backfills sets which predate the combined playlist and sets a
  * newly added artist accumulates in their own playlist over several ticks.
  *
@@ -555,25 +635,25 @@ export async function backfillCombined(
   env: Env,
   opts: { log?: Logger; maxInsertsPerRun?: number; deadlineMs?: number; trigger?: string } = {},
 ): Promise<CombinedBackfillResult> {
-  const log = opts.log ?? makeLogger({ task: 'sync.combined_backfill' })
-  const tokenInfo = await getAccessToken(env)
+  const log = opts.log ?? makeLogger({ task: "sync.combined_backfill" });
+  const tokenInfo = await getAccessToken(env);
   if (!tokenInfo) {
-    log.info('combined.skip_no_oauth')
-    return { ok: false, reason: 'youtube_not_connected' }
+    log.info("combined.skip_no_oauth");
+    return { ok: false, reason: "youtube_not_connected" };
   }
-  const sources = await collectCombinedSources(env)
+  const sources = await collectCombinedSources(env);
   if (sources.length === 0) {
-    // Nothing has been synced yet — don't create an empty playlist for it.
-    log.info('combined.skip_no_sources')
-    return { ok: false, reason: 'no_sources' }
+    // Nothing has been synced yet - don't create an empty playlist for it.
+    log.info("combined.skip_no_sources");
+    return { ok: false, reason: "no_sources" };
   }
   const merged = await mergeIntoCombinedPlaylist(env, tokenInfo.accessToken, sources, {
     log,
     maxInsertsPerRun: opts.maxInsertsPerRun,
     deadlineMs: opts.deadlineMs,
     trigger: opts.trigger,
-  })
-  return { ok: true, ...merged }
+  });
+  return { ok: true, ...merged };
 }
 
 /** Read-only combined-playlist summary for the admin panel. */
@@ -581,12 +661,12 @@ export async function combinedPlaylistStatus(
   env: Env,
   opts: { log?: Logger } = {},
 ): Promise<{ connected: false } | ({ connected: true } & CombinedStatus)> {
-  const log = opts.log ?? makeLogger({ task: 'sync.combined_status' })
-  const tokenInfo = await getAccessToken(env)
-  if (!tokenInfo) return { connected: false }
-  const sources = await collectCombinedSources(env)
-  const status = await readCombinedStatus(env, tokenInfo.accessToken, sources, log)
-  return { connected: true, ...status }
+  const log = opts.log ?? makeLogger({ task: "sync.combined_status" });
+  const tokenInfo = await getAccessToken(env);
+  if (!tokenInfo) return { connected: false };
+  const sources = await collectCombinedSources(env);
+  const status = await readCombinedStatus(env, tokenInfo.accessToken, sources, log);
+  return { connected: true, ...status };
 }
 
 /**
@@ -599,25 +679,30 @@ export async function syncOne(
   accessToken: string,
   opts: SyncOpts = {},
 ): Promise<SyncOneResult> {
-  const log = opts.log ?? makeLogger({ task: 'sync.one', slug: sub.slug })
-  const maxSets = opts.maxSetsPerRun ?? DEFAULT_MAX_SETS_PER_RUN
-  const maxRechecks = opts.maxRechecksPerRun ?? DEFAULT_MAX_RECHECKS_PER_RUN
-  const startedAt = Date.now()
-  const loaded = await loadSubState(env, sub.slug, log)
+  const log = opts.log ?? makeLogger({ task: "sync.one", slug: sub.slug });
+  const maxSets = opts.maxSetsPerRun ?? DEFAULT_MAX_SETS_PER_RUN;
+  const maxRechecks = opts.maxRechecksPerRun ?? DEFAULT_MAX_RECHECKS_PER_RUN;
+  const startedAt = Date.now();
+  const loaded = await loadSubState(env, sub.slug, log);
   // A snapshot of what was loaded: the final save diffs against it so only
   // rows this run changed are written. Cloned because the run mutates the
   // loaded maps in place (tracklistVideos in particular).
-  const since = loaded ? structuredClone(loaded) : null
-  const state: SubState = loaded ?? { processedTracklistUrls: [] }
+  const since = loaded ? structuredClone(loaded) : null;
+  const state: SubState = loaded ?? { processedTracklistUrls: [] };
   // First run on state written before rechecks existed: recover each
   // processed set's video from the audit trail so the first recheck has a
   // baseline to compare against instead of just recording.
   const tracklistVideos: Record<string, TracklistVideo> =
     state.tracklistVideos ??
     (state.processedTracklistUrls.length > 0
-      ? await seedTracklistVideosFromAudit(env, sub.slug, new Set(state.processedTracklistUrls), log)
-      : {})
-  const settings = opts.settings ?? (await getPoolSettings(env))
+      ? await seedTracklistVideosFromAudit(
+          env,
+          sub.slug,
+          new Set(state.processedTracklistUrls),
+          log,
+        )
+      : {});
+  const settings = opts.settings ?? (await getPoolSettings(env));
   /**
    * YouTube's daily quota is out: from the hold (lib/youtube-quota.ts) or, later
    * in the run, a reply this run got. While it is set the run asks YouTube
@@ -625,93 +710,116 @@ export async function syncOne(
    * with no recording goes to mkvid and one whose video is already in the
    * playlist is settled; only a playlist write waits (`quotaDeferred`).
    */
-  let quotaHeld = opts.quotaHeld ?? !!(await getQuotaOut(env))
+  let quotaHeld = opts.quotaHeld ?? !!(await getQuotaOut(env));
   /** Sets whose playlist write waits for quota (SyncOneResult.quota.deferred). */
-  const quotaDeferred: string[] = []
+  const quotaDeferred: string[] = [];
   // A button press (manual.one / manual.all / manual.resync) may wait for a
   // free pool browser; the scheduler keeps its short waits and moves on.
-  const queueSeconds = opts.queueSeconds ?? (opts.trigger?.startsWith('manual.') ? settings.manualQueueSeconds : 0)
+  const queueSeconds =
+    opts.queueSeconds ?? (opts.trigger?.startsWith("manual.") ? settings.manualQueueSeconds : 0);
   // Room for one full queue wait, so a run whose first fetch queued still
   // gets on with its sets afterwards.
-  const deadline = startedAt + SYNC_DEADLINE_MS + queueSeconds * 1000
+  const deadline = startedAt + SYNC_DEADLINE_MS + queueSeconds * 1000;
   const fetchOpts = fetchOptsFromEnv(env, log, {
     ...(opts.excludeAccounts?.length ? { excludeAccounts: opts.excludeAccounts } : {}),
     ...(queueSeconds > 0 ? { queueSeconds } : {}),
-  })
+  });
   /** Pool options for one set fetch: the run's priority, else by kind (see SyncOpts.priority). */
-  const setFetchOpts = (setUrl: string, phase: 'new' | 'recheck'): Fetch1001Opts => ({
+  const setFetchOpts = (setUrl: string, phase: "new" | "recheck"): Fetch1001Opts => ({
     ...fetchOpts,
-    kind: 'set',
-    priority: opts.priority ?? (phase === 'recheck' ? 'recheck' : firstFetchClass(settings, setAgeDays(setDateFromUrl(setUrl), nowSeconds()))),
-  })
+    kind: "set",
+    priority:
+      opts.priority ??
+      (phase === "recheck"
+        ? "recheck"
+        : firstFetchClass(settings, setAgeDays(setDateFromUrl(setUrl), nowSeconds()))),
+  });
   /** Verification + next due time for a fetched set page, before anything reads them (lib/fetch-scheduler.ts). */
-  const noteFetched = (setUrl: string, f: { html: string; accountId?: string; fetchedAt?: string }, videoId: string | null, parsed: ScrapedTracklist | null) =>
-    recordSetFetch(env, { setUrl, html: f.html, parsed, videoId, accountId: f.accountId, fetchedAt: f.fetchedAt, settings, pool: fetchOpts.pool ?? null, log })
+  const noteFetched = (
+    setUrl: string,
+    f: { html: string; accountId?: string; fetchedAt?: string },
+    videoId: string | null,
+    parsed: ScrapedTracklist | null,
+  ) =>
+    recordSetFetch(env, {
+      setUrl,
+      html: f.html,
+      parsed,
+      videoId,
+      accountId: f.accountId,
+      fetchedAt: f.fetchedAt,
+      settings,
+      pool: fetchOpts.pool ?? null,
+      log,
+    });
   /**
    * Parse a fetched set page ONCE; the cache write-through, the verification
    * record and the mkvid track list all take this result. null = no track rows
    * (an error page or a stub) or a parse that threw.
    */
   const parsePage = (setUrl: string, html: string): ScrapedTracklist | null => {
-    if (!/tlpItem/.test(html)) return null
+    if (!/tlpItem/.test(html)) return null;
     try {
-      return parseTracklist(setUrl, html)
+      return parseTracklist(setUrl, html);
     } catch (e) {
-      log.warn('sync.parse_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
-      return null
+      log.warn("sync.parse_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
+      return null;
     }
-  }
+  };
 
   // 1. Discover tracklists. Either crawl the DJ index (the fresh-discovery
   // path, used by the daily cron + initial manual syncs) OR skip the crawl
   // entirely and rely on `state.discoveredTracklistUrls` (used by the
-  // frequent drain-pending cron — discovery doesn't need to repeat every
+  // frequent drain-pending cron - discovery doesn't need to repeat every
   // few minutes, and skipping saves ~14 AJAX hops per sub).
-  const discovered = new Set<string>(state.discoveredTracklistUrls ?? [])
-  let artistName: string
-  let crawlStopReason: string | undefined
+  const discovered = new Set<string>(state.discoveredTracklistUrls ?? []);
+  let artistName: string;
+  let crawlStopReason: string | undefined;
   /** Page 1 of the DJ listing refused by the pool / paused: the run stops there, like a set fetch would. */
-  let crawlStoppedBy: SyncOneResult['stoppedBy']
+  let crawlStoppedBy: SyncOneResult["stoppedBy"];
   // A manual run's crawl costs page views too: page 1 is charged to its
   // budget, and a spent budget skips the crawl.
-  const crawlBudgetOk = opts.skipDjCrawl || takeFetch(opts.fetchBudget)
+  const crawlBudgetOk = opts.skipDjCrawl || takeFetch(opts.fetchBudget);
   if (opts.skipDjCrawl || !crawlBudgetOk) {
-    artistName = state.artistName ?? prettifySlug(sub.slug)
-    log.info('sync.skip_crawl', {
+    artistName = state.artistName ?? prettifySlug(sub.slug);
+    log.info("sync.skip_crawl", {
       slug: sub.slug,
       artistName,
       tracklistsKnownTotal: discovered.size,
-      ...(crawlBudgetOk ? {} : { reason: 'fetch_budget_spent' }),
-    })
+      ...(crawlBudgetOk ? {} : { reason: "fetch_budget_spent" }),
+    });
   } else {
     // Head walk only. The DJ's older history is the scheduler's paced
     // backfill (one step at a time, priority backfill); it resumes from the
     // scroll keys this crawl leaves behind.
     const crawl = await crawlDjIndex(sub.slug, {
       ...fetchOpts,
-      priority: opts.priority ?? 'new',
+      priority: opts.priority ?? "new",
       maxPages: DEFAULT_MAX_DJ_PAGES,
       deadlineMs: deadline,
       knownUrls: new Set(discovered),
-    })
-    artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug)
-    crawlStopReason = crawl.stopReason
+    });
+    artistName = crawl.artistName ?? state.artistName ?? prettifySlug(sub.slug);
+    crawlStopReason = crawl.stopReason;
     if (crawl.page1Error !== undefined && isStopTheBatchError(crawl.page1Error)) {
       // Until 2026-10-07 this was swallowed: the run said "synced, 0 sets"
       // after waiting out the pool, with no lastError.
-      crawlStoppedBy = stoppedByOf(crawl.page1Error)
-      log[crawlStoppedBy.level === 'error' ? 'error' : 'warn']('sync.batch_stopped_at_dj_page', { slug: sub.slug, ...errorFields(crawl.page1Error) })
+      crawlStoppedBy = stoppedByOf(crawl.page1Error);
+      log[crawlStoppedBy.level === "error" ? "error" : "warn"]("sync.batch_stopped_at_dj_page", {
+        slug: sub.slug,
+        ...errorFields(crawl.page1Error),
+      });
     }
-    // Union with previously-discovered URLs — earlier pages may have failed
+    // Union with previously-discovered URLs - earlier pages may have failed
     // to fetch this run but we don't want to lose them from the todo set.
-    const knownBefore = discovered.size
-    for (const u of crawl.tracklistUrls) discovered.add(u)
+    const knownBefore = discovered.size;
+    for (const u of crawl.tracklistUrls) discovered.add(u);
     try {
-      await rememberDjScrollKeys(env, sub.slug, crawl)
+      await rememberDjScrollKeys(env, sub.slug, crawl);
     } catch (e) {
-      log.warn('sync.remember_scroll_keys_failed', { slug: sub.slug, ...errorFields(e) })
+      log.warn("sync.remember_scroll_keys_failed", { slug: sub.slug, ...errorFields(e) });
     }
-    log.info('sync.dj_parsed', {
+    log.info("sync.dj_parsed", {
       slug: sub.slug,
       artistName,
       pagesWalked: crawl.pagesWalked,
@@ -720,158 +828,173 @@ export async function syncOne(
       tracklistsNewThisRun: discovered.size - knownBefore,
       tracklistsKnownTotal: discovered.size,
       backfill: crawl.backfill ?? null,
-    })
+    });
   }
 
   // 1b. A set 1001tracklists renamed is listed under its new URL while the old
   // one (which only redirects) is still known: fold the old URL into the new
   // one so the set is tracked once (lib/tracklist-renames.ts).
-  const renames = findRenamedTracklists([...discovered])
+  const renames = findRenamedTracklists([...discovered]);
   if (renames.length > 0) {
-    mergeRenamedState(state, tracklistVideos, discovered, renames)
-    await retireRenamedTracklists(env, sub.slug, renames, log)
+    mergeRenamedState(state, tracklistVideos, discovered, renames);
+    await retireRenamedTracklists(env, sub.slug, renames, log);
   }
 
   // 2. Resolve / create the playlist. State first, then YT lookup, then create.
-  const playlistTitle = artistPlaylistTitle(artistName)
+  const playlistTitle = artistPlaylistTitle(artistName);
   // Empty until step 2 resolves it. Typed as a definite string so the insert
   // and removal closures below don't have to re-narrow it on every call.
-  let playlistId: string = state.playlistId ?? ''
+  let playlistId: string = state.playlistId ?? "";
   // Track whether the resolution path went through `playlists.insert` so we
   // can skip the immediately-following `playlistItems.list`. YouTube's read
   // API takes a few seconds to see a freshly-created playlist; listing it
   // right away 404s with playlistNotFound even though the id is valid. A
   // newly-created playlist is by definition empty, so the list call is also
-  // unnecessary — known-empty is the right baseline.
-  let justCreated = false
+  // unnecessary - known-empty is the right baseline.
+  let justCreated = false;
   // Out of quota a DJ with no playlist yet stays without one for this run: its sets that need no write are still handled.
   if (!playlistId && !quotaHeld) {
-    const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
-    playlistId = r.id
-    justCreated = r.justCreated
+    const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug);
+    playlistId = r.id;
+    justCreated = r.justCreated;
   }
 
-  // 3. Existing video ids in the playlist (defense in depth — wiped state mustn't dupe).
+  // 3. Existing video ids in the playlist (defense in depth - wiped state mustn't dupe).
   // If the cached playlistId references a playlist the user has since deleted
   // (or that was never visible to this account), the list call 404s with
   // playlistNotFound. Treat that as a state-staleness signal: drop the id,
-  // re-resolve by title (or create fresh), and retry — skipping the list
+  // re-resolve by title (or create fresh), and retry - skipping the list
   // again if recovery created a fresh playlist.
-  let existingVideoIds: Set<string>
+  let existingVideoIds: Set<string>;
   /** False only out of quota with no cached snapshot: what is in the playlist is not known, so no video is taken to be in it. */
-  let membershipKnown = true
+  let membershipKnown = true;
   if (quotaHeld) {
     // The snapshot or nothing: listing the playlist is a YouTube call that would be refused.
-    const snapshot = playlistId ? await peekCachedPlaylistVideoIds(env, playlistId) : null
-    membershipKnown = snapshot !== null
-    existingVideoIds = snapshot ?? new Set()
+    const snapshot = playlistId ? await peekCachedPlaylistVideoIds(env, playlistId) : null;
+    membershipKnown = snapshot !== null;
+    existingVideoIds = snapshot ?? new Set();
   } else if (justCreated) {
-    existingVideoIds = new Set()
-    await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
+    existingVideoIds = new Set();
+    await cachePlaylistVideoIds(env, playlistId, existingVideoIds);
   } else {
     try {
-      existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log)
+      existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log);
     } catch (e) {
       if (e instanceof PlaylistNotFoundError) {
-        log.warn('sync.playlist_stale', { slug: sub.slug, stalePlaylistId: playlistId })
-        const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
-        playlistId = r.id
+        log.warn("sync.playlist_stale", { slug: sub.slug, stalePlaylistId: playlistId });
+        const r = await resolveArtistPlaylist(
+          playlistTitle,
+          artistName,
+          accessToken,
+          log,
+          sub.slug,
+        );
+        playlistId = r.id;
         if (r.justCreated) {
-          existingVideoIds = new Set()
-          await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
+          existingVideoIds = new Set();
+          await cachePlaylistVideoIds(env, playlistId, existingVideoIds);
         } else {
-          existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log)
+          existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log);
         }
       } else {
-        throw e
+        throw e;
       }
     }
   }
 
   // 4. Walk tracklist URLs we haven't already processed. todo is drawn from
-  // the cumulative discovery set (state ∪ this-run), excluding both
+  // the cumulative discovery set (state union this-run), excluding both
   // already-processed and previously-abandoned URLs.
-  const processed = new Set(state.processedTracklistUrls)
-  const abandoned = new Set(state.abandonedTracklistUrls ?? [])
-  const failureCounts: Record<string, number> = { ...(state.failureCounts ?? {}) }
-  const allUrls = [...discovered]
-  const todo = (crawlStoppedBy ? [] : opts.selection ? opts.selection.newUrls.filter((u) => discovered.has(u)) : allUrls)
+  const processed = new Set(state.processedTracklistUrls);
+  const abandoned = new Set(state.abandonedTracklistUrls ?? []);
+  const failureCounts: Record<string, number> = { ...(state.failureCounts ?? {}) };
+  const allUrls = [...discovered];
+  const todo = (
+    crawlStoppedBy
+      ? []
+      : opts.selection
+        ? opts.selection.newUrls.filter((u) => discovered.has(u))
+        : allUrls
+  )
     .filter((u) => !processed.has(u) && !abandoned.has(u))
-    .slice(0, maxSets)
-  log.info('sync.todo_window', {
+    .slice(0, maxSets);
+  log.info("sync.todo_window", {
     slug: sub.slug,
     totalUrls: allUrls.length,
     alreadyProcessed: processed.size,
     abandoned: abandoned.size,
     todoThisRun: todo.length,
     capped: allUrls.length - processed.size - abandoned.size > maxSets,
-  })
+  });
 
-  let videoIdsFound = 0
-  let videoIdsAdded = 0
-  let setsProcessed = 0
-  let setsAbandonedThisRun = 0
+  let videoIdsFound = 0;
+  let videoIdsAdded = 0;
+  let setsProcessed = 0;
   /** Set when a block/pause stopped the run early; recorded as lastRunStats.stop (see StopLevel) and skips the recheck window. */
-  let stopReason: string | null = crawlStoppedBy?.reason ?? null
-  let stoppedBy: SyncOneResult['stoppedBy'] = crawlStoppedBy
-  let setsRechecked = 0
-  let videosReplaced = 0
+  let stopReason: string | null = crawlStoppedBy?.reason ?? null;
+  let stoppedBy: SyncOneResult["stoppedBy"] = crawlStoppedBy;
+  let setsRechecked = 0;
+  let videosReplaced = 0;
   /** Set when YouTube answered this run with a quota or rate-limit reply (isQuotaError). */
-  let quotaHit = false
+  let quotaHit = false;
   /** A per-minute limit: no more YouTube writes, and no more fetches, this run. (The daily one sets `quotaHeld` and the run goes on without writes.) */
-  let rateLimited = false
+  let rateLimited = false;
   /** The last YouTube 401 of this run, if any (see AUTH_ERROR_RUNS). */
-  let authFailure: string | null = null
-  // Artist-playlist membership changed (insert or removal) → write the
+  let authFailure: string | null = null;
+  // Artist-playlist membership changed (insert or removal) -> write the
   // cached id set back at the end.
-  let playlistChanged = false
-  const viaSeen = new Set<string>()
+  let playlistChanged = false;
+  const viaSeen = new Set<string>();
 
   // 4b. Live mirror into the combined "all tracked artists" playlist. Opened
   // lazily on the first video we resolve, so a run that finds nothing new
   // costs nothing here. Every failure degrades to a status on the audit row
   // rather than failing the set: the set is already handled for the artist
   // playlist, and the combined backfill re-derives whatever was dropped.
-  const combined: { handle: CombinedHandle | null; openFailed: boolean } = { handle: null, openFailed: false }
+  const combined: { handle: CombinedHandle | null; openFailed: boolean } = {
+    handle: null,
+    openFailed: false,
+  };
   const openCombinedOnce = async (): Promise<CombinedHandle | null> => {
-    if (combined.handle || combined.openFailed) return combined.handle
+    if (combined.handle || combined.openFailed) return combined.handle;
     try {
-      combined.handle = await openCombinedPlaylist(env, accessToken, log)
+      combined.handle = await openCombinedPlaylist(env, accessToken, log);
     } catch (e) {
-      combined.openFailed = true
-      log.warn('sync.combined_open_failed', { slug: sub.slug, ...errorFields(e) })
+      combined.openFailed = true;
+      log.warn("sync.combined_open_failed", { slug: sub.slug, ...errorFields(e) });
     }
-    return combined.handle
-  }
+    return combined.handle;
+  };
   const mirrorToCombined = async (videoId: string): Promise<CombinedAdditionStatus | null> => {
     // Out of quota nothing is mirrored: the combined backfill adds it (the combined playlist is the union of the artist playlists).
-    if (quotaHeld) return null
-    const handle = await openCombinedOnce()
-    if (!handle) return 'unavailable'
+    if (quotaHeld) return null;
+    const handle = await openCombinedOnce();
+    if (!handle) return "unavailable";
     try {
-      if (await combinedRefuses(env, handle.playlistId, videoId, handle.videoIds)) return 'unavailable'
-      const status = await addToCombined(env, handle, videoId, accessToken, log)
-      if (status === 'added') {
-        log.info('sync.combined_added', { slug: sub.slug, videoId, playlistId: handle.playlistId })
+      if (await combinedRefuses(env, handle.playlistId, videoId, handle.videoIds))
+        return "unavailable";
+      const status = await addToCombined(env, handle, videoId, accessToken, log);
+      if (status === "added") {
+        log.info("sync.combined_added", { slug: sub.slug, videoId, playlistId: handle.playlistId });
       }
-      return status
+      return status;
     } catch (e) {
-      log.warn('sync.combined_add_failed', { slug: sub.slug, videoId, ...errorFields(e) })
+      log.warn("sync.combined_add_failed", { slug: sub.slug, videoId, ...errorFields(e) });
       // A permanently-uninsertable video (deleted/private) must be recorded,
-      // or the combined backfill will retry it every cron tick — 50 quota
+      // or the combined backfill will retry it every cron tick - 50 quota
       // units per failed attempt, forever.
       if (isPermanentInsertError(e)) {
-        await markVideosUnavailable(env, [videoId], log).catch(() => {})
-        return 'unavailable'
+        await markVideosUnavailable(env, [videoId], log).catch(() => {});
+        return "unavailable";
       }
-      return 'failed'
+      return "failed";
     }
-  }
+  };
 
   // One audit row per set we decide an outcome for, surfaced by the admin
   // panel's "Recent playlist additions" view. Buffered here and flushed in a
-  // single batch after the loop — see lib/playlist-audit.ts for why.
-  const additions: PlaylistAdditionRecord[] = []
+  // single batch after the loop - see lib/playlist-audit.ts for why.
+  const additions: PlaylistAdditionRecord[] = [];
   const auditSet = (
     status: PlaylistAdditionStatus,
     setUrl: string,
@@ -885,7 +1008,7 @@ export async function syncOne(
       setUrl,
       videoId: null,
       videoUrl: null,
-      // Resolved by step 2 — never actually empty here.
+      // Resolved by step 2 - never actually empty here.
       playlistId: playlistId || null,
       playlistTitle,
       combinedStatus: null,
@@ -895,34 +1018,44 @@ export async function syncOne(
       failureCount: null,
       meta: { ms: null },
       ...fields,
-    })
-  }
+    });
+  };
 
   // mkvid bridge (lib/mkvid.ts): a set with no YouTube recording but a
   // SoundCloud / hearthis.at one is queued for mkvid to render + upload. Only
-  // while MKVID_TOKEN is configured — the queue is pointless with nobody
+  // while MKVID_TOKEN is configured - the queue is pointless with nobody
   // polling it. Never fails the set: any error here is a warn log and the set
   // is still recorded as `no_youtube` (the next recheck queues it again).
-  const mkvidEnabled = !!env.MKVID_TOKEN
-  const maybeQueueForMkvid = async (setUrl: string, html: string, parsed: ScrapedTracklist | null): Promise<string | null> => {
-    if (!mkvidEnabled) return null
+  const mkvidEnabled = !!env.MKVID_TOKEN;
+  const maybeQueueForMkvid = async (
+    setUrl: string,
+    html: string,
+    parsed: ScrapedTracklist | null,
+  ): Promise<string | null> => {
+    if (!mkvidEnabled) return null;
     try {
-      if (!parsed) return null
-      const tracks = parsed.tracks
-      const source = extractSetAudioSource(html, lastCueSeconds(tracks))
-      if (!source) return null
-      // Zero rows is the fingerprint of a captcha shell, not a set — never queue from it.
-      if (tracks.length === 0) return null
+      if (!parsed) return null;
+      const tracks = parsed.tracks;
+      const source = extractSetAudioSource(html, lastCueSeconds(tracks));
+      if (!source) return null;
+      // Zero rows is the fingerprint of a captcha shell, not a set - never queue from it.
+      if (tracks.length === 0) return null;
       // Decoy names (see DecoySignal) do not matter for queueing: only the row
       // count, the ID count and the last cue are used, and those stay real.
       // They do matter for the stored track list (below), which drops names
       // from any page it cannot trust. Logged so the sync's view of the
       // poisoning is on record too.
-      if (parsed.decoy.suspected) log.warn('sync.mkvid_decoy_page', { slug: sub.slug, setUrl, named: parsed.decoy.named, mismatched: parsed.decoy.mismatched })
+      if (parsed.decoy.suspected)
+        log.warn("sync.mkvid_decoy_page", {
+          slug: sub.slug,
+          setUrl,
+          named: parsed.decoy.named,
+          mismatched: parsed.decoy.mismatched,
+        });
       // Every page row counts, anonymous "ID - ID" rows included. A list with
       // IDs is still queued: the claim holds it until the set is 7 days old
       // (lib/mkvid-readiness.ts), and never renders an unverified one.
-      const { trackCount, idedCount } = mkvidRowCounts(parsed.rows.length ? parsed.rows : tracks)
+      const { trackCount, idedCount } = mkvidRowCounts(parsed.rows.length ? parsed.rows : tracks);
       const r = await enqueueMkvidRequest(env, {
         slug: sub.slug,
         setUrl,
@@ -933,47 +1066,64 @@ export async function syncOne(
         lastCueSeconds: lastCueSeconds(tracks),
         trackCount,
         idedCount,
-      })
-      // The per-track list mkvid draws from — on first queueing, and on every
+      });
+      // The per-track list mkvid draws from - on first queueing, and on every
       // recheck so requests queued before lists were stored get one. Names
       // only survive a page that passes the decoy check (lib/mkvid.ts
       // mkvidTracksTrusted); a failure here must not cost the queueing.
-      let tracksSaved: string
+      let tracksSaved: string;
       try {
-        tracksSaved = await saveMkvidTracks(env, setUrl, parsed)
+        tracksSaved = await saveMkvidTracks(env, setUrl, parsed);
       } catch (e) {
-        tracksSaved = 'failed'
-        log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+        tracksSaved = "failed";
+        log.warn("sync.mkvid_tracks_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
       }
-      log.info('sync.mkvid_queue', { slug: sub.slug, setUrl, source: source.kind, result: r, trackCount, idedCount, tracksSaved, verified: await isVerified(env, setUrl) })
-      return r === 'queued' ? `queued for mkvid (${source.kind})` : r === 'requeued' ? `mkvid request requeued with a new source (${source.kind})` : `mkvid request already exists (${source.kind})`
+      log.info("sync.mkvid_queue", {
+        slug: sub.slug,
+        setUrl,
+        source: source.kind,
+        result: r,
+        trackCount,
+        idedCount,
+        tracksSaved,
+        verified: await isVerified(env, setUrl),
+      });
+      return r === "queued"
+        ? `queued for mkvid (${source.kind})`
+        : r === "requeued"
+          ? `mkvid request requeued with a new source (${source.kind})`
+          : `mkvid request already exists (${source.kind})`;
     } catch (e) {
-      log.warn('sync.mkvid_queue_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
-      return null
+      log.warn("sync.mkvid_queue_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
+      return null;
     }
-  }
+  };
   /**
    * A set whose video is an mkvid upload keeps its stored track list current
    * too, so a "Delete and recreate" renders from the newest list. Only writes
    * when the set has a request; never fails the recheck.
    */
-  const refreshMkvidTracks = async (setUrl: string, parsed: ScrapedTracklist | null): Promise<void> => {
-    if (!mkvidEnabled || !parsed) return
+  const refreshMkvidTracks = async (
+    setUrl: string,
+    parsed: ScrapedTracklist | null,
+  ): Promise<void> => {
+    if (!mkvidEnabled || !parsed) return;
     try {
-      if (parsed.tracks.length > 0) await saveMkvidTracks(env, setUrl, parsed)
+      if (parsed.tracks.length > 0) await saveMkvidTracks(env, setUrl, parsed);
     } catch (e) {
-      log.warn('sync.mkvid_tracks_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+      log.warn("sync.mkvid_tracks_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
     }
-  }
+  };
   /** The set gained a real recording: a pending mkvid request has nothing left to do. */
   const supersedeMkvid = async (setUrl: string, videoId: string): Promise<void> => {
-    if (!mkvidEnabled) return
+    if (!mkvidEnabled) return;
     try {
-      if (await supersedeMkvidRequestForSet(env, setUrl, videoId)) log.info('sync.mkvid_superseded', { slug: sub.slug, setUrl, videoId })
+      if (await supersedeMkvidRequestForSet(env, setUrl, videoId))
+        log.info("sync.mkvid_superseded", { slug: sub.slug, setUrl, videoId });
     } catch (e) {
-      log.warn('sync.mkvid_supersede_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+      log.warn("sync.mkvid_supersede_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
     }
-  }
+  };
 
   /**
    * Insert into the artist playlist, recovering once from a playlist deleted
@@ -981,189 +1131,262 @@ export async function syncOne(
    * new id). Updates the in-memory membership set and the added counter.
    * The video goes in at the place its set's date gives it (lib/playlist-order.ts).
    */
-  const orderKeys: OrderKeyCache = {}
+  const orderKeys: OrderKeyCache = {};
   // Addition pushes (lib/playlist-add-push.ts) go out while the run carries on
   // and are waited for at its end, so they never eat into the run's deadline.
-  const additionPushes: Array<Promise<void>> = []
+  const additionPushes: Array<Promise<void>> = [];
   const insertOrdered = (videoId: string, setUrl: string) =>
-    insertInOrder(env, { playlistId, videoId, existing: existingVideoIds, accessToken, log, setUrl, cache: orderKeys })
+    insertInOrder(env, {
+      playlistId,
+      videoId,
+      existing: existingVideoIds,
+      accessToken,
+      log,
+      setUrl,
+      cache: orderKeys,
+    });
   const addToArtistPlaylist = async (videoId: string, setUrl: string): Promise<void> => {
     try {
-      await insertOrdered(videoId, setUrl)
+      await insertOrdered(videoId, setUrl);
     } catch (e) {
-      if (!(e instanceof PlaylistNotFoundError)) throw e
-      log.warn('sync.playlist_stale_midrun', { slug: sub.slug, stalePlaylistId: playlistId })
-      const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug)
-      playlistId = r.id
-      // Found existing same-titled → list to avoid dupes; freshly created → empty.
+      if (!(e instanceof PlaylistNotFoundError)) throw e;
+      log.warn("sync.playlist_stale_midrun", { slug: sub.slug, stalePlaylistId: playlistId });
+      const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug);
+      playlistId = r.id;
+      // Found existing same-titled -> list to avoid dupes; freshly created -> empty.
       if (r.justCreated) {
-        existingVideoIds = new Set()
-        await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
+        existingVideoIds = new Set();
+        await cachePlaylistVideoIds(env, playlistId, existingVideoIds);
       } else {
-        existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log)
+        existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log);
       }
-      await insertOrdered(videoId, setUrl)
+      await insertOrdered(videoId, setUrl);
     }
-    existingVideoIds.add(videoId)
+    existingVideoIds.add(videoId);
     // Confirmed insert: from now on the comparison expects it in this playlist.
-    await markInPlaylist(env, playlistId, videoId, 'sync')
-    additionPushes.push(notifyPlaylistAdd(env, { setUrl, videoId, playlistTitle, via: 'sync' }, log))
-    videoIdsAdded += 1
-    playlistChanged = true
-  }
+    await markInPlaylist(env, playlistId, videoId, "sync");
+    additionPushes.push(
+      notifyPlaylistAdd(env, { setUrl, videoId, playlistTitle, via: "sync" }, log),
+    );
+    videoIdsAdded += 1;
+    playlistChanged = true;
+  };
 
   /** Remove from the artist playlist if it's there. Returns items deleted. */
   const removeFromArtistPlaylist = async (videoId: string): Promise<number> => {
-    if (!existingVideoIds.has(videoId)) return 0
-    const n = await removeVideoFromPlaylist(playlistId, videoId, accessToken)
-    existingVideoIds.delete(videoId)
+    if (!existingVideoIds.has(videoId)) return 0;
+    const n = await removeVideoFromPlaylist(playlistId, videoId, accessToken);
+    existingVideoIds.delete(videoId);
     // Taken out by the sync itself (a swap): never an owner removal, even if the new insert then fails.
-    await markOutOfPlaylist(env, playlistId, videoId, 'swap')
-    playlistChanged = true
-    return n
-  }
+    await markOutOfPlaylist(env, playlistId, videoId, "swap");
+    playlistChanged = true;
+    return n;
+  };
 
   for (const setUrl of todo) {
     if (Date.now() >= deadline) {
-      log.warn('sync.deadline_hit_during_set_loop', {
+      log.warn("sync.deadline_hit_during_set_loop", {
         slug: sub.slug,
         setsProcessed,
         setsRemainingInWindow: todo.length - setsProcessed,
-      })
-      break
+      });
+      break;
     }
     // The page of this set was fetched before and only its insert waited for quota: the video is on record, the page is not fetched again.
-    const kept = tracklistVideos[setUrl]
-    const waiting = kept?.videoId && kept.source !== 'mkvid' && nowSeconds() - kept.checkedAt <= DEFERRED_INSERT_MAX_AGE_SECONDS ? { videoId: kept.videoId, checkedAt: kept.checkedAt } : null
+    const kept = tracklistVideos[setUrl];
+    const waiting =
+      kept?.videoId &&
+      kept.source !== "mkvid" &&
+      nowSeconds() - kept.checkedAt <= DEFERRED_INSERT_MAX_AGE_SECONDS
+        ? { videoId: kept.videoId, checkedAt: kept.checkedAt }
+        : null;
     if (waiting && quotaHeld) {
-      quotaDeferred.push(setUrl)
-      continue
+      quotaDeferred.push(setUrl);
+      continue;
     }
     if (!waiting && !takeFetch(opts.fetchBudget)) {
-      log.info('sync.set_budget_exhausted', { slug: sub.slug, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed })
-      break
+      log.info("sync.set_budget_exhausted", {
+        slug: sub.slug,
+        setsProcessed,
+        setsRemainingInWindow: todo.length - setsProcessed,
+      });
+      break;
     }
-    const tSet = Date.now()
+    const tSet = Date.now();
     // Remembered outside the try so a failure *after* the page was parsed
     // (typically YouTube rejecting the insert) can still name the video.
-    let foundVideoId: string | null = null
-    let foundVia: string | null = null
+    let foundVideoId: string | null = null;
+    let foundVia: string | null = null;
     // When the page was read: now, or when the earlier run fetched it.
-    const checkedAt = waiting?.checkedAt ?? nowSeconds()
+    const checkedAt = waiting?.checkedAt ?? nowSeconds();
     try {
-      let setFetched: Awaited<ReturnType<typeof fetch1001Html>> | null = null
-      let parsedPage: ScrapedTracklist | null = null
-      let pick: Awaited<ReturnType<typeof pickSetVideo>>
+      let setFetched: Awaited<ReturnType<typeof fetch1001Html>> | null = null;
+      let parsedPage: ScrapedTracklist | null = null;
+      let pick: Awaited<ReturnType<typeof pickSetVideo>>;
       if (waiting) {
         // Judged again from the stored page facts now that YouTube can be asked: the first look, out of quota, had the cached record at most.
-        foundVideoId = waiting.videoId
-        pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: null, rawVideoId: waiting.videoId, playlistId, accessToken, log })
-        log.info('sync.deferred_insert_resumed', { slug: sub.slug, setUrl, videoId: waiting.videoId, kept: pick.videoId !== null })
+        foundVideoId = waiting.videoId;
+        pick = await pickSetVideo(env, {
+          slug: sub.slug,
+          setUrl,
+          html: null,
+          rawVideoId: waiting.videoId,
+          playlistId,
+          accessToken,
+          log,
+        });
+        log.info("sync.deferred_insert_resumed", {
+          slug: sub.slug,
+          setUrl,
+          videoId: waiting.videoId,
+          kept: pick.videoId !== null,
+        });
       } else {
-        const fetchOpts = setFetchOpts(setUrl, 'new')
-        setFetched = await fetch1001Html(setUrl, fetchOpts)
-        viaSeen.add(setFetched.via)
+        const fetchOpts = setFetchOpts(setUrl, "new");
+        setFetched = await fetch1001Html(setUrl, fetchOpts);
+        viaSeen.add(setFetched.via);
         // Write-through: the phone button then serves this list from cache.
-        parsedPage = parsePage(setUrl, setFetched.html)
-        const written = await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new', parsedPage)
+        parsedPage = parsePage(setUrl, setFetched.html);
+        const written = await cacheTracklistFromHtml(
+          env,
+          setUrl,
+          setFetched.html,
+          log,
+          "sync.new",
+          parsedPage,
+        );
         // Its tracks' links are looked up ahead of a phone tap by the cron (lib/link-prewarm.ts; one D1 batch, never throws).
-        if (written?.cached && parsedPage) await enqueueLinkPrewarm(env, setUrl, parsedPage, log)
-        foundVia = setFetched.via
+        if (written?.cached && parsedPage) await enqueueLinkPrewarm(env, setUrl, parsedPage, log);
+        foundVia = setFetched.via;
         // Full-recording rule + never-re-add list (lib/playlist-hygiene.ts): a turned-down video counts as none.
-        pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log, noLookup: quotaHeld })
+        pick = await pickSetVideo(env, {
+          slug: sub.slug,
+          setUrl,
+          html: setFetched.html,
+          rawVideoId: parseSetYouTubeId(setFetched.html),
+          playlistId,
+          accessToken,
+          log,
+          noLookup: quotaHeld,
+        });
       }
-      const videoId = pick.videoId
-      foundVideoId = videoId
-      if (setFetched) await noteFetched(setUrl, setFetched, videoId, parsedPage)
-      const via = setFetched ? { via: setFetched.via } : {}
+      const videoId = pick.videoId;
+      foundVideoId = videoId;
+      if (setFetched) await noteFetched(setUrl, setFetched, videoId, parsedPage);
+      const via = setFetched ? { via: setFetched.via } : {};
       if (videoId) {
-        const present = membershipKnown && existingVideoIds.has(videoId)
+        const present = membershipKnown && existingVideoIds.has(videoId);
         if (!present && quotaHeld) {
           // Everything but the insert is done (cached, verified, scheduled). The set stays unprocessed with its
           // video on record, charged nothing; the run that finds the quota back inserts it without another fetch.
-          tracklistVideos[setUrl] = { videoId, checkedAt }
-          quotaDeferred.push(setUrl)
-          log.info('sync.insert_deferred_quota', { slug: sub.slug, setUrl, videoId })
-          continue
+          tracklistVideos[setUrl] = { videoId, checkedAt };
+          quotaDeferred.push(setUrl);
+          log.info("sync.insert_deferred_quota", { slug: sub.slug, setUrl, videoId });
+          continue;
         }
-        videoIdsFound += 1
+        videoIdsFound += 1;
         if (!present) {
-          await addToArtistPlaylist(videoId, setUrl)
-          log.info('sync.added', { slug: sub.slug, setUrl, videoId, playlistId })
-          auditSet('added', setUrl, {
+          await addToArtistPlaylist(videoId, setUrl);
+          log.info("sync.added", { slug: sub.slug, setUrl, videoId, playlistId });
+          auditSet("added", setUrl, {
             videoId,
             videoUrl: watchUrl(videoId),
             ...via,
             meta: { ms: Date.now() - tSet },
             combinedStatus: await mirrorToCombined(videoId),
-          })
+          });
         } else {
-          log.info('sync.already_in_playlist', { slug: sub.slug, setUrl, videoId })
+          log.info("sync.already_in_playlist", { slug: sub.slug, setUrl, videoId });
           // Already in the artist playlist, but possibly not in the combined
-          // one (it predates this feature, or a previous mirror failed) — so
+          // one (it predates this feature, or a previous mirror failed) - so
           // mirror duplicates too rather than leaning on the backfill.
-          auditSet('duplicate', setUrl, {
+          auditSet("duplicate", setUrl, {
             videoId,
             videoUrl: watchUrl(videoId),
             ...via,
             meta: { ms: Date.now() - tSet },
             combinedStatus: await mirrorToCombined(videoId),
-          })
+          });
         }
       } else if (!setFetched) {
         // The video that waited for quota was turned down on the second look. There is no page here to
         // look for an audio source in: the set's first recheck queues it for mkvid, as for any set without one.
-        const note = pick.rejected ? rejectionNote(pick.rejected) : null
-        auditSet('no_youtube', setUrl, { meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
+        const note = pick.rejected ? rejectionNote(pick.rejected) : null;
+        auditSet("no_youtube", setUrl, {
+          meta: { ms: Date.now() - tSet },
+          ...(note ? { message: note } : {}),
+        });
         // Its schedule was written when the page still counted as having a video (a recheck up to 30 days out): due now instead.
-        await markSetDue(env, setUrl).catch((e) => log.warn('sync.mark_due_failed', { slug: sub.slug, setUrl, ...errorFields(e) }))
+        await markSetDue(env, setUrl).catch((e) =>
+          log.warn("sync.mark_due_failed", { slug: sub.slug, setUrl, ...errorFields(e) }),
+        );
       } else {
         // Diagnostic fingerprint so we can tell at a glance whether the page
         // truly has no YT or whether the parser missed an embed shape.
-        log.info('sync.no_youtube_on_set', {
+        log.info("sync.no_youtube_on_set", {
           slug: sub.slug,
           setUrl,
           fingerprint: youtubeFingerprint(setFetched.html),
-        })
-        const note = [pick.rejected ? rejectionNote(pick.rejected) : null, await maybeQueueForMkvid(setUrl, setFetched.html, parsedPage)].filter(Boolean).join('; ')
-        auditSet('no_youtube', setUrl, { via: setFetched.via, meta: { ms: Date.now() - tSet }, ...(note ? { message: note } : {}) })
+        });
+        const note = [
+          pick.rejected ? rejectionNote(pick.rejected) : null,
+          await maybeQueueForMkvid(setUrl, setFetched.html, parsedPage),
+        ]
+          .filter(Boolean)
+          .join("; ");
+        auditSet("no_youtube", setUrl, {
+          via: setFetched.via,
+          meta: { ms: Date.now() - tSet },
+          ...(note ? { message: note } : {}),
+        });
       }
-      processed.add(setUrl)
-      tracklistVideos[setUrl] = { videoId, checkedAt }
-      delete failureCounts[setUrl]
-      setsProcessed += 1
+      processed.add(setUrl);
+      tracklistVideos[setUrl] = { videoId, checkedAt };
+      delete failureCounts[setUrl];
+      setsProcessed += 1;
     } catch (e) {
       if (foundVideoId && isPermanentInsertError(e)) {
         // YouTube itself says this recording cannot be added (deleted, private,
         // region-blocked: 400/403/404 that is not a quota error). No number of
-        // retries changes that, so the set is settled now — like a set whose
-        // page has no usable recording — instead of costing three ticks. Its
+        // retries changes that, so the set is settled now - like a set whose
+        // page has no usable recording - instead of costing three ticks. Its
         // dead video id is remembered so the 5-day recheck still notices if
         // 1001tracklists attaches a replacement recording later.
-        log.warn('sync.set_video_unavailable', { slug: sub.slug, setUrl, videoId: foundVideoId, ...errorFields(e) })
-        auditSet('no_youtube', setUrl, {
+        log.warn("sync.set_video_unavailable", {
+          slug: sub.slug,
+          setUrl,
+          videoId: foundVideoId,
+          ...errorFields(e),
+        });
+        auditSet("no_youtube", setUrl, {
           videoId: foundVideoId,
           videoUrl: watchUrl(foundVideoId),
-          message: `YouTube rejected ${foundVideoId} as unavailable: ${(e instanceof Error ? e.message : String(e)).split('\n')[0]}`,
+          message: `YouTube rejected ${foundVideoId} as unavailable: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}`,
           ...(foundVia ? { via: foundVia } : {}),
           meta: { ms: Date.now() - tSet },
-        })
-        await markVideosUnavailable(env, [foundVideoId], log).catch(() => {})
-        processed.add(setUrl)
-        tracklistVideos[setUrl] = { videoId: foundVideoId, checkedAt: nowSeconds() }
-        delete failureCounts[setUrl]
-        setsProcessed += 1
-        continue
+        });
+        await markVideosUnavailable(env, [foundVideoId], log).catch(() => {});
+        processed.add(setUrl);
+        tracklistVideos[setUrl] = { videoId: foundVideoId, checkedAt: nowSeconds() };
+        delete failureCounts[setUrl];
+        setsProcessed += 1;
+        continue;
       }
       if (isStopTheBatchError(e)) {
         // A pause, a pool refusal (budget spent, captcha pending) or a broken
         // route is not the set's fault: every remaining set would fail the
         // same way. Stop the run here, charge nothing, and let a later tick
         // pick up exactly where we left off.
-        stoppedBy = stoppedByOf(e)
-        stopReason = stoppedBy.reason
-        log[stoppedBy.level === 'error' ? 'error' : 'warn']('sync.batch_stopped_blocked', { slug: sub.slug, setUrl, setsProcessed, setsRemainingInWindow: todo.length - setsProcessed, ...errorFields(e) })
-        break
+        stoppedBy = stoppedByOf(e);
+        stopReason = stoppedBy.reason;
+        log[stoppedBy.level === "error" ? "error" : "warn"]("sync.batch_stopped_blocked", {
+          slug: sub.slug,
+          setUrl,
+          setsProcessed,
+          setsRemainingInWindow: todo.length - setsProcessed,
+          ...errorFields(e),
+        });
+        break;
       }
       if (isQuotaError(e)) {
         // YouTube is out of quota (or rate limiting): the whole project is, not
@@ -1171,52 +1394,60 @@ export async function syncOne(
         // this) and every further write this run would fail the same way. Record
         // the row (no failure count); the set stays in the window with its video
         // on record, so the run that inserts it does not fetch the page again.
-        quotaHit = true
-        await noteQuotaOut(env, e, log)
-        log.warn('sync.quota_exhausted', { slug: sub.slug, setUrl, ...errorFields(e) })
-        auditSet('failed', setUrl, {
+        quotaHit = true;
+        await noteQuotaOut(env, e, log);
+        log.warn("sync.quota_exhausted", { slug: sub.slug, setUrl, ...errorFields(e) });
+        auditSet("failed", setUrl, {
           message: e instanceof Error ? e.message : String(e),
           ...(foundVideoId ? { videoId: foundVideoId, videoUrl: watchUrl(foundVideoId) } : {}),
           ...(foundVia ? { via: foundVia } : {}),
           meta: { ms: Date.now() - tSet },
-        })
+        });
         if (foundVideoId) {
-          tracklistVideos[setUrl] = { videoId: foundVideoId, checkedAt }
-          quotaDeferred.push(setUrl)
+          tracklistVideos[setUrl] = { videoId: foundVideoId, checkedAt };
+          quotaDeferred.push(setUrl);
         }
         // The day's quota: the rest of the window is still fetched, and whatever needs no write is settled.
-        if (quotaKind((e as YouTubeApiError).reason) === 'quota') {
-          quotaHeld = true
-          continue
+        if (quotaKind((e as YouTubeApiError).reason) === "quota") {
+          quotaHeld = true;
+          continue;
         }
         // A per-minute limit: it is over by the next tick, so nothing more is fetched for writes that would wait.
-        rateLimited = true
-        break
+        rateLimited = true;
+        break;
       }
       // Bump per-URL failure count. After ABANDON_AFTER_FAILURES, give up
       // and mark the URL processed so the cron stops re-attempting it
       // every tick. Blocks and route faults never reach this branch (see
       // above), so a URL is only abandoned for failures that are actually
-      // about that URL — a real 404, a page that parses to zero tracks, a
+      // about that URL - a real 404, a page that parses to zero tracks, a
       // 5xx from the site itself.
       // A YouTube 401 is Google refusing a valid token now and then, never
       // about the set: it is retried next run without counting toward abandoning.
-      const authFlake = e instanceof YouTubeApiError && e.status === 401
-      if (authFlake) authFailure = (e instanceof Error ? e.message : String(e)).split('\n')[0]!.slice(0, 200)
-      const fc = authFlake ? (failureCounts[setUrl] ?? 0) : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
-      const abandon = !authFlake && fc >= ABANDON_AFTER_FAILURES
-      log.warn('sync.set_failed', { slug: sub.slug, setUrl, failureCount: fc, abandoning: abandon, ...errorFields(e) })
-      auditSet(abandon ? 'abandoned' : 'failed', setUrl, {
+      const authFlake = e instanceof YouTubeApiError && e.status === 401;
+      if (authFlake)
+        authFailure = (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 200);
+      const fc = authFlake
+        ? (failureCounts[setUrl] ?? 0)
+        : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1);
+      const abandon = !authFlake && fc >= ABANDON_AFTER_FAILURES;
+      log.warn("sync.set_failed", {
+        slug: sub.slug,
+        setUrl,
+        failureCount: fc,
+        abandoning: abandon,
+        ...errorFields(e),
+      });
+      auditSet(abandon ? "abandoned" : "failed", setUrl, {
         message: e instanceof Error ? e.message : String(e),
         failureCount: fc,
         ...(foundVideoId ? { videoId: foundVideoId, videoUrl: watchUrl(foundVideoId) } : {}),
         ...(foundVia ? { via: foundVia } : {}),
         meta: { ms: Date.now() - tSet },
-      })
+      });
       if (abandon) {
-        abandoned.add(setUrl)
-        delete failureCounts[setUrl]
-        setsAbandonedThisRun += 1
+        abandoned.add(setUrl);
+        delete failureCounts[setUrl];
       }
     }
   }
@@ -1226,15 +1457,23 @@ export async function syncOne(
   // is never starved by rechecks; the deadline guards both.
   const rechecksDue = opts.selection
     ? opts.selection.recheckUrls.filter((u) => processed.has(u) && !abandoned.has(u))
-    : dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings, await idRowSets(env, log))
+    : dueRecheckUrls(
+        processed,
+        abandoned,
+        tracklistVideos,
+        nowSeconds(),
+        settings,
+        await idRowSets(env, log),
+      );
   /**
    * A manual run (no selection) makes no rechecks while the quota is out: a
    * recheck that finds something can only be deferred and fetched again, and a
    * button press has a handful of fetches to spend. The scheduler still hands
    * them over one at a time, each held to its daily attempts.
    */
-  const noManualRechecks = () => quotaHeld && !opts.selection
-  const rechecks = stopReason || rateLimited || noManualRechecks() ? [] : rechecksDue.slice(0, maxRechecks)
+  const noManualRechecks = () => quotaHeld && !opts.selection;
+  const rechecks =
+    stopReason || rateLimited || noManualRechecks() ? [] : rechecksDue.slice(0, maxRechecks);
   /**
    * Out of quota a recheck's write (a first video, a swap) waits: the page was
    * read and recorded, what the set resolved to is left as it was, so the
@@ -1246,86 +1485,109 @@ export async function syncOne(
    * processed set. Its attempt is not given back.
    */
   const deferRecheck = async (setUrl: string, videoId: string, atSec: number): Promise<void> => {
-    quotaDeferred.push(setUrl)
+    quotaDeferred.push(setUrl);
     try {
-      await holdSetOut(env, setUrl, atSec)
+      await holdSetOut(env, setUrl, atSec);
     } catch (e) {
-      log.warn('sync.recheck_defer_failed', { slug: sub.slug, setUrl, ...errorFields(e) })
+      log.warn("sync.recheck_defer_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
     }
-    log.info('sync.recheck_deferred_quota', { slug: sub.slug, setUrl, videoId, dueAt: atSec })
-  }
+    log.info("sync.recheck_deferred_quota", { slug: sub.slug, setUrl, videoId, dueAt: atSec });
+  };
   if (rechecksDue.length > 0) {
-    log.info('sync.recheck_window', {
+    log.info("sync.recheck_window", {
       slug: sub.slug,
       due: rechecksDue.length,
       thisRun: rechecks.length,
-    })
+    });
   }
   for (const setUrl of rechecks) {
     // The day's quota ran out during this manual run: the rechecks left are not fetched (see noManualRechecks).
-    if (noManualRechecks()) break
+    if (noManualRechecks()) break;
     if (Date.now() >= deadline) {
-      log.warn('sync.deadline_hit_during_recheck_loop', {
+      log.warn("sync.deadline_hit_during_recheck_loop", {
         slug: sub.slug,
         setsRechecked,
         setsRemainingInWindow: rechecks.length - setsRechecked,
-      })
-      break
+      });
+      break;
     }
     if (!takeFetch(opts.fetchBudget)) {
-      log.info('sync.recheck_budget_exhausted', { slug: sub.slug, setsRechecked, setsRemainingInWindow: rechecks.length - setsRechecked })
-      break
+      log.info("sync.recheck_budget_exhausted", {
+        slug: sub.slug,
+        setsRechecked,
+        setsRemainingInWindow: rechecks.length - setsRechecked,
+      });
+      break;
     }
-    const tSet = Date.now()
-    const prev = tracklistVideos[setUrl]
+    const tSet = Date.now();
+    const prev = tracklistVideos[setUrl];
     try {
-      const fetchOpts = setFetchOpts(setUrl, 'recheck')
-      const setFetched = await fetch1001Html(setUrl, fetchOpts)
-      viaSeen.add(setFetched.via)
-      const parsedPage = parsePage(setUrl, setFetched.html)
-      const written = await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck', parsedPage)
+      const fetchOpts = setFetchOpts(setUrl, "recheck");
+      const setFetched = await fetch1001Html(setUrl, fetchOpts);
+      viaSeen.add(setFetched.via);
+      const parsedPage = parsePage(setUrl, setFetched.html);
+      const written = await cacheTracklistFromHtml(
+        env,
+        setUrl,
+        setFetched.html,
+        log,
+        "sync.recheck",
+        parsedPage,
+      );
       // Tracks new to the page (or whose links' cache expired) are pre-warmed too; cached ones are dropped by the drain.
-      if (written?.cached && parsedPage) await enqueueLinkPrewarm(env, setUrl, parsedPage, log)
-      const { videoId } = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log, noLookup: quotaHeld })
-      const checkedAt = nowSeconds()
-      await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null, parsedPage)
+      if (written?.cached && parsedPage) await enqueueLinkPrewarm(env, setUrl, parsedPage, log);
+      const { videoId } = await pickSetVideo(env, {
+        slug: sub.slug,
+        setUrl,
+        html: setFetched.html,
+        rawVideoId: parseSetYouTubeId(setFetched.html),
+        playlistId,
+        accessToken,
+        log,
+        noLookup: quotaHeld,
+      });
+      const checkedAt = nowSeconds();
+      await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null, parsedPage);
       if (!prev || prev.videoId === undefined) {
         // Unknown baseline: record what the page has now, change nothing.
-        tracklistVideos[setUrl] = { videoId, checkedAt }
-        log.info('sync.recheck_baseline', { slug: sub.slug, setUrl, videoId })
+        tracklistVideos[setUrl] = { videoId, checkedAt };
+        log.info("sync.recheck_baseline", { slug: sub.slug, setUrl, videoId });
       } else if (videoId === null) {
         // The set lost its recording (or, for an mkvid upload, never had one on
-        // the page). Keep what we have — never remove on absence.
-        tracklistVideos[setUrl] = { ...prev, videoId: prev.videoId, checkedAt }
-        log.info('sync.recheck_no_youtube', { slug: sub.slug, setUrl, keptVideoId: prev.videoId })
+        // the page). Keep what we have - never remove on absence.
+        tracklistVideos[setUrl] = { ...prev, videoId: prev.videoId, checkedAt };
+        log.info("sync.recheck_no_youtube", { slug: sub.slug, setUrl, keptVideoId: prev.videoId });
         // Still nothing on YouTube: a SoundCloud/hearthis recording that has
         // appeared since (or a request that was never queued) goes to mkvid.
-        // Idempotent — a set with a request already gets 'exists'.
-        if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html, parsedPage)
-        else await refreshMkvidTracks(setUrl, parsedPage)
+        // Idempotent - a set with a request already gets 'exists'.
+        if (prev.videoId === null) await maybeQueueForMkvid(setUrl, setFetched.html, parsedPage);
+        else await refreshMkvidTracks(setUrl, parsedPage);
       } else if (videoId === prev.videoId) {
-        tracklistVideos[setUrl] = { videoId, checkedAt }
-        log.info('sync.recheck_unchanged', { slug: sub.slug, setUrl, videoId })
-      } else if (quotaHeld && !(prev.videoId === null && membershipKnown && existingVideoIds.has(videoId))) {
+        tracklistVideos[setUrl] = { videoId, checkedAt };
+        log.info("sync.recheck_unchanged", { slug: sub.slug, setUrl, videoId });
+      } else if (
+        quotaHeld &&
+        !(prev.videoId === null && membershipKnown && existingVideoIds.has(videoId))
+      ) {
         // A first video to insert, or a swap, while the quota is out.
-        await deferRecheck(setUrl, videoId, quotaDayEnd(Date.now()))
+        await deferRecheck(setUrl, videoId, quotaDayEnd(Date.now()));
       } else if (prev.videoId === null) {
         // The set gained a recording since we last looked: same as a first-time add.
-        videoIdsFound += 1
-        const wasPresent = existingVideoIds.has(videoId)
+        videoIdsFound += 1;
+        const wasPresent = existingVideoIds.has(videoId);
         if (!wasPresent) {
-          await addToArtistPlaylist(videoId, setUrl)
-          log.info('sync.recheck_added', { slug: sub.slug, setUrl, videoId, playlistId })
+          await addToArtistPlaylist(videoId, setUrl);
+          log.info("sync.recheck_added", { slug: sub.slug, setUrl, videoId, playlistId });
         }
-        tracklistVideos[setUrl] = { videoId, checkedAt }
-        await supersedeMkvid(setUrl, videoId)
-        auditSet(wasPresent ? 'duplicate' : 'added', setUrl, {
+        tracklistVideos[setUrl] = { videoId, checkedAt };
+        await supersedeMkvid(setUrl, videoId);
+        auditSet(wasPresent ? "duplicate" : "added", setUrl, {
           videoId,
           videoUrl: watchUrl(videoId),
           via: setFetched.via,
           meta: { ms: Date.now() - tSet },
           combinedStatus: await mirrorToCombined(videoId),
-        })
+        });
       } else {
         // Swapped recording. New is strictly better: out with the old (from
         // both playlists, unless another set still resolves to it), in with
@@ -1333,34 +1595,38 @@ export async function syncOne(
         // leaves the next recheck with a clean retry: `prev` is unchanged
         // until the end, so it re-runs this branch and every step is a no-op
         // once done.
-        const oldVideoId = prev.videoId
-        videoIdsFound += 1
-        const oldStillUsedHere = referencedByOtherSet(tracklistVideos, oldVideoId, setUrl)
-        let removedFromArtist = 0
+        const oldVideoId = prev.videoId;
+        videoIdsFound += 1;
+        const oldStillUsedHere = referencedByOtherSet(tracklistVideos, oldVideoId, setUrl);
+        let removedFromArtist = 0;
         if (oldStillUsedHere) {
-          log.info('sync.recheck_keep_old_shared', { slug: sub.slug, setUrl, oldVideoId })
+          log.info("sync.recheck_keep_old_shared", { slug: sub.slug, setUrl, oldVideoId });
         } else {
-          removedFromArtist = await removeFromArtistPlaylist(oldVideoId)
+          removedFromArtist = await removeFromArtistPlaylist(oldVideoId);
         }
-        let removedFromCombined = 0
+        let removedFromCombined = 0;
         if (!oldStillUsedHere && !(await videoReferencedByAnySub(env, oldVideoId, sub.slug))) {
-          const handle = await openCombinedOnce()
+          const handle = await openCombinedOnce();
           if (handle) {
             try {
-              removedFromCombined = await removeFromCombined(handle, oldVideoId, accessToken, log)
+              removedFromCombined = await removeFromCombined(handle, oldVideoId, accessToken, log);
             } catch (e) {
               // The combined backfill only ever adds, so a failed removal here
-              // is not self-healing — but it is also not worth failing the
+              // is not self-healing - but it is also not worth failing the
               // swap over. Logged for the panel.
-              log.warn('sync.recheck_combined_remove_failed', { slug: sub.slug, oldVideoId, ...errorFields(e) })
+              log.warn("sync.recheck_combined_remove_failed", {
+                slug: sub.slug,
+                oldVideoId,
+                ...errorFields(e),
+              });
             }
           }
         }
-        if (!existingVideoIds.has(videoId)) await addToArtistPlaylist(videoId, setUrl)
-        const combinedStatus = await mirrorToCombined(videoId)
-        tracklistVideos[setUrl] = { videoId, checkedAt }
-        videosReplaced += 1
-        log.info('sync.recheck_replaced', {
+        if (!existingVideoIds.has(videoId)) await addToArtistPlaylist(videoId, setUrl);
+        const combinedStatus = await mirrorToCombined(videoId);
+        tracklistVideos[setUrl] = { videoId, checkedAt };
+        videosReplaced += 1;
+        log.info("sync.recheck_replaced", {
           slug: sub.slug,
           setUrl,
           oldVideoId,
@@ -1368,8 +1634,8 @@ export async function syncOne(
           removedFromArtist,
           removedFromCombined,
           playlistId,
-        })
-        auditSet('replaced', setUrl, {
+        });
+        auditSet("replaced", setUrl, {
           videoId,
           videoUrl: watchUrl(videoId),
           previousVideoId: oldVideoId,
@@ -1377,84 +1643,118 @@ export async function syncOne(
           meta: { ms: Date.now() - tSet },
           combinedStatus,
           message: `replaced ${oldVideoId} (removed ${removedFromArtist} from artist, ${removedFromCombined} from combined)`,
-        })
+        });
       }
-      delete failureCounts[setUrl]
-      setsRechecked += 1
+      delete failureCounts[setUrl];
+      setsRechecked += 1;
     } catch (e) {
       if (isStopTheBatchError(e)) {
-        stoppedBy = stoppedByOf(e)
-        stopReason = stoppedBy.reason
-        log[stoppedBy.level === 'error' ? 'error' : 'warn']('sync.recheck_batch_stopped_blocked', { slug: sub.slug, setUrl, setsRechecked, ...errorFields(e) })
-        break
+        stoppedBy = stoppedByOf(e);
+        // eslint-disable-next-line no-useless-assignment -- kept in step with stoppedBy; nothing after the recheck loop reads it yet
+        stopReason = stoppedBy.reason;
+        log[stoppedBy.level === "error" ? "error" : "warn"]("sync.recheck_batch_stopped_blocked", {
+          slug: sub.slug,
+          setUrl,
+          setsRechecked,
+          ...errorFields(e),
+        });
+        break;
       }
       if (isQuotaError(e)) {
         // Out of YouTube quota mid-swap. No failure is charged to the set; a
         // later tick redoes the swap from the top (every completed step is a
         // no-op on retry), and the set is made due for it (see deferRecheck).
-        quotaHit = true
-        await noteQuotaOut(env, e, log)
-        log.warn('sync.recheck_quota_exhausted', { slug: sub.slug, setUrl, ...errorFields(e) })
+        quotaHit = true;
+        await noteQuotaOut(env, e, log);
+        log.warn("sync.recheck_quota_exhausted", { slug: sub.slug, setUrl, ...errorFields(e) });
         // Same row as a new set's: failed, no failure count, so Activity shows the wait.
-        auditSet('failed', setUrl, {
+        auditSet("failed", setUrl, {
           videoId: prev?.videoId ?? null,
           videoUrl: prev?.videoId ? watchUrl(prev.videoId) : null,
           message: `recheck: ${e instanceof Error ? e.message : String(e)}`,
           meta: { ms: Date.now() - tSet },
-        })
-        const daily = quotaKind((e as YouTubeApiError).reason) === 'quota'
-        await deferRecheck(setUrl, prev?.videoId ?? '', daily ? quotaDayEnd(Date.now()) : nowSeconds() + RATE_LIMIT_RECHECK_SECONDS)
+        });
+        const daily = quotaKind((e as YouTubeApiError).reason) === "quota";
+        await deferRecheck(
+          setUrl,
+          prev?.videoId ?? "",
+          daily ? quotaDayEnd(Date.now()) : nowSeconds() + RATE_LIMIT_RECHECK_SECONDS,
+        );
         // The day's quota: the other rechecks are still read, and those that need no write are settled.
         if (daily) {
-          quotaHeld = true
-          continue
+          quotaHeld = true;
+          continue;
         }
-        rateLimited = true
-        break
+        // eslint-disable-next-line no-useless-assignment -- kept for symmetry with the first-time loop; nothing after the recheck loop reads it yet
+        rateLimited = true;
+        break;
       }
       // Same counter as first-time processing, but a set that already has a
-      // video in the playlist is never abandoned for failing a *recheck* —
+      // video in the playlist is never abandoned for failing a *recheck* -
       // after ABANDON_AFTER_FAILURES it is simply deferred to the next
       // interval instead of being retried every tick.
-      const authFlake = e instanceof YouTubeApiError && e.status === 401
-      if (authFlake) authFailure = (e instanceof Error ? e.message : String(e)).split('\n')[0]!.slice(0, 200)
-      const fc = authFlake ? (failureCounts[setUrl] ?? 0) : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1)
-      const defer = !authFlake && fc >= ABANDON_AFTER_FAILURES
-      log.warn('sync.recheck_failed', { slug: sub.slug, setUrl, failureCount: fc, deferring: defer, ...errorFields(e) })
-      auditSet('failed', setUrl, {
+      const authFlake = e instanceof YouTubeApiError && e.status === 401;
+      if (authFlake)
+        authFailure = (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 200);
+      const fc = authFlake
+        ? (failureCounts[setUrl] ?? 0)
+        : (failureCounts[setUrl] = (failureCounts[setUrl] ?? 0) + 1);
+      const defer = !authFlake && fc >= ABANDON_AFTER_FAILURES;
+      log.warn("sync.recheck_failed", {
+        slug: sub.slug,
+        setUrl,
+        failureCount: fc,
+        deferring: defer,
+        ...errorFields(e),
+      });
+      auditSet("failed", setUrl, {
         videoId: prev?.videoId ?? null,
         videoUrl: prev?.videoId ? watchUrl(prev.videoId) : null,
         message: `recheck: ${e instanceof Error ? e.message : String(e)}`,
         failureCount: fc,
         meta: { ms: Date.now() - tSet },
-      })
+      });
       if (defer) {
-        tracklistVideos[setUrl] = { ...(prev ?? {}), checkedAt: nowSeconds() }
-        delete failureCounts[setUrl]
+        tracklistVideos[setUrl] = { ...(prev ?? {}), checkedAt: nowSeconds() };
+        delete failureCounts[setUrl];
       }
     }
   }
 
   // A stopped run is kept as `stop` with how many runs in a row it has been;
   // it is the DJ's lastError only when it needs the owner or has gone on too long.
-  const ranAt = nowSeconds()
+  const ranAt = nowSeconds();
   // The owner's own pause starts the count over: the pool was not asked.
-  const prevStop = state.lastRunStats?.stop?.level === 'retry' && stoppedBy?.level === 'retry' ? state.lastRunStats.stop : undefined
+  const prevStop =
+    state.lastRunStats?.stop?.level === "retry" && stoppedBy?.level === "retry"
+      ? state.lastRunStats.stop
+      : undefined;
   const stop = stoppedBy
-    ? { reason: stoppedBy.reason, code: stoppedBy.poolCode ?? null, level: stoppedBy.level ?? 'error', runs: (prevStop?.runs ?? 0) + 1, since: prevStop?.since ?? ranAt }
-    : null
-  const stuck = !!stop && stop.level === 'retry' && stop.runs >= STOP_ERROR_RUNS && ranAt - stop.since >= STOP_ERROR_SECONDS
+    ? {
+        reason: stoppedBy.reason,
+        code: stoppedBy.poolCode ?? null,
+        level: stoppedBy.level ?? "error",
+        runs: (prevStop?.runs ?? 0) + 1,
+        since: prevStop?.since ?? ranAt,
+      }
+    : null;
+  const stuck =
+    !!stop &&
+    stop.level === "retry" &&
+    stop.runs >= STOP_ERROR_RUNS &&
+    ranAt - stop.since >= STOP_ERROR_SECONDS;
   // Runs in a row that ended with a YouTube 401. A stopped run reached YouTube
   // for nothing, so it neither adds to the count nor clears it.
-  const prevAuthFails = state.lastRunStats?.authFails ?? 0
-  const authFails = authFailure ? prevAuthFails + 1 : stop ? prevAuthFails : 0
-  const lastError = stop?.level === 'error'
-    ? stop.reason
-    : authFailure && authFails >= AUTH_ERROR_RUNS
-      ? `YouTube refused the login on ${authFails} runs in a row: ${authFailure}`
-      : stop && stuck
-        ? `${stop.reason} (${stop.runs} runs in a row since ${new Date(stop.since * 1000).toISOString()})`
-        : null
+  const prevAuthFails = state.lastRunStats?.authFails ?? 0;
+  const authFails = authFailure ? prevAuthFails + 1 : stop ? prevAuthFails : 0;
+  const lastError =
+    stop?.level === "error"
+      ? stop.reason
+      : authFailure && authFails >= AUTH_ERROR_RUNS
+        ? `YouTube refused the login on ${authFails} runs in a row: ${authFailure}`
+        : stop && stuck
+          ? `${stop.reason} (${stop.runs} runs in a row since ${new Date(stop.since * 1000).toISOString()})`
+          : null;
   const next: SubState = {
     // Empty only when the quota was out before this DJ had a playlist: nothing is stored then.
     ...(playlistId ? { playlistId } : {}),
@@ -1475,24 +1775,19 @@ export async function syncOne(
       videoIdsAdded,
       tracklistsRechecked: setsRechecked,
       videosReplaced,
-      via:
-        viaSeen.size === 0
-          ? 'pool'
-          : viaSeen.size === 1
-            ? ([...viaSeen][0] as Via)
-            : 'mixed',
+      via: viaSeen.size === 0 ? "pool" : viaSeen.size === 1 ? ([...viaSeen][0] as Via) : "mixed",
     },
-  }
-  await saveSubState(env, sub.slug, next, { since })
+  };
+  await saveSubState(env, sub.slug, next, { since });
   // Write the post-insert/removal video set back so the next cron tick reads
-  // it from KV instead of paying YT quota to re-fetch. Only on actual change —
+  // it from KV instead of paying YT quota to re-fetch. Only on actual change -
   // a no-op run shouldn't re-extend the TTL on a cache the API already populated.
   if (playlistChanged && membershipKnown) {
-    await cachePlaylistVideoIds(env, playlistId, existingVideoIds)
+    await cachePlaylistVideoIds(env, playlistId, existingVideoIds);
   }
-  if (combined.handle) await flushCombined(env, combined.handle, log)
-  await flushPlaylistAdditions(env, additions, log)
-  await Promise.all(additionPushes)
+  if (combined.handle) await flushCombined(env, combined.handle, log);
+  await flushPlaylistAdditions(env, additions, log);
+  await Promise.all(additionPushes);
 
   return {
     slug: sub.slug,
@@ -1506,24 +1801,38 @@ export async function syncOne(
       videoIdsFound,
       videoIdsAdded,
       // Pending = discovered minus already-processed minus permanently-abandoned.
-      tracklistsPending: [...discovered].filter((u) => !processed.has(u) && !abandoned.has(u)).length,
+      tracklistsPending: [...discovered].filter((u) => !processed.has(u) && !abandoned.has(u))
+        .length,
       combinedVideoIdsAdded: combined.handle?.inserted ?? 0,
       tracklistsRechecked: setsRechecked,
       videosReplaced,
-      rechecksPending: dueRecheckUrls(processed, abandoned, tracklistVideos, nowSeconds(), settings, await idRowSets(env, log)).length,
+      rechecksPending: dueRecheckUrls(
+        processed,
+        abandoned,
+        tracklistVideos,
+        nowSeconds(),
+        settings,
+        await idRowSets(env, log),
+      ).length,
     },
     ...(stoppedBy ? { stoppedBy } : {}),
     ...(crawlStopReason ? { crawlStopReason } : {}),
-    ...(quotaHeld || quotaHit ? { quota: { out: quotaHeld, hit: quotaHit, deferred: [...new Set(quotaDeferred)] } } : {}),
-  }
+    ...(quotaHeld || quotaHit
+      ? { quota: { out: quotaHeld, hit: quotaHit, deferred: [...new Set(quotaDeferred)] } }
+      : {}),
+  };
 }
 
 /** Does any *other* tracklist in `map` currently resolve to `videoId`? */
-function referencedByOtherSet(map: Record<string, TracklistVideo>, videoId: string, exceptUrl: string): boolean {
+function referencedByOtherSet(
+  map: Record<string, TracklistVideo>,
+  videoId: string,
+  exceptUrl: string,
+): boolean {
   for (const [u, e] of Object.entries(map)) {
-    if (u !== exceptUrl && e.videoId === videoId) return true
+    if (u !== exceptUrl && e.videoId === videoId) return true;
   }
-  return false
+  return false;
 }
 
 /**
@@ -1533,15 +1842,19 @@ function referencedByOtherSet(map: Record<string, TracklistVideo>, videoId: stri
  * combined playlist while the other DJ's set still points at it. Only
  * consulted on a swap, so the extra KV reads are rare.
  */
-async function videoReferencedByAnySub(env: Env, videoId: string, exceptSlug: string): Promise<boolean> {
-  return (await slugsReferencingVideo(env, videoId, exceptSlug)).length > 0
+async function videoReferencedByAnySub(
+  env: Env,
+  videoId: string,
+  exceptSlug: string,
+): Promise<boolean> {
+  return (await slugsReferencingVideo(env, videoId, exceptSlug)).length > 0;
 }
 
 /**
  * Recover a sub's per-tracklist video baseline from the playlist-addition
  * audit trail (rows carry set URL + video id, 90 days deep). Runs once, on
  * the first sync after `tracklistVideos` was introduced, so sets processed
- * before then can still have a swapped recording detected — otherwise the
+ * before then can still have a swapped recording detected - otherwise the
  * first recheck could only record. The newest row per set is its latest
  * outcome. Sets with no surviving row get no entry (baseline unknown).
  */
@@ -1551,38 +1864,46 @@ export async function seedTracklistVideosFromAudit(
   processedUrls: ReadonlySet<string>,
   log: Logger,
 ): Promise<Record<string, TracklistVideo>> {
-  const out: Record<string, TracklistVideo> = {}
+  const out: Record<string, TracklistVideo> = {};
   try {
     for (const [setUrl, m] of await latestAdditionPerSet(env, slug)) {
-      if (!processedUrls.has(setUrl)) continue
-      if (m.status === 'added' || m.status === 'duplicate' || m.status === 'replaced') {
-        if (!m.vid) continue
-        out[setUrl] = { videoId: m.vid, checkedAt: auditSeconds(m.t) }
-      } else if (m.status === 'no_youtube') {
-        out[setUrl] = { videoId: null, checkedAt: auditSeconds(m.t) }
+      if (!processedUrls.has(setUrl)) continue;
+      if (m.status === "added" || m.status === "duplicate" || m.status === "replaced") {
+        if (!m.vid) continue;
+        out[setUrl] = { videoId: m.vid, checkedAt: auditSeconds(m.t) };
+      } else if (m.status === "no_youtube") {
+        out[setUrl] = { videoId: null, checkedAt: auditSeconds(m.t) };
       }
     }
   } catch (e) {
     // Best-effort: an unreadable audit trail just means more sets start with
     // an unknown baseline. Never fail the sync over it.
-    log.warn('sync.seed_from_audit_failed', { slug, seeded: Object.keys(out).length, ...errorFields(e) })
+    log.warn("sync.seed_from_audit_failed", {
+      slug,
+      seeded: Object.keys(out).length,
+      ...errorFields(e),
+    });
   }
-  log.info('sync.seed_from_audit', { slug, processed: processedUrls.size, seeded: Object.keys(out).length })
-  return out
+  log.info("sync.seed_from_audit", {
+    slug,
+    processed: processedUrls.size,
+    seeded: Object.keys(out).length,
+  });
+  return out;
 }
 
 function auditSeconds(iso: string): number {
-  const ms = Date.parse(iso)
-  return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
 }
 
 export type InvalidateResult = {
-  slug: string
+  slug: string;
   /** Processed tracklists now due for an immediate recheck. */
-  tracklistsMarked: number
+  tracklistsMarked: number;
   /** Previously given-up tracklists that will be retried. */
-  abandonedCleared: number
-}
+  abandonedCleared: number;
+};
 
 /**
  * "Invalidate video cache": forget everything the sync *trusts* about this
@@ -1599,18 +1920,19 @@ export type InvalidateResult = {
  * answering with a Cloudflare shell (what every set got during the 2026-09
  * ban once the home proxy was blocked), or a deliberate pause.
  */
-export const BLOCK_SHAPED_FAILURE = /ip.?block|rate-limited|blocked|home proxy|unlocker|cf shell|cloudflare|challenge|paused|\b403\b|no_body|unusable/i
+export const BLOCK_SHAPED_FAILURE =
+  /ip.?block|rate-limited|blocked|home proxy|unlocker|cf shell|cloudflare|challenge|paused|\b403\b|no_body|unusable/i;
 
 export type RequeueResult = {
-  days: number
-  dryRun: boolean
-  auditRowsScanned: number
+  days: number;
+  dryRun: boolean;
+  auditRowsScanned: number;
   /** Sets whose failure/abandon rows in the window all look block-shaped, per slug. */
-  candidates: Record<string, string[]>
+  candidates: Record<string, string[]>;
   /** Sets actually removed from a sub's abandoned list (or whose failure count was reset). */
-  requeued: Record<string, string[]>
-  requeuedCount: number
-}
+  requeued: Record<string, string[]>;
+  requeuedCount: number;
+};
 
 /**
  * One-time repair after a ban episode: sets that were abandoned (3 failures)
@@ -1621,34 +1943,43 @@ export type RequeueResult = {
  * processes it again. Blocks no longer count as failures going forward (see
  * the set loop), so this should not be needed twice.
  */
-export async function requeueBanVictims(env: Env, opts: { days?: number; dryRun?: boolean; log: Logger }): Promise<RequeueResult> {
-  const days = opts.days ?? 14
-  const dryRun = opts.dryRun ?? false
-  const log = opts.log
-  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
-  const candidates = new Map<string, Set<string>>()
-  let scanned = 0
+export async function requeueBanVictims(
+  env: Env,
+  opts: { days?: number; dryRun?: boolean; log: Logger },
+): Promise<RequeueResult> {
+  const days = opts.days ?? 14;
+  const dryRun = opts.dryRun ?? false;
+  const log = opts.log;
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const candidates = new Map<string, Set<string>>();
+  let scanned = 0;
   for (const m of await failureRowsSince(env, cutoff)) {
-    scanned++
+    scanned++;
     if (m.msg && BLOCK_SHAPED_FAILURE.test(m.msg)) {
-      if (!candidates.has(m.slug)) candidates.set(m.slug, new Set())
-      candidates.get(m.slug)!.add(m.set)
+      if (!candidates.has(m.slug)) candidates.set(m.slug, new Set());
+      candidates.get(m.slug)!.add(m.set);
     }
   }
 
-  const requeued: Record<string, string[]> = {}
+  const requeued: Record<string, string[]> = {};
   for (const [slug, urls] of candidates) {
-    const state = await loadSubState(env, slug)
-    if (!state) continue
-    const abandoned = new Set(state.abandonedTracklistUrls ?? [])
-    const failureCounts = state.failureCounts ?? {}
-    const hit = [...urls].filter((u) => abandoned.has(u) || u in failureCounts)
-    if (hit.length === 0) continue
-    requeued[slug] = hit.sort()
-    if (!dryRun) await requeueTracklists(env, slug, hit)
+    const state = await loadSubState(env, slug);
+    if (!state) continue;
+    const abandoned = new Set(state.abandonedTracklistUrls ?? []);
+    const failureCounts = state.failureCounts ?? {};
+    const hit = [...urls].filter((u) => abandoned.has(u) || u in failureCounts);
+    if (hit.length === 0) continue;
+    requeued[slug] = hit.sort();
+    if (!dryRun) await requeueTracklists(env, slug, hit);
   }
-  const requeuedCount = Object.values(requeued).reduce((a, x) => a + x.length, 0)
-  log.info('sync.requeue_ban_victims', { days, dryRun, auditRowsScanned: scanned, requeuedCount, perSlug: Object.fromEntries(Object.entries(requeued).map(([k, v]) => [k, v.length])) })
+  const requeuedCount = Object.values(requeued).reduce((a, x) => a + x.length, 0);
+  log.info("sync.requeue_ban_victims", {
+    days,
+    dryRun,
+    auditRowsScanned: scanned,
+    requeuedCount,
+    perSlug: Object.fromEntries(Object.entries(requeued).map(([k, v]) => [k, v.length])),
+  });
   return {
     days,
     dryRun,
@@ -1656,39 +1987,43 @@ export async function requeueBanVictims(env: Env, opts: { days?: number; dryRun?
     candidates: Object.fromEntries([...candidates].map(([k, v]) => [k, [...v].sort()])),
     requeued,
     requeuedCount,
-  }
+  };
 }
 
-export async function invalidateVideoCache(env: Env, slug: string, log: Logger): Promise<InvalidateResult> {
-  const state = await loadSubState(env, slug)
+export async function invalidateVideoCache(
+  env: Env,
+  slug: string,
+  log: Logger,
+): Promise<InvalidateResult> {
+  const state = await loadSubState(env, slug);
   if (!state) {
-    log.info('sync.invalidate.no_state', { slug })
-    return { slug, tracklistsMarked: 0, abandonedCleared: 0 }
+    log.info("sync.invalidate.no_state", { slug });
+    return { slug, tracklistsMarked: 0, abandonedCleared: 0 };
   }
-  const processed = new Set(state.processedTracklistUrls)
+  const processed = new Set(state.processedTracklistUrls);
   // State that predates rechecks has no baselines: seed them from the audit
   // trail first, so the rechecks this triggers can compare (and swap) rather
   // than merely record.
   if (!state.tracklistVideos && processed.size > 0) {
-    const tracklistVideos = await seedTracklistVideosFromAudit(env, slug, processed, log)
-    await saveSubState(env, slug, { ...state, tracklistVideos }, { since: state })
+    const tracklistVideos = await seedTracklistVideosFromAudit(env, slug, processed, log);
+    await saveSubState(env, slug, { ...state, tracklistVideos }, { since: state });
   }
-  const { tracklistsMarked, abandonedCleared } = await invalidateSubTracklists(env, slug)
-  if (state.playlistId) await invalidatePlaylistVideoIds(env, state.playlistId)
-  const combined = await loadCombinedState(env)
-  if (combined.playlistId) await invalidatePlaylistVideoIds(env, combined.playlistId)
-  log.info('sync.invalidate', {
+  const { tracklistsMarked, abandonedCleared } = await invalidateSubTracklists(env, slug);
+  if (state.playlistId) await invalidatePlaylistVideoIds(env, state.playlistId);
+  const combined = await loadCombinedState(env);
+  if (combined.playlistId) await invalidatePlaylistVideoIds(env, combined.playlistId);
+  log.info("sync.invalidate", {
     slug,
     tracklistsMarked,
     abandonedCleared,
     playlistId: state.playlistId ?? null,
     combinedPlaylistId: combined.playlistId ?? null,
-  })
-  return { slug, tracklistsMarked, abandonedCleared }
+  });
+  return { slug, tracklistsMarked, abandonedCleared };
 }
 
 /**
- * Resolve this artist's playlist by title — find an existing one with that
+ * Resolve this artist's playlist by title - find an existing one with that
  * exact title on the user's channel, or create a fresh public one. Used both
  * on first sync and as the recovery path when cached state references a
  * deleted playlist. Never returns null (the shared helper only does so in
@@ -1705,10 +2040,10 @@ async function resolveArtistPlaylist(
     { title, description: playlistDescription(artistName), logCtx: { slug } },
     accessToken,
     log,
-  )
-  if (!r) throw new Error(`playlist ${JSON.stringify(title)} could not be resolved`)
-  return r
+  );
+  if (!r) throw new Error(`playlist ${JSON.stringify(title)} could not be resolved`);
+  return r;
 }
 
 // Lives in prettify-slug.ts (lib/search uses it without an import cycle); re-exported for existing importers.
-export { prettifySlug }
+export { prettifySlug };

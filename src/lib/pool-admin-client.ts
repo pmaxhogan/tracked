@@ -24,29 +24,29 @@
  * false while a signup has nothing to answer yet. tlpool reads the body's
  * `error`, never the status alone: a 200 carrying `error` is an error too.
  */
-import type { Env } from '../types'
-import { TLPOOL_NUMERIC_KEYS } from './tlpool-settings-fields'
+import type { Env } from "../types";
+import { TLPOOL_NUMERIC_KEYS } from "./tlpool-settings-fields";
 
 /** The two vars live here, not in `types.ts`, so this file has no shared edits. */
-export type PoolEnv = Env & { TLPOOL_URL?: string; TLPOOL_TOKEN?: string }
+export type PoolEnv = Env & { TLPOOL_URL?: string; TLPOOL_TOKEN?: string };
 
 /** What the Add account dialog may ask of tlpool's exit picker. */
-export const EXIT_KINDS = ['auto', 'own', 'mullvad', 'airvpn'] as const
-export type ExitKindChoice = (typeof EXIT_KINDS)[number]
+export const EXIT_KINDS = ["auto", "own", "mullvad", "airvpn"] as const;
+export type ExitKindChoice = (typeof EXIT_KINDS)[number];
 
-export type Fetcher = (input: Request | string, init?: RequestInit) => Promise<Response>
+export type Fetcher = (input: Request | string, init?: RequestInit) => Promise<Response>;
 
 export type PoolErrorCode =
-  | 'pool_not_configured'
-  | 'pool_unreachable'
-  | 'pool_auth_failed'
-  | 'pool_error'
-  | 'bad_response'
-  | 'not_found'
-  | 'conflict'
-  | 'expired'
-  | 'invalid'
-  | 'too_many'
+  | "pool_not_configured"
+  | "pool_unreachable"
+  | "pool_auth_failed"
+  | "pool_error"
+  | "bad_response"
+  | "not_found"
+  | "conflict"
+  | "expired"
+  | "invalid"
+  | "too_many";
 
 export class PoolAdminError extends Error {
   constructor(
@@ -61,155 +61,162 @@ export class PoolAdminError extends Error {
     /** The upstream JSON body (never sent to a browser; the client reads fields like `status` from it). */
     readonly body: unknown = null,
   ) {
-    super(code)
-    this.name = 'PoolAdminError'
+    super(code);
+    this.name = "PoolAdminError";
   }
 }
 
-export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** Live-view sub-paths proxied to tlpool: the page, its websocket, noVNC's core/ and vendor/ modules. */
-export const LIVE_PATH_RE = /^(?:|websockify|(?:core|vendor)\/[A-Za-z0-9._\-/]+\.(?:js|mjs|json))$/
-const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
-export const ACCOUNT_ACTIONS = ['rest', 'retire', 'retest'] as const
-export type AccountAction = (typeof ACCOUNT_ACTIONS)[number]
+export const LIVE_PATH_RE = /^(?:|websockify|(?:core|vendor)\/[A-Za-z0-9._\-/]+\.(?:js|mjs|json))$/;
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+export const ACCOUNT_ACTIONS = ["rest", "retire", "retest"] as const;
+export type AccountAction = (typeof ACCOUNT_ACTIONS)[number];
 /** A scheduled creation waiting in tlpool's queue (not an account yet): `queued-<n>`. */
-export const QUEUED_ID_RE = /^queued-\d+$/
+export const QUEUED_ID_RE = /^queued-\d+$/;
 /** The furthest ahead an account creation may be scheduled. */
-export const MAX_SCHEDULE_MS = 90 * 86400_000
+export const MAX_SCHEDULE_MS = 90 * 86400_000;
 /** How far in the past a scheduledAt may be (clock skew between the browser and the Worker). */
-export const SCHEDULE_PAST_SLACK_MS = 5 * 60_000
+export const SCHEDULE_PAST_SLACK_MS = 5 * 60_000;
 
 export type PoolAccount = {
-  id: string
-  state: string
-  passive: boolean
-  exitLabel: string | null
-  exitKind: string | null
-  usedToday: number | null
-  budget: number | null
-  rampDay: number | null
-  lastOkAt: string | null
-  lastChallengeAt: string | null
-  flagged: boolean
-  flagReason: string | null
-  restUntil: string | null
+  id: string;
+  state: string;
+  passive: boolean;
+  exitLabel: string | null;
+  exitKind: string | null;
+  usedToday: number | null;
+  budget: number | null;
+  rampDay: number | null;
+  lastOkAt: string | null;
+  lastChallengeAt: string | null;
+  flagged: boolean;
+  flagReason: string | null;
+  restUntil: string | null;
   /** In-page XHR lookups (media links, ajax) today, on their own budget. */
-  xhrUsedToday: number | null
-  xhrBudget: number | null
+  xhrUsedToday: number | null;
+  xhrBudget: number | null;
   /** The challenge that tracks this account's signup (tlpool `signupChallengeId`); the pool page reopens its progress from it. */
-  signupChallengeId: string | null
+  signupChallengeId: string | null;
   /** When the account entered its current state. tlpool keeps it (state_changed_at) but its /status does not send it yet: null today. */
-  stateChangedAt: string | null
-  /** Why it rests, as tlpool words it (`retest:requested`, `challenge_expired`…); plain text, never one holding '@' or a URL. */
-  restReason: string | null
+  stateChangedAt: string | null;
+  /** Why it rests, as tlpool words it (`retest:requested`, `challenge_expired`...); plain text, never one holding '@' or a URL. */
+  restReason: string | null;
   /** One retest with a known set is due once the rest ends. */
-  retestPending: boolean
-  createdAt: string | null
+  retestPending: boolean;
+  createdAt: string | null;
   /** When signup finished and the ramp started (ramp day 0). */
-  activatedAt: string | null
+  activatedAt: string | null;
   /** When it was retired; the exit's 30-day quarantine runs from here. */
-  retiredAt: string | null
+  retiredAt: string | null;
   /** When it submitted the register form (null: never submitted, so its exit was never burned). */
-  submittedAt: string | null
+  submittedAt: string | null;
   /** tlpool's last error in plain words (same text rules as restReason). */
-  lastError: string | null
+  lastError: string | null;
   /** Why it may not open a browser now (exit missing, unverified, IP changed, marked bad); same text rules. */
-  exitProblem: string | null
+  exitProblem: string | null;
   /** A captcha waiting for this account (opaque challenge id). */
-  pendingChallengeId: string | null
+  pendingChallengeId: string | null;
   /** tlpool would accept a signup retry (signup_failed, or a new account whose signup ended). */
-  canRetrySignup: boolean
+  canRetrySignup: boolean;
   /** What the pool is doing with it right now: `signup`, `retest`, `fetch:<priority>`. */
-  busy: string | null
+  busy: string | null;
   /** A scheduled creation (tlpool state "queued", id `queued-<n>`): not an account yet, never counted as one. */
-  queued: boolean
+  queued: boolean;
   /** When a queued creation is due (ISO, UTC). */
-  scheduledAt: string | null
+  scheduledAt: string | null;
   /** How many times a queued creation was tried and failed (see lastError). */
-  attempts: number | null
-}
+  attempts: number | null;
+};
 
 /** `queued` (+ scheduledAt, and a `queued-<n>` accountId, no challengeId) only when tlpool queued the creation instead of starting it. */
-export type CreateAccountResult = { challengeId: string | null; accountId: string | null; queued?: true; scheduledAt?: string | null }
+export type CreateAccountResult = {
+  challengeId: string | null;
+  accountId: string | null;
+  queued?: true;
+  scheduledAt?: string | null;
+};
 
 export type PoolStatus = {
-  accounts: PoolAccount[]
-  queueDepth: number | null
-  queueByPriority: Record<string, number>
+  accounts: PoolAccount[];
+  queueDepth: number | null;
+  queueByPriority: Record<string, number>;
   /** Page views spent today across accounts (tlpool `totals.usedToday`). */
-  requestsToday: number | null
+  requestsToday: number | null;
   /** Today's page budget across fetching accounts (tlpool `totals.budgetToday`). */
-  budgetToday: number | null
-  requestsByPriority: Record<string, number>
-}
+  budgetToday: number | null;
+  requestsByPriority: Record<string, number>;
+};
 
-export type ChallengeState = 'pending' | 'solved' | 'expired' | 'failed'
+export type ChallengeState = "pending" | "solved" | "expired" | "failed";
 
 export type PoolChallenge = {
-  id: string
-  type: 'image' | 'checkbox'
-  accountId: string | null
-  /** Why the challenge exists: signup, login, fetch, retest… (snake_case code). */
-  reason: string | null
-  state: ChallengeState
-  createdAt: string | null
-  expiresAt: string | null
+  id: string;
+  type: "image" | "checkbox";
+  accountId: string | null;
+  /** Why the challenge exists: signup, login, fetch, retest... (snake_case code). */
+  reason: string | null;
+  state: ChallengeState;
+  createdAt: string | null;
+  expiresAt: string | null;
   /** Signup progress step, when the challenge belongs to an account creation. */
-  step: string | null
+  step: string | null;
   /** Why the flow behind the challenge failed, in tlpool's plain words (render as text only). */
-  error: string | null
+  error: string | null;
   /** False while a signup challenge has nothing for the owner to answer yet (no captcha shown). */
-  ready: boolean
-}
+  ready: boolean;
+};
 
 export type PoolSettings = {
-  budgetPerDay: number | null
+  budgetPerDay: number | null;
   /** Page budgets for the first days of a new account, e.g. [10, 20]; full budget after. */
-  ramp: number[] | null
+  ramp: number[] | null;
   /** Fraction 0..1 of each day's budget held back for the phone button. */
-  reservedPhoneShare: number | null
-  imagePolicy: string | null
+  reservedPhoneShare: number | null;
+  imagePolicy: string | null;
   /** In-page XHRs (media links, ajax) per account per day, on their own budget. */
-  xhrBudgetPerDay: number | null
+  xhrBudgetPerDay: number | null;
   /** Fraction 0..1 of the budget each non-phone priority may use (backfill stops first). */
-  priorityCeilings: Record<string, number> | null
+  priorityCeilings: Record<string, number> | null;
   /** tlpool's plain numeric settings (lib/tlpool-settings-fields.ts), by key; a key tlpool did not send is absent. */
-  tuning?: Record<string, number>
-}
+  tuning?: Record<string, number>;
+};
 
 /** Non-phone priorities tlpool caps with `priorityCeilings`. */
-export const CEILING_PRIORITIES = ['new', 'verify', 'recheck', 'backfill'] as const
+export const CEILING_PRIORITIES = ["new", "verify", "recheck", "backfill"] as const;
 
 /** `pending`: a checkbox wall that is still up after "Done, I clicked it". */
-export type AnswerOutcome = 'solved' | 'wrong' | 'expired' | 'accepted' | 'pending'
+export type AnswerOutcome = "solved" | "wrong" | "expired" | "accepted" | "pending";
 
-// ── small parsers ──────────────────────────────────────────────────────────
+// -- small parsers ----------------------------------------------------------
 
-type Obj = Record<string, unknown>
-const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
+type Obj = Record<string, unknown>;
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 
 function pick(o: Obj, ...keys: string[]): unknown {
-  for (const k of keys) if (o[k] !== undefined && o[k] !== null) return o[k]
-  return undefined
+  for (const k of keys) if (o[k] !== undefined && o[k] !== null) return o[k];
+  return undefined;
 }
 function num(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v
-  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
-  return null
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  return null;
 }
-/** A bounded plain label (exit label, state…): printable, no angle brackets, max 64. */
+/** A bounded plain label (exit label, state...): printable, no angle brackets, max 64. */
 function label(v: unknown): string | null {
-  if (typeof v !== 'string' && typeof v !== 'number') return null
-  const s = String(v).trim()
-  if (!s || s.length > 64 || /[\u0000-\u001f<>]/.test(s)) return null
-  return s
+  if (typeof v !== "string" && typeof v !== "number") return null;
+  const s = String(v).trim();
+  // eslint-disable-next-line no-control-regex -- rejecting control characters is the point
+  if (!s || s.length > 64 || /[\u0000-\u001f<>]/.test(s)) return null;
+  return s;
 }
 /** tlpool's plain-words text (errors, messages): printable, no angle brackets, bounded. */
 function plain(v: unknown, max = 200): string | null {
-  if (typeof v !== 'string') return null
-  const s = v.replace(/\s+/g, ' ').trim()
-  if (!s || /[\u0000-\u001f<>]/.test(s)) return null
-  return s.length > max ? s.slice(0, max - 1) + '…' : s
+  if (typeof v !== "string") return null;
+  const s = v.replace(/\s+/g, " ").trim();
+  // eslint-disable-next-line no-control-regex -- rejecting control characters is the point
+  if (!s || /[\u0000-\u001f<>]/.test(s)) return null;
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 /**
  * Free text about an account (rest reason, last error, exit problem): plain()
@@ -217,238 +224,296 @@ function plain(v: unknown, max = 200): string | null {
  * URL or a backslash. tracked is a public repo and these reach a page.
  */
 function accountText(v: unknown, max = 200): string | null {
-  const s = plain(v, max)
-  return s && !/@|:\/\/|\\/.test(s) ? s : null
+  const s = plain(v, max);
+  return s && !/@|:\/\/|\\/.test(s) ? s : null;
 }
 function code(v: unknown): string | null {
-  return typeof v === 'string' && /^[a-z][a-z0-9_]{0,47}$/.test(v) ? v : null
+  return typeof v === "string" && /^[a-z][a-z0-9_]{0,47}$/.test(v) ? v : null;
 }
 function opaqueId(v: unknown): string | null {
-  if (typeof v === 'number') v = String(v)
-  if (isObj(v)) v = v.id
-  return typeof v === 'string' && ID_RE.test(v) ? v : null
+  if (typeof v === "number") v = String(v);
+  if (isObj(v)) v = v.id;
+  return typeof v === "string" && ID_RE.test(v) ? v : null;
 }
 function iso(v: unknown): string | null {
-  if (typeof v === 'number' && Number.isFinite(v)) {
+  if (typeof v === "number" && Number.isFinite(v)) {
     // Python timestamps: seconds since epoch.
-    const ms = v < 1e12 ? v * 1000 : v
-    return new Date(ms).toISOString()
+    const ms = v < 1e12 ? v * 1000 : v;
+    return new Date(ms).toISOString();
   }
-  if (typeof v !== 'string') return null
-  const t = Date.parse(v)
-  return Number.isFinite(t) ? new Date(t).toISOString() : null
+  if (typeof v !== "string") return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 function bool(v: unknown): boolean {
-  return v === true || v === 1 || v === 'true' || v === '1'
+  return v === true || v === 1 || v === "true" || v === "1";
 }
 function countMap(v: unknown): Record<string, number> {
-  const out: Record<string, number> = {}
-  if (!isObj(v)) return out
+  const out: Record<string, number> = {};
+  if (!isObj(v)) return out;
   for (const [k, x] of Object.entries(v)) {
-    const n = num(x)
-    if (n !== null && code(k)) out[k] = n
+    const n = num(x);
+    if (n !== null && code(k)) out[k] = n;
   }
-  return out
+  return out;
 }
 
-// ── normalisers (whitelists) ───────────────────────────────────────────────
+// -- normalisers (whitelists) -----------------------------------------------
 
 export function normalizeAccount(raw: unknown): PoolAccount | null {
-  if (!isObj(raw)) return null
-  const id = opaqueId(pick(raw, 'id', 'accountId', 'account_id'))
-  if (!id) return null
-  const exit = isObj(raw.exit) ? raw.exit : {}
-  const state = label(pick(raw, 'state', 'status')) ?? 'unknown'
-  const flagRaw = pick(raw, 'flagged', 'flaggedAt', 'flagged_at')
+  if (!isObj(raw)) return null;
+  const id = opaqueId(pick(raw, "id", "accountId", "account_id"));
+  if (!id) return null;
+  const exit = isObj(raw.exit) ? raw.exit : {};
+  const state = label(pick(raw, "state", "status")) ?? "unknown";
+  const flagRaw = pick(raw, "flagged", "flaggedAt", "flagged_at");
   return {
     id,
     state,
-    passive: bool(raw.passive) || state === 'passive',
-    exitLabel: label(pick(raw, 'exitLabel', 'exit_label') ?? pick(exit, 'label', 'name')),
-    exitKind: label(pick(raw, 'exitKind', 'exit_kind') ?? pick(exit, 'kind', 'type')),
-    usedToday: num(pick(raw, 'usedToday', 'used_today', 'used')),
-    budget: num(pick(raw, 'budget', 'budgetToday', 'budget_today')),
-    rampDay: num(pick(raw, 'rampDay', 'ramp_day')),
-    lastOkAt: iso(pick(raw, 'lastOkAt', 'last_ok_at', 'lastOk', 'last_ok', 'lastSuccessAt', 'last_success_at')),
-    lastChallengeAt: iso(pick(raw, 'lastChallengeAt', 'last_challenge_at', 'lastChallenge', 'last_challenge')),
-    flagged: state === 'flagged' || (flagRaw !== undefined && flagRaw !== false && flagRaw !== 0),
-    flagReason: code(pick(raw, 'flagReason', 'flag_reason', 'restReason', 'rest_reason')),
-    restUntil: iso(pick(raw, 'restUntil', 'rest_until', 'restingUntil', 'resting_until')),
-    xhrUsedToday: num(pick(raw, 'usedXhrToday', 'used_xhr_today', 'xhrUsedToday')),
-    xhrBudget: num(pick(raw, 'xhrBudget', 'xhr_budget')),
-    signupChallengeId: opaqueId(pick(raw, 'signupChallengeId', 'signup_challenge_id', 'signup_cid')),
-    stateChangedAt: iso(pick(raw, 'stateChangedAt', 'state_changed_at')),
-    restReason: accountText(pick(raw, 'restReason', 'rest_reason'), 120),
-    retestPending: bool(pick(raw, 'retestPending', 'retest_pending')),
-    createdAt: iso(pick(raw, 'createdAt', 'created_at')),
-    activatedAt: iso(pick(raw, 'activatedAt', 'activated_at')),
-    retiredAt: iso(pick(raw, 'retiredAt', 'retired_at')),
-    submittedAt: iso(pick(raw, 'submittedAt', 'submitted_at')),
-    lastError: accountText(pick(raw, 'lastError', 'last_error')),
-    exitProblem: accountText(pick(raw, 'exitProblem', 'exit_problem')),
-    pendingChallengeId: opaqueId(pick(raw, 'pendingChallenge', 'pendingChallengeId', 'pending_challenge')),
-    canRetrySignup: bool(pick(raw, 'canRetrySignup', 'can_retry_signup')),
-    queued: state === 'queued' || QUEUED_ID_RE.test(id) || bool(raw.queued),
-    scheduledAt: iso(pick(raw, 'scheduledAt', 'scheduled_at')),
+    passive: bool(raw.passive) || state === "passive",
+    exitLabel: label(pick(raw, "exitLabel", "exit_label") ?? pick(exit, "label", "name")),
+    exitKind: label(pick(raw, "exitKind", "exit_kind") ?? pick(exit, "kind", "type")),
+    usedToday: num(pick(raw, "usedToday", "used_today", "used")),
+    budget: num(pick(raw, "budget", "budgetToday", "budget_today")),
+    rampDay: num(pick(raw, "rampDay", "ramp_day")),
+    lastOkAt: iso(
+      pick(raw, "lastOkAt", "last_ok_at", "lastOk", "last_ok", "lastSuccessAt", "last_success_at"),
+    ),
+    lastChallengeAt: iso(
+      pick(raw, "lastChallengeAt", "last_challenge_at", "lastChallenge", "last_challenge"),
+    ),
+    flagged: state === "flagged" || (flagRaw !== undefined && flagRaw !== false && flagRaw !== 0),
+    flagReason: code(pick(raw, "flagReason", "flag_reason", "restReason", "rest_reason")),
+    restUntil: iso(pick(raw, "restUntil", "rest_until", "restingUntil", "resting_until")),
+    xhrUsedToday: num(pick(raw, "usedXhrToday", "used_xhr_today", "xhrUsedToday")),
+    xhrBudget: num(pick(raw, "xhrBudget", "xhr_budget")),
+    signupChallengeId: opaqueId(
+      pick(raw, "signupChallengeId", "signup_challenge_id", "signup_cid"),
+    ),
+    stateChangedAt: iso(pick(raw, "stateChangedAt", "state_changed_at")),
+    restReason: accountText(pick(raw, "restReason", "rest_reason"), 120),
+    retestPending: bool(pick(raw, "retestPending", "retest_pending")),
+    createdAt: iso(pick(raw, "createdAt", "created_at")),
+    activatedAt: iso(pick(raw, "activatedAt", "activated_at")),
+    retiredAt: iso(pick(raw, "retiredAt", "retired_at")),
+    submittedAt: iso(pick(raw, "submittedAt", "submitted_at")),
+    lastError: accountText(pick(raw, "lastError", "last_error")),
+    exitProblem: accountText(pick(raw, "exitProblem", "exit_problem")),
+    pendingChallengeId: opaqueId(
+      pick(raw, "pendingChallenge", "pendingChallengeId", "pending_challenge"),
+    ),
+    canRetrySignup: bool(pick(raw, "canRetrySignup", "can_retry_signup")),
+    queued: state === "queued" || QUEUED_ID_RE.test(id) || bool(raw.queued),
+    scheduledAt: iso(pick(raw, "scheduledAt", "scheduled_at")),
     attempts: num(raw.attempts),
-    busy: typeof raw.busy === 'string' && /^[a-z][a-z0-9_]{0,23}(?::[a-z0-9_]{1,24})?$/.test(raw.busy) ? raw.busy : null,
-  }
+    busy:
+      typeof raw.busy === "string" && /^[a-z][a-z0-9_]{0,23}(?::[a-z0-9_]{1,24})?$/.test(raw.busy)
+        ? raw.busy
+        : null,
+  };
 }
 
 function accountList(v: unknown): PoolAccount[] {
-  const arr = Array.isArray(v) ? v : isObj(v) && Array.isArray(v.accounts) ? v.accounts : []
-  return arr.map(normalizeAccount).filter((a): a is PoolAccount => a !== null)
+  const arr = Array.isArray(v) ? v : isObj(v) && Array.isArray(v.accounts) ? v.accounts : [];
+  return arr.map(normalizeAccount).filter((a): a is PoolAccount => a !== null);
 }
 
 export function normalizeStatus(raw: unknown): PoolStatus {
-  if (!isObj(raw)) throw new PoolAdminError('bad_response', 503)
-  const q = pick(raw, 'queueDepth', 'queue_depth', 'queue')
-  const totals = isObj(raw.totals) ? raw.totals : {}
+  if (!isObj(raw)) throw new PoolAdminError("bad_response", 503);
+  const q = pick(raw, "queueDepth", "queue_depth", "queue");
+  const totals = isObj(raw.totals) ? raw.totals : {};
   // tlpool: queueDepth is a number and queueByPriority sits beside it; older shapes nest the map in `queue`.
-  const queueByPriority = isObj(q) ? countMap(q) : countMap(pick(raw, 'queueByPriority', 'queue_by_priority'))
-  const queueDepth = isObj(q) ? Object.values(queueByPriority).reduce((a, b) => a + b, 0) : num(q)
-  const requestsByPriority = countMap(pick(totals, 'byPriority', 'by_priority') ?? pick(raw, 'byPriority', 'by_priority'))
-  let requestsToday = num(pick(totals, 'usedToday', 'used_today', 'requestsToday', 'requests_today', 'today') ?? pick(raw, 'requestsToday', 'requests_today'))
-  if (requestsToday === null && Object.keys(requestsByPriority).length) requestsToday = Object.values(requestsByPriority).reduce((a, b) => a + b, 0)
-  const budgetToday = num(pick(totals, 'budgetToday', 'budget_today'))
-  return { accounts: accountList(raw.accounts), queueDepth, queueByPriority, requestsToday, budgetToday, requestsByPriority }
+  const queueByPriority = isObj(q)
+    ? countMap(q)
+    : countMap(pick(raw, "queueByPriority", "queue_by_priority"));
+  const queueDepth = isObj(q) ? Object.values(queueByPriority).reduce((a, b) => a + b, 0) : num(q);
+  const requestsByPriority = countMap(
+    pick(totals, "byPriority", "by_priority") ?? pick(raw, "byPriority", "by_priority"),
+  );
+  let requestsToday = num(
+    pick(totals, "usedToday", "used_today", "requestsToday", "requests_today", "today") ??
+      pick(raw, "requestsToday", "requests_today"),
+  );
+  if (requestsToday === null && Object.keys(requestsByPriority).length)
+    requestsToday = Object.values(requestsByPriority).reduce((a, b) => a + b, 0);
+  const budgetToday = num(pick(totals, "budgetToday", "budget_today"));
+  return {
+    accounts: accountList(raw.accounts),
+    queueDepth,
+    queueByPriority,
+    requestsToday,
+    budgetToday,
+    requestsByPriority,
+  };
 }
 
 const CHALLENGE_STATES: Record<string, ChallengeState> = {
-  pending: 'pending', open: 'pending', waiting: 'pending', active: 'pending', wrong: 'pending',
-  solved: 'solved', done: 'solved', answered: 'solved', ok: 'solved',
-  expired: 'expired', closed: 'expired', timeout: 'expired', abandoned: 'expired',
-  failed: 'failed', error: 'failed',
-}
+  pending: "pending",
+  open: "pending",
+  waiting: "pending",
+  active: "pending",
+  wrong: "pending",
+  solved: "solved",
+  done: "solved",
+  answered: "solved",
+  ok: "solved",
+  expired: "expired",
+  closed: "expired",
+  timeout: "expired",
+  abandoned: "expired",
+  failed: "failed",
+  error: "failed",
+};
 
 export function normalizeChallenge(raw: unknown, fallbackId?: string): PoolChallenge | null {
-  if (!isObj(raw)) return null
-  const id = opaqueId(pick(raw, 'id', 'challengeId', 'challenge_id')) ?? (fallbackId && ID_RE.test(fallbackId) ? fallbackId : null)
-  if (!id) return null
-  const signup = isObj(raw.signup) ? raw.signup : {}
-  const t = String(pick(raw, 'type', 'kind') ?? 'image').toLowerCase()
-  const createdAt = iso(pick(raw, 'createdAt', 'created_at'))
-  let expiresAt = iso(pick(raw, 'expiresAt', 'expires_at'))
+  if (!isObj(raw)) return null;
+  const id =
+    opaqueId(pick(raw, "id", "challengeId", "challenge_id")) ??
+    (fallbackId && ID_RE.test(fallbackId) ? fallbackId : null);
+  if (!id) return null;
+  const signup = isObj(raw.signup) ? raw.signup : {};
+  const t = String(pick(raw, "type", "kind") ?? "image").toLowerCase();
+  const createdAt = iso(pick(raw, "createdAt", "created_at"));
+  let expiresAt = iso(pick(raw, "expiresAt", "expires_at"));
   // The spec holds every challenge 2 hours.
-  if (!expiresAt && createdAt) expiresAt = new Date(Date.parse(createdAt) + 2 * 3600_000).toISOString()
+  if (!expiresAt && createdAt)
+    expiresAt = new Date(Date.parse(createdAt) + 2 * 3600_000).toISOString();
   return {
     id,
-    type: t === 'checkbox' || t === 'turnstile' ? 'checkbox' : 'image',
-    accountId: opaqueId(pick(raw, 'account', 'accountId', 'account_id')),
-    reason: code(pick(raw, 'reason', 'why', 'purpose')),
-    state: CHALLENGE_STATES[String(pick(raw, 'state', 'status') ?? 'pending').toLowerCase()] ?? 'pending',
+    type: t === "checkbox" || t === "turnstile" ? "checkbox" : "image",
+    accountId: opaqueId(pick(raw, "account", "accountId", "account_id")),
+    reason: code(pick(raw, "reason", "why", "purpose")),
+    state:
+      CHALLENGE_STATES[String(pick(raw, "state", "status") ?? "pending").toLowerCase()] ??
+      "pending",
     createdAt,
     expiresAt,
-    step: code(pick(raw, 'step') ?? pick(signup, 'step')),
-    error: plain(pick(raw, 'error') ?? pick(signup, 'error')),
+    step: code(pick(raw, "step") ?? pick(signup, "step")),
+    error: plain(pick(raw, "error") ?? pick(signup, "error")),
     // tlpool: ready=false while a signup has nothing to answer; absent = an ordinary challenge, ready.
     ready: raw.ready === undefined || raw.ready === null ? true : bool(raw.ready),
-  }
+  };
 }
 
 function challengeList(v: unknown): PoolChallenge[] {
-  const arr = Array.isArray(v) ? v : isObj(v) && Array.isArray(v.challenges) ? v.challenges : []
-  return arr.map((x) => normalizeChallenge(x)).filter((c): c is PoolChallenge => c !== null)
+  const arr = Array.isArray(v) ? v : isObj(v) && Array.isArray(v.challenges) ? v.challenges : [];
+  return arr.map((x) => normalizeChallenge(x)).filter((c): c is PoolChallenge => c !== null);
 }
 
 export function normalizeSettings(raw: unknown): PoolSettings {
-  if (!isObj(raw)) throw new PoolAdminError('bad_response', 503)
-  let ramp: number[] | null = null
-  const r = pick(raw, 'ramp', 'rampSchedule', 'ramp_schedule')
-  if (Array.isArray(r)) ramp = r.map(num).filter((n): n is number => n !== null)
-  else if (isObj(r)) ramp = Object.keys(r).sort().map((k) => num(r[k])).filter((n): n is number => n !== null)
-  let share = num(pick(raw, 'reservedPhoneShare', 'reserved_phone_share', 'phoneShare', 'phone_share'))
-  if (share !== null && share > 1) share = share / 100
-  const ceilRaw = pick(raw, 'priorityCeilings', 'priority_ceilings')
-  let priorityCeilings: Record<string, number> | null = null
+  if (!isObj(raw)) throw new PoolAdminError("bad_response", 503);
+  let ramp: number[] | null = null;
+  const r = pick(raw, "ramp", "rampSchedule", "ramp_schedule");
+  if (Array.isArray(r)) ramp = r.map(num).filter((n): n is number => n !== null);
+  else if (isObj(r))
+    ramp = Object.keys(r)
+      .sort()
+      .map((k) => num(r[k]))
+      .filter((n): n is number => n !== null);
+  let share = num(
+    pick(raw, "reservedPhoneShare", "reserved_phone_share", "phoneShare", "phone_share"),
+  );
+  if (share !== null && share > 1) share = share / 100;
+  const ceilRaw = pick(raw, "priorityCeilings", "priority_ceilings");
+  let priorityCeilings: Record<string, number> | null = null;
   if (isObj(ceilRaw)) {
-    priorityCeilings = {}
+    priorityCeilings = {};
     for (const p of CEILING_PRIORITIES) {
-      const n = num(ceilRaw[p])
-      if (n !== null) priorityCeilings[p] = n
+      const n = num(ceilRaw[p]);
+      if (n !== null) priorityCeilings[p] = n;
     }
   }
   return {
-    budgetPerDay: num(pick(raw, 'budgetPerDay', 'budget_per_day', 'pagesPerDay', 'pages_per_day', 'budget')),
+    budgetPerDay: num(
+      pick(raw, "budgetPerDay", "budget_per_day", "pagesPerDay", "pages_per_day", "budget"),
+    ),
     ramp,
     reservedPhoneShare: share,
-    imagePolicy: code(pick(raw, 'imagePolicy', 'image_policy')),
-    xhrBudgetPerDay: num(pick(raw, 'xhrBudgetPerDay', 'xhr_budget_per_day')),
+    imagePolicy: code(pick(raw, "imagePolicy", "image_policy")),
+    xhrBudgetPerDay: num(pick(raw, "xhrBudgetPerDay", "xhr_budget_per_day")),
     priorityCeilings,
     ...pickTuning(raw),
-  }
+  };
 }
 
 /** `{ tuning }`: the TLPOOL_NUMERIC_KEYS tlpool sent as finite numbers; `{}` when it sent none. */
 function pickTuning(raw: Obj): { tuning?: Record<string, number> } {
-  const out: Record<string, number> = {}
+  const out: Record<string, number> = {};
   for (const k of TLPOOL_NUMERIC_KEYS) {
-    const v = raw[k]
-    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+    const v = raw[k];
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
   }
-  return Object.keys(out).length ? { tuning: out } : {}
+  return Object.keys(out).length ? { tuning: out } : {};
 }
 
 /** Validates a browser-sent settings patch against tlpool's own ranges (settings.py); only these fields ever reach tlpool. */
 export function validateSettingsPatch(body: unknown): Partial<PoolSettings> {
-  if (!isObj(body)) throw new PoolAdminError('invalid', 400, 'body_not_object')
-  const out: Partial<PoolSettings> = {}
+  if (!isObj(body)) throw new PoolAdminError("invalid", 400, "body_not_object");
+  const out: Partial<PoolSettings> = {};
   if (body.budgetPerDay !== undefined) {
-    const n = num(body.budgetPerDay)
-    if (n === null || !Number.isInteger(n) || n < 1 || n > 500) throw new PoolAdminError('invalid', 400, 'budget_per_day')
-    out.budgetPerDay = n
+    const n = num(body.budgetPerDay);
+    if (n === null || !Number.isInteger(n) || n < 1 || n > 500)
+      throw new PoolAdminError("invalid", 400, "budget_per_day");
+    out.budgetPerDay = n;
   }
   if (body.ramp !== undefined) {
-    if (!Array.isArray(body.ramp) || body.ramp.length > 14) throw new PoolAdminError('invalid', 400, 'ramp')
-    const ramp = body.ramp.map(num)
-    if (ramp.some((n) => n === null || !Number.isInteger(n) || n < 0 || n > 500)) throw new PoolAdminError('invalid', 400, 'ramp')
-    out.ramp = ramp as number[]
+    if (!Array.isArray(body.ramp) || body.ramp.length > 14)
+      throw new PoolAdminError("invalid", 400, "ramp");
+    const ramp = body.ramp.map(num);
+    if (ramp.some((n) => n === null || !Number.isInteger(n) || n < 0 || n > 500))
+      throw new PoolAdminError("invalid", 400, "ramp");
+    out.ramp = ramp as number[];
   }
   if (body.reservedPhoneShare !== undefined) {
-    const n = num(body.reservedPhoneShare)
-    if (n === null || n < 0 || n > 1) throw new PoolAdminError('invalid', 400, 'reserved_phone_share')
-    out.reservedPhoneShare = n
+    const n = num(body.reservedPhoneShare);
+    if (n === null || n < 0 || n > 1)
+      throw new PoolAdminError("invalid", 400, "reserved_phone_share");
+    out.reservedPhoneShare = n;
   }
   if (body.imagePolicy !== undefined) {
-    const c = code(body.imagePolicy)
-    if (c !== 'allow' && c !== 'block') throw new PoolAdminError('invalid', 400, 'image_policy')
-    out.imagePolicy = c
+    const c = code(body.imagePolicy);
+    if (c !== "allow" && c !== "block") throw new PoolAdminError("invalid", 400, "image_policy");
+    out.imagePolicy = c;
   }
   if (body.xhrBudgetPerDay !== undefined) {
-    const n = num(body.xhrBudgetPerDay)
-    if (n === null || !Number.isInteger(n) || n < 0 || n > 2000) throw new PoolAdminError('invalid', 400, 'xhr_budget_per_day')
-    out.xhrBudgetPerDay = n
+    const n = num(body.xhrBudgetPerDay);
+    if (n === null || !Number.isInteger(n) || n < 0 || n > 2000)
+      throw new PoolAdminError("invalid", 400, "xhr_budget_per_day");
+    out.xhrBudgetPerDay = n;
   }
   if (body.priorityCeilings !== undefined) {
-    if (!isObj(body.priorityCeilings)) throw new PoolAdminError('invalid', 400, 'priority_ceilings')
-    const ceil: Record<string, number> = {}
+    if (!isObj(body.priorityCeilings))
+      throw new PoolAdminError("invalid", 400, "priority_ceilings");
+    const ceil: Record<string, number> = {};
     for (const [k, v] of Object.entries(body.priorityCeilings)) {
-      const n = num(v)
-      if (!(CEILING_PRIORITIES as readonly string[]).includes(k) || n === null || n < 0 || n > 1) throw new PoolAdminError('invalid', 400, 'priority_ceilings')
-      ceil[k] = n
+      const n = num(v);
+      if (!(CEILING_PRIORITIES as readonly string[]).includes(k) || n === null || n < 0 || n > 1)
+        throw new PoolAdminError("invalid", 400, "priority_ceilings");
+      ceil[k] = n;
     }
-    out.priorityCeilings = ceil
+    out.priorityCeilings = ceil;
   }
   // tlpool's plain numeric settings: passed through as numbers; tlpool checks the ranges (400 with the reason).
   for (const k of TLPOOL_NUMERIC_KEYS) {
-    if (body[k] === undefined) continue
-    const v = body[k]
-    if (typeof v !== 'number' || !Number.isFinite(v)) throw new PoolAdminError('invalid', 400, 'not_a_number', null, `${k} must be a number`)
-    ;(out as Record<string, unknown>)[k] = v
+    if (body[k] === undefined) continue;
+    const v = body[k];
+    if (typeof v !== "number" || !Number.isFinite(v))
+      throw new PoolAdminError("invalid", 400, "not_a_number", null, `${k} must be a number`);
+    (out as Record<string, unknown>)[k] = v;
   }
-  if (!Object.keys(out).length) throw new PoolAdminError('invalid', 400, 'nothing_to_change')
-  return out
+  if (!Object.keys(out).length) throw new PoolAdminError("invalid", 400, "nothing_to_change");
+  return out;
 }
 
-// ── the client ─────────────────────────────────────────────────────────────
+// -- the client -------------------------------------------------------------
 
 /** tlpool codes that mean the same as a status mapping, and their HTTP answer to the browser. */
-const BODY_CODES: Record<string, [PoolErrorCode, PoolAdminError['status']]> = {
-  bad_request: ['invalid', 400],
-  not_found: ['not_found', 404],
-  conflict: ['conflict', 409],
-  expired: ['expired', 410],
-}
+const BODY_CODES: Record<string, [PoolErrorCode, PoolAdminError["status"]]> = {
+  bad_request: ["invalid", 400],
+  not_found: ["not_found", 404],
+  conflict: ["conflict", 409],
+  expired: ["expired", 410],
+};
 
 /**
  * The error an upstream answer means, from its body first: tlpool's `error`
@@ -456,148 +521,209 @@ const BODY_CODES: Record<string, [PoolErrorCode, PoolAdminError['status']]> = {
  * The status only picks the HTTP answer (a 200 carrying an error is a 409).
  */
 function errorFromBody(status: number, body: unknown, secrets: string[] = []): PoolAdminError {
-  const o = isObj(body) ? body : {}
-  const detail = code(pick(o, 'error', 'code', 'detail'))
-  let message = plain(pick(o, 'message'))
+  const o = isObj(body) ? body : {};
+  const detail = code(pick(o, "error", "code", "detail"));
+  let message = plain(pick(o, "message"));
   // Never echo anything that could be an address, a URL or a secret.
-  if (message && (/[@:/\\]/.test(message) || secrets.some((x) => x && message!.includes(x)))) message = null
-  const byStatus = STATUS_MAP[status]
-  const byBody = detail ? BODY_CODES[detail] : undefined
-  const [c, http] = byStatus ?? byBody ?? (status < 300 ? (['conflict', 409] as const) : (['pool_error', 503] as const))
-  return new PoolAdminError(c, http, detail, status, message, body)
+  if (message && (/[@:/\\]/.test(message) || secrets.some((x) => x && message!.includes(x))))
+    message = null;
+  const byStatus = STATUS_MAP[status];
+  const byBody = detail ? BODY_CODES[detail] : undefined;
+  const [c, http] =
+    byStatus ??
+    byBody ??
+    (status < 300 ? (["conflict", 409] as const) : (["pool_error", 503] as const));
+  return new PoolAdminError(c, http, detail, status, message, body);
 }
 
-const STATUS_MAP: Record<number, [PoolErrorCode, PoolAdminError['status']]> = {
-  400: ['invalid', 400],
-  404: ['not_found', 404],
-  409: ['conflict', 409],
-  410: ['expired', 410],
-  422: ['invalid', 422],
-  429: ['too_many', 429],
-}
+const STATUS_MAP: Record<number, [PoolErrorCode, PoolAdminError["status"]]> = {
+  400: ["invalid", 400],
+  404: ["not_found", 404],
+  409: ["conflict", 409],
+  410: ["expired", 410],
+  422: ["invalid", 422],
+  429: ["too_many", 429],
+};
 
 /** Headers a browser may usefully pass through to the live view (noVNC page, assets, websocket). */
-const LIVE_REQ_HEADERS = ['accept', 'accept-encoding', 'content-type', 'upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-protocol', 'sec-websocket-extensions', 'if-none-match', 'if-modified-since']
-const LIVE_RES_HEADERS = ['content-type', 'content-length', 'content-encoding', 'etag', 'last-modified']
+const LIVE_REQ_HEADERS = [
+  "accept",
+  "accept-encoding",
+  "content-type",
+  "upgrade",
+  "connection",
+  "sec-websocket-key",
+  "sec-websocket-version",
+  "sec-websocket-protocol",
+  "sec-websocket-extensions",
+  "if-none-match",
+  "if-modified-since",
+];
+const LIVE_RES_HEADERS = [
+  "content-type",
+  "content-length",
+  "content-encoding",
+  "etag",
+  "last-modified",
+];
 
-export type PoolAdminClient = ReturnType<typeof createPoolAdminClient>
+export type PoolAdminClient = ReturnType<typeof createPoolAdminClient>;
 
-export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init) => fetch(i, init)) {
-  const base = (env.TLPOOL_URL ?? '').trim().replace(/\/+$/, '')
-  const token = (env.TLPOOL_TOKEN ?? '').trim()
-  const configured = Boolean(base && token)
+export function createPoolAdminClient(
+  env: PoolEnv,
+  fetcher: Fetcher = (i, init) => fetch(i, init),
+) {
+  const base = (env.TLPOOL_URL ?? "").trim().replace(/\/+$/, "");
+  const token = (env.TLPOOL_TOKEN ?? "").trim();
+  const configured = Boolean(base && token);
 
-  async function raw(method: string, path: string, opts: { body?: unknown; timeoutMs?: number; headers?: Record<string, string> } = {}): Promise<Response> {
-    if (!configured) throw new PoolAdminError('pool_not_configured', 503)
-    const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(opts.headers ?? {}) }
-    let body: string | undefined
+  async function raw(
+    method: string,
+    path: string,
+    opts: { body?: unknown; timeoutMs?: number; headers?: Record<string, string> } = {},
+  ): Promise<Response> {
+    if (!configured) throw new PoolAdminError("pool_not_configured", 503);
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      ...(opts.headers ?? {}),
+    };
+    let body: string | undefined;
     if (opts.body !== undefined) {
-      headers['Content-Type'] = 'application/json'
-      body = JSON.stringify(opts.body)
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(opts.body);
     }
-    let r: Response
+    let r: Response;
     try {
-      r = await fetcher(base + path, { method, headers, body, signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000) })
+      r = await fetcher(base + path, {
+        method,
+        headers,
+        body,
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000),
+      });
     } catch {
       // Never propagate the message: it names TLPOOL_URL.
-      throw new PoolAdminError('pool_unreachable', 503)
+      throw new PoolAdminError("pool_unreachable", 503);
     }
-    if (r.ok) return r
+    if (r.ok) return r;
     const errBody = await r
       .clone()
       .json()
-      .catch(() => null)
-    if (r.status === 401 || r.status === 403) throw new PoolAdminError('pool_auth_failed', 503, null, r.status)
-    throw errorFromBody(r.status, errBody, [token, base])
+      .catch(() => null);
+    if (r.status === 401 || r.status === 403)
+      throw new PoolAdminError("pool_auth_failed", 503, null, r.status);
+    throw errorFromBody(r.status, errBody, [token, base]);
   }
 
   /** A JSON answer; a 2xx body that carries `error` is an error too (tlpool answers contract errors as 200). */
-  async function json(method: string, path: string, opts: { body?: unknown; timeoutMs?: number } = {}): Promise<unknown> {
-    const r = await raw(method, path, opts)
-    let j: unknown
+  async function json(
+    method: string,
+    path: string,
+    opts: { body?: unknown; timeoutMs?: number } = {},
+  ): Promise<unknown> {
+    const r = await raw(method, path, opts);
+    let j: unknown;
     try {
-      j = await r.json()
+      j = await r.json();
     } catch {
-      throw new PoolAdminError('bad_response', 503)
+      throw new PoolAdminError("bad_response", 503);
     }
     // A refusal body is {error: <snake_case code>, message?, ...}; an object that carries its own id (a
     // challenge whose flow failed has `error` in plain words) is a payload, not a refusal.
-    if (isObj(j) && code(j.error) && j.id === undefined) throw errorFromBody(r.status, j, [token, base])
-    return j
+    if (isObj(j) && code(j.error) && j.id === undefined)
+      throw errorFromBody(r.status, j, [token, base]);
+    return j;
   }
 
   const seg = (id: string): string => {
-    if (!ID_RE.test(id)) throw new PoolAdminError('invalid', 400, 'bad_id')
-    return encodeURIComponent(id)
-  }
+    if (!ID_RE.test(id)) throw new PoolAdminError("invalid", 400, "bad_id");
+    return encodeURIComponent(id);
+  };
 
   return {
     configured,
 
     async status(): Promise<PoolStatus> {
-      return normalizeStatus(await json('GET', '/status'))
+      return normalizeStatus(await json("GET", "/status"));
     },
 
     async listAccounts(): Promise<PoolAccount[]> {
-      return accountList(await json('GET', '/accounts'))
+      return accountList(await json("GET", "/accounts"));
     },
 
     /**
      * Starts the signup flow; tlpool answers the id of the challenge that tracks it. With `scheduledAt`
      * (a validated ISO string) tlpool queues the creation instead: `{queued: true, accountId: 'queued-<n>', scheduledAt}`.
      */
-    async createAccount(passive: boolean, exitKind: ExitKindChoice = 'auto', scheduledAt?: string): Promise<CreateAccountResult> {
+    async createAccount(
+      passive: boolean,
+      exitKind: ExitKindChoice = "auto",
+      scheduledAt?: string,
+    ): Promise<CreateAccountResult> {
       // "auto" is tlpool's default: leave the field out rather than send it.
-      const body: Record<string, unknown> = exitKind === 'auto' ? { passive } : { passive, exitKind }
-      if (scheduledAt) body.scheduledAt = scheduledAt
-      const j = await json('POST', '/accounts', { body, timeoutMs: 30_000 })
-      const o = isObj(j) ? j : {}
+      const body: Record<string, unknown> =
+        exitKind === "auto" ? { passive } : { passive, exitKind };
+      if (scheduledAt) body.scheduledAt = scheduledAt;
+      const j = await json("POST", "/accounts", { body, timeoutMs: 30_000 });
+      const o = isObj(j) ? j : {};
       if (bool(o.queued)) {
-        const accountId = opaqueId(pick(o, 'accountId', 'account_id', 'id'))
-        if (!accountId || !QUEUED_ID_RE.test(accountId)) throw new PoolAdminError('bad_response', 503)
-        return { queued: true, challengeId: null, accountId, scheduledAt: iso(pick(o, 'scheduledAt', 'scheduled_at')) ?? scheduledAt ?? null }
+        const accountId = opaqueId(pick(o, "accountId", "account_id", "id"));
+        if (!accountId || !QUEUED_ID_RE.test(accountId))
+          throw new PoolAdminError("bad_response", 503);
+        return {
+          queued: true,
+          challengeId: null,
+          accountId,
+          scheduledAt: iso(pick(o, "scheduledAt", "scheduled_at")) ?? scheduledAt ?? null,
+        };
       }
-      const challengeId = opaqueId(pick(o, 'challengeId', 'challenge_id', 'challenge', 'id'))
-      if (!challengeId) throw new PoolAdminError('bad_response', 503)
-      return { challengeId, accountId: opaqueId(pick(o, 'accountId', 'account_id', 'account')) }
+      const challengeId = opaqueId(pick(o, "challengeId", "challenge_id", "challenge", "id"));
+      if (!challengeId) throw new PoolAdminError("bad_response", 503);
+      return { challengeId, accountId: opaqueId(pick(o, "accountId", "account_id", "account")) };
     },
 
     /** Removes a queued creation (`queued-<n>`); tlpool answers 404 for an unknown one. */
     async cancelQueued(id: string): Promise<void> {
-      if (!QUEUED_ID_RE.test(id)) throw new PoolAdminError('invalid', 400, 'bad_id')
-      await json('POST', `/accounts/${seg(id)}/cancel`, { body: {} }).catch((e) => {
+      if (!QUEUED_ID_RE.test(id)) throw new PoolAdminError("invalid", 400, "bad_id");
+      await json("POST", `/accounts/${seg(id)}/cancel`, { body: {} }).catch((e) => {
         // An empty / 204 answer is still a success.
-        if (e instanceof PoolAdminError && e.code === 'bad_response') return null
-        throw e
-      })
+        if (e instanceof PoolAdminError && e.code === "bad_response") return null;
+        throw e;
+      });
     },
 
     async accountAction(id: string, action: AccountAction): Promise<PoolAccount | null> {
-      const j = await json('POST', `/accounts/${seg(id)}/${action}`, { body: {} }).catch((e) => {
+      const j = await json("POST", `/accounts/${seg(id)}/${action}`, { body: {} }).catch((e) => {
         // An action that answers 204 / an empty body is still a success.
-        if (e instanceof PoolAdminError && e.code === 'bad_response') return null
-        throw e
-      })
-      return normalizeAccount(isObj(j) && isObj(j.account) ? j.account : j)
+        if (e instanceof PoolAdminError && e.code === "bad_response") return null;
+        throw e;
+      });
+      return normalizeAccount(isObj(j) && isObj(j.account) ? j.account : j);
     },
 
     async listChallenges(): Promise<PoolChallenge[]> {
-      return challengeList(await json('GET', '/challenges'))
+      return challengeList(await json("GET", "/challenges"));
     },
 
     async getChallenge(id: string): Promise<PoolChallenge> {
-      const c = normalizeChallenge(await json('GET', `/challenges/${seg(id)}`), id)
-      if (!c) throw new PoolAdminError('bad_response', 503)
-      return c
+      const c = normalizeChallenge(await json("GET", `/challenges/${seg(id)}`), id);
+      if (!c) throw new PoolAdminError("bad_response", 503);
+      return c;
     },
 
     /** The PNG screenshot. `refresh` asks tlpool for a fresh screenshot rather than the last one. */
-    async challengeImage(id: string, refresh = false): Promise<{ body: ReadableStream | null; contentType: string }> {
-      const r = await raw('GET', `/challenges/${seg(id)}/image${refresh ? '?refresh=1' : ''}`, { timeoutMs: 20_000, headers: { Accept: 'image/png,image/*' } })
-      const ct = (r.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
+    async challengeImage(
+      id: string,
+      refresh = false,
+    ): Promise<{ body: ReadableStream | null; contentType: string }> {
+      const r = await raw("GET", `/challenges/${seg(id)}/image${refresh ? "?refresh=1" : ""}`, {
+        timeoutMs: 20_000,
+        headers: { Accept: "image/png,image/*" },
+      });
+      const ct = (r.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
       // Raster screenshots only: an SVG could carry script when opened directly.
-      if (!IMAGE_TYPES.has(ct)) throw new PoolAdminError('bad_response', 503)
-      return { body: r.body, contentType: ct }
+      if (!IMAGE_TYPES.has(ct)) throw new PoolAdminError("bad_response", 503);
+      return { body: r.body, contentType: ct };
     },
 
     /**
@@ -606,36 +732,42 @@ export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init)
      * solved or 422 `{status: pending}` while the wall is still up.
      */
     async answer(id: string, answer: string | { done: true }): Promise<AnswerOutcome> {
-      const body = typeof answer === 'string' ? { text: answer } : { done: true }
-      let j: unknown
+      const body = typeof answer === "string" ? { text: answer } : { done: true };
+      let j: unknown;
       try {
-        j = await json('POST', `/challenges/${seg(id)}/answer`, { body, timeoutMs: 30_000 })
+        j = await json("POST", `/challenges/${seg(id)}/answer`, { body, timeoutMs: 30_000 });
       } catch (e) {
         if (e instanceof PoolAdminError) {
-          const st = isObj(e.body) ? String(pick(e.body, 'status') ?? '').toLowerCase() : ''
-          if (e.code === 'expired' || st === 'expired' || (e.code === 'not_found' && e.detail !== 'bad_id')) return 'expired'
-          if (e.upstreamStatus === 422 && st === 'pending') return 'pending'
-          if (e.code === 'invalid' && e.upstreamStatus === 422) return 'wrong'
-          if (e.code === 'bad_response') return 'accepted'
+          const st = isObj(e.body) ? String(pick(e.body, "status") ?? "").toLowerCase() : "";
+          if (
+            e.code === "expired" ||
+            st === "expired" ||
+            (e.code === "not_found" && e.detail !== "bad_id")
+          )
+            return "expired";
+          if (e.upstreamStatus === 422 && st === "pending") return "pending";
+          if (e.code === "invalid" && e.upstreamStatus === 422) return "wrong";
+          if (e.code === "bad_response") return "accepted";
         }
-        throw e
+        throw e;
       }
-      const o = isObj(j) ? j : {}
-      const s = String(pick(o, 'outcome', 'result', 'status', 'state') ?? '').toLowerCase()
-      if (s === 'pending') return 'pending'
-      if (o.correct === false || s === 'wrong' || s === 'incorrect' || s === 'rejected') return 'wrong'
-      if (s === 'expired' || s === 'closed') return 'expired'
-      if (o.correct === true || s === 'solved' || s === 'ok' || s === 'correct') return 'solved'
-      return 'accepted'
+      const o = isObj(j) ? j : {};
+      const s = String(pick(o, "outcome", "result", "status", "state") ?? "").toLowerCase();
+      if (s === "pending") return "pending";
+      if (o.correct === false || s === "wrong" || s === "incorrect" || s === "rejected")
+        return "wrong";
+      if (s === "expired" || s === "closed") return "expired";
+      if (o.correct === true || s === "solved" || s === "ok" || s === "correct") return "solved";
+      return "accepted";
     },
 
     async getSettings(): Promise<PoolSettings> {
-      return normalizeSettings(await json('GET', '/settings'))
+      return normalizeSettings(await json("GET", "/settings"));
     },
 
     async putSettings(patch: Partial<PoolSettings>): Promise<PoolSettings> {
-      const j = await json('PUT', '/settings', { body: patch })
-      return normalizeSettings(j)
+      const j = await json("PUT", "/settings", { body: patch });
+      return normalizeSettings(j);
     },
 
     /**
@@ -646,47 +778,56 @@ export function createPoolAdminClient(env: PoolEnv, fetcher: Fetcher = (i, init)
      * fresh headers from a whitelist.
      */
     async live(id: string, subpath: string, search: string, req: Request): Promise<Response> {
-      if (!configured) throw new PoolAdminError('pool_not_configured', 503)
-      if (!/^[A-Za-z0-9._\-/]*$/.test(subpath) || subpath.split('/').some((p) => p === '..')) throw new PoolAdminError('invalid', 400, 'bad_path')
+      if (!configured) throw new PoolAdminError("pool_not_configured", 503);
+      if (!/^[A-Za-z0-9._\-/]*$/.test(subpath) || subpath.split("/").some((p) => p === ".."))
+        throw new PoolAdminError("invalid", 400, "bad_path");
       // Only what tlpool's live page needs: the page itself, its websocket and the noVNC modules it imports.
-      if (!LIVE_PATH_RE.test(subpath)) throw new PoolAdminError('not_found', 404, 'not_a_live_view_file')
-      const headers = new Headers()
+      if (!LIVE_PATH_RE.test(subpath))
+        throw new PoolAdminError("not_found", 404, "not_a_live_view_file");
+      const headers = new Headers();
       for (const h of LIVE_REQ_HEADERS) {
-        const v = req.headers.get(h)
-        if (v) headers.set(h, v)
+        const v = req.headers.get(h);
+        if (v) headers.set(h, v);
       }
-      headers.set('Authorization', `Bearer ${token}`)
-      const isUpgrade = (req.headers.get('upgrade') ?? '').toLowerCase() === 'websocket'
-      const target = `${base}/challenges/${seg(id)}/live/${subpath}${search}`
-      let r: Response
+      headers.set("Authorization", `Bearer ${token}`);
+      const isUpgrade = (req.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
+      const target = `${base}/challenges/${seg(id)}/live/${subpath}${search}`;
+      let r: Response;
       try {
         r = await fetcher(target, {
-          method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+          method: req.method === "HEAD" ? "HEAD" : "GET",
           headers,
           // A websocket lives as long as the owner looks at it; no timeout on it.
           signal: isUpgrade ? undefined : AbortSignal.timeout(20_000),
-        })
+        });
       } catch {
-        throw new PoolAdminError('pool_unreachable', 503)
+        throw new PoolAdminError("pool_unreachable", 503);
       }
-      if (r.status === 101) return r
-      if (r.status === 401 || r.status === 403) throw new PoolAdminError('pool_auth_failed', 503, null, r.status)
-      if (r.status === 404) throw new PoolAdminError('not_found', 404, null, 404)
-      if (r.status === 410) throw new PoolAdminError('expired', 410, null, 410)
-      if (r.status >= 500) throw new PoolAdminError('pool_error', 503, null, r.status)
-      const out = new Headers()
+      if (r.status === 101) return r;
+      if (r.status === 401 || r.status === 403)
+        throw new PoolAdminError("pool_auth_failed", 503, null, r.status);
+      if (r.status === 404) throw new PoolAdminError("not_found", 404, null, 404);
+      if (r.status === 410) throw new PoolAdminError("expired", 410, null, 410);
+      if (r.status >= 500) throw new PoolAdminError("pool_error", 503, null, r.status);
+      const out = new Headers();
       for (const h of LIVE_RES_HEADERS) {
-        const v = r.headers.get(h)
-        if (v) out.set(h, v)
+        const v = r.headers.get(h);
+        if (v) out.set(h, v);
       }
       // The page is HTML; a module is script or JSON. Anything else (an HTML file
       // among the assets, an SVG) is refused rather than served on this origin.
-      const ct = (r.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
-      const allowed = subpath === '' ? ct === 'text/html' : ct === 'text/javascript' || ct === 'application/javascript' || ct === 'application/json'
-      if (r.status < 300 && !allowed) throw new PoolAdminError('bad_response', 503, 'live_view_type')
-      out.set('Cache-Control', 'no-store')
-      out.set('X-Content-Type-Options', 'nosniff')
-      return new Response(r.body, { status: r.status, headers: out })
+      const ct = (r.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+      const allowed =
+        subpath === ""
+          ? ct === "text/html"
+          : ct === "text/javascript" ||
+            ct === "application/javascript" ||
+            ct === "application/json";
+      if (r.status < 300 && !allowed)
+        throw new PoolAdminError("bad_response", 503, "live_view_type");
+      out.set("Cache-Control", "no-store");
+      out.set("X-Content-Type-Options", "nosniff");
+      return new Response(r.body, { status: r.status, headers: out });
     },
-  }
+  };
 }

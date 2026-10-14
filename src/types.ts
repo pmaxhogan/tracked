@@ -1,99 +1,99 @@
 export type Env = {
-  CACHE: KVNamespace
+  CACHE: KVNamespace;
   /** R2 bucket tracked-pages: every page tlpool returned (lib/page-store.ts). Optional: unset = nothing is kept. */
-  PAGES?: R2Bucket
+  PAGES?: R2Bucket;
   /** R2 bucket tracked-images: search-result thumbnails copied from their source CDN (src/lib/search/images.ts). Optional: unset = no thumbnails. */
-  IMAGES?: R2Bucket
+  IMAGES?: R2Bucket;
   /** Durable list of DJ subscriptions for the /ui admin app. */
-  SUBS: KVNamespace
+  SUBS: KVNamespace;
   /**
    * D1 database (schema in `migrations/`): subscriptions, per-tracklist sync
    * state, both audit trails and the mkvid queue. KV keeps only caches, OAuth
-   * tokens, push subscriptions and ban state — see README "Storage".
+   * tokens, push subscriptions and ban state - see README "Storage".
    */
-  DB: D1Database
+  DB: D1Database;
   /** Search index (migrations-search/); optional so a Worker without it still serves everything else (search returns 503 search_unavailable). */
-  SEARCH_DB?: D1Database
-  API_TOKEN: string
+  SEARCH_DB?: D1Database;
+  API_TOKEN: string;
   /** Dedicated bearer for GET /liked-songs (agents that only need the liked list). Never accepted by the Tasker routes. */
-  LIKED_SONGS_TOKEN?: string
+  LIKED_SONGS_TOKEN?: string;
   /**
    * Bearer mkvid (the NAS render/upload service) presents on /mkvid/*. Also the
    * feature switch: while unset, the sync never queues a set for mkvid.
    */
-  MKVID_TOKEN?: string
+  MKVID_TOKEN?: string;
   /**
    * mkvid's base URL (e.g. https://mkvid.example.com): "Delete and recreate"
    * asks it to delete the replaced video (POST /api/videos/<id>/delete, bearer
    * MKVID_TOKEN). Unset = the deletes wait (and are retried) until it is set.
    */
-  MKVID_URL?: string
+  MKVID_URL?: string;
   /** Optional Cloudflare Access service token for reaching MKVID_URL through Access (sent as CF-Access-Client-Id / -Secret). */
-  MKVID_ACCESS_CLIENT_ID?: string
-  MKVID_ACCESS_CLIENT_SECRET?: string
+  MKVID_ACCESS_CLIENT_ID?: string;
+  MKVID_ACCESS_CLIENT_SECRET?: string;
   /** Seconds after which a claimed-but-unreported mkvid request is handed out again (default 10800 = 3 h). */
-  MKVID_CLAIM_TTL_SECONDS?: string
+  MKVID_CLAIM_TTL_SECONDS?: string;
   /** Max requests handed to mkvid per YouTube quota day (midnight Pacific) on its own Google project, mkvid-uploads (default 24, of the project's 100 uploads/day; uploads no longer spend the 10 000-unit general pool). `0` pauses. */
-  MKVID_DAILY_CLAIM_CAP?: string
+  MKVID_DAILY_CLAIM_CAP?: string;
   /** Same, for uploads mkvid makes through the sync's project, tracked-youtube, once its own is used up (default 6, so 30/day in total). `0` = never. */
-  MKVID_SHARED_DAILY_CLAIM_CAP?: string
-  /** Playlist sweep (lib/playlist-hygiene.ts): TRUE unless "0"/"false"/"no"/"off" — rejected videos are only reported, not removed. */
-  PLAYLIST_SWEEP_DRY_RUN?: string
+  MKVID_SHARED_DAILY_CLAIM_CAP?: string;
+  /** Playlist sweep (lib/playlist-hygiene.ts): TRUE unless "0"/"false"/"no"/"off" - rejected videos are only reported, not removed. */
+  PLAYLIST_SWEEP_DRY_RUN?: string;
   /** "1" turns on the vertical-video rule of the full-recording check (default off until verified live). */
-  REJECT_VERTICAL?: string
+  REJECT_VERTICAL?: string;
   /** Playlist sweep: max playlistItems.delete calls per UTC day (50 quota units each; default 40). */
-  PLAYLIST_SWEEP_DAILY_REMOVALS?: string
-  YOUTUBE_API_KEY: string
+  PLAYLIST_SWEEP_DAILY_REMOVALS?: string;
+  YOUTUBE_API_KEY: string;
   /**
    * tlpool, the NAS browser pool (lib/pool.ts): base URL through the
    * cloudflared tunnel. Every 1001tracklists request goes through it; while
    * unset, nothing is fetched from 1001tracklists at all.
    */
-  TLPOOL_URL?: string
-  /** Bearer for tlpool, in both directions: the Worker → POST /fetch, and tlpool → POST /pool/events. */
-  TLPOOL_TOKEN?: string
+  TLPOOL_URL?: string;
+  /** Bearer for tlpool, in both directions: the Worker -> POST /fetch, and tlpool -> POST /pool/events. */
+  TLPOOL_TOKEN?: string;
   /** Web Push (VAPID) identity for the admin page's IP-ban alerts. Generate with `node scripts/gen-vapid-keys.mjs`. */
-  VAPID_PUBLIC_KEY?: string
-  VAPID_PRIVATE_KEY?: string
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
   /** `mailto:` contact required by push services, e.g. mailto:you@example.com */
-  VAPID_SUBJECT?: string
+  VAPID_SUBJECT?: string;
   /** Cloudflare Access team domain, e.g. "yourteam.cloudflareaccess.com". */
-  CF_ACCESS_TEAM_DOMAIN?: string
+  CF_ACCESS_TEAM_DOMAIN?: string;
   /** Cloudflare Access application AUD tag (from the Access app config). */
-  CF_ACCESS_AUD?: string
+  CF_ACCESS_AUD?: string;
   /** Comma-separated allowlist of emails permitted to use /ui. */
-  CF_ACCESS_ALLOWED_EMAILS?: string
-  /** When "1" / "true", /ui skips CF Access verification — local dev only. */
-  DEV_BYPASS_CF_ACCESS?: string
+  CF_ACCESS_ALLOWED_EMAILS?: string;
+  /** When "1" / "true", /ui skips CF Access verification - local dev only. */
+  DEV_BYPASS_CF_ACCESS?: string;
   /** Google OAuth 2.0 client (for YouTube playlist write access). Set via `wrangler secret put`. */
-  GOOGLE_OAUTH_CLIENT_ID?: string
-  GOOGLE_OAUTH_CLIENT_SECRET?: string
-}
+  GOOGLE_OAUTH_CLIENT_ID?: string;
+  GOOGLE_OAUTH_CLIENT_SECRET?: string;
+};
 
-export type Status = 'ok' | 'no_video' | 'no_tracklist' | 'unidentified' | 'upstream_error'
+export type Status = "ok" | "no_video" | "no_tracklist" | "unidentified" | "upstream_error";
 
 export type ParsedTrack = {
   /** Display "H:MM:SS" / "M:SS" / "" if no cue. */
-  startTime: string
+  startTime: string;
   /** Parsed cue in seconds. null if cue was missing. */
-  startSeconds: number | null
-  artist: string
-  title: string
+  startSeconds: number | null;
+  artist: string;
+  title: string;
   /** Internal 1001tracklists track id, used for the medialink AJAX. null if unextractable. */
-  trackId: string | null
+  trackId: string | null;
   /** Canonical 1001tracklists track page URL. null when the meta url is missing. */
-  trackUrl: string | null
-  /** Square 300×300 album art URL (Beatport CDN or SoundCloud CDN). null when the row only had a 1001tl placeholder. */
-  artworkUrl: string | null
+  trackUrl: string | null;
+  /** Square 300x300 album art URL (Beatport CDN or SoundCloud CDN). null when the row only had a 1001tl placeholder. */
+  artworkUrl: string | null;
   /** True only when the playing track is fully anonymous (e.g. "Cave Studio - ID"). Remix/edit variants of a known base track surface artist+title+links and use idStatus instead. */
-  isUnidentified: boolean
+  isUnidentified: boolean;
   /**
    * Non-null when the row has a 1001tl trackStatus marker indicating a partial-ID
-   * variant of a known base track — typically "ID Remix", "ID Edit", "ID Bootleg",
+   * variant of a known base track - typically "ID Remix", "ID Edit", "ID Bootleg",
    * "ID Rework". Links/trackUrl point to the BASE track in this case; the actual
    * playing version may differ. null when the row is fully ID'd or fully unidentified.
    */
-  idStatus: string | null
+  idStatus: string | null;
   /**
    * True if this row is a "w/" sibling of the previous row in this list: a track
    * played on top of it (mashup, acapella, tracks played together). 1001tl marks
@@ -102,38 +102,38 @@ export type ParsedTrack = {
    * "ID - ID" rows carry no microdata and are not parsed), since the row before
    * it in this list is then not its base.
    */
-  isMashupLinked: boolean
+  isMashupLinked: boolean;
   /**
    * The row's own cue, as opposed to `startSeconds`, which on a "w/" row is the
    * cue it shares with its base (1001tl files it as ids[1+] of the base's
    * cueValuesEntry). Equal to `startSeconds` on every non-linked row; on a
    * linked row, the cue printed on the row itself, or null when it has none.
    */
-  ownStartSeconds: number | null
-}
+  ownStartSeconds: number | null;
+};
 
 export type ResponseTrack = {
-  title: string
-  artist: string
-  startTime: string
-  startSeconds: number | null
+  title: string;
+  artist: string;
+  startTime: string;
+  startSeconds: number | null;
   /** Length the track occupies in the set: nextGroupStart - thisGroupStart for non-last
    *  groups; setEnd - thisGroupStart for the last group when the caller provided
    *  videoDurationSeconds. null when neither input is known. Mashup-linked siblings
    *  share their group's duration. */
-  durationSeconds: number | null
+  durationSeconds: number | null;
   /** Same as durationSeconds, formatted "M:SS" / "H:MM:SS". Empty string when null. */
-  durationTime: string
-  isCurrent: boolean
-  isUnidentified: boolean
-  /** "ID Remix" / "ID Edit" / etc. — non-null means the links point to the base track but the actual playing version is a not-yet-identified variant. */
-  idStatus: string | null
-  appleLink: string | null
-  youtubeLink: string | null
+  durationTime: string;
+  isCurrent: boolean;
+  isUnidentified: boolean;
+  /** "ID Remix" / "ID Edit" / etc. - non-null means the links point to the base track but the actual playing version is a not-yet-identified variant. */
+  idStatus: string | null;
+  appleLink: string | null;
+  youtubeLink: string | null;
   /** Canonical 1001tracklists track page URL. null when no meta url is present. */
-  trackUrl: string | null
-  /** Square 300×300 album-art URL. null when only a placeholder was available. */
-  artworkUrl: string | null
+  trackUrl: string | null;
+  /** Square 300x300 album-art URL. null when only a placeholder was available. */
+  artworkUrl: string | null;
   /** Whether the connected YouTube account has liked youtubeLink. null when YouTube is not connected, the track has no youtubeLink, or the lookup failed. */
-  youtubeLiked: boolean | null
-}
+  youtubeLiked: boolean | null;
+};

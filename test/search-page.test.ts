@@ -1,348 +1,719 @@
-import { describe, it, expect } from 'vitest'
-import vm from 'node:vm'
-import { app } from '../src/index'
-import { shell, SEARCH_HREF } from '../src/ui/shell'
-import { fakeKV } from './helpers/fake-kv'
-import { fakeD1 } from './helpers/fake-d1'
-import type { Env } from '../src/types'
+import { describe, it, expect } from "vitest";
+import vm from "node:vm";
+import { app } from "../src/index";
+import { shell, SEARCH_HREF } from "../src/ui/shell";
+import { fakeKV } from "./helpers/fake-kv";
+import { fakeD1 } from "./helpers/fake-d1";
+import type { Env } from "../src/types";
 
-const env = () => ({ CACHE: fakeKV(), SUBS: fakeKV(), DB: fakeD1(), API_TOKEN: 't', YOUTUBE_API_KEY: 'k', DEV_BYPASS_CF_ACCESS: '1' }) as unknown as Env
-const scriptsOf = (html: string) => [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
-const tick = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)) }
+const env = () =>
+  ({
+    CACHE: fakeKV(),
+    SUBS: fakeKV(),
+    DB: fakeD1(),
+    API_TOKEN: "t",
+    YOUTUBE_API_KEY: "k",
+    DEV_BYPASS_CF_ACCESS: "1",
+  }) as unknown as Env;
+const scriptsOf = (html: string) =>
+  [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
+const tick = async (n = 12) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+};
 
-const SET_URL = 'https://www.1001tracklists.com/tracklist/abc/mau-p-live-2026-09-01.html'
+const SET_URL = "https://www.1001tracklists.com/tracklist/abc/mau-p-live-2026-09-01.html";
 const track = (over: Record<string, unknown> = {}) => ({
-  trackKey: 'k1', trackId: '123', artist: 'Mau P', title: 'Drugs from Amsterdam', label: 'Repopulate Mars', youtubeLink: null,
-  trackUrl: 'https://www.1001tracklists.com/track/x/mau-p-drugs/index.html',
-  sets: [{ url: SET_URL, title: 'Mau P live', djSlug: 'maup', djName: 'Mau P', date: '2026-09-01', cueSeconds: 125 }], ...over,
-})
+  trackKey: "k1",
+  trackId: "123",
+  artist: "Mau P",
+  title: "Drugs from Amsterdam",
+  label: "Repopulate Mars",
+  youtubeLink: null,
+  trackUrl: "https://www.1001tracklists.com/track/x/mau-p-drugs/index.html",
+  sets: [
+    {
+      url: SET_URL,
+      title: "Mau P live",
+      djSlug: "maup",
+      djName: "Mau P",
+      date: "2026-09-01",
+      cueSeconds: 125,
+    },
+  ],
+  ...over,
+});
 const response = (over: Record<string, unknown> = {}) => ({
-  q: 'mau p', corrected: [],
+  q: "mau p",
+  corrected: [],
   tracks: [track()],
-  sets: [{ url: SET_URL, title: 'Mau P <b>x</b> live', djSlug: 'maup', djName: 'Mau P', date: '2026-09-01', videoId: 'abcdefghijk', trackCount: 20, idedCount: 18 }],
-  djs: [{ slug: 'maup', name: 'Mau P', subscribed: true, sets: 4 }], ...over,
-})
+  sets: [
+    {
+      url: SET_URL,
+      title: "Mau P <b>x</b> live",
+      djSlug: "maup",
+      djName: "Mau P",
+      date: "2026-09-01",
+      videoId: "abcdefghijk",
+      trackCount: 20,
+      idedCount: 18,
+    },
+  ],
+  djs: [{ slug: "maup", name: "Mau P", subscribed: true, sets: 4 }],
+  ...over,
+});
 
-type Fn = (ev?: any) => void
+type Fn = (ev?: any) => void;
 /** A stub DOM with recorded listeners and timers, running the shell scripts and the page's. */
-async function open(search: string, answer: (u: string) => Promise<Response> | Response, globals: Record<string, unknown> = {}) {
-  const els = new Map<string, any>()
-  const listeners = new Map<string, Fn>()
-  const el = (id: string): any => ({ innerHTML: '', textContent: '', value: '', hidden: false, checked: false, disabled: false, className: '', src: '', dataset: {}, style: {}, options: [],
-    setAttribute(k: string, v: string) { (this as any)['@' + k] = v }, removeAttribute() {}, scrollIntoView() {},
-    addEventListener(t: string, fn: Fn) { listeners.set(id + ':' + t, fn) }, focus() {}, add() {}, remove() {}, appendChild() {}, showModal() {}, close() {}, querySelector: () => el('q'), querySelectorAll: () => [], closest: () => null })
-  const document = { hidden: false, getElementById: (id: string) => (els.has(id) ? els.get(id) : (els.set(id, el(id)), els.get(id))), querySelector: () => null, addEventListener() {}, createElement: () => el('new') }
-  const fetches: string[] = []
-  const timers = new Map<number, { fn: () => void; ms: number }>()
-  let tid = 0
-  const location: { search: string; pathname: string; href?: string } = { search, pathname: '/ui/search' }
+async function open(
+  search: string,
+  answer: (u: string) => Promise<Response> | Response,
+  globals: Record<string, unknown> = {},
+) {
+  const els = new Map<string, any>();
+  const listeners = new Map<string, Fn>();
+  const el = (id: string): any => ({
+    innerHTML: "",
+    textContent: "",
+    value: "",
+    hidden: false,
+    checked: false,
+    disabled: false,
+    className: "",
+    src: "",
+    dataset: {},
+    style: {},
+    options: [],
+    setAttribute(k: string, v: string) {
+      (this as any)["@" + k] = v;
+    },
+    removeAttribute() {},
+    scrollIntoView() {},
+    addEventListener(t: string, fn: Fn) {
+      listeners.set(id + ":" + t, fn);
+    },
+    focus() {},
+    add() {},
+    remove() {},
+    appendChild() {},
+    showModal() {},
+    close() {},
+    querySelector: () => el("q"),
+    querySelectorAll: () => [],
+    closest: () => null,
+  });
+  const document = {
+    hidden: false,
+    getElementById: (id: string) =>
+      els.has(id) ? els.get(id) : (els.set(id, el(id)), els.get(id)),
+    querySelector: () => null,
+    addEventListener() {},
+    createElement: () => el("new"),
+  };
+  const fetches: string[] = [];
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let tid = 0;
+  const location: { search: string; pathname: string; href?: string } = {
+    search,
+    pathname: "/ui/search",
+  };
   // replaceState really changes the query string (the tables keep their state there too).
-  const history = { urls: [] as string[], replaceState(_a: unknown, _b: string, u: string) { this.urls.push(u); const i = u.indexOf('?'); location.search = i < 0 ? '' : u.slice(i) } }
-  const ctx = vm.createContext({ document, console, Date, URLSearchParams, URL, AbortController, location, history,
-    fetch: async (u: string) => { fetches.push(u); return answer(u) },
-    setTimeout: (fn: () => void, ms: number) => { timers.set(++tid, { fn, ms }); return tid }, clearTimeout: (n: number) => { timers.delete(n) }, setInterval: () => 0, clearInterval() {},
-    Option: function (t: string, v: string) { return { text: t, value: v } }, ...globals })
-  const html = await (await app.request('https://tracked.example/ui/search', {}, env())).text()
-  for (const s of scriptsOf(html)) vm.runInContext(s, ctx)
-  await tick()
-  const searchFetches = () => fetches.filter((u) => u.startsWith('/ui/api/search'))
-  const fire = (id: string, type: string, ev: any = {}) => listeners.get(id + ':' + type)?.({ preventDefault() {}, target: els.get(id), ...ev })
-  const debounced = () => [...timers.entries()].filter(([, t]) => t.ms === 150)
-  const runDebounced = async () => { for (const [k, t] of debounced()) { timers.delete(k); t.fn() } await tick() }
-  return { els, html, fetches, searchFetches, fire, timers, debounced, runDebounced, history, location, listeners }
+  const history = {
+    urls: [] as string[],
+    replaceState(_a: unknown, _b: string, u: string) {
+      this.urls.push(u);
+      const i = u.indexOf("?");
+      location.search = i < 0 ? "" : u.slice(i);
+    },
+  };
+  const ctx = vm.createContext({
+    document,
+    console,
+    Date,
+    URLSearchParams,
+    URL,
+    AbortController,
+    location,
+    history,
+    fetch: async (u: string) => {
+      fetches.push(u);
+      return answer(u);
+    },
+    setTimeout: (fn: () => void, ms: number) => {
+      timers.set(++tid, { fn, ms });
+      return tid;
+    },
+    clearTimeout: (n: number) => {
+      timers.delete(n);
+    },
+    setInterval: () => 0,
+    clearInterval() {},
+    Option: function (t: string, v: string) {
+      return { text: t, value: v };
+    },
+    ...globals,
+  });
+  const html = await (await app.request("https://tracked.example/ui/search", {}, env())).text();
+  for (const s of scriptsOf(html)) vm.runInContext(s, ctx);
+  await tick();
+  const searchFetches = () => fetches.filter((u) => u.startsWith("/ui/api/search"));
+  const fire = (id: string, type: string, ev: any = {}) =>
+    listeners.get(id + ":" + type)?.({ preventDefault() {}, target: els.get(id), ...ev });
+  const debounced = () => [...timers.entries()].filter(([, t]) => t.ms === 150);
+  const runDebounced = async () => {
+    for (const [k, t] of debounced()) {
+      timers.delete(k);
+      t.fn();
+    }
+    await tick();
+  };
+  return {
+    els,
+    html,
+    fetches,
+    searchFetches,
+    fire,
+    timers,
+    debounced,
+    runDebounced,
+    history,
+    location,
+    listeners,
+  };
 }
 
-describe('Search page script', () => {
-  it('renders the three groups from a response, escaped and highlighted', async () => {
-    const p = await open('?q=mau%20p', () => Response.json(response()))
-    expect(p.searchFetches()).toHaveLength(1)
-    expect(p.searchFetches()[0]).toContain('q=mau%20p')
-    const out = p.els.get('sq-results').innerHTML as string
-    expect(out).toContain('<mark>Mau</mark>')
-    expect(out).toContain('&lt;b&gt;x&lt;/b&gt;')
-    expect(out).not.toContain('<b>x')
-    for (const h of ['>Track<', '>Set<', '>DJ<']) expect(out).toContain(h)
-    expect(out).toContain('/ui/set?url=' + encodeURIComponent(SET_URL))
-    expect(out).toContain('/ui/dj/maup')
-    expect(out).toContain('18/20 IDs')
-    expect(out).toContain('subscribed')
-    expect(p.els.get('sq').value).toBe('mau p')
-  })
+describe("Search page script", () => {
+  it("renders the three groups from a response, escaped and highlighted", async () => {
+    const p = await open("?q=mau%20p", () => Response.json(response()));
+    expect(p.searchFetches()).toHaveLength(1);
+    expect(p.searchFetches()[0]).toContain("q=mau%20p");
+    const out = p.els.get("sq-results").innerHTML as string;
+    expect(out).toContain("<mark>Mau</mark>");
+    expect(out).toContain("&lt;b&gt;x&lt;/b&gt;");
+    expect(out).not.toContain("<b>x");
+    for (const h of [">Track<", ">Set<", ">DJ<"]) expect(out).toContain(h);
+    expect(out).toContain("/ui/set?url=" + encodeURIComponent(SET_URL));
+    expect(out).toContain("/ui/dj/maup");
+    expect(out).toContain("18/20 IDs");
+    expect(out).toContain("subscribed");
+    expect(p.els.get("sq").value).toBe("mau p");
+  });
 
-  it('highlights across diacritics and never injects markup from the data', async () => {
-    const r = response({ tracks: [track({ artist: 'Mau P', title: 'Café <img src=x onerror=1> del Mar' })], sets: [], djs: [] })
-    const p = await open('?q=cafe', () => Response.json(r))
-    const out = p.els.get('sq-results').innerHTML as string
-    expect(out).toContain('<mark>Café</mark>')
-    expect(out).toContain('&lt;img src=x onerror=1&gt;')
-    expect(out).not.toContain('<img')
-    const apos = await open('?q=dont%20stop', () => Response.json(response({ tracks: [track({ title: "Don't Stop" })], sets: [], djs: [] })))
-    expect(apos.els.get('sq-results').innerHTML).toContain('<mark>Don&#39;t</mark> <mark>Stop</mark>')
-  })
-
-  it('shows the corrected notice with a search-exactly button that requests exact=1', async () => {
-    const answer = (u: string) => Response.json(u.includes('exact=1') ? response({ q: 'lily plamer dont', tracks: [], sets: [], djs: [] }) : response({ q: 'lily plamer dont', corrected: [{ from: 'plamer', to: 'palmer' }, { from: 'lily', to: 'lilly' }] }))
-    const p = await open('?q=lily%20plamer%20dont', answer)
-    const note = p.els.get('sq-corrected')
-    expect(note.hidden).toBe(false)
-    expect(note.innerHTML).toContain('Showing results for <strong>lilly palmer dont</strong>.</span>')
-    expect(note.innerHTML).toContain('Search exactly for lily plamer dont')
-    expect(p.searchFetches()[0]).not.toContain('exact=1')
-    p.fire('sq-corrected', 'click', { target: { closest: () => ({ id: 'sq-exact' }) } })
-    await tick()
-    expect(p.searchFetches()).toHaveLength(2)
-    expect(p.searchFetches()[1]).toContain('exact=1')
-    expect(p.els.get('sq-corrected').hidden).toBe(true)
-  })
-
-  it('debounces typing and drops a stale reply', async () => {
-    const pending: Array<(r: Response) => void> = []
-    const p = await open('', (u) => (u.startsWith('/ui/api/search') ? new Promise<Response>((res) => pending.push(res)) : new Response('{}', { status: 404 })))
-    expect(p.searchFetches()).toHaveLength(0)
-    p.els.get('sq').value = 'ma'; p.fire('sq', 'input')
-    p.els.get('sq').value = 'mau'; p.fire('sq', 'input')
-    expect(p.debounced()).toHaveLength(1)
-    await p.runDebounced()
-    expect(p.searchFetches()).toHaveLength(1)
-    expect(p.searchFetches()[0]).toContain('q=mau')
-    p.els.get('sq').value = 'mau p'; p.fire('sq', 'input')
-    await p.runDebounced()
-    expect(p.searchFetches()).toHaveLength(2)
-    pending[1]!(Response.json(response({ q: 'mau p', sets: [], djs: [], tracks: [track({ title: 'Second reply' })] })))
-    await tick()
-    pending[0]!(Response.json(response({ q: 'mau', sets: [], djs: [], tracks: [track({ title: 'First reply' })] })))
-    await tick()
-    const out = p.els.get('sq-results').innerHTML as string
-    expect(out).toContain('Second reply')
-    expect(out).not.toContain('First reply')
-    expect(p.history.urls.at(-1)).toBe('/ui/search?q=mau+p')
-  })
-
-  it('keeps the previous results while a search is pending: an expand click repaints them', async () => {
-    let first = true
-    const p = await open('?q=mau', (u) => {
-      if (!u.startsWith('/ui/api/search')) return new Response('{}', { status: 404 })
-      if (first) { first = false; return Response.json(response()) }
-      return new Promise<Response>(() => {})
-    })
-    expect(p.els.get('sq-results').innerHTML).toContain('Drugs from Amsterdam')
-    p.els.get('sq').value = 'mau p'; p.fire('sq', 'input')
-    await p.runDebounced()
-    expect(p.searchFetches()).toHaveLength(2)
-    p.fire('sq-results', 'click', { target: { closest: (s: string) => (s === '[data-exp]' ? { dataset: { exp: 'k1' } } : null) } })
-    const out = p.els.get('sq-results').innerHTML as string
-    expect(out).toContain('Drugs from Amsterdam')
-    expect(out).toContain('class="sq-sets"')
-  })
-
-  it('a new search aborts the previous request', async () => {
-    const aborted: number[] = []
-    let made = 0
-    class StubAbortController {
-      n = ++made
-      signal = { n: this.n }
-      abort() { aborted.push(this.n) }
-    }
-    const p = await open('', (u) => (u.startsWith('/ui/api/search') ? new Promise<Response>(() => {}) : new Response('{}', { status: 404 })), { AbortController: StubAbortController })
-    p.els.get('sq').value = 'mau'; p.fire('sq', 'input')
-    await p.runDebounced()
-    expect(made).toBe(1)
-    expect(aborted).toEqual([])
-    p.els.get('sq').value = 'mau p'; p.fire('sq', 'input')
-    await p.runDebounced()
-    expect(made).toBe(2)
-    expect(aborted).toEqual([1])
-  })
-
-  it('a track with no YouTube link and a numeric id gets a links button; one with a link gets a YouTube pill', async () => {
-    const r = response({ sets: [], djs: [], tracks: [track({ trackKey: 'a', trackId: '55', title: 'Needs Links' }), track({ trackKey: 'b', trackId: '56', title: 'Has Link', youtubeLink: 'https://youtu.be/abc' }), track({ trackKey: 'c', trackId: null, title: 'No Id' })] })
-    const p = await open('?q=mau', () => Response.json(r))
-    const out = p.els.get('sq-results').innerHTML as string
-    expect((out.match(/data-links="/g) ?? []).length).toBe(1)
-    expect(out).toContain('data-links="a"')
-    expect(out).toContain('href="https://youtu.be/abc"')
-    expect(out).toContain('>YouTube<')
-  })
-
-  it('the links button looks the track up and shows the YouTube pill', async () => {
-    const r = response({ sets: [], djs: [], tracks: [track({ trackKey: 'a', trackId: '55', title: 'Needs Links' })] })
-    const answer = (u: string) => u.startsWith('/ui/api/search') ? Response.json(r) : u === '/ui/api/tracklist/links' ? Response.json({ links: { '55': { youtubeLink: 'https://youtu.be/zzz' } } }) : new Response('{}', { status: 404 })
-    const p = await open('?q=mau', answer)
-    p.fire('sq-results', 'click', { target: { closest: (s: string) => (s === '[data-links]' ? { dataset: { links: 'a' } } : null) } })
-    await tick()
-    expect(p.fetches).toContain('/ui/api/tracklist/links')
-    const out = p.els.get('sq-results').innerHTML as string
-    expect(out).toContain('href="https://youtu.be/zzz"')
-    expect(out).not.toContain('data-links="a"')
-  })
-
-  it('a track with no YouTube link gets a Pre-save button; one already pre-saved links to its pre-save; pressing it saves the track', async () => {
-    const r = response({ sets: [], djs: [], tracks: [
-      track({ trackKey: 'a', trackId: '55', title: 'Not Saved' }),
-      track({ trackKey: 'b', trackId: '56', title: 'Has Link', youtubeLink: 'https://youtu.be/abc' }),
-      track({ trackKey: 'c', trackId: '57', title: 'Saved Before' }),
-      track({ trackKey: 'd', trackId: null, trackUrl: null, title: 'Nothing To Save By' }),
-    ] })
-    const answer = (u: string) => u.startsWith('/ui/api/search') ? Response.json(r)
-      : u === '/ui/api/presaves/lookup' ? Response.json({ byTrackId: { '57': { id: 9, stage: 'watching' } }, byRow: {} })
-      : u === '/ui/api/presaves' ? Response.json({ ok: true, created: true, presave: { id: 12, stage: 'watching' }, message: 'Pre-saved: Mau P – Not Saved' })
-      : new Response('{}', { status: 404 })
-    const p = await open('?q=mau', answer)
-    let out = p.els.get('sq-results').innerHTML as string
-    expect([...out.matchAll(/data-ps="([^"]+)"/g)].map((m) => m[1])).toEqual(['a'])
-    expect(out).toContain('href="/ui/presave?id=9"')
-    expect(out).toContain('Pre-saved ✓')
-    p.fire('sq-results', 'click', { target: { closest: (sel: string) => (sel === '[data-ps]' ? { dataset: { ps: 'a' } } : null) } })
-    await tick()
-    expect(p.fetches.filter((u) => u === '/ui/api/presaves')).toHaveLength(1)
-    out = p.els.get('sq-results').innerHTML as string
-    expect(out).not.toContain('data-ps="a"')
-    expect(out).toContain('href="/ui/presave?id=12"')
-  })
-
-  it('All is one list: DJs first, then tracks and sets by score (a set first on a tie); a tab shows one kind', async () => {
-    const sets = [
-      { url: SET_URL + 'a', title: 'Set A', djSlug: 'maup', djName: 'Mau P', date: null, videoId: null, trackCount: 0, idedCount: 0, image: null, score: 0.95 },
-      { url: SET_URL + 'b', title: 'Set B', djSlug: 'maup', djName: 'Mau P', date: null, videoId: null, trackCount: 0, idedCount: 0, image: null, score: 0.5 },
-    ]
-    const tracks = [track({ trackKey: 'ta', title: 'Track A', score: 0.9 }), track({ trackKey: 'tb', title: 'Track B', score: 0.5 })]
-    const p = await open('?q=mau', (u) => Response.json(u.includes('kind=sets') ? response({ tracks: [], djs: [], sets }) : response({ tracks, sets, djs: [{ slug: 'maup', name: 'Mau P', subscribed: true, sets: 4, image: null, score: 0.4 }] })))
-    expect(p.searchFetches()[0]).toContain('kind=all')
-    const out = p.els.get('sq-results').innerHTML as string
-    const at = (s: string) => out.indexOf(s)
-    expect(at('/ui/dj/maup"')).toBeGreaterThan(-1)
-    const order = ['Profile</a>', 'Set A', 'Track A', 'Set B', 'Track B'].map(at)
-    expect(order.every((x) => x > -1)).toBe(true)
-    expect([...order].sort((a, b) => a - b)).toEqual(order)
-    expect(out).not.toContain('Show all')
-    expect(out).not.toContain('<h2')
-    expect(p.els.get('sq-tabs').innerHTML).toContain('aria-pressed="true"')
-    p.fire('sq-tabs', 'click', { target: { closest: (s: string) => (s === '[data-kind]' ? { dataset: { kind: 'sets' } } : null) } })
-    await tick()
-    expect(p.searchFetches()[1]).toContain('kind=sets')
-    expect(p.searchFetches()[1]).toContain('limit=200')
-    expect(p.history.urls.at(-1)).toContain('kind=sets')
-    // A single kind is a table: the All list is emptied, the Sets table shows, best match first.
-    expect(p.els.get('sq-results').innerHTML).toBe('')
-    expect(p.els.get('sq-t-sets').hidden).toBe(false)
-    expect(p.els.get('sq-t-tracks').hidden).toBe(true)
-    const one = p.els.get('sqs-body').innerHTML as string
-    expect(one.match(/data-tkt-row=/g)!.length).toBe(2)
-    expect(one.indexOf('Set A')).toBeLessThan(one.indexOf('Set B'))
-    expect(one).toContain('id="sq-sets-0"')
-    expect(one).toContain('>95<') // the Match column
-    expect(one).not.toContain('sq-kind')
-    expect(p.els.get('sqs-pager').innerHTML).toContain('1–2 of 2')
-  })
-
-  it('a kind tab is a sortable, filterable table: header sort, keyboard order follows the table, expand and links still work', async () => {
-    const tracks = [
-      track({ trackKey: 'ta', trackId: '55', artist: 'Zed', title: 'Track A', label: 'Lbl <x>', score: 0.9, sets: [{ url: SET_URL, title: 'S', djSlug: 'maup', djName: 'Mau P', date: '2026-01-01', cueSeconds: 65 }] }),
-      track({ trackKey: 'tb', artist: 'Abe', title: 'Track B', score: 0.5, youtubeLink: 'https://youtu.be/b', sets: [{ url: SET_URL + 'b', title: 'S2', djSlug: 'x', djName: 'X', date: '2026-09-01', cueSeconds: null }] }),
-    ]
-    const answer = (u: string) => u.startsWith('/ui/api/search') ? Response.json(response({ tracks, sets: [], djs: [] })) : u === '/ui/api/tracklist/links' ? Response.json({ links: { '55': { youtubeLink: 'https://youtu.be/zzz' } } }) : new Response('{}', { status: 404 })
-    const p = await open('?q=mau&kind=tracks', answer)
-    expect(p.searchFetches()[0]).toContain('kind=tracks&limit=200')
-    const body = () => p.els.get('sqt-body').innerHTML as string
-    expect(body().indexOf('Track A')).toBeLessThan(body().indexOf('Track B'))
-    expect(body()).toContain('Lbl &lt;x&gt;')
-    expect(body()).toContain('<mark>Mau</mark>')
-    // Sort by artist (a header click on the table root): Abe first.
-    const tableClick = p.listeners.get('sq-t-tracks:click')!
-    const sortTarget = (col: string) => { const t: any = { getAttribute: (k: string) => (k === 'data-tkt' ? 'sort' : k === 'data-col' ? col : null), closest: (sel: string) => (sel === '[data-tkt]' ? t : null) }; return { target: t } }
-    tableClick(sortTarget('artist'))
-    expect(body().indexOf('Track B')).toBeLessThan(body().indexOf('Track A'))
-    // The arrow keys walk the rows in the order shown.
-    p.fire('sq', 'keydown', { key: 'ArrowDown' })
-    expect(p.els.get('sq')['@aria-activedescendant']).toBe('sq-tracks-1')
-    p.fire('sq', 'keydown', { key: 'Enter' })
-    expect(p.location.href).toBe('/ui/set?url=' + encodeURIComponent(SET_URL + 'b'))
-    // Expand lists the sets; the links button looks the track up.
-    p.fire('sq-tables', 'click', { target: { closest: (sel: string) => (sel === '[data-exp]' ? { dataset: { exp: 'ta' } } : null) } })
-    expect(body()).toContain('class="sq-sets"')
-    expect(body()).toContain('1:05')
-    p.fire('sq-tables', 'click', { target: { closest: (sel: string) => (sel === '[data-links]' ? { dataset: { links: 'ta' } } : null) } })
-    await tick()
-    expect(body()).toContain('href="https://youtu.be/zzz"')
-    // The order (artist) survived the repaints.
-    expect(body().indexOf('Track B')).toBeLessThan(body().indexOf('Track A'))
-  })
-
-  it('a full window of 200 says so', async () => {
-    const sets = Array.from({ length: 200 }, (_, i) => ({ url: SET_URL + i, title: 'Set ' + i, djSlug: 'maup', djName: 'Mau P', date: null, videoId: null, trackCount: 1, idedCount: 1, image: null, score: 1 - i / 1000 }))
-    const p = await open('?q=mau&kind=sets', () => Response.json(response({ tracks: [], djs: [], sets })))
-    expect(p.els.get('sq-cap').hidden).toBe(false)
-    expect(p.els.get('sq-cap').textContent).toContain('best 200')
-    expect(p.els.get('sqs-pager').innerHTML).toContain('1–50 of 200')
-  })
-
-  it('every row has a square thumbnail: an R2 image path over a lettered placeholder; anything else is just the placeholder', async () => {
-    const img = '/ui/img/' + 'a'.repeat(32)
-    const p = await open('?q=mau', () => Response.json(response({
-      tracks: [track({ image: img }), track({ trackKey: 'k2', artist: 'Zed', image: 'https://evil.example/x.png' })],
+  it("highlights across diacritics and never injects markup from the data", async () => {
+    const r = response({
+      tracks: [track({ artist: "Mau P", title: "Café <img src=x onerror=1> del Mar" })],
       sets: [],
-      djs: [{ slug: 'maup', name: 'Mau P', subscribed: true, sets: 4, image: img }],
-    })))
-    const out = p.els.get('sq-results').innerHTML as string
-    expect(out.match(/class="sq-thumb/g)!.length).toBe(3)
-    expect(out.match(new RegExp('<img src="' + img + '"', 'g'))!.length).toBe(2)
-    expect(out).not.toContain('evil.example')
-    expect(out).toContain('<span class="sq-ph">Z</span>')
-    expect(out).toContain('class="sq-thumb dj"')
-  })
+      djs: [],
+    });
+    const p = await open("?q=cafe", () => Response.json(r));
+    const out = p.els.get("sq-results").innerHTML as string;
+    expect(out).toContain("<mark>Café</mark>");
+    expect(out).toContain("&lt;img src=x onerror=1&gt;");
+    expect(out).not.toContain("<img");
+    const apos = await open("?q=dont%20stop", () =>
+      Response.json(response({ tracks: [track({ title: "Don't Stop" })], sets: [], djs: [] })),
+    );
+    expect(apos.els.get("sq-results").innerHTML).toContain(
+      "<mark>Don&#39;t</mark> <mark>Stop</mark>",
+    );
+  });
 
-  it('keyboard: arrows move the active result, Enter opens it, Escape clears', async () => {
-    const p = await open('?q=mau', () => Response.json(response()))
-    const input = p.els.get('sq')
-    expect(p.els.get('sq-results').innerHTML).toContain('role="option"')
-    p.fire('sq', 'keydown', { key: 'ArrowDown' })
-    expect(input['@aria-activedescendant']).toBe('sq-r0')
-    p.fire('sq', 'keydown', { key: 'ArrowDown' })
-    expect(input['@aria-activedescendant']).toBe('sq-r1')
-    p.fire('sq', 'keydown', { key: 'ArrowUp' })
-    expect(input['@aria-activedescendant']).toBe('sq-r0')
-    p.fire('sq', 'keydown', { key: 'Enter' })
-    expect(p.location.href).toBe('/ui/dj/maup') // All lists DJs first
-    p.fire('sq', 'keydown', { key: 'Escape' })
-    expect(input.value).toBe('')
-    expect(p.els.get('sq-results').innerHTML).toBe('')
-  })
+  it("shows the corrected notice with a search-exactly button that requests exact=1", async () => {
+    const answer = (u: string) =>
+      Response.json(
+        u.includes("exact=1")
+          ? response({ q: "lily plamer dont", tracks: [], sets: [], djs: [] })
+          : response({
+              q: "lily plamer dont",
+              corrected: [
+                { from: "plamer", to: "palmer" },
+                { from: "lily", to: "lilly" },
+              ],
+            }),
+      );
+    const p = await open("?q=lily%20plamer%20dont", answer);
+    const note = p.els.get("sq-corrected");
+    expect(note.hidden).toBe(false);
+    expect(note.innerHTML).toContain(
+      "Showing results for <strong>lilly palmer dont</strong>.</span>",
+    );
+    expect(note.innerHTML).toContain("Search exactly for lily plamer dont");
+    expect(p.searchFetches()[0]).not.toContain("exact=1");
+    p.fire("sq-corrected", "click", { target: { closest: () => ({ id: "sq-exact" }) } });
+    await tick();
+    expect(p.searchFetches()).toHaveLength(2);
+    expect(p.searchFetches()[1]).toContain("exact=1");
+    expect(p.els.get("sq-corrected").hidden).toBe(true);
+  });
 
-  it('empty states: no query, nothing found, index not set up, other errors', async () => {
-    const none = await open('', () => new Response('{}', { status: 404 }))
-    expect(none.els.get('sq-empty').textContent).toBe('Search every verified track list: tracks, sets and DJs.')
-    const nf = await open('?q=zzz', () => Response.json(response({ q: 'zzz', tracks: [], sets: [], djs: [] })))
-    expect(nf.els.get('sq-empty').textContent).toBe('Nothing found for “zzz”.')
-    const un = await open('?q=zzz', () => Response.json({ error: 'search_unavailable', message: 'The search index is not bound to this Worker.' }, { status: 503 }))
-    expect(un.els.get('sq-empty').textContent).toBe('The search index is not set up on this Worker.')
-    const bad = await open('?q=zzz', () => Response.json({ error: 'invalid_request', message: 'nope' }, { status: 400 }))
-    expect(bad.els.get('sq-empty').textContent).toBe('nope')
-  })
-})
+  it("debounces typing and drops a stale reply", async () => {
+    const pending: Array<(r: Response) => void> = [];
+    const p = await open("", (u) =>
+      u.startsWith("/ui/api/search")
+        ? new Promise<Response>((res) => pending.push(res))
+        : new Response("{}", { status: 404 }),
+    );
+    expect(p.searchFetches()).toHaveLength(0);
+    p.els.get("sq").value = "ma";
+    p.fire("sq", "input");
+    p.els.get("sq").value = "mau";
+    p.fire("sq", "input");
+    expect(p.debounced()).toHaveLength(1);
+    await p.runDebounced();
+    expect(p.searchFetches()).toHaveLength(1);
+    expect(p.searchFetches()[0]).toContain("q=mau");
+    p.els.get("sq").value = "mau p";
+    p.fire("sq", "input");
+    await p.runDebounced();
+    expect(p.searchFetches()).toHaveLength(2);
+    pending[1]!(
+      Response.json(
+        response({ q: "mau p", sets: [], djs: [], tracks: [track({ title: "Second reply" })] }),
+      ),
+    );
+    await tick();
+    pending[0]!(
+      Response.json(
+        response({ q: "mau", sets: [], djs: [], tracks: [track({ title: "First reply" })] }),
+      ),
+    );
+    await tick();
+    const out = p.els.get("sq-results").innerHTML as string;
+    expect(out).toContain("Second reply");
+    expect(out).not.toContain("First reply");
+    expect(p.history.urls.at(-1)).toBe("/ui/search?q=mau+p");
+  });
 
-describe('TK.api.get abort support', () => {
-  it('passes the signal to fetch; an aborted request resolves to aborted:true without throwing', async () => {
-    const { RUNTIME_JS } = await import('../src/ui/runtime')
-    const seen: unknown[] = []
-    const ctx = vm.createContext({ document: { getElementById: () => null, querySelector: () => null, addEventListener() {} }, console, Date, AbortController,
-      fetch: (_u: string, init: { signal?: AbortSignal }) => { seen.push(init.signal); return new Promise((_res, rej) => init.signal!.addEventListener('abort', () => rej(Object.assign(new Error('x'), { name: 'AbortError' })))) } })
-    vm.runInContext(RUNTIME_JS, ctx)
-    const ac = new AbortController()
-    const p = vm.runInContext('(s) => TK.api.get("/x", { signal: s })', ctx)(ac.signal) as Promise<unknown>
-    ac.abort()
-    expect(await p).toMatchObject({ ok: false, status: 0, aborted: true })
-    expect(seen[0]).toBe(ac.signal)
-  })
-})
+  it("keeps the previous results while a search is pending: an expand click repaints them", async () => {
+    let first = true;
+    const p = await open("?q=mau", (u) => {
+      if (!u.startsWith("/ui/api/search")) return new Response("{}", { status: 404 });
+      if (first) {
+        first = false;
+        return Response.json(response());
+      }
+      return new Promise<Response>(() => {});
+    });
+    expect(p.els.get("sq-results").innerHTML).toContain("Drugs from Amsterdam");
+    p.els.get("sq").value = "mau p";
+    p.fire("sq", "input");
+    await p.runDebounced();
+    expect(p.searchFetches()).toHaveLength(2);
+    p.fire("sq-results", "click", {
+      target: { closest: (s: string) => (s === "[data-exp]" ? { dataset: { exp: "k1" } } : null) },
+    });
+    const out = p.els.get("sq-results").innerHTML as string;
+    expect(out).toContain("Drugs from Amsterdam");
+    expect(out).toContain('class="sq-sets"');
+  });
 
-describe('shell search box', () => {
-  it('the top form searches /ui/search and the Search tab links there', () => {
-    expect(SEARCH_HREF).toBe('/ui/search')
-    const h = shell({ nav: 'home', title: 'Home', body: '' })
-    expect(h).toContain('<form class="tk-search" action="/ui/search" method="get" role="search">')
-    expect(h).toContain('<input id="tk-search" name="q" type="search" placeholder="Search tracks, sets, DJs" aria-label="Search tracks, sets, DJs">')
-    const tabs = /<nav class="tk-tabs"[^>]*>([\s\S]*?)<\/nav>/.exec(h)![1]!
-    expect(tabs).toContain('href="/ui/search"')
-    for (const l of ['Home', 'DJs', 'Search', 'mkvid', 'Pool']) expect(tabs).toContain(l)
-  })
-})
+  it("a new search aborts the previous request", async () => {
+    const aborted: number[] = [];
+    let made = 0;
+    class StubAbortController {
+      n = ++made;
+      signal = { n: this.n };
+      abort() {
+        aborted.push(this.n);
+      }
+    }
+    const p = await open(
+      "",
+      (u) =>
+        u.startsWith("/ui/api/search")
+          ? new Promise<Response>(() => {})
+          : new Response("{}", { status: 404 }),
+      { AbortController: StubAbortController },
+    );
+    p.els.get("sq").value = "mau";
+    p.fire("sq", "input");
+    await p.runDebounced();
+    expect(made).toBe(1);
+    expect(aborted).toEqual([]);
+    p.els.get("sq").value = "mau p";
+    p.fire("sq", "input");
+    await p.runDebounced();
+    expect(made).toBe(2);
+    expect(aborted).toEqual([1]);
+  });
+
+  it("a track with no YouTube link and a numeric id gets a links button; one with a link gets a YouTube pill", async () => {
+    const r = response({
+      sets: [],
+      djs: [],
+      tracks: [
+        track({ trackKey: "a", trackId: "55", title: "Needs Links" }),
+        track({
+          trackKey: "b",
+          trackId: "56",
+          title: "Has Link",
+          youtubeLink: "https://youtu.be/abc",
+        }),
+        track({ trackKey: "c", trackId: null, title: "No Id" }),
+      ],
+    });
+    const p = await open("?q=mau", () => Response.json(r));
+    const out = p.els.get("sq-results").innerHTML as string;
+    expect((out.match(/data-links="/g) ?? []).length).toBe(1);
+    expect(out).toContain('data-links="a"');
+    expect(out).toContain('href="https://youtu.be/abc"');
+    expect(out).toContain(">YouTube<");
+  });
+
+  it("the links button looks the track up and shows the YouTube pill", async () => {
+    const r = response({
+      sets: [],
+      djs: [],
+      tracks: [track({ trackKey: "a", trackId: "55", title: "Needs Links" })],
+    });
+    const answer = (u: string) =>
+      u.startsWith("/ui/api/search")
+        ? Response.json(r)
+        : u === "/ui/api/tracklist/links"
+          ? Response.json({ links: { "55": { youtubeLink: "https://youtu.be/zzz" } } })
+          : new Response("{}", { status: 404 });
+    const p = await open("?q=mau", answer);
+    p.fire("sq-results", "click", {
+      target: {
+        closest: (s: string) => (s === "[data-links]" ? { dataset: { links: "a" } } : null),
+      },
+    });
+    await tick();
+    expect(p.fetches).toContain("/ui/api/tracklist/links");
+    const out = p.els.get("sq-results").innerHTML as string;
+    expect(out).toContain('href="https://youtu.be/zzz"');
+    expect(out).not.toContain('data-links="a"');
+  });
+
+  it("a track with no YouTube link gets a Pre-save button; one already pre-saved links to its pre-save; pressing it saves the track", async () => {
+    const r = response({
+      sets: [],
+      djs: [],
+      tracks: [
+        track({ trackKey: "a", trackId: "55", title: "Not Saved" }),
+        track({
+          trackKey: "b",
+          trackId: "56",
+          title: "Has Link",
+          youtubeLink: "https://youtu.be/abc",
+        }),
+        track({ trackKey: "c", trackId: "57", title: "Saved Before" }),
+        track({ trackKey: "d", trackId: null, trackUrl: null, title: "Nothing To Save By" }),
+      ],
+    });
+    const answer = (u: string) =>
+      u.startsWith("/ui/api/search")
+        ? Response.json(r)
+        : u === "/ui/api/presaves/lookup"
+          ? Response.json({ byTrackId: { "57": { id: 9, stage: "watching" } }, byRow: {} })
+          : u === "/ui/api/presaves"
+            ? Response.json({
+                ok: true,
+                created: true,
+                presave: { id: 12, stage: "watching" },
+                message: "Pre-saved: Mau P - Not Saved",
+              })
+            : new Response("{}", { status: 404 });
+    const p = await open("?q=mau", answer);
+    let out = p.els.get("sq-results").innerHTML as string;
+    expect([...out.matchAll(/data-ps="([^"]+)"/g)].map((m) => m[1])).toEqual(["a"]);
+    expect(out).toContain('href="/ui/presave?id=9"');
+    expect(out).toContain("Pre-saved ✓");
+    p.fire("sq-results", "click", {
+      target: { closest: (sel: string) => (sel === "[data-ps]" ? { dataset: { ps: "a" } } : null) },
+    });
+    await tick();
+    expect(p.fetches.filter((u) => u === "/ui/api/presaves")).toHaveLength(1);
+    out = p.els.get("sq-results").innerHTML as string;
+    expect(out).not.toContain('data-ps="a"');
+    expect(out).toContain('href="/ui/presave?id=12"');
+  });
+
+  it("All is one list: DJs first, then tracks and sets by score (a set first on a tie); a tab shows one kind", async () => {
+    const sets = [
+      {
+        url: SET_URL + "a",
+        title: "Set A",
+        djSlug: "maup",
+        djName: "Mau P",
+        date: null,
+        videoId: null,
+        trackCount: 0,
+        idedCount: 0,
+        image: null,
+        score: 0.95,
+      },
+      {
+        url: SET_URL + "b",
+        title: "Set B",
+        djSlug: "maup",
+        djName: "Mau P",
+        date: null,
+        videoId: null,
+        trackCount: 0,
+        idedCount: 0,
+        image: null,
+        score: 0.5,
+      },
+    ];
+    const tracks = [
+      track({ trackKey: "ta", title: "Track A", score: 0.9 }),
+      track({ trackKey: "tb", title: "Track B", score: 0.5 }),
+    ];
+    const p = await open("?q=mau", (u) =>
+      Response.json(
+        u.includes("kind=sets")
+          ? response({ tracks: [], djs: [], sets })
+          : response({
+              tracks,
+              sets,
+              djs: [
+                { slug: "maup", name: "Mau P", subscribed: true, sets: 4, image: null, score: 0.4 },
+              ],
+            }),
+      ),
+    );
+    expect(p.searchFetches()[0]).toContain("kind=all");
+    const out = p.els.get("sq-results").innerHTML as string;
+    const at = (s: string) => out.indexOf(s);
+    expect(at('/ui/dj/maup"')).toBeGreaterThan(-1);
+    const order = ["Profile</a>", "Set A", "Track A", "Set B", "Track B"].map(at);
+    expect(order.every((x) => x > -1)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(out).not.toContain("Show all");
+    expect(out).not.toContain("<h2");
+    expect(p.els.get("sq-tabs").innerHTML).toContain('aria-pressed="true"');
+    p.fire("sq-tabs", "click", {
+      target: {
+        closest: (s: string) => (s === "[data-kind]" ? { dataset: { kind: "sets" } } : null),
+      },
+    });
+    await tick();
+    expect(p.searchFetches()[1]).toContain("kind=sets");
+    expect(p.searchFetches()[1]).toContain("limit=200");
+    expect(p.history.urls.at(-1)).toContain("kind=sets");
+    // A single kind is a table: the All list is emptied, the Sets table shows, best match first.
+    expect(p.els.get("sq-results").innerHTML).toBe("");
+    expect(p.els.get("sq-t-sets").hidden).toBe(false);
+    expect(p.els.get("sq-t-tracks").hidden).toBe(true);
+    const one = p.els.get("sqs-body").innerHTML as string;
+    expect(one.match(/data-tkt-row=/g)!.length).toBe(2);
+    expect(one.indexOf("Set A")).toBeLessThan(one.indexOf("Set B"));
+    expect(one).toContain('id="sq-sets-0"');
+    expect(one).toContain(">95<"); // the Match column
+    expect(one).not.toContain("sq-kind");
+    expect(p.els.get("sqs-pager").innerHTML).toContain("1-2 of 2");
+  });
+
+  it("a kind tab is a sortable, filterable table: header sort, keyboard order follows the table, expand and links still work", async () => {
+    const tracks = [
+      track({
+        trackKey: "ta",
+        trackId: "55",
+        artist: "Zed",
+        title: "Track A",
+        label: "Lbl <x>",
+        score: 0.9,
+        sets: [
+          {
+            url: SET_URL,
+            title: "S",
+            djSlug: "maup",
+            djName: "Mau P",
+            date: "2026-01-01",
+            cueSeconds: 65,
+          },
+        ],
+      }),
+      track({
+        trackKey: "tb",
+        artist: "Abe",
+        title: "Track B",
+        score: 0.5,
+        youtubeLink: "https://youtu.be/b",
+        sets: [
+          {
+            url: SET_URL + "b",
+            title: "S2",
+            djSlug: "x",
+            djName: "X",
+            date: "2026-09-01",
+            cueSeconds: null,
+          },
+        ],
+      }),
+    ];
+    const answer = (u: string) =>
+      u.startsWith("/ui/api/search")
+        ? Response.json(response({ tracks, sets: [], djs: [] }))
+        : u === "/ui/api/tracklist/links"
+          ? Response.json({ links: { "55": { youtubeLink: "https://youtu.be/zzz" } } })
+          : new Response("{}", { status: 404 });
+    const p = await open("?q=mau&kind=tracks", answer);
+    expect(p.searchFetches()[0]).toContain("kind=tracks&limit=200");
+    const body = () => p.els.get("sqt-body").innerHTML as string;
+    expect(body().indexOf("Track A")).toBeLessThan(body().indexOf("Track B"));
+    expect(body()).toContain("Lbl &lt;x&gt;");
+    expect(body()).toContain("<mark>Mau</mark>");
+    // Sort by artist (a header click on the table root): Abe first.
+    const tableClick = p.listeners.get("sq-t-tracks:click")!;
+    const sortTarget = (col: string) => {
+      const t: any = {
+        getAttribute: (k: string) => (k === "data-tkt" ? "sort" : k === "data-col" ? col : null),
+        closest: (sel: string) => (sel === "[data-tkt]" ? t : null),
+      };
+      return { target: t };
+    };
+    tableClick(sortTarget("artist"));
+    expect(body().indexOf("Track B")).toBeLessThan(body().indexOf("Track A"));
+    // The arrow keys walk the rows in the order shown.
+    p.fire("sq", "keydown", { key: "ArrowDown" });
+    expect(p.els.get("sq")["@aria-activedescendant"]).toBe("sq-tracks-1");
+    p.fire("sq", "keydown", { key: "Enter" });
+    expect(p.location.href).toBe("/ui/set?url=" + encodeURIComponent(SET_URL + "b"));
+    // Expand lists the sets; the links button looks the track up.
+    p.fire("sq-tables", "click", {
+      target: {
+        closest: (sel: string) => (sel === "[data-exp]" ? { dataset: { exp: "ta" } } : null),
+      },
+    });
+    expect(body()).toContain('class="sq-sets"');
+    expect(body()).toContain("1:05");
+    p.fire("sq-tables", "click", {
+      target: {
+        closest: (sel: string) => (sel === "[data-links]" ? { dataset: { links: "ta" } } : null),
+      },
+    });
+    await tick();
+    expect(body()).toContain('href="https://youtu.be/zzz"');
+    // The order (artist) survived the repaints.
+    expect(body().indexOf("Track B")).toBeLessThan(body().indexOf("Track A"));
+  });
+
+  it("a full window of 200 says so", async () => {
+    const sets = Array.from({ length: 200 }, (_, i) => ({
+      url: SET_URL + i,
+      title: "Set " + i,
+      djSlug: "maup",
+      djName: "Mau P",
+      date: null,
+      videoId: null,
+      trackCount: 1,
+      idedCount: 1,
+      image: null,
+      score: 1 - i / 1000,
+    }));
+    const p = await open("?q=mau&kind=sets", () =>
+      Response.json(response({ tracks: [], djs: [], sets })),
+    );
+    expect(p.els.get("sq-cap").hidden).toBe(false);
+    expect(p.els.get("sq-cap").textContent).toContain("best 200");
+    expect(p.els.get("sqs-pager").innerHTML).toContain("1-50 of 200");
+  });
+
+  it("every row has a square thumbnail: an R2 image path over a lettered placeholder; anything else is just the placeholder", async () => {
+    const img = "/ui/img/" + "a".repeat(32);
+    const p = await open("?q=mau", () =>
+      Response.json(
+        response({
+          tracks: [
+            track({ image: img }),
+            track({ trackKey: "k2", artist: "Zed", image: "https://evil.example/x.png" }),
+          ],
+          sets: [],
+          djs: [{ slug: "maup", name: "Mau P", subscribed: true, sets: 4, image: img }],
+        }),
+      ),
+    );
+    const out = p.els.get("sq-results").innerHTML as string;
+    expect(out.match(/class="sq-thumb/g)!.length).toBe(3);
+    expect(out.match(new RegExp('<img src="' + img + '"', "g"))!.length).toBe(2);
+    expect(out).not.toContain("evil.example");
+    expect(out).toContain('<span class="sq-ph">Z</span>');
+    expect(out).toContain('class="sq-thumb dj"');
+  });
+
+  it("keyboard: arrows move the active result, Enter opens it, Escape clears", async () => {
+    const p = await open("?q=mau", () => Response.json(response()));
+    const input = p.els.get("sq");
+    expect(p.els.get("sq-results").innerHTML).toContain('role="option"');
+    p.fire("sq", "keydown", { key: "ArrowDown" });
+    expect(input["@aria-activedescendant"]).toBe("sq-r0");
+    p.fire("sq", "keydown", { key: "ArrowDown" });
+    expect(input["@aria-activedescendant"]).toBe("sq-r1");
+    p.fire("sq", "keydown", { key: "ArrowUp" });
+    expect(input["@aria-activedescendant"]).toBe("sq-r0");
+    p.fire("sq", "keydown", { key: "Enter" });
+    expect(p.location.href).toBe("/ui/dj/maup"); // All lists DJs first
+    p.fire("sq", "keydown", { key: "Escape" });
+    expect(input.value).toBe("");
+    expect(p.els.get("sq-results").innerHTML).toBe("");
+  });
+
+  it("empty states: no query, nothing found, index not set up, other errors", async () => {
+    const none = await open("", () => new Response("{}", { status: 404 }));
+    expect(none.els.get("sq-empty").textContent).toBe(
+      "Search every verified track list: tracks, sets and DJs.",
+    );
+    const nf = await open("?q=zzz", () =>
+      Response.json(response({ q: "zzz", tracks: [], sets: [], djs: [] })),
+    );
+    expect(nf.els.get("sq-empty").textContent).toBe("Nothing found for \u201czzz\u201d.");
+    const un = await open("?q=zzz", () =>
+      Response.json(
+        { error: "search_unavailable", message: "The search index is not bound to this Worker." },
+        { status: 503 },
+      ),
+    );
+    expect(un.els.get("sq-empty").textContent).toBe(
+      "The search index is not set up on this Worker.",
+    );
+    const bad = await open("?q=zzz", () =>
+      Response.json({ error: "invalid_request", message: "nope" }, { status: 400 }),
+    );
+    expect(bad.els.get("sq-empty").textContent).toBe("nope");
+  });
+});
+
+describe("TK.api.get abort support", () => {
+  it("passes the signal to fetch; an aborted request resolves to aborted:true without throwing", async () => {
+    const { RUNTIME_JS } = await import("../src/ui/runtime");
+    const seen: unknown[] = [];
+    const ctx = vm.createContext({
+      document: { getElementById: () => null, querySelector: () => null, addEventListener() {} },
+      console,
+      Date,
+      AbortController,
+      fetch: (_u: string, init: { signal?: AbortSignal }) => {
+        seen.push(init.signal);
+        return new Promise((_res, rej) =>
+          init.signal!.addEventListener("abort", () =>
+            rej(Object.assign(new Error("x"), { name: "AbortError" })),
+          ),
+        );
+      },
+    });
+    vm.runInContext(RUNTIME_JS, ctx);
+    const ac = new AbortController();
+    const p = vm.runInContext(
+      '(s) => TK.api.get("/x", { signal: s })',
+      ctx,
+    )(ac.signal) as Promise<unknown>;
+    ac.abort();
+    expect(await p).toMatchObject({ ok: false, status: 0, aborted: true });
+    expect(seen[0]).toBe(ac.signal);
+  });
+});
+
+describe("shell search box", () => {
+  it("the top form searches /ui/search and the Search tab links there", () => {
+    expect(SEARCH_HREF).toBe("/ui/search");
+    const h = shell({ nav: "home", title: "Home", body: "" });
+    expect(h).toContain('<form class="tk-search" action="/ui/search" method="get" role="search">');
+    expect(h).toContain(
+      '<input id="tk-search" name="q" type="search" placeholder="Search tracks, sets, DJs" aria-label="Search tracks, sets, DJs">',
+    );
+    const tabs = /<nav class="tk-tabs"[^>]*>([\s\S]*?)<\/nav>/.exec(h)![1]!;
+    expect(tabs).toContain('href="/ui/search"');
+    for (const l of ["Home", "DJs", "Search", "mkvid", "Pool"]) expect(tabs).toContain(l);
+  });
+});

@@ -11,31 +11,46 @@
 // Table state lives in the query string under `a.` (a.page, a.chip, a.f.kind,
 // ...). The old links (?kind=, ?problems=1, ?dj=, ?range=) are read once and
 // turned into table state. Every upstream value goes through esc.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import { icon } from '../icons'
-import type { UiPage } from './index'
-import { ACTIVITY_DETAIL_CSS, ACTIVITY_DETAIL_JS } from './activity-detail'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import { icon } from "../icons";
+import type { UiPage } from "./index";
+import { ACTIVITY_DETAIL_CSS, ACTIVITY_DETAIL_JS } from "./activity-detail";
 
 const KINDS: Array<[string, string]> = [
-  ['request', 'Requests'], ['playlist', 'Playlist'], ['hygiene', 'Hygiene'], ['mkvid', 'mkvid'],
-  ['pool', 'Pool'], ['sync', 'Sync'], ['ban', 'IP blocks'],
-]
+  ["request", "Requests"],
+  ["playlist", "Playlist"],
+  ["hygiene", "Hygiene"],
+  ["mkvid", "mkvid"],
+  ["pool", "Pool"],
+  ["sync", "Sync"],
+  ["ban", "IP blocks"],
+];
 const KIND_TIPS: Record<string, string> = {
-  request: 'Now-playing lookups from your phone: which set and track it found.',
-  playlist: 'Videos added to, replaced in or skipped for a playlist by the sync.',
-  hygiene: 'Videos removed from playlists, or found missing from them.',
-  mkvid: 'Sets queued for, rendered by and uploaded through mkvid.',
-  pool: 'Events from the account pool: accounts created, flagged or retired, and captchas.',
-  sync: 'The last sync of each DJ: ok, waiting (the pool stopped it and the scheduler tries again) or an error.',
-  ban: 'Times 1001tracklists blocked tracked.',
-}
-const RANGE_TIPS: Record<string, string> = { '24h': 'The last 24 hours.', '7d': 'The last 7 days.', '30d': 'The last 30 days.', '90d': 'The last 90 days (the longest the logs are kept).' }
+  request: "Now-playing lookups from your phone: which set and track it found.",
+  playlist: "Videos added to, replaced in or skipped for a playlist by the sync.",
+  hygiene: "Videos removed from playlists, or found missing from them.",
+  mkvid: "Sets queued for, rendered by and uploaded through mkvid.",
+  pool: "Events from the account pool: accounts created, flagged or retired, and captchas.",
+  sync: "The last sync of each DJ: ok, waiting (the pool stopped it and the scheduler tries again) or an error.",
+  ban: "Times 1001tracklists blocked tracked.",
+};
+const RANGE_TIPS: Record<string, string> = {
+  "24h": "The last 24 hours.",
+  "7d": "The last 7 days.",
+  "30d": "The last 30 days.",
+  "90d": "The last 90 days (the longest the logs are kept).",
+};
 
 const KIND_ICON: Record<string, string> = {
-  request: icon('play', { size: 16 }), playlist: icon('playlist', { size: 16 }), hygiene: icon('removed', { size: 16 }),
-  mkvid: icon('mkvid', { size: 16 }), pool: icon('pool', { size: 16 }), sync: icon('refresh', { size: 16 }), ban: icon('ban', { size: 16 }),
-}
+  request: icon("play", { size: 16 }),
+  playlist: icon("playlist", { size: 16 }),
+  hygiene: icon("removed", { size: 16 }),
+  mkvid: icon("mkvid", { size: 16 }),
+  pool: icon("pool", { size: 16 }),
+  sync: icon("refresh", { size: 16 }),
+  ban: icon("ban", { size: 16 }),
+};
 
 /**
  * The activity table's columns and cells, shared by the Activity page and
@@ -77,7 +92,7 @@ export const ACTIVITY_ROW_JS = /* js */ `
   function activityLinksHtml(r) {
     const links = (r.dj ? '<a class="a-link" href="/ui/dj/' + encodeURIComponent(r.dj) + '">' + esc(r.dj) + '</a>' : '') +
       (r.setUrl ? '<a class="a-link" href="/ui/set?url=' + encodeURIComponent(r.setUrl) + '">set</a>' : '');
-    return links ? '<span class="a-links">' + links + '</span>' : '<span class="tkt-nil">–</span>';
+    return links ? '<span class="a-links">' + links + '</span>' : '<span class="tkt-nil">-</span>';
   }
   function activityKindHtml(r) {
     let label = r.kind;
@@ -98,7 +113,7 @@ export const ACTIVITY_ROW_JS = /* js */ `
     ];
   }
   const activityRowAttrs = (r) => (r.problem ? { 'data-problem': '1' } : null);
-`
+`;
 
 /**
  * The drawer for an activity row, shared by the Activity page and Home: audit
@@ -121,8 +136,8 @@ export const ACTIVITY_DRAWER_JS = /* js */ `
     return dl([
       ['When', esc(iso) + (iso ? ' <span class="when">(' + esc(TK.fmt.rel(iso)) + ')</span>' : '')],
       ['Kind', esc(r.kind)],
-      ['Status', '<span class="' + (r.problem ? 'warn' : '') + '">' + esc(STATUS_LABELS[r.status] || r.status || '—') + '</span>' + (STATUS_TIPS[r.status] && STATUS_LABELS[r.status] ? ' ' + esc(STATUS_TIPS[r.status]) : '')],
-      ['Title', esc(r.title || '—')],
+      ['Status', '<span class="' + (r.problem ? 'warn' : '') + '">' + esc(STATUS_LABELS[r.status] || r.status || '-') + '</span>' + (STATUS_TIPS[r.status] && STATUS_LABELS[r.status] ? ' ' + esc(STATUS_TIPS[r.status]) : '')],
+      ['Title', esc(r.title || '-')],
       r.detail ? ['Detail', esc(r.detail)] : null,
       r.dj ? ['DJ', '<a href="/ui/dj/' + encodeURIComponent(r.dj) + '">' + esc(r.dj) + '</a>'] : null,
       r.setUrl ? ['Set', '<a href="/ui/set?url=' + encodeURIComponent(r.setUrl) + '">' + esc(setLabel(r.setUrl)) + '</a> ' + link(r.setUrl, '1001tracklists')] : null,
@@ -136,7 +151,7 @@ export const ACTIVITY_DRAWER_JS = /* js */ `
     else if (ref.kind === 'addition') openFetched(r.title || 'Playlist addition', '/ui/api/playlist-addition-detail?key=' + encodeURIComponent(ref.key), plDetailHtml);
     else { ++drawerSeq; TK.drawer.open(r.title || 'Activity', '<div class="h-detail">' + ownDetailHtml(r) + '</div>'); }
   }
-`
+`;
 
 /** Cell styles of the activity table (Activity and Home). */
 export const ACTIVITY_ROW_CSS = /* css */ `
@@ -159,19 +174,19 @@ export const ACTIVITY_ROW_CSS = /* css */ `
     .a-table .tkt-table td[data-label="Event"] { flex-direction: column; text-align: left; }
     .a-table .tkt-table td[data-label="Event"]::before { content: none; }
   }
-`
+`;
 
 const BODY = /* html */ `
 <div class="a-djbar"><label for="a-dj" class="muted">DJ</label><select id="a-dj" aria-label="DJ"><option value="">All DJs</option></select></div>
 <div id="a-table" class="a-table"></div>
-`
+`;
 
 export const ACTIVITY_PAGE_CSS = /* css */ `
   .a-djbar { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); font-size: var(--fs-sm); min-width: 0; }
   #a-dj { font: inherit; font-size: var(--fs-sm); color: var(--fg); background: var(--page); border: 1px solid var(--line-strong); border-radius: var(--r-ctl); padding: 5px 8px; min-width: 0; max-width: 100%; }
   .a-table .tkt-presets { flex-wrap: wrap; }
 ${ACTIVITY_ROW_CSS}
-${ACTIVITY_DETAIL_CSS}`
+${ACTIVITY_DETAIL_CSS}`;
 
 const JS = /* js */ `
 (() => {
@@ -188,7 +203,7 @@ ${ACTIVITY_DRAWER_JS}
   const since = (ms) => String(Math.floor((Date.now() - ms) / 600000) * 600000);
   const known = new Set(ACTIVITY_KIND_LIST.map((k) => k[0]));
 
-  // ── old links (?kind=, ?problems=1, ?dj=, ?range=) become table state ──
+  // -- old links (?kind=, ?problems=1, ?dj=, ?range=) become table state --
   const legacy = ['kind', 'problems', 'dj', 'range'].filter((k) => TK.qs.get(k) != null);
   if (legacy.length) {
     const kinds = (TK.qs.get('kind') || '').split(',').filter((k) => known.has(k));
@@ -230,7 +245,7 @@ ${ACTIVITY_DRAWER_JS}
   $dj.addEventListener('change', () => { const v = $dj.value || ''; table.setFilter('dj', v ? 'eq' : null, v); });
   if ($refresh) $refresh.addEventListener('click', () => TK.busy($refresh, 'Refreshing…', () => table.reload()));
 
-  // ── the DJ select's options; a failure leaves "All DJs" ──
+  // -- the DJ select's options; a failure leaves "All DJs" --
   async function loadDjs() {
     const res = await TK.api.get('/ui/api/list');
     const subs = res.ok && res.data && res.data.subscriptions;
@@ -243,17 +258,18 @@ ${ACTIVITY_DRAWER_JS}
   }
   loadDjs();
 })();
-`
+`;
 
 export const ACTIVITY_PAGE: UiPage = {
-  path: '/activity',
+  path: "/activity",
   html: shell({
-    nav: 'activity',
-    title: 'Activity',
-    description: 'Everything tracked did, newest first: requests, playlist additions, hygiene, mkvid, pool, sync and IP blocks.',
-    actions: `<button id="a-refresh" type="button" class="btn"${tipAttr('Reloads this page of events.')}>Refresh</button>`,
+    nav: "activity",
+    title: "Activity",
+    description:
+      "Everything tracked did, newest first: requests, playlist additions, hygiene, mkvid, pool, sync and IP blocks.",
+    actions: `<button id="a-refresh" type="button" class="btn"${tipAttr("Reloads this page of events.")}>Refresh</button>`,
     body: BODY,
     css: ACTIVITY_PAGE_CSS,
     js: JS,
   }),
-}
+};

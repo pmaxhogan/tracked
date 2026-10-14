@@ -1,6 +1,6 @@
 // Captcha page (what a push notification opens): one challenge, image + answer box or the live view.
-import { shell } from '../shell'
-import { POOL_CSS, COMMON_JS, CAPTCHA_JS } from './pool-common'
+import { shell } from "../shell";
+import { POOL_CSS, COMMON_JS, CAPTCHA_JS } from "./pool-common";
 
 /** The page a push notification opens. `id` is validated against ID_RE before it gets here. */
 export function captchaPageHtml(id: string): string {
@@ -8,7 +8,7 @@ export function captchaPageHtml(id: string): string {
 (() => {
 ${COMMON_JS}
 ${CAPTCHA_JS}
-  const ID = ${JSON.stringify(id).replace(/</g, '\\u003c')};
+  const ID = ${JSON.stringify(id).replace(/</g, "\\u003c")};
   let ch = null, widget = null, finished = false, timer = null, watch = null;
 
   function renderHead() {
@@ -66,14 +66,14 @@ ${CAPTCHA_JS}
   })();
   timer = setInterval(tick, 1000);
 })();
-`
+`;
   return shell({
-    nav: 'captcha',
-    title: 'Captcha',
-    width: 'narrow',
+    nav: "captcha",
+    title: "Captcha",
+    width: "narrow",
     body: '<div id="head" class="tk-card"><span class="muted">loading…</span></div><div id="state"></div><div id="widget"></div>',
     css: POOL_CSS,
     js,
     ownNavCount: true,
-  })
+  });
 }

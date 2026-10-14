@@ -1,0 +1,8 @@
+# stack-template: dotfiles/prettierrc@2 e037a1e69eca
+# Prettier: 2-space, double quotes, semicolons, LF (stack standard lint.eslint-prettier).
+semi: true
+singleQuote: false
+printWidth: 100
+tabWidth: 2
+trailingComma: "all"
+endOfLine: "lf"

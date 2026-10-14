@@ -1,11 +1,11 @@
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { isNearMismatch, parseTracklist } from '../src/lib/tracklists1001'
-import { passesDecoyCheck } from '../src/lib/verification'
-import { mkvidTracksTrusted } from '../src/lib/mkvid'
-import { classifyPage } from '../src/lib/page-store'
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { isNearMismatch, parseTracklist } from "../src/lib/tracklists1001";
+import { passesDecoyCheck } from "../src/lib/verification";
+import { mkvidTracksTrusted } from "../src/lib/mkvid";
+import { classifyPage } from "../src/lib/page-store";
 
 // 2026-09-30: the strict decoy check (0 rows whose microdata name differs from
 // the visible text) rested four good pool accounts for 72 h. Each of their
@@ -13,181 +13,255 @@ import { classifyPage } from '../src/lib/page-store'
 // visible text adding a parenthetical or repeating an artist. Those "near"
 // mismatches are counted apart and never count as decoy evidence.
 
-const fx = (n: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', n), 'utf8')
-const URL = 'https://www.1001tracklists.com/tracklist/1abcdef/some-set-2026-09-30.html'
+const fx = (n: string) =>
+  readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "fixtures", n), "utf8");
+const URL = "https://www.1001tracklists.com/tracklist/1abcdef/some-set-2026-09-30.html";
 
 // The three live pairs (meta, shown), names only.
 const LIVE: Array<[string, string]> = [
-  ['Truth x Lies &amp; KLP - Smile', 'Truth x Lies &amp; KLP &amp; Lies - Smile'],
-  ['The Prodigy - No Good (ALOK Remix)', 'The Prodigy - No Good (Start The Dance) (ALOK Remix)'],
-  ['Adam Beyer &amp; Charles D - Rave Repeat', 'Adam Beyer &amp; Charles D (USA) - Rave Repeat'],
-]
+  ["Truth x Lies &amp; KLP - Smile", "Truth x Lies &amp; KLP &amp; Lies - Smile"],
+  ["The Prodigy - No Good (ALOK Remix)", "The Prodigy - No Good (Start The Dance) (ALOK Remix)"],
+  ["Adam Beyer &amp; Charles D - Rave Repeat", "Adam Beyer &amp; Charles D (USA) - Rave Repeat"],
+];
 
 const row = (n: number, meta: string, shown = meta) =>
-  `<div class="tlpTog bItm tlpItem trRow${n}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="${meta}"><span class="trackValue">${shown}</span></div></div>`
+  `<div class="tlpTog bItm tlpItem trRow${n}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="${meta}"><span class="trackValue">${shown}</span></div></div>`;
 /** A synthetic page: `clean` rows whose names agree, then the given (meta, shown) rows. */
 const page = (clean: number, extra: Array<[string, string]>) => {
-  let html = ''
-  let n = 0
-  for (let i = 0; i < clean; i++) html += row(++n, `Artist ${n} - Track Number ${n}`)
-  for (const [m, s] of extra) html += row(++n, m, s)
-  return html
-}
-const decode = (s: string) => s.replace(/&amp;/g, '&')
+  let html = "";
+  let n = 0;
+  for (let i = 0; i < clean; i++) html += row(++n, `Artist ${n} - Track Number ${n}`);
+  for (const [m, s] of extra) html += row(++n, m, s);
+  return html;
+};
+const decode = (s: string) => s.replace(/&amp;/g, "&");
 
-describe('near mismatches (benign meta/visible name differences)', () => {
-  it('classifies each live example as near', () => {
-    for (const [m, s] of LIVE) expect(isNearMismatch(decode(m).toLowerCase(), decode(s).toLowerCase()), m).toBe(true)
-  })
+describe("near mismatches (benign meta/visible name differences)", () => {
+  it("classifies each live example as near", () => {
+    for (const [m, s] of LIVE)
+      expect(isNearMismatch(decode(m).toLowerCase(), decode(s).toLowerCase()), m).toBe(true);
+  });
 
-  it('a page with one near mismatch passes every check', async () => {
+  it("a page with one near mismatch passes every check", async () => {
     for (const pair of LIVE) {
-      const html = page(19, [pair])
-      const p = parseTracklist(URL, html)
-      expect(p.decoy).toEqual({ named: 20, mismatched: 0, nearMismatched: 1, suspected: false })
-      expect(passesDecoyCheck(p)).toBe(true)
-      expect(mkvidTracksTrusted(p.decoy, true)).toBe(true)
-      expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('clean')
+      const html = page(19, [pair]);
+      const p = parseTracklist(URL, html);
+      expect(p.decoy).toEqual({ named: 20, mismatched: 0, nearMismatched: 1, suspected: false });
+      expect(passesDecoyCheck(p)).toBe(true);
+      expect(mkvidTracksTrusted(p.decoy, true)).toBe(true);
+      expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict).toBe(
+        "clean",
+      );
     }
-  })
+  });
 
-  it('all three live examples on one short page still pass', async () => {
-    const html = page(13, LIVE)
-    const p = parseTracklist(URL, html)
-    expect(p.decoy).toEqual({ named: 16, mismatched: 0, nearMismatched: 3, suspected: false })
-    expect(passesDecoyCheck(p)).toBe(true)
-    expect(mkvidTracksTrusted(p.decoy, true)).toBe(true)
-    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('clean')
-  })
+  it("all three live examples on one short page still pass", async () => {
+    const html = page(13, LIVE);
+    const p = parseTracklist(URL, html);
+    expect(p.decoy).toEqual({ named: 16, mismatched: 0, nearMismatched: 3, suspected: false });
+    expect(passesDecoyCheck(p)).toBe(true);
+    expect(mkvidTracksTrusted(p.decoy, true)).toBe(true);
+    expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict).toBe(
+      "clean",
+    );
+  });
 
-  it('a single far mismatch fails the in-page checks; only verification with the same far pair trusts it', async () => {
-    const html = page(45, [['Artist A - Some Title', 'Somebody Else - Other Words']])
-    const p = parseTracklist(URL, html)
-    expect(p.decoy).toMatchObject({ named: 46, mismatched: 1, nearMismatched: 0, suspected: false })
-    expect(p.decoy.far).toHaveLength(1) // the far pair, for the verification fingerprint
-    expect(passesDecoyCheck(p)).toBe(false)
+  it("a single far mismatch fails the in-page checks; only verification with the same far pair trusts it", async () => {
+    const html = page(45, [["Artist A - Some Title", "Somebody Else - Other Words"]]);
+    const p = parseTracklist(URL, html);
+    expect(p.decoy).toMatchObject({
+      named: 46,
+      mismatched: 1,
+      nearMismatched: 0,
+      suspected: false,
+    });
+    expect(p.decoy.far).toHaveLength(1); // the far pair, for the verification fingerprint
+    expect(passesDecoyCheck(p)).toBe(false);
     // Verified means a second account saw this very far pair (it is in the fingerprint): a site quirk.
-    expect(mkvidTracksTrusted(p.decoy, true)).toBe(true)
-    expect(mkvidTracksTrusted(p.decoy, false)).toBe(false)
-    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('decoy')
-  })
+    expect(mkvidTracksTrusted(p.decoy, true)).toBe(true);
+    expect(mkvidTracksTrusted(p.decoy, false)).toBe(false);
+    expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict).toBe(
+      "decoy",
+    );
+  });
 
-  it('is not fooled by decoy-style rows that swap one part of the name', () => {
+  it("is not fooled by decoy-style rows that swap one part of the name", () => {
     // Pairs taken from the decoy fixture: high token overlap (Jaccard up to
     // 0.71), but a part was replaced, not added.
     const far: Array<[string, string]> = [
-      ['Don Diablo & RetroVision - Set Me Free (TAIGA Remix)', 'Don Diablo & RetroVision - Set Me Free (Figure & 2FAC3D Remix)'],
-      ['Naughty Boy & RAY BLK & Wyclef Jean - All Or Nothing (Ten Ven Remix)', 'Naughty Boy & RAY BLK & Wyclef Jean - All Or Nothing (Luan Pugliesi Remix)'],
-      ['4 Strings - 13 Ways To Save The World', 'CHASE WRIGHT - 13 Ways To Save The World'],
-      ['Beroshima & Frank Muller - Electronic Discussion (The Hacker Remix)', 'Beroshima & Frank Muller - Electronic Discussion (Leftfield & Lydon Remix)'],
-    ]
-    for (const [m, s] of far) expect(isNearMismatch(m.toLowerCase(), s.toLowerCase()), m).toBe(false)
+      [
+        "Don Diablo & RetroVision - Set Me Free (TAIGA Remix)",
+        "Don Diablo & RetroVision - Set Me Free (Figure & 2FAC3D Remix)",
+      ],
+      [
+        "Naughty Boy & RAY BLK & Wyclef Jean - All Or Nothing (Ten Ven Remix)",
+        "Naughty Boy & RAY BLK & Wyclef Jean - All Or Nothing (Luan Pugliesi Remix)",
+      ],
+      ["4 Strings - 13 Ways To Save The World", "CHASE WRIGHT - 13 Ways To Save The World"],
+      [
+        "Beroshima & Frank Muller - Electronic Discussion (The Hacker Remix)",
+        "Beroshima & Frank Muller - Electronic Discussion (Leftfield & Lydon Remix)",
+      ],
+    ];
+    for (const [m, s] of far)
+      expect(isNearMismatch(m.toLowerCase(), s.toLowerCase()), m).toBe(false);
     // Visible text that drops a remix credit is not benign either.
-    expect(isNearMismatch('a - t (x remix)', 'a - t')).toBe(false)
+    expect(isNearMismatch("a - t (x remix)", "a - t")).toBe(false);
     // Nor is a one-word name contained in anything.
-    expect(isNearMismatch('energy', 'monococ - energy')).toBe(false)
-  })
+    expect(isNearMismatch("energy", "monococ - energy")).toBe(false);
+  });
 
-  it('compares artist and title separately and only allows parenthetical or repeated additions', () => {
+  it("compares artist and title separately and only allows parenthetical or repeated additions", () => {
     const far: Array<[string, string]> = [
       // An added artist outside parentheses (the shape that would reach users via byArtist).
-      ['modjo - lady', 'modjo & someone - lady'],
-      ['inch - mindflow', 'patti day & inch - mindflow'],
+      ["modjo - lady", "modjo & someone - lady"],
+      ["inch - mindflow", "patti day & inch - mindflow"],
       // A different track whose remix credit happens to hold the meta words.
-      ['a - b', 'x - y (a b remix)'],
+      ["a - b", "x - y (a b remix)"],
       // Artist and title swapped, or a word moved across the separator.
-      ['daft punk - one more time', 'one more time - daft punk'],
-      ['daft punk one - more time', 'daft punk - one more time'],
+      ["daft punk - one more time", "one more time - daft punk"],
+      ["daft punk one - more time", "daft punk - one more time"],
       // A title added around a meta "ID".
-      ['artist - id', 'artist - real song (id remix)'],
+      ["artist - id", "artist - real song (id remix)"],
       // One side has a separator and the other does not.
-      ['artist - title', 'artist title'],
-    ]
-    for (const [m, s] of far) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(false)
+      ["artist - title", "artist title"],
+    ];
+    for (const [m, s] of far) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(false);
     // A parenthetical added to the title is harmless (the shown title comes from the meta name): near.
-    expect(isNearMismatch('monococ - energy', 'monococ - energy (extended mix)')).toBe(true)
-    expect(isNearMismatch('monococ - energy', 'monococ - energy [extended mix]')).toBe(true)
-  })
+    expect(isNearMismatch("monococ - energy", "monococ - energy (extended mix)")).toBe(true);
+    expect(isNearMismatch("monococ - energy", "monococ - energy [extended mix]")).toBe(true);
+  });
 
-  it('a superset decoy (shown text adds an artist on most rows) fails every check', async () => {
-    const rows: Array<[string, string]> = Array.from({ length: 20 }, (_, i) => [`Artist ${i} - Title ${i}`, `Artist ${i} &amp; Guest ${i + 50} - Title ${i}`])
-    const html = page(0, rows)
-    const p = parseTracklist(URL, html)
-    expect(p.decoy).toMatchObject({ named: 20, mismatched: 20, nearMismatched: 0, suspected: true })
-    expect(passesDecoyCheck(p)).toBe(false)
-    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false)
-    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('decoy')
-  })
+  it("a superset decoy (shown text adds an artist on most rows) fails every check", async () => {
+    const rows: Array<[string, string]> = Array.from({ length: 20 }, (_, i) => [
+      `Artist ${i} - Title ${i}`,
+      `Artist ${i} &amp; Guest ${i + 50} - Title ${i}`,
+    ]);
+    const html = page(0, rows);
+    const p = parseTracklist(URL, html);
+    expect(p.decoy).toMatchObject({
+      named: 20,
+      mismatched: 20,
+      nearMismatched: 0,
+      suspected: true,
+    });
+    expect(passesDecoyCheck(p)).toBe(false);
+    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false);
+    expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict).toBe(
+      "decoy",
+    );
+  });
 
-  it('reads feat/featuring as ft and ignores accents and punctuation', () => {
-    expect(isNearMismatch('artist feat. singer - song', 'artist ft. singer (uk) - song')).toBe(true)
-    expect(isNearMismatch('beyonce - halo', 'beyoncé - halo (live)')).toBe(true)
-  })
+  it("reads feat/featuring as ft and ignores accents and punctuation", () => {
+    expect(isNearMismatch("artist feat. singer - song", "artist ft. singer (uk) - song")).toBe(
+      true,
+    );
+    expect(isNearMismatch("beyonce - halo", "beyoncé - halo (live)")).toBe(true);
+  });
 
   // 2026-10-07: 28 pool accounts rested on one far row each, the same row text
   // on every fetch by every account (19 of them on the Coolio row, across 19 sets).
   const LIVE_1007: Array<[string, string]> = [
-    ["coolio - gangsta's paradise (machaki remix)", "coolio ft. l.v. - gangsta's paradise (machaki remix)"],
-    ['matroda ft. dances with white girls - bang', 'matroda ft. dances - bang'],
-    ['chance the rapper - cocoa butter kisses (levity remix)', 'chance the rapper ft. vic mensa & twista - cocoa butter kisses (levity remix)'],
-    ['calvin harris & d.o.d - sweet nothing (2025 edit)', 'calvin harris & d.o.d ft. florence welch - sweet nothing (2025 edit)'],
-    ['enne (br) & black keusen - aperta & empina', 'enne & black keusen - aperta & empina'],
-    ['celo (us) & alienpark - id', 'celo & alienpark - id'],
-    ['emcy (col) & nic vesperi & koby gray - 2 lives', 'emcy & nic vesperi & koby gray - 2 lives'],
-  ]
+    [
+      "coolio - gangsta's paradise (machaki remix)",
+      "coolio ft. l.v. - gangsta's paradise (machaki remix)",
+    ],
+    ["matroda ft. dances with white girls - bang", "matroda ft. dances - bang"],
+    [
+      "chance the rapper - cocoa butter kisses (levity remix)",
+      "chance the rapper ft. vic mensa & twista - cocoa butter kisses (levity remix)",
+    ],
+    [
+      "calvin harris & d.o.d - sweet nothing (2025 edit)",
+      "calvin harris & d.o.d ft. florence welch - sweet nothing (2025 edit)",
+    ],
+    ["enne (br) & black keusen - aperta & empina", "enne & black keusen - aperta & empina"],
+    ["celo (us) & alienpark - id", "celo & alienpark - id"],
+    ["emcy (col) & nic vesperi & koby gray - 2 lives", "emcy & nic vesperi & koby gray - 2 lives"],
+  ];
 
-  it('a featured-artist credit on either side, or a country tag only in the microdata, is near', () => {
-    for (const [m, s] of LIVE_1007) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(true)
-  })
+  it("a featured-artist credit on either side, or a country tag only in the microdata, is near", () => {
+    for (const [m, s] of LIVE_1007) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(true);
+  });
 
-  it('still far: a featured artist in place of the artist, a dropped word, a dropped or swapped longer credit', () => {
+  it("still far: a featured artist in place of the artist, a dropped word, a dropped or swapped longer credit", () => {
     const far: Array<[string, string]> = [
-      ['coolio - song', 'someone ft. coolio - song'],
-      ['chemical surf & jetlag music - kids', 'chemical surf & jetlag - kids'],
-      ['artist (live band) - song', 'artist - song'],
-      ['a - t (x remix)', 'a - t (y remix)'],
-      ['ft. a - song', 'ft. b - song'],
-    ]
-    for (const [m, s] of far) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(false)
-  })
+      ["coolio - song", "someone ft. coolio - song"],
+      ["chemical surf & jetlag music - kids", "chemical surf & jetlag - kids"],
+      ["artist (live band) - song", "artist - song"],
+      ["a - t (x remix)", "a - t (y remix)"],
+      ["ft. a - song", "ft. b - song"],
+    ];
+    for (const [m, s] of far) expect(isNearMismatch(m, s), `${m} / ${s}`).toBe(false);
+  });
 
-  it('a page with the 2026-10-07 Coolio row passes every check', async () => {
-    const html = page(30, [["Coolio - Gangsta's Paradise (Machaki Remix)", "Coolio ft. L.V. - Gangsta's Paradise (Machaki Remix)"]])
-    const p = parseTracklist(URL, html)
-    expect(p.decoy).toEqual({ named: 31, mismatched: 0, nearMismatched: 1, suspected: false })
-    expect(passesDecoyCheck(p)).toBe(true)
-    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('clean')
-  })
+  it("a page with the 2026-10-07 Coolio row passes every check", async () => {
+    const html = page(30, [
+      [
+        "Coolio - Gangsta's Paradise (Machaki Remix)",
+        "Coolio ft. L.V. - Gangsta's Paradise (Machaki Remix)",
+      ],
+    ]);
+    const p = parseTracklist(URL, html);
+    expect(p.decoy).toEqual({ named: 31, mismatched: 0, nearMismatched: 1, suspected: false });
+    expect(passesDecoyCheck(p)).toBe(true);
+    expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict).toBe(
+      "clean",
+    );
+  });
 
-  it('the decoy fixture: every mismatch is far, and it fails every check', async () => {
-    const html = fx('tracklist-decoy-dcr839.html')
-    const p = parseTracklist(URL, html)
-    expect(p.decoy).toMatchObject({ named: 25, mismatched: 24, nearMismatched: 0, suspected: true })
-    expect(p.decoy.far).toHaveLength(24)
-    expect(passesDecoyCheck(p)).toBe(false)
-    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false)
-    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('decoy')
-  })
+  it("the decoy fixture: every mismatch is far, and it fails every check", async () => {
+    const html = fx("tracklist-decoy-dcr839.html");
+    const p = parseTracklist(URL, html);
+    expect(p.decoy).toMatchObject({
+      named: 25,
+      mismatched: 24,
+      nearMismatched: 0,
+      suspected: true,
+    });
+    expect(p.decoy.far).toHaveLength(24);
+    expect(passesDecoyCheck(p)).toBe(false);
+    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false);
+    expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict).toBe(
+      "decoy",
+    );
+  });
 
-  it('a decoy page built from synthetic rows fails every check', async () => {
-    const rows: Array<[string, string]> = Array.from({ length: 20 }, (_, i) => [`Real Artist ${i} - Real Title ${i}`, `Fake Name ${i + 100} - Other Song ${i + 200}`])
-    const html = page(0, rows)
-    const p = parseTracklist(URL, html)
-    expect(p.decoy).toMatchObject({ named: 20, mismatched: 20, nearMismatched: 0, suspected: true })
-    expect(passesDecoyCheck(p)).toBe(false)
-    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false)
-    expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict).toBe('decoy')
-  })
+  it("a decoy page built from synthetic rows fails every check", async () => {
+    const rows: Array<[string, string]> = Array.from({ length: 20 }, (_, i) => [
+      `Real Artist ${i} - Real Title ${i}`,
+      `Fake Name ${i + 100} - Other Song ${i + 200}`,
+    ]);
+    const html = page(0, rows);
+    const p = parseTracklist(URL, html);
+    expect(p.decoy).toMatchObject({
+      named: 20,
+      mismatched: 20,
+      nearMismatched: 0,
+      suspected: true,
+    });
+    expect(passesDecoyCheck(p)).toBe(false);
+    expect(mkvidTracksTrusted(p.decoy, true)).toBe(false);
+    expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict).toBe(
+      "decoy",
+    );
+  });
 
-  it('the clean fixtures have no mismatches of either kind and pass', async () => {
-    for (const name of ['tracklist-matroda.html', 'tracklist-habstrakt.html', 'tracklist-maxstyler.html']) {
-      const html = fx(name)
-      const p = parseTracklist(URL, html)
-      expect(p.decoy.mismatched, name).toBe(0)
-      expect(p.decoy.nearMismatched, name).toBe(0)
-      expect(passesDecoyCheck(p), name).toBe(true)
-      expect(mkvidTracksTrusted(p.decoy, true), name).toBe(true)
-      expect((await classifyPage({ kind: 'set', status: 200, html, url: URL })).verdict, name).toBe('clean')
+  it("the clean fixtures have no mismatches of either kind and pass", async () => {
+    for (const name of [
+      "tracklist-matroda.html",
+      "tracklist-habstrakt.html",
+      "tracklist-maxstyler.html",
+    ]) {
+      const html = fx(name);
+      const p = parseTracklist(URL, html);
+      expect(p.decoy.mismatched, name).toBe(0);
+      expect(p.decoy.nearMismatched, name).toBe(0);
+      expect(passesDecoyCheck(p), name).toBe(true);
+      expect(mkvidTracksTrusted(p.decoy, true), name).toBe(true);
+      expect((await classifyPage({ kind: "set", status: 200, html, url: URL })).verdict, name).toBe(
+        "clean",
+      );
     }
-  })
-})
+  });
+});

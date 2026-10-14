@@ -1,478 +1,554 @@
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
-import { parseSearchResult, parseSearchResults, parseSearchQueryEcho, parseUrlSearchResult, scoreTitleMatch, pickBestTracklist, parseTracklist, parseMediaLinks, extractSetAppleLink, normalizeArtworkUrl, parseCueValueData, normalizeTracklistUrl, looksLikeDecoy } from '../src/lib/tracklists1001'
-import { isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from '../src/lib/fetch'
-import { selectCurrent } from '../src/lib/timestamp'
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import {
+  parseSearchResult,
+  parseSearchResults,
+  parseSearchQueryEcho,
+  parseUrlSearchResult,
+  scoreTitleMatch,
+  pickBestTracklist,
+  parseTracklist,
+  parseMediaLinks,
+  extractSetAppleLink,
+  normalizeArtworkUrl,
+  parseCueValueData,
+  normalizeTracklistUrl,
+  looksLikeDecoy,
+} from "../src/lib/tracklists1001";
+import { isIPBlocked, extractIPBlockedAddress, looksLikeCfShell } from "../src/lib/fetch";
+import { selectCurrent } from "../src/lib/timestamp";
 
-const here = dirname(fileURLToPath(import.meta.url))
-const fx = (name: string) => readFileSync(resolve(here, 'fixtures', name), 'utf8')
+const here = dirname(fileURLToPath(import.meta.url));
+const fx = (name: string) => readFileSync(resolve(here, "fixtures", name), "utf8");
 
-describe('IP block detection', () => {
-  it('detects the IP-block search response', () => {
-    expect(isIPBlocked(fx('ip-block-search.html'))).toBe(true)
-  })
+describe("IP block detection", () => {
+  it("detects the IP-block search response", () => {
+    expect(isIPBlocked(fx("ip-block-search.html"))).toBe(true);
+  });
 
-  it('detects the IP-block tracklist response', () => {
-    expect(isIPBlocked(fx('ip-block-tracklist.html'))).toBe(true)
-  })
+  it("detects the IP-block tracklist response", () => {
+    expect(isIPBlocked(fx("ip-block-tracklist.html"))).toBe(true);
+  });
 
-  it('does not flag the JS interstitial as IP-blocked', () => {
-    expect(isIPBlocked(fx('tracklist-neptune.html'))).toBe(false)
-  })
+  it("does not flag the JS interstitial as IP-blocked", () => {
+    expect(isIPBlocked(fx("tracklist-neptune.html"))).toBe(false);
+  });
 
-  it('does not flag a real tracklist page as IP-blocked', () => {
-    expect(isIPBlocked(fx('tracklist-matroda.html'))).toBe(false)
-  })
+  it("does not flag a real tracklist page as IP-blocked", () => {
+    expect(isIPBlocked(fx("tracklist-matroda.html"))).toBe(false);
+  });
 
-  it('extracts the client IP from the unblock page', () => {
-    expect(extractIPBlockedAddress(fx('ip-block-search.html'))).toMatch(/^(?:\d{1,3}\.){3}\d{1,3}$/)
-  })
+  it("extracts the client IP from the unblock page", () => {
+    expect(extractIPBlockedAddress(fx("ip-block-search.html"))).toMatch(
+      /^(?:\d{1,3}\.){3}\d{1,3}$/,
+    );
+  });
 
-  it('returns null IP for non-blocked pages', () => {
-    expect(extractIPBlockedAddress(fx('tracklist-matroda.html'))).toBeNull()
-  })
-})
+  it("returns null IP for non-blocked pages", () => {
+    expect(extractIPBlockedAddress(fx("tracklist-matroda.html"))).toBeNull();
+  });
+});
 
-describe('CF shell detection (looksLikeCfShell)', () => {
-  it('flags a page with turnstile-container and no track structure', () => {
+describe("CF shell detection (looksLikeCfShell)", () => {
+  it("flags a page with turnstile-container and no track structure", () => {
     const html = `<html><head><title>x</title></head><body>
       <div id="turnstile-container" data-sitekey="abc"></div>
       <script>jsAsyncReady();</script>
-    </body></html>`
-    expect(looksLikeCfShell(html)).toBe(true)
-  })
+    </body></html>`;
+    expect(looksLikeCfShell(html)).toBe(true);
+  });
 
-  it('flags a page mentioning cf-mitigated with no tlpItem rows', () => {
-    const html = '<html><body><meta name="cf-mitigated" content="challenge"><script>jsbuffer.push();</script></body></html>'
-    expect(looksLikeCfShell(html)).toBe(true)
-  })
+  it("flags a page mentioning cf-mitigated with no tlpItem rows", () => {
+    const html =
+      '<html><body><meta name="cf-mitigated" content="challenge"><script>jsbuffer.push();</script></body></html>';
+    expect(looksLikeCfShell(html)).toBe(true);
+  });
 
-  it('does NOT flag a real tracklist page', () => {
-    expect(looksLikeCfShell(fx('tracklist-matroda.html'))).toBe(false)
-  })
+  it("does NOT flag a real tracklist page", () => {
+    expect(looksLikeCfShell(fx("tracklist-matroda.html"))).toBe(false);
+  });
 
-  it('does NOT flag a real tracklist page even if scripts mention cf in passing', () => {
-    expect(looksLikeCfShell(fx('tracklist-maxstyler.html'))).toBe(false)
-  })
+  it("does NOT flag a real tracklist page even if scripts mention cf in passing", () => {
+    expect(looksLikeCfShell(fx("tracklist-maxstyler.html"))).toBe(false);
+  });
 
-  it('also matches the JS interstitial page (a browser in tlpool solves that one; a Worker never sees it now)', () => {
-    expect(looksLikeCfShell(fx('tracklist-neptune.html'))).toBe(true)
-  })
+  it("also matches the JS interstitial page (a browser in tlpool solves that one; a Worker never sees it now)", () => {
+    expect(looksLikeCfShell(fx("tracklist-neptune.html"))).toBe(true);
+  });
 
-  it('does NOT flag the IP-block page (different gate, handled by isIPBlocked)', () => {
+  it("does NOT flag the IP-block page (different gate, handled by isIPBlocked)", () => {
     // The IP-block fixture has unblock_ip and may also reference sitekey, but
-    // looksLikeCfShell is a fallback — IP-block is detected first in fetchTracklist.
+    // looksLikeCfShell is a fallback - IP-block is detected first in fetchTracklist.
     // This is a behavioral note: looksLikeCfShell may return true on IP-block too.
     // The order of checks in fetchTracklist (IP block first) ensures we route correctly.
-    const ipBlock = fx('ip-block-tracklist.html')
+    const ipBlock = fx("ip-block-tracklist.html");
     if (looksLikeCfShell(ipBlock)) {
-      // It does match — that's fine, isIPBlocked runs first in production code.
-      expect(isIPBlocked(ipBlock)).toBe(true)
+      // It does match - that's fine, isIPBlocked runs first in production code.
+      expect(isIPBlocked(ipBlock)).toBe(true);
     }
-  })
-})
+  });
+});
 
-describe('parseSearchResult', () => {
-  it('finds the matching tracklist URL', () => {
-    const r = parseSearchResult(fx('search-result.html'))
+describe("parseSearchResult", () => {
+  it("finds the matching tracklist URL", () => {
+    const r = parseSearchResult(fx("search-result.html"));
     expect(r.tracklistUrl).toBe(
-      'https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html',
-    )
-  })
+      "https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html",
+    );
+  });
 
-  it('returns null when there are no matches', () => {
-    const r = parseSearchResult(fx('search-no-result.html'))
-    expect(r.tracklistUrl).toBeNull()
-  })
-})
+  it("returns null when there are no matches", () => {
+    const r = parseSearchResult(fx("search-no-result.html"));
+    expect(r.tracklistUrl).toBeNull();
+  });
+});
 
-describe('parseSearchQueryEcho', () => {
-  it('returns the query 1001tl echoes in the results header', () => {
-    expect(parseSearchQueryEcho(fx('search-result.html'))).toBe('https://www.youtube.com/watch?v=79n8BaQAL2Q')
-  })
+describe("parseSearchQueryEcho", () => {
+  it("returns the query 1001tl echoes in the results header", () => {
+    expect(parseSearchQueryEcho(fx("search-result.html"))).toBe(
+      "https://www.youtube.com/watch?v=79n8BaQAL2Q",
+    );
+  });
 
-  it('is present even on an empty result page', () => {
-    expect(parseSearchQueryEcho(fx('search-no-result.html'))).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ')
-  })
+  it("is present even on an empty result page", () => {
+    expect(parseSearchQueryEcho(fx("search-no-result.html"))).toBe(
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    );
+  });
 
-  it('returns null for a non-search page', () => {
-    expect(parseSearchQueryEcho(fx('tracklist-matroda.html'))).toBeNull()
-  })
-})
+  it("returns null for a non-search page", () => {
+    expect(parseSearchQueryEcho(fx("tracklist-matroda.html"))).toBeNull();
+  });
+});
 
-describe('parseUrlSearchResult (YouTube-URL search)', () => {
-  it('returns the first row when 1001tl echoes the URL verbatim', () => {
-    const r = parseUrlSearchResult(fx('search-result.html'), 'https://www.youtube.com/watch?v=79n8BaQAL2Q')
-    expect(r.textFallback).toBe(false)
+describe("parseUrlSearchResult (YouTube-URL search)", () => {
+  it("returns the first row when 1001tl echoes the URL verbatim", () => {
+    const r = parseUrlSearchResult(
+      fx("search-result.html"),
+      "https://www.youtube.com/watch?v=79n8BaQAL2Q",
+    );
+    expect(r.textFallback).toBe(false);
     expect(r.result.tracklistUrl).toBe(
-      'https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html',
-    )
-  })
+      "https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html",
+    );
+  });
 
   it('returns null (not the newest "youtube" tracklist) when 1001tl mangled a multi-hyphen id into a word search', () => {
     // Live page for watch?v=-R-Lmvn7sVg (Adam Beyer & Mau P, DCR786): the site
     // rewrote the id as " R Lmvn7sVg" and returned 30 unrelated tracklists whose
     // titles merely contain "youtube"/"watch".
-    const html = fx('search-url-fallback.html')
-    expect(parseSearchResults(html).length).toBe(30)
-    expect(parseSearchResult(html).tracklistUrl).toContain('/tracklist/1tfxuq6t/')
-    const r = parseUrlSearchResult(html, 'https://www.youtube.com/watch?v=-R-Lmvn7sVg')
-    expect(r.echo).toBe('https://www.youtube.com/watch?v= R Lmvn7sVg')
-    expect(r.textFallback).toBe(true)
-    expect(r.result.tracklistUrl).toBeNull()
-  })
+    const html = fx("search-url-fallback.html");
+    expect(parseSearchResults(html).length).toBe(30);
+    expect(parseSearchResult(html).tracklistUrl).toContain("/tracklist/1tfxuq6t/");
+    const r = parseUrlSearchResult(html, "https://www.youtube.com/watch?v=-R-Lmvn7sVg");
+    expect(r.echo).toBe("https://www.youtube.com/watch?v= R Lmvn7sVg");
+    expect(r.textFallback).toBe(true);
+    expect(r.result.tracklistUrl).toBeNull();
+  });
 
-  it('still returns null for an empty result set', () => {
-    const r = parseUrlSearchResult(fx('search-no-result.html'), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ')
-    expect(r.textFallback).toBe(false)
-    expect(r.result.tracklistUrl).toBeNull()
-  })
-})
+  it("still returns null for an empty result set", () => {
+    const r = parseUrlSearchResult(
+      fx("search-no-result.html"),
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    );
+    expect(r.textFallback).toBe(false);
+    expect(r.result.tracklistUrl).toBeNull();
+  });
+});
 
-describe('parseSearchResults (title-search rows)', () => {
-  it('returns each row with its url and visible title', () => {
-    const rows = parseSearchResults(fx('search-result.html'))
-    expect(rows.length).toBe(1)
+describe("parseSearchResults (title-search rows)", () => {
+  it("returns each row with its url and visible title", () => {
+    const rows = parseSearchResults(fx("search-result.html"));
+    expect(rows.length).toBe(1);
     expect(rows[0]!.tracklistUrl).toBe(
-      'https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html',
-    )
-    expect(rows[0]!.title).toBe('Matroda @ Club Space Miami, United States')
-  })
+      "https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html",
+    );
+    expect(rows[0]!.title).toBe("Matroda @ Club Space Miami, United States");
+  });
 
-  it('returns [] when the page has no result rows', () => {
-    expect(parseSearchResults(fx('search-no-result.html'))).toEqual([])
-  })
-})
+  it("returns [] when the page has no result rows", () => {
+    expect(parseSearchResults(fx("search-no-result.html"))).toEqual([]);
+  });
+});
 
-describe('scoreTitleMatch (pairwise, no result-set context)', () => {
-  it('scores an exact normalized match as 1', () => {
-    expect(scoreTitleMatch('Matroda @ Club Space', 'matroda club space')).toBe(1)
-  })
+describe("scoreTitleMatch (pairwise, no result-set context)", () => {
+  it("scores an exact normalized match as 1", () => {
+    expect(scoreTitleMatch("Matroda @ Club Space", "matroda club space")).toBe(1);
+  });
 
-  it('scores containment (1001tl title is the notif title minus the date) high', () => {
+  it("scores containment (1001tl title is the notif title minus the date) high", () => {
     const s = scoreTitleMatch(
-      'Matroda @ Club Space Miami, United States 2023-08-05',
-      'Matroda @ Club Space Miami, United States',
-    )
-    expect(s).toBeGreaterThanOrEqual(0.9)
-  })
+      "Matroda @ Club Space Miami, United States 2023-08-05",
+      "Matroda @ Club Space Miami, United States",
+    );
+    expect(s).toBeGreaterThanOrEqual(0.9);
+  });
 
   it('uses overlap coefficient so surplus query tokens (date, "4hr set") do not sink a real match', () => {
     // The bug that regressed this: Jaccard put this at 0.333 (< threshold) and
     // the match was dropped. Overlap coefficient keeps it well above 0.5.
     const s = scoreTitleMatch(
-      'Gorgon City - 4hr Set @ Space Miami, Dec 27 2025',
-      'Gorgon City @ Club Space Miami, United States',
-    )
-    expect(s).toBeGreaterThan(0.5)
-  })
-})
+      "Gorgon City - 4hr Set @ Space Miami, Dec 27 2025",
+      "Gorgon City @ Club Space Miami, United States",
+    );
+    expect(s).toBeGreaterThan(0.5);
+  });
+});
 
-describe('pickBestTracklist (IDF-weighted, real Gorgon City search page)', () => {
-  const rows = parseSearchResults(fx('search-gorgon-multi.html'))
+describe("pickBestTracklist (IDF-weighted, real Gorgon City search page)", () => {
+  const rows = parseSearchResults(fx("search-gorgon-multi.html"));
 
   it('has the tricky shape: many identical "Club Space Miami" titles differing only by date', () => {
-    const dupes = rows.filter((r) => r.title === 'Gorgon City @ Club Space Miami, United States')
-    expect(dupes.length).toBeGreaterThanOrEqual(5)
-  })
+    const dupes = rows.filter((r) => r.title === "Gorgon City @ Club Space Miami, United States");
+    expect(dupes.length).toBeGreaterThanOrEqual(5);
+  });
 
-  it('picks the date 1001tl ranked first (its order, not our text score, breaks the tie)', () => {
-    const best = pickBestTracklist('Gorgon City - 4hr Set @ Space Miami, Dec 27 2025', rows)
-    expect(best?.tracklistUrl).toContain('gorgon-city-club-space-miami-united-states-2025-12-27')
-  })
+  it("picks the date 1001tl ranked first (its order, not our text score, breaks the tie)", () => {
+    const best = pickBestTracklist("Gorgon City - 4hr Set @ Space Miami, Dec 27 2025", rows);
+    expect(best?.tracklistUrl).toContain("gorgon-city-club-space-miami-united-states-2025-12-27");
+  });
 
-  it('rejects a venue-only match: different artist, same shared Club Space Miami boilerplate', () => {
-    expect(pickBestTracklist('SomeUnknownDJ @ Club Space Miami, United States 2025-12-27', rows)).toBeNull()
-  })
-})
+  it("rejects a venue-only match: different artist, same shared Club Space Miami boilerplate", () => {
+    expect(
+      pickBestTracklist("SomeUnknownDJ @ Club Space Miami, United States 2025-12-27", rows),
+    ).toBeNull();
+  });
+});
 
-describe('pickBestTracklist (real Adam Beyer & Mau P DCR786 title search)', () => {
+describe("pickBestTracklist (real Adam Beyer & Mau P DCR786 title search)", () => {
   // Live 1001tl rows for the YouTube title of DCR786. The correct set is row 1
   // but its 1001tl title carries a date and spells "786" where YouTube says
   // "DCR786"; a short unrelated Adam Beyer set used to win on brevity.
-  const rows = parseSearchResults(fx('search-dcr786-title.html'))
-  const query = 'Adam Beyer & Mau P live from Resistance at Ultra Europe [Drumcode Radio Live/DCR786]'
+  const rows = parseSearchResults(fx("search-dcr786-title.html"));
+  const query =
+    "Adam Beyer & Mau P live from Resistance at Ultra Europe [Drumcode Radio Live/DCR786]";
 
-  it('has the tricky shape: correct row is dated and numbered differently, a shorter same-artist row exists', () => {
-    expect(rows[0]!.title).toContain('Drumcode Radio 786')
-    expect(rows[0]!.title).toMatch(/\d{4}-\d{2}-\d{2}/)
-    expect(rows.some((r) => r.title === 'Adam Beyer - Drumcode 153 (live from Awakefest)')).toBe(true)
-  })
+  it("has the tricky shape: correct row is dated and numbered differently, a shorter same-artist row exists", () => {
+    expect(rows[0]!.title).toContain("Drumcode Radio 786");
+    expect(rows[0]!.title).toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(rows.some((r) => r.title === "Adam Beyer - Drumcode 153 (live from Awakefest)")).toBe(
+      true,
+    );
+  });
 
-  it('picks the DCR786 set, not the shorter Drumcode 153 row', () => {
-    const best = pickBestTracklist(query, rows)
-    expect(best?.tracklistUrl).toContain('/tracklist/2dxjw8x9/adam-beyer-mau-p-drumcode-radio-786-')
-    expect(best!.score).toBeGreaterThanOrEqual(0.5)
-  })
+  it("picks the DCR786 set, not the shorter Drumcode 153 row", () => {
+    const best = pickBestTracklist(query, rows);
+    expect(best?.tracklistUrl).toContain(
+      "/tracklist/2dxjw8x9/adam-beyer-mau-p-drumcode-radio-786-",
+    );
+    expect(best!.score).toBeGreaterThanOrEqual(0.5);
+  });
 
-  it('never settles for a different Drumcode Radio episode when DCR786 is absent', () => {
+  it("never settles for a different Drumcode Radio episode when DCR786 is absent", () => {
     // With row 1 gone the closest rows are "Drumcode Radio 377/720/800 (Resistance
-    // Stage, Ultra …)": same artist, show and stage brand, wrong episode.
-    const without = rows.filter((r) => !r.tracklistUrl.includes('drumcode-radio-786'))
-    const best = pickBestTracklist(query, without)
-    expect(best?.title ?? '').not.toMatch(/Drumcode(?: Radio)? \d+/)
-  })
+    // Stage, Ultra ...)": same artist, show and stage brand, wrong episode.
+    const without = rows.filter((r) => !r.tracklistUrl.includes("drumcode-radio-786"));
+    const best = pickBestTracklist(query, without);
+    expect(best?.title ?? "").not.toMatch(/Drumcode(?: Radio)? \d+/);
+  });
 
-  it('rejects a lone candidate whose episode number disagrees', () => {
-    const sibling = rows.find((r) => r.title.includes('Drumcode Radio 377'))!
-    expect(pickBestTracklist(query, [sibling])).toBeNull()
-  })
-})
+  it("rejects a lone candidate whose episode number disagrees", () => {
+    const sibling = rows.find((r) => r.title.includes("Drumcode Radio 377"))!;
+    expect(pickBestTracklist(query, [sibling])).toBeNull();
+  });
+});
 
-describe('pickBestTracklist (episode-number agreement)', () => {
+describe("pickBestTracklist (episode-number agreement)", () => {
   const rows = [
-    { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'Adam Beyer @ Drumcode Radio 377 (Resistance Stage, Ultra Brasil, Brazil 2018-04-14)' },
-    { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Adam Beyer @ Drumcode Radio 786 (Resistance Stage, Ultra Europe, Croatia 2025-07-13)' },
-    { tracklistUrl: 'https://x/tracklist/c/ccc.html', title: 'Fisher @ Coachella, United States' },
-  ]
+    {
+      tracklistUrl: "https://x/tracklist/a/aaa.html",
+      title: "Adam Beyer @ Drumcode Radio 377 (Resistance Stage, Ultra Brasil, Brazil 2018-04-14)",
+    },
+    {
+      tracklistUrl: "https://x/tracklist/b/bbb.html",
+      title: "Adam Beyer @ Drumcode Radio 786 (Resistance Stage, Ultra Europe, Croatia 2025-07-13)",
+    },
+    { tracklistUrl: "https://x/tracklist/c/ccc.html", title: "Fisher @ Coachella, United States" },
+  ];
 
-  it('walks past a same-show row with the wrong number to the row with the right one', () => {
-    const best = pickBestTracklist('Adam Beyer live from Resistance at Ultra Europe [Drumcode Radio Live/DCR786]', rows)
-    expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
-  })
+  it("walks past a same-show row with the wrong number to the row with the right one", () => {
+    const best = pickBestTracklist(
+      "Adam Beyer live from Resistance at Ultra Europe [Drumcode Radio Live/DCR786]",
+      rows,
+    );
+    expect(best?.tracklistUrl).toBe("https://x/tracklist/b/bbb.html");
+  });
 
-  it('does not treat a dated title as numbered (ISO date is stripped first)', () => {
-    const best = pickBestTracklist('Adam Beyer @ Drumcode Radio 786', [rows[1]!, rows[2]!])
-    expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
-  })
+  it("does not treat a dated title as numbered (ISO date is stripped first)", () => {
+    const best = pickBestTracklist("Adam Beyer @ Drumcode Radio 786", [rows[1]!, rows[2]!]);
+    expect(best?.tracklistUrl).toBe("https://x/tracklist/b/bbb.html");
+  });
 
-  it('still matches when only one side carries a number', () => {
-    const best = pickBestTracklist('Gorgon City 4hr Set Space Miami, Dec 27 2025', [
-      { tracklistUrl: 'https://x/tracklist/g/ggg.html', title: 'Gorgon City @ Club Space Miami, United States' },
-      { tracklistUrl: 'https://x/tracklist/c/ccc.html', title: 'Fisher @ Coachella, United States' },
-    ])
-    expect(best?.tracklistUrl).toBe('https://x/tracklist/g/ggg.html')
-  })
-})
+  it("still matches when only one side carries a number", () => {
+    const best = pickBestTracklist("Gorgon City 4hr Set Space Miami, Dec 27 2025", [
+      {
+        tracklistUrl: "https://x/tracklist/g/ggg.html",
+        title: "Gorgon City @ Club Space Miami, United States",
+      },
+      {
+        tracklistUrl: "https://x/tracklist/c/ccc.html",
+        title: "Fisher @ Coachella, United States",
+      },
+    ]);
+    expect(best?.tracklistUrl).toBe("https://x/tracklist/g/ggg.html");
+  });
+});
 
-describe('sigTokens behaviours (via scoreTitleMatch)', () => {
-  it('matches a fused episode code against the spelled-out number', () => {
-    expect(scoreTitleMatch('Drumcode Radio DCR786', 'Drumcode Radio 786')).toBeGreaterThanOrEqual(0.9)
-  })
+describe("sigTokens behaviours (via scoreTitleMatch)", () => {
+  it("matches a fused episode code against the spelled-out number", () => {
+    expect(scoreTitleMatch("Drumcode Radio DCR786", "Drumcode Radio 786")).toBeGreaterThanOrEqual(
+      0.9,
+    );
+  });
 
-  it('ignores an ISO date appended to the 1001tl title', () => {
-    const dated = scoreTitleMatch('Matroda @ Club Space Miami', 'Matroda @ Club Space Miami, United States 2023-08-05')
-    const undated = scoreTitleMatch('Matroda @ Club Space Miami', 'Matroda @ Club Space Miami, United States')
-    expect(dated).toBe(undated)
-  })
-})
+  it("ignores an ISO date appended to the 1001tl title", () => {
+    const dated = scoreTitleMatch(
+      "Matroda @ Club Space Miami",
+      "Matroda @ Club Space Miami, United States 2023-08-05",
+    );
+    const undated = scoreTitleMatch(
+      "Matroda @ Club Space Miami",
+      "Matroda @ Club Space Miami, United States",
+    );
+    expect(dated).toBe(undated);
+  });
+});
 
-describe('pickBestTracklist (synthetic edge cases)', () => {
-  it('accepts the lone candidate for a specific query', () => {
-    const rows = parseSearchResults(fx('search-result.html'))
-    const best = pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', rows)
-    expect(best?.tracklistUrl).toBe(rows[0]!.tracklistUrl)
-  })
+describe("pickBestTracklist (synthetic edge cases)", () => {
+  it("accepts the lone candidate for a specific query", () => {
+    const rows = parseSearchResults(fx("search-result.html"));
+    const best = pickBestTracklist("Matroda @ Club Space Miami, United States 2023-08-05", rows);
+    expect(best?.tracklistUrl).toBe(rows[0]!.tracklistUrl);
+  });
 
-  it('returns null when the set is not in the results (only unrelated sets)', () => {
+  it("returns null when the set is not in the results (only unrelated sets)", () => {
     const many = [
-      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'John Summit @ Red Rocks, United States' },
-      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Fisher @ Coachella, United States' },
-    ]
-    expect(pickBestTracklist('Matroda @ Club Space Miami, United States 2023-08-05', many)).toBeNull()
-  })
+      {
+        tracklistUrl: "https://x/tracklist/a/aaa.html",
+        title: "John Summit @ Red Rocks, United States",
+      },
+      {
+        tracklistUrl: "https://x/tracklist/b/bbb.html",
+        title: "Fisher @ Coachella, United States",
+      },
+    ];
+    expect(
+      pickBestTracklist("Matroda @ Club Space Miami, United States 2023-08-05", many),
+    ).toBeNull();
+  });
 
-  it('recovers a correct match ranked below an unrelated row (walks past the miss)', () => {
+  it("recovers a correct match ranked below an unrelated row (walks past the miss)", () => {
     const many = [
-      { tracklistUrl: 'https://x/tracklist/a/aaa.html', title: 'Fisher @ Coachella, United States' },
-      { tracklistUrl: 'https://x/tracklist/b/bbb.html', title: 'Eli Brown @ Mixmag The Lab Mendoza, Argentina' },
-    ]
-    const best = pickBestTracklist('Eli Brown | Mixmag Lab Mendoza', many)
-    expect(best?.tracklistUrl).toBe('https://x/tracklist/b/bbb.html')
-  })
-})
+      {
+        tracklistUrl: "https://x/tracklist/a/aaa.html",
+        title: "Fisher @ Coachella, United States",
+      },
+      {
+        tracklistUrl: "https://x/tracklist/b/bbb.html",
+        title: "Eli Brown @ Mixmag The Lab Mendoza, Argentina",
+      },
+    ];
+    const best = pickBestTracklist("Eli Brown | Mixmag Lab Mendoza", many);
+    expect(best?.tracklistUrl).toBe("https://x/tracklist/b/bbb.html");
+  });
+});
 
-describe('normalizeTracklistUrl', () => {
-  const canonical = 'https://www.1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html'
+describe("normalizeTracklistUrl", () => {
+  const canonical = "https://www.1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html";
 
-  it('passes through a canonical tracklist URL', () => {
-    expect(normalizeTracklistUrl(canonical)).toBe(canonical)
-  })
+  it("passes through a canonical tracklist URL", () => {
+    expect(normalizeTracklistUrl(canonical)).toBe(canonical);
+  });
 
-  it('adds a scheme when missing', () => {
-    expect(normalizeTracklistUrl('www.1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html')).toBe(canonical)
-  })
+  it("adds a scheme when missing", () => {
+    expect(
+      normalizeTracklistUrl("www.1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html"),
+    ).toBe(canonical);
+  });
 
-  it('upgrades a bare (www-less) host to the canonical www origin', () => {
-    expect(normalizeTracklistUrl('1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html')).toBe(canonical)
-  })
+  it("upgrades a bare (www-less) host to the canonical www origin", () => {
+    expect(
+      normalizeTracklistUrl("1001tracklists.com/tracklist/l3uw499/matroda-space-miami.html"),
+    ).toBe(canonical);
+  });
 
-  it('accepts an id-only path', () => {
-    expect(normalizeTracklistUrl('https://www.1001tracklists.com/tracklist/l3uw499')).toBe(
-      'https://www.1001tracklists.com/tracklist/l3uw499',
-    )
-  })
+  it("accepts an id-only path", () => {
+    expect(normalizeTracklistUrl("https://www.1001tracklists.com/tracklist/l3uw499")).toBe(
+      "https://www.1001tracklists.com/tracklist/l3uw499",
+    );
+  });
 
-  it('drops query string and fragment', () => {
-    expect(normalizeTracklistUrl(canonical + '?utm=x#frag')).toBe(canonical)
-  })
+  it("drops query string and fragment", () => {
+    expect(normalizeTracklistUrl(canonical + "?utm=x#frag")).toBe(canonical);
+  });
 
-  it('rejects a DJ page URL', () => {
-    expect(normalizeTracklistUrl('https://www.1001tracklists.com/dj/lillypalmer/index.html')).toBeNull()
-  })
+  it("rejects a DJ page URL", () => {
+    expect(
+      normalizeTracklistUrl("https://www.1001tracklists.com/dj/lillypalmer/index.html"),
+    ).toBeNull();
+  });
 
-  it('rejects a non-1001tracklists host', () => {
-    expect(normalizeTracklistUrl('https://example.com/tracklist/l3uw499/x.html')).toBeNull()
-  })
+  it("rejects a non-1001tracklists host", () => {
+    expect(normalizeTracklistUrl("https://example.com/tracklist/l3uw499/x.html")).toBeNull();
+  });
 
-  it('rejects a bare slug (no /tracklist/ path)', () => {
-    expect(normalizeTracklistUrl('l3uw499')).toBeNull()
-  })
+  it("rejects a bare slug (no /tracklist/ path)", () => {
+    expect(normalizeTracklistUrl("l3uw499")).toBeNull();
+  });
 
-  it('rejects empty / whitespace input', () => {
-    expect(normalizeTracklistUrl('')).toBeNull()
-    expect(normalizeTracklistUrl('   ')).toBeNull()
-  })
-})
+  it("rejects empty / whitespace input", () => {
+    expect(normalizeTracklistUrl("")).toBeNull();
+    expect(normalizeTracklistUrl("   ")).toBeNull();
+  });
+});
 
-describe('parseTracklist (Matroda Space Miami)', () => {
+describe("parseTracklist (Matroda Space Miami)", () => {
   const url =
-    'https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html'
-  const parsed = parseTracklist(url, fx('tracklist-matroda.html'))
+    "https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html";
+  const parsed = parseTracklist(url, fx("tracklist-matroda.html"));
 
-  it('extracts the slug from the URL', () => {
-    expect(parsed.slug).toBe('l3uw499')
-  })
+  it("extracts the slug from the URL", () => {
+    expect(parsed.slug).toBe("l3uw499");
+  });
 
-  it('extracts all 28 rows', () => {
-    expect(parsed.tracks).toHaveLength(28)
-  })
+  it("extracts all 28 rows", () => {
+    expect(parsed.tracks).toHaveLength(28);
+  });
 
-  it('parses cue seconds from the hidden input', () => {
-    const t = parsed.tracks[1]!
-    expect(t.startSeconds).toBe(150)
-    expect(t.startTime).toBe('02:30')
-    expect(t.artist).toBe('TOBEHONEST')
-    expect(t.title).toBe('Where Ya At')
-    expect(t.isUnidentified).toBe(false)
-  })
+  it("parses cue seconds from the hidden input", () => {
+    const t = parsed.tracks[1]!;
+    expect(t.startSeconds).toBe(150);
+    expect(t.startTime).toBe("02:30");
+    expect(t.artist).toBe("TOBEHONEST");
+    expect(t.title).toBe("Where Ya At");
+    expect(t.isUnidentified).toBe(false);
+  });
 
   it('detects mashup-linked (w/) rows via the "con" class', () => {
-    const mashup = parsed.tracks.find((t) => t.isMashupLinked)
-    expect(mashup).toBeDefined()
-    expect(mashup!.title).toBe('Calypso')
-    expect(mashup!.artist).toBe('Round Table Knights & Bauchamp')
-  })
+    const mashup = parsed.tracks.find((t) => t.isMashupLinked);
+    expect(mashup).toBeDefined();
+    expect(mashup!.title).toBe("Calypso");
+    expect(mashup!.artist).toBe("Round Table Knights & Bauchamp");
+  });
 
-  it('extracts the set-level YouTube recording; SoundCloud is null when the page has no set player', () => {
-    expect(parsed.setYoutubeLink).toBe('https://www.youtube.com/watch?v=79n8BaQAL2Q')
-    expect(parsed.setSoundcloudLink).toBeNull()
-  })
+  it("extracts the set-level YouTube recording; SoundCloud is null when the page has no set player", () => {
+    expect(parsed.setYoutubeLink).toBe("https://www.youtube.com/watch?v=79n8BaQAL2Q");
+    expect(parsed.setSoundcloudLink).toBeNull();
+  });
 
   it('flags fully unidentified rows (title is literal "ID")', () => {
-    const ids = parsed.tracks.filter((t) => t.isUnidentified)
-    expect(ids.length).toBeGreaterThanOrEqual(1)
-    expect(ids[0]!.title).toBe('ID')
-    expect(ids[0]!.idStatus).toBeNull()
-  })
+    const ids = parsed.tracks.filter((t) => t.isUnidentified);
+    expect(ids.length).toBeGreaterThanOrEqual(1);
+    expect(ids[0]!.title).toBe("ID");
+    expect(ids[0]!.idStatus).toBeNull();
+  });
 
-  it('extracts artworkUrl from data-src and normalizes to 300x300', () => {
+  it("extracts artworkUrl from data-src and normalizes to 300x300", () => {
     // Row 1 (TOBEHONEST - Where Ya At) has a Beatport thumbnail
-    const t = parsed.tracks[1]!
+    const t = parsed.tracks[1]!;
     expect(t.artworkUrl).toBe(
-      'https://geo-media.beatport.com/image_size/300x300/8702a65a-cfa7-4890-9476-4a346d36f169.jpg',
-    )
-  })
+      "https://geo-media.beatport.com/image_size/300x300/8702a65a-cfa7-4890-9476-4a346d36f169.jpg",
+    );
+  });
 
-  it('returns null artworkUrl for rows that only embed the placeholder', () => {
+  it("returns null artworkUrl for rows that only embed the placeholder", () => {
     // Row 9 (Cave Studio - ID) uses default_100.png as the src
-    const id = parsed.tracks.find((t) => t.isUnidentified && t.title === 'ID')!
-    expect(id.artworkUrl).toBeNull()
-  })
+    const id = parsed.tracks.find((t) => t.isUnidentified && t.title === "ID")!;
+    expect(id.artworkUrl).toBeNull();
+  });
 
   it('detects "ID Remix" rows: NOT isUnidentified, artist+title from base track, idStatus="ID Remix"', () => {
     // Row 19 in the fixture: Armand van Helden - I Want Your Soul (ID Remix)
-    const row = parsed.tracks.find((t) => t.idStatus === 'ID Remix')!
-    expect(row).toBeDefined()
-    expect(row.isUnidentified).toBe(false)
-    expect(row.artist).toBe('Armand van Helden')
-    expect(row.title).toBe('I Want Your Soul')
+    const row = parsed.tracks.find((t) => t.idStatus === "ID Remix")!;
+    expect(row).toBeDefined();
+    expect(row.isUnidentified).toBe(false);
+    expect(row.artist).toBe("Armand van Helden");
+    expect(row.title).toBe("I Want Your Soul");
     expect(row.trackUrl).toBe(
-      'https://www.1001tracklists.com/track/6gbh9j5/armand-van-helden-i-want-your-soul/index.html',
-    )
-  })
+      "https://www.1001tracklists.com/track/6gbh9j5/armand-van-helden-i-want-your-soul/index.html",
+    );
+  });
 
-  it('captures the medialink track id (iRow.mediaRow data-trackid)', () => {
-    const t = parsed.tracks[1]!
-    expect(t.trackId).toBe('909720')
-  })
+  it("captures the medialink track id (iRow.mediaRow data-trackid)", () => {
+    const t = parsed.tracks[1]!;
+    expect(t.trackId).toBe("909720");
+  });
 
   it('captures trackUrl from meta[itemprop="url"]', () => {
-    const t = parsed.tracks[1]!
+    const t = parsed.tracks[1]!;
     expect(t.trackUrl).toBe(
-      'https://www.1001tracklists.com/track/1hf79cg5/tobehonest-where-ya-at/index.html',
-    )
-  })
+      "https://www.1001tracklists.com/track/1hf79cg5/tobehonest-where-ya-at/index.html",
+    );
+  });
 
-  it('returns null trackUrl for unidentified rows', () => {
-    const id = parsed.tracks.find((t) => t.isUnidentified)!
-    expect(id.trackUrl).toBeNull()
-  })
+  it("returns null trackUrl for unidentified rows", () => {
+    const id = parsed.tracks.find((t) => t.isUnidentified)!;
+    expect(id.trackUrl).toBeNull();
+  });
 
-  it('setAppleLink is null when the page has no set-level Apple Music album', () => {
-    expect(parsed.setAppleLink).toBeNull()
-  })
+  it("setAppleLink is null when the page has no set-level Apple Music album", () => {
+    expect(parsed.setAppleLink).toBeNull();
+  });
 
-  it('keeps tracks ordered by ascending start time', () => {
-    const cues = parsed.tracks.map((t) => t.startSeconds).filter((x): x is number => x !== null)
+  it("keeps tracks ordered by ascending start time", () => {
+    const cues = parsed.tracks.map((t) => t.startSeconds).filter((x): x is number => x !== null);
     for (let i = 1; i < cues.length; i++) {
-      expect(cues[i]!).toBeGreaterThanOrEqual(cues[i - 1]!)
+      expect(cues[i]!).toBeGreaterThanOrEqual(cues[i - 1]!);
     }
-  })
-})
+  });
+});
 
-describe('parseTracklist (Max Styler — has set-level Apple Music album)', () => {
+describe("parseTracklist (Max Styler - has set-level Apple Music album)", () => {
   const url =
-    'https://www.1001tracklists.com/tracklist/1pmwyfn1/max-styler-circuitgrounds-edc-las-vegas-united-states-2025-05-16.html'
-  const parsed = parseTracklist(url, fx('tracklist-maxstyler.html'))
+    "https://www.1001tracklists.com/tracklist/1pmwyfn1/max-styler-circuitgrounds-edc-las-vegas-united-states-2025-05-16.html";
+  const parsed = parseTracklist(url, fx("tracklist-maxstyler.html"));
 
-  it('builds a canonical music.apple.com album URL from the embed iframe', () => {
+  it("builds a canonical music.apple.com album URL from the embed iframe", () => {
     expect(parsed.setAppleLink).toBe(
-      'https://music.apple.com/us/album/max-styler-at-edc-las-vegas-2025-circuit-grounds-stage-dj-mix/1818472775?app=music&at=1000lwkw',
-    )
-  })
+      "https://music.apple.com/us/album/max-styler-at-edc-las-vegas-2025-circuit-grounds-stage-dj-mix/1818472775?app=music&at=1000lwkw",
+    );
+  });
 
-  it('still parses tracks alongside', () => {
-    expect(parsed.tracks.length).toBeGreaterThan(0)
-  })
+  it("still parses tracks alongside", () => {
+    expect(parsed.tracks.length).toBeGreaterThan(0);
+  });
 
   it("inherits the parent cue on mashup-linked rows that share an entry's ids[N]", () => {
     // 1001tl emits the mashup partner as `cueValuesEntry.ids[1] = 'tlp12_content'`
     // in the same entry as its parent (tlp11_content at 2325s). The row still
     // has the visual `w/` marker (class "con"); the cue is just stored on the
     // shared entry rather than its own block.
-    const mashup = parsed.tracks.find((t) => t.isMashupLinked && t.title === "Let Em' Know")
-    expect(mashup).toBeDefined()
-    expect(mashup!.startSeconds).toBe(2325)
-    expect(mashup!.isMashupLinked).toBe(true)
-  })
+    const mashup = parsed.tracks.find((t) => t.isMashupLinked && t.title === "Let Em' Know");
+    expect(mashup).toBeDefined();
+    expect(mashup!.startSeconds).toBe(2325);
+    expect(mashup!.isMashupLinked).toBe(true);
+  });
 
-  it('marks trailing untimed extras with null startSeconds (not s=0)', () => {
-    // Several trailing rows — Drunken Kong, Shadow Child, etc. — appear after
+  it("marks trailing untimed extras with null startSeconds (not s=0)", () => {
+    // Several trailing rows - Drunken Kong, Shadow Child, etc. - appear after
     // the last cued track but have no time. They must not collapse to s=0.
-    const trailing = parsed.tracks.filter(
-      (t) => !t.isMashupLinked && t.startSeconds === null,
-    )
-    expect(trailing.length).toBeGreaterThanOrEqual(5)
-  })
+    const trailing = parsed.tracks.filter((t) => !t.isMashupLinked && t.startSeconds === null);
+    expect(trailing.length).toBeGreaterThanOrEqual(5);
+  });
 
-  it('keeps the legitimate first track at startSeconds=0', () => {
-    const first = parsed.tracks[0]!
-    expect(first.startSeconds).toBe(0)
-    expect(first.startTime).toBe('0:00')
-  })
+  it("keeps the legitimate first track at startSeconds=0", () => {
+    const first = parsed.tracks[0]!;
+    expect(first.startSeconds).toBe(0);
+    expect(first.startTime).toBe("0:00");
+  });
 
-  it('extracts the set-level YouTube recording and SoundCloud widget link', () => {
-    expect(parsed.setYoutubeLink).toBe('https://www.youtube.com/watch?v=N40pkDgwNfg')
+  it("extracts the set-level YouTube recording and SoundCloud widget link", () => {
+    expect(parsed.setYoutubeLink).toBe("https://www.youtube.com/watch?v=N40pkDgwNfg");
     expect(parsed.setSoundcloudLink).toBe(
-      'https://w.soundcloud.com/player/?url=' + encodeURIComponent('https://api.soundcloud.com/tracks/2099378310'),
-    )
-  })
-})
+      "https://w.soundcloud.com/player/?url=" +
+        encodeURIComponent("https://api.soundcloud.com/tracks/2099378310"),
+    );
+  });
+});
 
-describe('parseTracklist + selectCurrent (Habstrakt b2b JSTJR — regression)', () => {
+describe("parseTracklist + selectCurrent (Habstrakt b2b JSTJR - regression)", () => {
   // Captured 2026-05-14 from the live page. Reproduces the original bug:
   // every track has a cue (last at 44:40), but the row right after Guest
   // List (Badders, tlp9_content) is encoded as ids[1] of Guest List's
@@ -481,70 +557,70 @@ describe('parseTracklist + selectCurrent (Habstrakt b2b JSTJR — regression)', 
   // start" as null and pinned Guest List as current for every offset past
   // 12:30.
   const url =
-    'https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-1001tracklists-x-dj-lovers-club-pres.-waterways-amsterdam-dance-event-netherlands-2024-11-11.html'
-  const parsed = parseTracklist(url, fx('tracklist-habstrakt.html'))
-  const setEnd = 2759 // user-reported videoDurationSeconds
+    "https://www.1001tracklists.com/tracklist/18kll1h1/habstrakt-jstjr-1001tracklists-x-dj-lovers-club-pres.-waterways-amsterdam-dance-event-netherlands-2024-11-11.html";
+  const parsed = parseTracklist(url, fx("tracklist-habstrakt.html"));
+  const setEnd = 2759; // user-reported videoDurationSeconds
 
-  it('parses every cued track including the mashup-partner cue', () => {
-    expect(parsed.tracks).toHaveLength(31)
-    const badders = parsed.tracks.find((t) => t.title === 'Badders')!
-    expect(badders.startSeconds).toBe(750)
-    const guestList = parsed.tracks.find((t) => t.title === 'Guest List')!
-    expect(guestList.startSeconds).toBe(750)
-  })
+  it("parses every cued track including the mashup-partner cue", () => {
+    expect(parsed.tracks).toHaveLength(31);
+    const badders = parsed.tracks.find((t) => t.title === "Badders")!;
+    expect(badders.startSeconds).toBe(750);
+    const guestList = parsed.tracks.find((t) => t.title === "Guest List")!;
+    expect(guestList.startSeconds).toBe(750);
+  });
 
-  it('selectCurrent at 1668s (27:48) picks the track cued exactly there', () => {
-    const r = selectCurrent(parsed.tracks, 1668, setEnd)
-    const current = r.picked.find((t) => t.isCurrent)!
-    expect(current.title).toBe('Outer Space (CHYL Remix)')
-    expect(current.startSeconds).toBe(1668)
-  })
+  it("selectCurrent at 1668s (27:48) picks the track cued exactly there", () => {
+    const r = selectCurrent(parsed.tracks, 1668, setEnd);
+    const current = r.picked.find((t) => t.isCurrent)!;
+    expect(current.title).toBe("Outer Space (CHYL Remix)");
+    expect(current.startSeconds).toBe(1668);
+  });
 
-  it('treats the two ids[N]-paired rows at 12:30 (Guest List w/ Badders) as one group', () => {
+  it("treats the two ids[N]-paired rows at 12:30 (Guest List w/ Badders) as one group", () => {
     // Currently playing at 12:35: 1001tl paired Guest List (ids[0]) with
     // Badders (ids[1]) at cue 750. Both must show isCurrent=true so the
     // caller can render the mashup pair together.
-    const r = selectCurrent(parsed.tracks, 755, setEnd)
-    const cur = r.picked.filter((t) => t.isCurrent).map((t) => t.title)
-    expect(cur).toContain('Guest List')
-    expect(cur).toContain('Badders')
-  })
+    const r = selectCurrent(parsed.tracks, 755, setEnd);
+    const cur = r.picked.filter((t) => t.isCurrent).map((t) => t.title);
+    expect(cur).toContain("Guest List");
+    expect(cur).toContain("Badders");
+  });
 
-  it('selectCurrent at 1112s (18:32) picks the track whose window contains it', () => {
-    // Cue 950 (Marlon Hoffstadt — It's That Time) → next real cue 1125
-    // (Eminem — Shake That). 1112 falls in [950, 1125).
-    const r = selectCurrent(parsed.tracks, 1112, setEnd)
-    const current = r.picked.find((t) => t.isCurrent)!
-    expect(current.title).toBe("It's That Time")
-    expect(current.startSeconds).toBe(950)
-  })
+  it("selectCurrent at 1112s (18:32) picks the track whose window contains it", () => {
+    // Cue 950 (Marlon Hoffstadt - It's That Time) -> next real cue 1125
+    // (Eminem - Shake That). 1112 falls in [950, 1125).
+    const r = selectCurrent(parsed.tracks, 1112, setEnd);
+    const current = r.picked.find((t) => t.isCurrent)!;
+    expect(current.title).toBe("It's That Time");
+    expect(current.startSeconds).toBe(950);
+  });
 
-  it('does NOT pin Guest List as current well past its cue', () => {
+  it("does NOT pin Guest List as current well past its cue", () => {
     for (const sec of [1112, 1668, 2500]) {
-      const r = selectCurrent(parsed.tracks, sec, setEnd)
-      const current = r.picked.find((t) => t.isCurrent)
-      expect(current?.title).not.toBe('Guest List')
+      const r = selectCurrent(parsed.tracks, sec, setEnd);
+      const current = r.picked.find((t) => t.isCurrent);
+      expect(current?.title).not.toBe("Guest List");
     }
-  })
-})
+  });
+});
 
-describe('parseCueValueData', () => {
-  it('extracts every cue mapping from the JS block', () => {
-    const map = parseCueValueData(fx('tracklist-maxstyler.html'))
+describe("parseCueValueData", () => {
+  it("extracts every cue mapping from the JS block", () => {
+    const map = parseCueValueData(fx("tracklist-maxstyler.html"));
     // 22 cued entries; the mashup partner (tlp12) shares its parent's cue
     // via ids[1] in the same entry, so the map size is 23 (22 + 1 sibling).
-    expect(map.size).toBe(23)
-    expect(map.get('tlp0_content')).toBe(0)
-    expect(map.get('tlp1_content')).toBe(227)
-    expect(map.get('tlp23_content')).toBe(4400)
+    expect(map.size).toBe(23);
+    expect(map.get("tlp0_content")).toBe(0);
+    expect(map.get("tlp1_content")).toBe(227);
+    expect(map.get("tlp23_content")).toBe(4400);
     // Mashup partner shares the parent entry's cue (tlp11 at 2325s).
-    expect(map.get('tlp12_content')).toBe(2325)
-    expect(map.get('tlp11_content')).toBe(2325)
-    // Index 14 is missing in the page's emitted data — verify we don't synthesize it
-    expect(map.has('tlp14_content')).toBe(false)
-  })
+    expect(map.get("tlp12_content")).toBe(2325);
+    expect(map.get("tlp11_content")).toBe(2325);
+    // Index 14 is missing in the page's emitted data - verify we don't synthesize it
+    expect(map.has("tlp14_content")).toBe(false);
+  });
 
-  it('captures every ids[N] in a multi-id entry (Habstrakt b2b mashup pattern)', () => {
+  it("captures every ids[N] in a multi-id entry (Habstrakt b2b mashup pattern)", () => {
     const block = `
       cueValuesEntry = {};
       cueValuesEntry.seconds = 750;
@@ -554,153 +630,163 @@ describe('parseCueValueData', () => {
       cueValuesEntry = {};
       cueValuesEntry.seconds = 840;
       cueValuesEntry.ids[0] = 'tlp10_content';
-    `
-    const map = parseCueValueData(block)
-    expect(map.get('tlp8_content')).toBe(750)
-    expect(map.get('tlp9_content')).toBe(750) // the sibling — would be missing without the fix
-    expect(map.get('tlp10_content')).toBe(840)
-  })
+    `;
+    const map = parseCueValueData(block);
+    expect(map.get("tlp8_content")).toBe(750);
+    expect(map.get("tlp9_content")).toBe(750); // the sibling - would be missing without the fix
+    expect(map.get("tlp10_content")).toBe(840);
+  });
 
-  it('returns empty map when no cueValueData block is present', () => {
-    expect(parseCueValueData('<html><body>nothing</body></html>').size).toBe(0)
-  })
-})
+  it("returns empty map when no cueValueData block is present", () => {
+    expect(parseCueValueData("<html><body>nothing</body></html>").size).toBe(0);
+  });
+});
 
-describe('extractSetAppleLink (unit)', () => {
-  it('returns null when no embed URL is present', () => {
-    expect(extractSetAppleLink('<html><body>nothing here</body></html>')).toBeNull()
-  })
+describe("extractSetAppleLink (unit)", () => {
+  it("returns null when no embed URL is present", () => {
+    expect(extractSetAppleLink("<html><body>nothing here</body></html>")).toBeNull();
+  });
 
-  it('rebuilds the canonical URL with country, slug, album id, and query string', () => {
+  it("rebuilds the canonical URL with country, slug, album id, and query string", () => {
     const html =
-      '<iframe src="https://embed.music.apple.com/album/some-slug/1234567/us/album/some-slug/1234567?app=music&at=foo"></iframe>'
+      '<iframe src="https://embed.music.apple.com/album/some-slug/1234567/us/album/some-slug/1234567?app=music&at=foo"></iframe>';
     expect(extractSetAppleLink(html)).toBe(
-      'https://music.apple.com/us/album/some-slug/1234567?app=music&at=foo',
-    )
-  })
+      "https://music.apple.com/us/album/some-slug/1234567?app=music&at=foo",
+    );
+  });
 
-  it('handles a non-US country code', () => {
+  it("handles a non-US country code", () => {
     const html =
-      '<iframe src="https://embed.music.apple.com/album/foo/999/gb/album/foo/999"></iframe>'
-    expect(extractSetAppleLink(html)).toBe('https://music.apple.com/gb/album/foo/999')
-  })
-})
+      '<iframe src="https://embed.music.apple.com/album/foo/999/gb/album/foo/999"></iframe>';
+    expect(extractSetAppleLink(html)).toBe("https://music.apple.com/gb/album/foo/999");
+  });
+});
 
-describe('normalizeArtworkUrl', () => {
+describe("normalizeArtworkUrl", () => {
   it.each([
-    'https://www.1001tracklists.com/images/static/empty.png',
-    '/images/static/empty.png',
-    'https://cdn.1001tracklists.com/images/artworks/default_100.png',
-    'https://cdn.1001tracklists.com/images/artworks/default_500.png',
-    '',
-  ])('returns null for placeholder %s', (raw) => {
-    expect(normalizeArtworkUrl(raw)).toBeNull()
-  })
+    "https://www.1001tracklists.com/images/static/empty.png",
+    "/images/static/empty.png",
+    "https://cdn.1001tracklists.com/images/artworks/default_100.png",
+    "https://cdn.1001tracklists.com/images/artworks/default_500.png",
+    "",
+  ])("returns null for placeholder %s", (raw) => {
+    expect(normalizeArtworkUrl(raw)).toBeNull();
+  });
 
-  it('rewrites Beatport size to 300x300 regardless of input size', () => {
+  it("rewrites Beatport size to 300x300 regardless of input size", () => {
     expect(
-      normalizeArtworkUrl('https://geo-media.beatport.com/image_size/1400x1400/abc-def.jpg'),
-    ).toBe('https://geo-media.beatport.com/image_size/300x300/abc-def.jpg')
-    expect(
-      normalizeArtworkUrl('https://geo-media.beatport.com/image_size/60x60/abc-def.jpg'),
-    ).toBe('https://geo-media.beatport.com/image_size/300x300/abc-def.jpg')
-  })
+      normalizeArtworkUrl("https://geo-media.beatport.com/image_size/1400x1400/abc-def.jpg"),
+    ).toBe("https://geo-media.beatport.com/image_size/300x300/abc-def.jpg");
+    expect(normalizeArtworkUrl("https://geo-media.beatport.com/image_size/60x60/abc-def.jpg")).toBe(
+      "https://geo-media.beatport.com/image_size/300x300/abc-def.jpg",
+    );
+  });
 
-  it('rewrites SoundCloud size to t300x300', () => {
-    expect(
-      normalizeArtworkUrl('https://i1.sndcdn.com/artworks-sDgTuNY7UCiK-0-t500x500.jpg'),
-    ).toBe('https://i1.sndcdn.com/artworks-sDgTuNY7UCiK-0-t300x300.jpg')
-    expect(
-      normalizeArtworkUrl('https://i2.sndcdn.com/artworks-foo-bar-t120x120.jpg'),
-    ).toBe('https://i2.sndcdn.com/artworks-foo-bar-t300x300.jpg')
-  })
+  it("rewrites SoundCloud size to t300x300", () => {
+    expect(normalizeArtworkUrl("https://i1.sndcdn.com/artworks-sDgTuNY7UCiK-0-t500x500.jpg")).toBe(
+      "https://i1.sndcdn.com/artworks-sDgTuNY7UCiK-0-t300x300.jpg",
+    );
+    expect(normalizeArtworkUrl("https://i2.sndcdn.com/artworks-foo-bar-t120x120.jpg")).toBe(
+      "https://i2.sndcdn.com/artworks-foo-bar-t300x300.jpg",
+    );
+  });
 
-  it('passes through unknown CDNs unchanged', () => {
-    expect(normalizeArtworkUrl('https://example.com/some/image.jpg')).toBe('https://example.com/some/image.jpg')
-  })
+  it("passes through unknown CDNs unchanged", () => {
+    expect(normalizeArtworkUrl("https://example.com/some/image.jpg")).toBe(
+      "https://example.com/some/image.jpg",
+    );
+  });
 
-  it('returns null for non-http inputs', () => {
-    expect(normalizeArtworkUrl('javascript:void(0)')).toBeNull()
-    expect(normalizeArtworkUrl('data:image/png;base64,xxx')).toBeNull()
-  })
-})
+  it("returns null for non-http inputs", () => {
+    expect(normalizeArtworkUrl("javascript:void(0)")).toBeNull();
+    expect(normalizeArtworkUrl("data:image/png;base64,xxx")).toBeNull();
+  });
+});
 
-describe('parseMediaLinks', () => {
-  const json = JSON.parse(fx('medialink-909720.json'))
-  it('finds the apple music link by parsing the embed iframe URL', () => {
-    const r = parseMediaLinks(json)
+describe("parseMediaLinks", () => {
+  const json = JSON.parse(fx("medialink-909720.json"));
+  it("finds the apple music link by parsing the embed iframe URL", () => {
+    const r = parseMediaLinks(json);
     expect(r.appleLink).toBe(
-      'https://music.apple.com/us/album/where-ya-at/1696220774?i=1696221102',
-    )
-  })
+      "https://music.apple.com/us/album/where-ya-at/1696220774?i=1696221102",
+    );
+  });
 
-  it('finds the youtube link from the more[] array', () => {
-    const r = parseMediaLinks(json)
-    expect(r.youtubeLink).toBe('https://www.youtube.com/watch?v=h8CtvP1rEy8')
-  })
+  it("finds the youtube link from the more[] array", () => {
+    const r = parseMediaLinks(json);
+    expect(r.youtubeLink).toBe("https://www.youtube.com/watch?v=h8CtvP1rEy8");
+  });
 
-  it('builds a SoundCloud widget-player link from the source-10 playerId', () => {
-    const r = parseMediaLinks(json)
-    // playerId 2131221114 → api track URL wrapped in the widget player.
+  it("builds a SoundCloud widget-player link from the source-10 playerId", () => {
+    const r = parseMediaLinks(json);
+    // playerId 2131221114 -> api track URL wrapped in the widget player.
     expect(r.soundcloudLink).toBe(
-      'https://w.soundcloud.com/player/?url=' +
-        encodeURIComponent('https://api.soundcloud.com/tracks/2131221114'),
-    )
-  })
+      "https://w.soundcloud.com/player/?url=" +
+        encodeURIComponent("https://api.soundcloud.com/tracks/2131221114"),
+    );
+  });
 
-  it('falls back to parsing the api URL out of the iframe when playerId is not a bare id', () => {
+  it("falls back to parsing the api URL out of the iframe when playerId is not a bare id", () => {
     const r = parseMediaLinks({
       success: true,
       data: [
         {
-          source: '10',
-          playerId: 'scWidget_999',
+          source: "10",
+          playerId: "scWidget_999",
           player:
             '<iframe src="https://w.soundcloud.com/player/?url=https://api.soundcloud.com/tracks/555&amp;show_artwork=true"></iframe>',
         },
       ],
-    })
+    });
     expect(r.soundcloudLink).toBe(
-      'https://w.soundcloud.com/player/?url=' + encodeURIComponent('https://api.soundcloud.com/tracks/555'),
-    )
-  })
+      "https://w.soundcloud.com/player/?url=" +
+        encodeURIComponent("https://api.soundcloud.com/tracks/555"),
+    );
+  });
 
-  it('returns null links (incl. soundcloud) when the response is unsuccessful', () => {
-    const r = parseMediaLinks({ success: false })
-    expect(r).toEqual({ appleLink: null, youtubeLink: null, soundcloudLink: null })
-  })
-})
+  it("returns null links (incl. soundcloud) when the response is unsuccessful", () => {
+    const r = parseMediaLinks({ success: false });
+    expect(r).toEqual({ appleLink: null, youtubeLink: null, soundcloudLink: null });
+  });
+});
 
 // 2026-09-26: 1001tracklists started serving decoy track data to accounts it
 // has flagged as scrapers. The page chrome, cue times, track ids and artwork
 // are real; every name is randomized per fetch, and within one row the
 // microdata name, the visible text and the link slug all disagree. A real
 // page agrees with itself on every row.
-describe('decoy detection (looksLikeDecoy)', () => {
-  it('flags the captured decoy page: nearly every named row contradicts its own visible text', () => {
-    const r = parseTracklist('https://www.1001tracklists.com/tracklist/1pqq0hst/x.html', fx('tracklist-decoy-dcr839.html'))
-    expect(r.tracks.length).toBeGreaterThan(20)
-    expect(r.decoy.named).toBe(25)
-    expect(r.decoy.mismatched).toBe(24)
-    expect(r.decoy.suspected).toBe(true)
-    expect(looksLikeDecoy(r.decoy)).toBe(true)
-  })
+describe("decoy detection (looksLikeDecoy)", () => {
+  it("flags the captured decoy page: nearly every named row contradicts its own visible text", () => {
+    const r = parseTracklist(
+      "https://www.1001tracklists.com/tracklist/1pqq0hst/x.html",
+      fx("tracklist-decoy-dcr839.html"),
+    );
+    expect(r.tracks.length).toBeGreaterThan(20);
+    expect(r.decoy.named).toBe(25);
+    expect(r.decoy.mismatched).toBe(24);
+    expect(r.decoy.suspected).toBe(true);
+    expect(looksLikeDecoy(r.decoy)).toBe(true);
+  });
 
-  it('does not flag any real page: zero rows disagree with themselves', () => {
-    for (const name of ['tracklist-matroda.html', 'tracklist-habstrakt.html', 'tracklist-maxstyler.html']) {
-      const r = parseTracklist(`https://www.1001tracklists.com/tracklist/x/${name}`, fx(name))
-      expect(r.decoy.mismatched, name).toBe(0)
-      expect(r.decoy.suspected, name).toBe(false)
+  it("does not flag any real page: zero rows disagree with themselves", () => {
+    for (const name of [
+      "tracklist-matroda.html",
+      "tracklist-habstrakt.html",
+      "tracklist-maxstyler.html",
+    ]) {
+      const r = parseTracklist(`https://www.1001tracklists.com/tracklist/x/${name}`, fx(name));
+      expect(r.decoy.mismatched, name).toBe(0);
+      expect(r.decoy.suspected, name).toBe(false);
     }
-  })
+  });
 
-  it('needs a few named rows and a majority of mismatches before it speaks', () => {
-    expect(looksLikeDecoy({ named: 2, mismatched: 2 })).toBe(false)
-    expect(looksLikeDecoy({ named: 3, mismatched: 1 })).toBe(false)
-    expect(looksLikeDecoy({ named: 3, mismatched: 2 })).toBe(true)
-    expect(looksLikeDecoy({ named: 0, mismatched: 0 })).toBe(false)
-  })
-})
+  it("needs a few named rows and a majority of mismatches before it speaks", () => {
+    expect(looksLikeDecoy({ named: 2, mismatched: 2 })).toBe(false);
+    expect(looksLikeDecoy({ named: 3, mismatched: 1 })).toBe(false);
+    expect(looksLikeDecoy({ named: 3, mismatched: 2 })).toBe(true);
+    expect(looksLikeDecoy({ named: 0, mismatched: 0 })).toBe(false);
+  });
+});
 
 // 'w/' rows: a track played on top of the row before it (mashup, acapella over
 // an instrumental, two tracks together). On the page the row carries the class
@@ -708,130 +794,200 @@ describe('decoy detection (looksLikeDecoy)', () => {
 // with previous track") where the number would be, and usually has no cue of
 // its own: 1001tl files it as ids[1+] of its parent's cueValuesEntry.
 describe("parseTracklist: 'w/' (layered) rows", () => {
-  const url = 'https://www.1001tracklists.com/tracklist/x/y.html'
-  const p = (name: string) => parseTracklist(url, fx(name))
+  const url = "https://www.1001tracklists.com/tracklist/x/y.html";
+  const p = (name: string) => parseTracklist(url, fx(name));
 
   it("gives a 'w/' row without a cue of its own ownStartSeconds null, leaving the inherited startSeconds alone", () => {
-    const t = p('tracklist-maxstyler.html').tracks
-    const i = t.findIndex((r) => r.title === "Let Em' Know")
-    expect(t[i]!.isMashupLinked).toBe(true)
-    expect(t[i]!.startSeconds).toBe(2325) // the parent's cue, as /now-playing groups by it
-    expect(t[i]!.ownStartSeconds).toBeNull()
-    expect(t[i - 1]!.title).toBe('Mokba') // its base, directly before it
-    expect(t[i - 1]!.ownStartSeconds).toBe(2325)
-  })
+    const t = p("tracklist-maxstyler.html").tracks;
+    const i = t.findIndex((r) => r.title === "Let Em' Know");
+    expect(t[i]!.isMashupLinked).toBe(true);
+    expect(t[i]!.startSeconds).toBe(2325); // the parent's cue, as /now-playing groups by it
+    expect(t[i]!.ownStartSeconds).toBeNull();
+    expect(t[i - 1]!.title).toBe("Mokba"); // its base, directly before it
+    expect(t[i - 1]!.ownStartSeconds).toBe(2325);
+  });
 
   it("reads a 'w/' row's own visible cue when it shows one", () => {
-    const t = p('tracklist-matroda.html').tracks
-    const i = t.findIndex((r) => r.title === 'Calypso')
-    expect(t[i]!.isMashupLinked).toBe(true)
-    expect(t[i]!.startSeconds).toBe(4590) // shared entry with the parent
-    expect(t[i]!.ownStartSeconds).toBe(4650) // "1:17:30" on the row itself
-  })
+    const t = p("tracklist-matroda.html").tracks;
+    const i = t.findIndex((r) => r.title === "Calypso");
+    expect(t[i]!.isMashupLinked).toBe(true);
+    expect(t[i]!.startSeconds).toBe(4590); // shared entry with the parent
+    expect(t[i]!.ownStartSeconds).toBe(4650); // "1:17:30" on the row itself
+  });
 
-  it('every other row has ownStartSeconds equal to startSeconds (a shared entry without w/ is not layered)', () => {
-    for (const name of ['tracklist-matroda.html', 'tracklist-maxstyler.html', 'tracklist-habstrakt.html', 'tracklist-decoy-dcr839.html']) {
-      for (const r of p(name).tracks.filter((r) => !r.isMashupLinked)) expect(r.ownStartSeconds, `${name} ${r.title}`).toBe(r.startSeconds)
+  it("every other row has ownStartSeconds equal to startSeconds (a shared entry without w/ is not layered)", () => {
+    for (const name of [
+      "tracklist-matroda.html",
+      "tracklist-maxstyler.html",
+      "tracklist-habstrakt.html",
+      "tracklist-decoy-dcr839.html",
+    ]) {
+      for (const r of p(name).tracks.filter((r) => !r.isMashupLinked))
+        expect(r.ownStartSeconds, `${name} ${r.title}`).toBe(r.startSeconds);
     }
     // Habstrakt's Badders is ids[1] of Guest List's entry but a numbered row of its own.
-    const badders = p('tracklist-habstrakt.html').tracks.find((r) => r.title === 'Badders')!
-    expect(badders.isMashupLinked).toBe(false)
-    expect(badders.ownStartSeconds).toBe(750)
-  })
+    const badders = p("tracklist-habstrakt.html").tracks.find((r) => r.title === "Badders")!;
+    expect(badders.isMashupLinked).toBe(false);
+    expect(badders.ownStartSeconds).toBe(750);
+  });
 
   it("a 'w/' row whose base was dropped (anonymous 'ID - ID' rows carry no microdata) is not linked to the unrelated row before it", () => {
-    const t = p('tracklist-decoy-dcr839.html').tracks
+    const t = p("tracklist-decoy-dcr839.html").tracks;
     // trRow27 is "ID - ID" and dropped; its w/ partner (track id 32060) survives.
-    const orphan = t.find((r) => r.trackId === '32060')!
-    expect(orphan.isMashupLinked).toBe(false)
-    expect(orphan.startSeconds).toBe(5883)
-    expect(orphan.ownStartSeconds).toBe(5883) // the page's cue for the moment it came in
+    const orphan = t.find((r) => r.trackId === "32060")!;
+    expect(orphan.isMashupLinked).toBe(false);
+    expect(orphan.startSeconds).toBe(5883);
+    expect(orphan.ownStartSeconds).toBe(5883); // the page's cue for the moment it came in
     // Rows whose base was kept stay linked, without a cue of their own.
-    for (const id of ['10868', '143730', '352759']) {
-      const r = t.find((x) => x.trackId === id)!
-      expect(r.isMashupLinked, id).toBe(true)
-      expect(r.ownStartSeconds, id).toBeNull()
+    for (const id of ["10868", "143730", "352759"]) {
+      const r = t.find((x) => x.trackId === id)!;
+      expect(r.isMashupLinked, id).toBe(true);
+      expect(r.ownStartSeconds, id).toBeNull();
     }
-    // Page order kept: Don Diablo (495505) → w/ 10868 → w/ 143730.
-    const ids = t.map((r) => r.trackId)
-    expect(ids.indexOf('10868')).toBe(ids.indexOf('495505') + 1)
-    expect(ids.indexOf('143730')).toBe(ids.indexOf('495505') + 2)
-  })
+    // Page order kept: Don Diablo (495505) -> w/ 10868 -> w/ 143730.
+    const ids = t.map((r) => r.trackId);
+    expect(ids.indexOf("10868")).toBe(ids.indexOf("495505") + 1);
+    expect(ids.indexOf("143730")).toBe(ids.indexOf("495505") + 2);
+  });
 
   it("selectCurrent keeps an orphaned 'w/' row out of the unrelated group before it", () => {
-    const t = p('tracklist-decoy-dcr839.html').tracks
-    const orphan = t.find((r) => r.trackId === '32060')!
-    const before = t[t.indexOf(orphan) - 1]!
-    expect(before.startSeconds).not.toBe(5883)
-    const cur = selectCurrent(t, 5890).picked.filter((r) => r.isCurrent)
-    expect(cur.map((r) => r.trackUrl)).toEqual([orphan.trackUrl])
-  })
+    const t = p("tracklist-decoy-dcr839.html").tracks;
+    const orphan = t.find((r) => r.trackId === "32060")!;
+    const before = t[t.indexOf(orphan) - 1]!;
+    expect(before.startSeconds).not.toBe(5883);
+    const cur = selectCurrent(t, 5890).picked.filter((r) => r.isCurrent);
+    expect(cur.map((r) => r.trackUrl)).toEqual([orphan.trackUrl]);
+  });
 
   it("never links the first row of a list, even when the page marks it 'w/'", () => {
     const row = (n: number, cls: string, name: string) =>
-      `<div class="tlpTog bItm tlpItem trRow${n}${cls}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="${name}"><span class="trackValue">${name}</span></div></div>`
-    const html = row(1, ' con', 'A - One') + row(2, ' con', 'B - Two') +
-      `<script>cueValuesEntry = {}; cueValuesEntry.seconds = 30; cueValuesEntry.ids = []; cueValuesEntry.ids[0] = 'tlp1_content'; cueValuesEntry.ids[1] = 'tlp2_content';</script>`
-    const t = parseTracklist(url, html).tracks
-    expect(t.map((r) => [r.isMashupLinked, r.startSeconds, r.ownStartSeconds])).toEqual([[false, 30, 30], [true, 30, null]])
-  })
+      `<div class="tlpTog bItm tlpItem trRow${n}${cls}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="${name}"><span class="trackValue">${name}</span></div></div>`;
+    const html =
+      row(1, " con", "A - One") +
+      row(2, " con", "B - Two") +
+      `<script>cueValuesEntry = {}; cueValuesEntry.seconds = 30; cueValuesEntry.ids = []; cueValuesEntry.ids[0] = 'tlp1_content'; cueValuesEntry.ids[1] = 'tlp2_content';</script>`;
+    const t = parseTracklist(url, html).tracks;
+    expect(t.map((r) => [r.isMashupLinked, r.startSeconds, r.ownStartSeconds])).toEqual([
+      [false, 30, 30],
+      [true, 30, null],
+    ]);
+  });
 
   it('rows carry their label (from the publisher meta); "Not On Label" and anonymous rows give null; tracks keep the ParsedTrack shape', () => {
-    const m = parseTracklist('https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html', fx('tracklist-matroda.html'))
-    expect(m.rows[0]!.label).toBeNull()
-    expect(m.rows[1]!.label).toBe('BLACK BOOK')
-    expect(m.rows.every((r) => r.label === null || r.label.length > 0)).toBe(true)
-    expect(m.rows.some((r) => r.label !== null)).toBe(true)
-    expect('label' in m.tracks[0]!).toBe(false)
-    expect(m.tracks.some((t) => 'label' in t)).toBe(false)
-    const d = p('tracklist-decoy-dcr839.html')
-    expect(d.rows.filter((r) => r.anonymous).every((r) => r.label === null)).toBe(true)
-    expect(d.rows.some((r) => r.label === 'SENSO SOUNDS')).toBe(true)
-    expect(d.rows.some((r) => r.label === 'WE ARE THE BRAVE')).toBe(true)
-    expect(d.tracks.some((t) => 'label' in t)).toBe(false)
-  })
+    const m = parseTracklist(
+      "https://www.1001tracklists.com/tracklist/l3uw499/matroda-club-space-miami-united-states-2023-08-05.html",
+      fx("tracklist-matroda.html"),
+    );
+    expect(m.rows[0]!.label).toBeNull();
+    expect(m.rows[1]!.label).toBe("BLACK BOOK");
+    expect(m.rows.every((r) => r.label === null || r.label.length > 0)).toBe(true);
+    expect(m.rows.some((r) => r.label !== null)).toBe(true);
+    expect("label" in m.tracks[0]!).toBe(false);
+    expect(m.tracks.some((t) => "label" in t)).toBe(false);
+    const d = p("tracklist-decoy-dcr839.html");
+    expect(d.rows.filter((r) => r.anonymous).every((r) => r.label === null)).toBe(true);
+    expect(d.rows.some((r) => r.label === "SENSO SOUNDS")).toBe(true);
+    expect(d.rows.some((r) => r.label === "WE ARE THE BRAVE")).toBe(true);
+    expect(d.tracks.some((t) => "label" in t)).toBe(false);
+  });
 
-  it('label: visible span.trackLabel fallback, entity decoding, inner whitespace, several labels, Not On Label', () => {
+  it("label: visible span.trackLabel fallback, entity decoding, inner whitespace, several labels, Not On Label", () => {
     const row = (n: number, inner: string) =>
-      `<div class="tlpTog bItm tlpItem trRow${n}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="A - T${n}">${inner}</div></div>`
+      `<div class="tlpTog bItm tlpItem trRow${n}" data-id="${n}"><div id="tlp${n}_content"><meta itemprop="name" content="A - T${n}">${inner}</div></div>`;
     const html =
-      row(1, '<span title="label" class="trackLabel noWrap blueTxt">Armada  Music<a href="/label/x/index.html"></a></span>') +
-      row(2, '<meta itemprop="publisher" content="&lt;span class=&quot;trackLabel&quot;&gt;Drums &amp;amp; Bass  Records&lt;/span&gt;&lt;span class=&quot;trackLabel&quot;&gt;Second Label&lt;/span&gt;">') +
+      row(
+        1,
+        '<span title="label" class="trackLabel noWrap blueTxt">Armada  Music<a href="/label/x/index.html"></a></span>',
+      ) +
+      row(
+        2,
+        '<meta itemprop="publisher" content="&lt;span class=&quot;trackLabel&quot;&gt;Drums &amp;amp; Bass  Records&lt;/span&gt;&lt;span class=&quot;trackLabel&quot;&gt;Second Label&lt;/span&gt;">',
+      ) +
       row(3, '<span title="label" class="trackLabel noWrap">Not On Label</span>') +
-      row(4, '')
-    expect(parseTracklist(url, html).rows.map((r) => r.label)).toEqual(['Armada Music', 'Drums & Bass Records / Second Label', null, null])
-  })
+      row(4, "");
+    expect(parseTracklist(url, html).rows.map((r) => r.label)).toEqual([
+      "Armada Music",
+      "Drums & Bass Records / Second Label",
+      null,
+      null,
+    ]);
+  });
   it("rows: every page row in order, anonymous 'ID - ID' rows included and flagged; tracks: the same list without them", () => {
-    const d = p('tracklist-decoy-dcr839.html')
-    expect(d.rows).toHaveLength(41)
-    const anon = d.rows.filter((r) => r.anonymous)
-    expect(anon).toHaveLength(16)
+    const d = p("tracklist-decoy-dcr839.html");
+    expect(d.rows).toHaveLength(41);
+    const anon = d.rows.filter((r) => r.anonymous);
+    expect(anon).toHaveLength(16);
     for (const r of anon) {
-      expect(r).toMatchObject({ artist: 'ID', title: 'ID', isUnidentified: true, artworkUrl: null, trackUrl: null, idStatus: null })
-      expect(r.trackId).toMatch(/^\d+$/) // the row's data-id
+      expect(r).toMatchObject({
+        artist: "ID",
+        title: "ID",
+        isUnidentified: true,
+        artworkUrl: null,
+        trackUrl: null,
+        idStatus: null,
+      });
+      expect(r.trackId).toMatch(/^\d+$/); // the row's data-id
     }
     // Their own cues, from the page (row 5 at 14:26; row 27 at 1:38:03).
-    expect(d.rows[4]).toMatchObject({ anonymous: true, startSeconds: 866, ownStartSeconds: 866, startTime: '14:26', isMashupLinked: false })
+    expect(d.rows[4]).toMatchObject({
+      anonymous: true,
+      startSeconds: 866,
+      ownStartSeconds: 866,
+      startTime: "14:26",
+      isMashupLinked: false,
+    });
     // A w/ row on an anonymous row is linked to it, without a cue of its own.
-    expect(d.rows[14]).toMatchObject({ anonymous: true, isMashupLinked: true, startSeconds: 2833, ownStartSeconds: null })
-    const orphan = d.rows.findIndex((r) => r.trackId === '32060')
-    expect(d.rows[orphan - 1]).toMatchObject({ anonymous: true, startSeconds: 5883 })
-    expect(d.rows[orphan]).toMatchObject({ anonymous: false, isMashupLinked: true, ownStartSeconds: null })
+    expect(d.rows[14]).toMatchObject({
+      anonymous: true,
+      isMashupLinked: true,
+      startSeconds: 2833,
+      ownStartSeconds: null,
+    });
+    const orphan = d.rows.findIndex((r) => r.trackId === "32060");
+    expect(d.rows[orphan - 1]).toMatchObject({ anonymous: true, startSeconds: 5883 });
+    expect(d.rows[orphan]).toMatchObject({
+      anonymous: false,
+      isMashupLinked: true,
+      ownStartSeconds: null,
+    });
     // `tracks` is exactly what it was: the named rows, the orphan unlinked there.
-    expect(d.tracks).toHaveLength(25)
-    expect(d.tracks.map((t) => t.trackId)).toEqual(d.rows.filter((r) => !r.anonymous).map((r) => r.trackId))
-    expect(d.tracks.some((t) => 'anonymous' in t)).toBe(false)
-    expect(d.tracks.find((t) => t.trackId === '32060')!.isMashupLinked).toBe(false)
+    expect(d.tracks).toHaveLength(25);
+    expect(d.tracks.map((t) => t.trackId)).toEqual(
+      d.rows.filter((r) => !r.anonymous).map((r) => r.trackId),
+    );
+    expect(d.tracks.some((t) => "anonymous" in t)).toBe(false);
+    expect(d.tracks.find((t) => t.trackId === "32060")!.isMashupLinked).toBe(false);
     // Real pages here have no anonymous rows: rows and tracks agree.
-    for (const name of ['tracklist-matroda.html', 'tracklist-maxstyler.html', 'tracklist-habstrakt.html']) {
-      const r = p(name)
-      expect(r.rows.map(({ anonymous, label: _l, mediaId: _m, presaveCount: _ps, hasYoutube: _yt, hasSpotify: _sp, ...t }) => (expect(anonymous).toBe(false), t)), name).toEqual(r.tracks)
+    for (const name of [
+      "tracklist-matroda.html",
+      "tracklist-maxstyler.html",
+      "tracklist-habstrakt.html",
+    ]) {
+      const r = p(name);
+      expect(
+        r.rows.map(
+          ({
+            anonymous,
+            label: _l,
+            mediaId: _m,
+            presaveCount: _ps,
+            hasYoutube: _yt,
+            hasSpotify: _sp,
+            ...t
+          }) => (expect(anonymous).toBe(false), t),
+        ),
+        name,
+      ).toEqual(r.tracks);
     }
-  })
+  });
 
-  it('counts: 2 of the 89 rows on the three real pages are w/ rows; the decoy page has 3 linked + 1 orphan among its kept rows', () => {
-    const linked = (name: string) => p(name).tracks.filter((r) => r.isMashupLinked).length
-    expect([linked('tracklist-matroda.html'), linked('tracklist-maxstyler.html'), linked('tracklist-habstrakt.html')]).toEqual([1, 1, 0])
-    expect(linked('tracklist-decoy-dcr839.html')).toBe(3)
-  })
-})
+  it("counts: 2 of the 89 rows on the three real pages are w/ rows; the decoy page has 3 linked + 1 orphan among its kept rows", () => {
+    const linked = (name: string) => p(name).tracks.filter((r) => r.isMashupLinked).length;
+    expect([
+      linked("tracklist-matroda.html"),
+      linked("tracklist-maxstyler.html"),
+      linked("tracklist-habstrakt.html"),
+    ]).toEqual([1, 1, 0]);
+    expect(linked("tracklist-decoy-dcr839.html")).toBe(3);
+  });
+});

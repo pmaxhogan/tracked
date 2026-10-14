@@ -4,25 +4,25 @@
 // set's links and its track list (track-row.ts, with Pre-save). The slug is
 // read client-side from the path (/ui/dj/<slug>); nothing user-controlled is
 // templated into the markup.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
-import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from './dj-actions'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { TRACK_ROW_CSS, TRACK_ROW_JS } from "./track-row";
+import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from "./dj-actions";
 
 const BODY = /* html */ `
 <div class="dj-layout">
   <aside class="tk-card dj-side">
-    <div class="tk-row"><span id="dj-sub" class="badge ok" hidden${tipAttr('You are subscribed: the sync keeps this DJ\'s playlist up to date with their sets.')}>subscribed</span></div>
+    <div class="tk-row"><span id="dj-sub" class="badge ok" hidden${tipAttr("You are subscribed: the sync keeps this DJ's playlist up to date with their sets.")}>subscribed</span></div>
     <p class="mono dj-slug"><span id="dj-slug"></span></p>
     <p id="counts" class="muted sub"><span class="skel" style="width:70%"></span></p>
     <p id="dj-playlist" class="sub" hidden></p>
     <p id="dj-last" class="sub" hidden></p>
     <p class="sub"><a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> · <a href="/ui/djs">All DJs</a></p>
     <div class="dj-actions">
-      <button id="sync" type="button" class="btn primary" hidden${tipAttr('Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.')}>Sync</button>
-      <button id="resync" type="button" class="btn danger" hidden${tipAttr('Marks every processed set of this DJ as due for a re-check and re-reads its playlists from YouTube, so swapped recordings are replaced. Costs up to 10 fetches per press; the scheduler does the rest over later ticks.')}>Invalidate &amp; resync</button>
-      <button id="refresh" type="button" class="btn"${tipAttr('Crawls this DJ\'s page on 1001tracklists again to list the newest sets. Does not change the playlist.')}>Refresh from 1001tracklists</button>
+      <button id="sync" type="button" class="btn primary" hidden${tipAttr("Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.")}>Sync</button>
+      <button id="resync" type="button" class="btn danger" hidden${tipAttr("Marks every processed set of this DJ as due for a re-check and re-reads its playlists from YouTube, so swapped recordings are replaced. Costs up to 10 fetches per press; the scheduler does the rest over later ticks.")}>Invalidate &amp; resync</button>
+      <button id="refresh" type="button" class="btn"${tipAttr("Crawls this DJ's page on 1001tracklists again to list the newest sets. Does not change the playlist.")}>Refresh from 1001tracklists</button>
     </div>
   </aside>
   <section class="dj-main">
@@ -31,7 +31,7 @@ const BODY = /* html */ `
     <div id="sets" class="dj-sets-t"></div>
   </section>
 </div>
-`
+`;
 
 const CSS = /* css */ `
   .dj-layout { display: grid; gap: var(--sp-4); align-items: start; }
@@ -58,7 +58,7 @@ const CSS = /* css */ `
     .dj-side { position: sticky; top: var(--sp-4); }
   }
 ${TRACK_ROW_CSS}
-${DJ_ACTIONS_CSS}`
+${DJ_ACTIONS_CSS}`;
 
 const JS = /* js */ `
 (() => {
@@ -83,7 +83,7 @@ ${DJ_ACTIONS_JS}
     document.title = name + ' · tracked';
   }
 
-  // ── the set table (TKTable, local mode over the merged crawl + sync list) ──
+  // -- the set table (TKTable, local mode over the merged crawl + sync list) --
   // One row per set: { url, title, date, video, trackCount, idedCount, complete, sync }. video and the
   // counts come from D1 (the sync's last page fetch) and are replaced by the live list once a set is opened.
   let sets = [];
@@ -111,7 +111,7 @@ ${DJ_ACTIONS_JS}
     return '<span class="tkt-nil"' + TK.tip('Not known yet: the set page has not been read. Open the set to load it.') + '>?</span>';
   }
   function completeHtml(r) {
-    if (r.complete == null) return '<span class="tkt-nil">–</span>';
+    if (r.complete == null) return '<span class="tkt-nil">-</span>';
     const full = r.complete === 'full';
     return '<span class="badge ' + (full ? 'ok' : 'warn') + '"' + TK.tip(full ? 'Every track in this set is identified.' : 'Some tracks in this set are still unidentified (' + (r.trackCount - r.idedCount) + ' of ' + r.trackCount + ').') + '>' + (full ? 'full' : 'partial') + '</span>';
   }
@@ -119,7 +119,7 @@ ${DJ_ACTIONS_JS}
     { key: 'date', label: 'Date', type: 'date', width: '7.5rem' },
     { key: 'title', label: 'Set', type: 'text', render: (r) => '<span class="dj-set-title">' + esc(r.title) + '</span>' + (r.tlSlug ? '<span class="dj-set-sub mono">' + esc(r.tlSlug) + '</span>' : '') },
     { key: 'video', label: 'Video', type: 'enum', options: VIDEO, render: videoHtml, tip: 'Whether the set has a YouTube video: linked on 1001tracklists, or rendered by mkvid.' },
-    { key: 'trackCount', label: 'Tracks', type: 'number', render: (r) => r.trackCount == null ? '<span class="tkt-nil">–</span>' : esc((r.idedCount != null ? r.idedCount + '/' : '') + r.trackCount), tip: 'Identified tracks out of all rows, from the last time the set page was read.' },
+    { key: 'trackCount', label: 'Tracks', type: 'number', render: (r) => r.trackCount == null ? '<span class="tkt-nil">-</span>' : esc((r.idedCount != null ? r.idedCount + '/' : '') + r.trackCount), tip: 'Identified tracks out of all rows, from the last time the set page was read.' },
     { key: 'complete', label: 'IDs', type: 'enum', options: COMPLETE, render: completeHtml, tip: 'Full: every track identified. Partial: some rows are still ID.' },
     { key: 'sync', label: 'Sync', type: 'enum', options: SYNC, hideOn: 'phone', tip: 'Where the set is in the sync: processed (resolved, with or without a video), pending, or abandoned after repeated failures. Empty: the sync does not track it.' },
   ];
@@ -148,7 +148,7 @@ ${DJ_ACTIONS_JS}
     });
   }
 
-  // ── expanded rows: a detail row after the set's row, kept across repaints ──
+  // -- expanded rows: a detail row after the set's row, kept across repaints --
   const findRow = (url) => {
     const body = $('st-body');
     if (!body || !body.children) return null;
@@ -370,7 +370,7 @@ ${DJ_ACTIONS_JS}
     await TK.api.swr(path, applySets);
   }
 
-  // ── Sync / Invalidate & resync: the same calls and wording as the DJs page (dj-actions) ──
+  // -- Sync / Invalidate & resync: the same calls and wording as the DJs page (dj-actions) --
   $sync.addEventListener('click', async () => { const out = await DJA.syncSlug(slug, $sync); if (out && out.ok) loadState(); });
   $resync.addEventListener('click', async () => { const out = await DJA.syncSlug(slug, $resync, { resync: true }); if (out && out.ok) loadState(); });
   $refresh.addEventListener('click', () => load(true));
@@ -386,16 +386,16 @@ ${DJ_ACTIONS_JS}
   loadState();
   load(false);
 })();
-`
+`;
 
 export const DJ_PAGE: UiPage = {
-  path: '/dj/:slug',
+  path: "/dj/:slug",
   html: shell({
-    nav: 'djs',
-    title: 'DJ',
-    h1Id: 'dj-name',
+    nav: "djs",
+    title: "DJ",
+    h1Id: "dj-name",
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

@@ -10,40 +10,43 @@
  *     still commits atomically.
  */
 
-import type { Env } from '../types'
+import type { Env } from "../types";
 
-/** Coerce a JS value into something D1 will bind: undefined → null, boolean → 0/1. */
+/** Coerce a JS value into something D1 will bind: undefined -> null, boolean -> 0/1. */
 export function v(x: unknown): string | number | null {
-  if (x === undefined || x === null) return null
-  if (typeof x === 'boolean') return x ? 1 : 0
-  if (typeof x === 'number' || typeof x === 'string') return x
-  return JSON.stringify(x)
+  if (x === undefined || x === null) return null;
+  if (typeof x === "boolean") return x ? 1 : 0;
+  if (typeof x === "number" || typeof x === "string") return x;
+  return JSON.stringify(x);
 }
 
 /** Largest statement list handed to a single `batch()` call. */
-export const BATCH_CHUNK = 100
+export const BATCH_CHUNK = 100;
 
 /** Run `statements` in chunks of `BATCH_CHUNK`, each chunk one transaction. */
-export async function batchChunked(db: D1Database, statements: D1PreparedStatement[]): Promise<void> {
+export async function batchChunked(
+  db: D1Database,
+  statements: D1PreparedStatement[],
+): Promise<void> {
   for (let i = 0; i < statements.length; i += BATCH_CHUNK) {
-    const chunk = statements.slice(i, i + BATCH_CHUNK)
-    if (chunk.length === 1) await chunk[0]!.run()
-    else if (chunk.length > 1) await db.batch(chunk)
+    const chunk = statements.slice(i, i + BATCH_CHUNK);
+    if (chunk.length === 1) await chunk[0]!.run();
+    else if (chunk.length > 1) await db.batch(chunk);
   }
 }
 
 /** `env.DB`, or a clear error when the binding is missing (misconfigured wrangler.jsonc / test env). */
 export function dbOf(env: Env): D1Database {
-  if (!env.DB) throw new Error('D1 binding DB is not configured')
-  return env.DB
+  if (!env.DB) throw new Error("D1 binding DB is not configured");
+  return env.DB;
 }
 
 /** Parse a JSON column, tolerating NULL / garbage (returns `fallback`). */
 export function parseJson<T>(raw: unknown, fallback: T): T {
-  if (typeof raw !== 'string' || raw === '') return fallback
+  if (typeof raw !== "string" || raw === "") return fallback;
   try {
-    return JSON.parse(raw) as T
+    return JSON.parse(raw) as T;
   } catch {
-    return fallback
+    return fallback;
   }
 }

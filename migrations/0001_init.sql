@@ -3,7 +3,7 @@
 -- either the sync's source of truth or an audit trail that gets queried.
 --
 -- Apply with `npm run d1:migrate` (wrangler d1 migrations apply --remote)
--- BEFORE pushing code that depends on it — Workers Builds only runs
+-- BEFORE pushing code that depends on it - Workers Builds only runs
 -- `wrangler deploy`, it never applies migrations.
 
 -- The DJ subscription list (was `subs:list` + `subs:item:<slug>`).

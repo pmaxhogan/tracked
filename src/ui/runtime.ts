@@ -12,10 +12,10 @@
 // This is a template literal: any backslash that must reach the browser
 // (regexes) is doubled here.
 
-import { SKEL_ITEMS } from './skeleton'
+import { SKEL_ITEMS } from "./skeleton";
 
 /** Applies a stored manual theme ('dark' | 'light'); 'system' is left to the media query. */
-export const THEME_BOOT_JS = `(function(){try{var t=localStorage.getItem('tk-theme');if(t==='dark'||t==='light')document.documentElement.dataset.theme=t}catch(e){}})();`
+export const THEME_BOOT_JS = `(function(){try{var t=localStorage.getItem('tk-theme');if(t==='dark'||t==='light')document.documentElement.dataset.theme=t}catch(e){}})();`;
 
 /** Defines the one shared global, TK. */
 export const RUNTIME_JS = /* js */ `
@@ -34,7 +34,7 @@ var TK = (() => {
   const tipTerm = (label, text) => '<span class="tip-term"' + tip(text) + '>' + esc(label) + '</span>';
   const safeHref = (u) => (/^https?:\\/\\//i.test(String(u || '')) ? String(u) : null);
 
-  // ── API ──
+  // -- API --
   // The senders are literal object literals, method first, then the JSON
   // content type, then credentials: the same-origin guard requires both.
   async function send(path, init) {
@@ -61,7 +61,7 @@ var TK = (() => {
     stored: (path, maxAgeMs) => { const hit = swrRead(path, maxAgeMs || 86400000); return hit ? hit.data : null; },
   };
 
-  // ── stale-while-revalidate GETs ──
+  // -- stale-while-revalidate GETs --
   // TK.api.swr(path, handle, opts): the last good response this browser saw
   // for path (at most opts.maxAgeMs old, default a day) goes to
   // handle({ ok: true, status: 200, data, stale: true, storedAt }) at once,
@@ -126,7 +126,7 @@ var TK = (() => {
     return d.error ? String(d.error) : fallback;
   }
 
-  // ── feedback ──
+  // -- feedback --
   // The topmost open <dialog>, if any. A modal dialog (the drawer, a confirm)
   // sits in the top layer and makes everything outside it inert, so a toast
   // shown in #tk-toasts would be hidden behind it.
@@ -261,7 +261,7 @@ var TK = (() => {
     }
   }
 
-  // ── polling ──
+  // -- polling --
   // Every polling loop goes through poll(): it pauses while the tab is hidden
   // (and runs once when it comes back), backs off on errors (doubling, up to a
   // minute), stops for good on 401/403 (the Access login expired:
@@ -293,12 +293,12 @@ var TK = (() => {
     return { stop, isStopped: () => stopped, now: () => { if (stopped) return; if (timer) clearTimeout(timer); timer = null; run(); } };
   }
 
-  // ── formatting (verbatim from the old pages) ──
-  const fmtTime = (iso) => { if (!iso) return '—'; const d = new Date(iso); const sameDay = d.toDateString() === new Date().toDateString(); return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
-  const fmtDur = (ms) => { if (ms == null) return '—'; const m = Math.round(ms / 60000); if (m < 60) return m + ' min'; const h = Math.floor(m / 60); return h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : ''); };
+  // -- formatting (verbatim from the old pages) --
+  const fmtTime = (iso) => { if (!iso) return '-'; const d = new Date(iso); const sameDay = d.toDateString() === new Date().toDateString(); return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
+  const fmtDur = (ms) => { if (ms == null) return '-'; const m = Math.round(ms / 60000); if (m < 60) return m + ' min'; const h = Math.floor(m / 60); return h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : ''); };
   const ago = (iso) => fmtDur(Date.now() - Date.parse(iso)) + ' ago';
   function clock(s) {
-    if (s == null || isNaN(s)) return '—';
+    if (s == null || isNaN(s)) return '-';
     s = Math.round(s);
     const neg = s < 0; s = Math.abs(s);
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -334,7 +334,7 @@ var TK = (() => {
     } catch { return u; }
   }
 
-  // ── query string ──
+  // -- query string --
   const qs = {
     get(name) { return typeof location === 'undefined' ? null : new URLSearchParams(location.search).get(name); },
     set(obj) {
@@ -359,7 +359,7 @@ var TK = (() => {
     }
   }
 
-  // ── skeletons ── (markup from src/ui/skeleton.ts)
+  // -- skeletons -- (markup from src/ui/skeleton.ts)
   const SKEL_ITEMS = ${JSON.stringify(SKEL_ITEMS)};
   function skel(n, kind) {
     const items = SKEL_ITEMS[kind === 'card' ? 'card' : 'row'];
@@ -368,7 +368,7 @@ var TK = (() => {
     return h + '</div>';
   }
 
-  // ── theme ──
+  // -- theme --
   const THEME_KEY = 'tk-theme';
   const theme = {
     get() {
@@ -389,4 +389,4 @@ var TK = (() => {
     fmt: { time: fmtTime, dur: fmtDur, ago, rel: relTime, clock, until: untilTime, date: fmtDate, setLabel },
   };
 })();
-`
+`;

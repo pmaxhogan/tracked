@@ -14,15 +14,15 @@
  * hot path (a claim, a sweep, a prune) adds at most one KV read a half-minute.
  */
 
-import { z } from 'zod'
-import type { Env } from '../types'
-import { mergeSettings } from './pool-settings'
+import { z } from "zod";
+import type { Env } from "../types";
+import { mergeSettings } from "./pool-settings";
 
-export const APP_SETTINGS_KEY = 'app:settings'
-const MEMO_MS = 30_000
+export const APP_SETTINGS_KEY = "app:settings";
+const MEMO_MS = 30_000;
 
 /** The least a day's reorder budget can usefully be: two moves (50 each) and the listings around them. Below it nothing would ever move. */
-export const ORDER_MIN_DAILY_UNITS = 110
+export const ORDER_MIN_DAILY_UNITS = 110;
 
 export const AppSettingsSchema = z.object({
   mkvid: z.object({
@@ -31,19 +31,39 @@ export const AppSettingsSchema = z.object({
     /** Uploads a quota day through the sync's project once the first is full; null = MKVID_SHARED_DAILY_CLAIM_CAP, else 6. */
     sharedDailyClaimCap: z.number().int().min(0).max(100).nullable(),
     /** A claim mkvid has not finished is handed out again after this; null = MKVID_CLAIM_TTL_SECONDS, else 180 min. */
-    claimTtlMinutes: z.number().int().min(10).max(24 * 60).nullable(),
+    claimTtlMinutes: z
+      .number()
+      .int()
+      .min(10)
+      .max(24 * 60)
+      .nullable(),
     /** Failed attempts before a request is parked as failed (default 3). */
     maxAttempts: z.number().int().min(1).max(10),
-    /** A retryable failure waits this × attempts before the next claim (default 6 h). */
-    retryBackoffHours: z.number().min(0.25).max(24 * 7),
+    /** A retryable failure waits this x attempts before the next claim (default 6 h). */
+    retryBackoffHours: z
+      .number()
+      .min(0.25)
+      .max(24 * 7),
     /** mkvid refused a list as unverified: look again after this, no attempt used (default 60 min). */
-    unverifiedRetryMinutes: z.number().int().min(5).max(24 * 60),
+    unverifiedRetryMinutes: z
+      .number()
+      .int()
+      .min(5)
+      .max(24 * 60),
     /** Privacy mkvid uploads a set with (sent on every claim; an mkvid from before this uses its TRACKED_PRIVACY). */
-    privacy: z.enum(['public', 'unlisted', 'private']),
+    privacy: z.enum(["public", "unlisted", "private"]),
     /** Every this many hours, delivered videos that are gone from YouTube leave the playlists and are rendered again (default 6). 0 = never. */
-    goneCheckHours: z.number().min(0).max(24 * 7),
+    goneCheckHours: z
+      .number()
+      .min(0)
+      .max(24 * 7),
     /** This many recordings "removed" within a day are not believed until the owner confirms (lib/mkvid-removed-burst.ts; default 3). 0 = never; 1 is not "several". */
-    removedBurstCount: z.number().int().min(0).max(50).refine((n) => n !== 1, { message: '0 (never) or 2 to 50' }),
+    removedBurstCount: z
+      .number()
+      .int()
+      .min(0)
+      .max(50)
+      .refine((n) => n !== 1, { message: "0 (never) or 2 to 50" }),
   }),
   playlists: z.object({
     /** The daily playlist sweep only reports; null = PLAYLIST_SWEEP_DRY_RUN (unset = true). */
@@ -56,9 +76,9 @@ export const AppSettingsSchema = z.object({
     shortToleranceMinutes: z.number().min(0).max(60),
     /** An audio player this much longer than the video means the video is a cut (default 10 min). */
     audioToleranceMinutes: z.number().min(0).max(120),
-    /** Hold a playlist instead of removing when more than this many of its videos went missing at once (default 5)… */
+    /** Hold a playlist instead of removing when more than this many of its videos went missing at once (default 5)... */
     massRemovalMax: z.number().int().min(0).max(100),
-    /** …or more than this share of it (default 0.3). */
+    /** ...or more than this share of it (default 0.3). */
     massRemovalRatio: z.number().min(0).max(1),
     /** Hold every playlist when one run finds more than this many missing in all (default 15). */
     runRemovalMax: z.number().int().min(0).max(500),
@@ -67,7 +87,14 @@ export const AppSettingsSchema = z.object({
     /** Combined-playlist inserts per run at most (default 20). */
     combinedMaxInsertsPerRun: z.number().int().min(0).max(100),
     /** Quota units a quota day the reorder pass may spend moving videos already in the artist playlists into set-date order, listings included (a move is 50). Default 0: paused, no YouTube call at all, until the owner picks a budget. */
-    orderDailyUnits: z.number().int().min(0).max(10000).refine((n) => n === 0 || n >= ORDER_MIN_DAILY_UNITS, { message: `0 (paused) or at least ${ORDER_MIN_DAILY_UNITS}: less cannot pay for reading a playlist and moving one video` }),
+    orderDailyUnits: z
+      .number()
+      .int()
+      .min(0)
+      .max(10000)
+      .refine((n) => n === 0 || n >= ORDER_MIN_DAILY_UNITS, {
+        message: `0 (paused) or at least ${ORDER_MIN_DAILY_UNITS}: less cannot pay for reading a playlist and moving one video`,
+      }),
     /** Moves one reorder run makes at most (default 10). */
     orderMovesPerRun: z.number().int().min(1).max(100),
   }),
@@ -76,15 +103,22 @@ export const AppSettingsSchema = z.object({
     /** The scheduled recheck runs at all (manual rechecks always work). */
     enabled: z.boolean(),
     /** A watched track is looked up again this often (default 12 h: twice a day). */
-    recheckIntervalHours: z.number().min(1).max(24 * 30),
-    /** Every interval × (1 ± this), so rechecks spread out (default 0.15). */
+    recheckIntervalHours: z
+      .number()
+      .min(1)
+      .max(24 * 30),
+    /** Every interval x (1 +/- this), so rechecks spread out (default 0.15). */
     jitterFraction: z.number().min(0).max(0.5),
     /** Rechecks one scheduler tick may run, on top of its other items (default 1). */
     maxPerTick: z.number().int().min(0).max(10),
     /** Pool priority of a scheduled recheck (manual ones go at phone priority). */
-    priority: z.enum(['new', 'verify', 'recheck', 'backfill']),
+    priority: z.enum(["new", "verify", "recheck", "backfill"]),
     /** A failed check (pool refused, page error) is tried again after this (default 60 min). */
-    retryMinutes: z.number().int().min(5).max(24 * 60),
+    retryMinutes: z
+      .number()
+      .int()
+      .min(5)
+      .max(24 * 60),
     /** Push to every device when a pre-saved track gets a YouTube link. */
     notifyFound: z.boolean(),
     /** Like a pre-saved track's video on the connected YouTube account once it has one (lib/presave-like.ts; 50 units each). */
@@ -109,13 +143,16 @@ export const AppSettingsSchema = z.object({
     /** The YouTube playlist every track upload goes into (created when missing). */
     playlistTitle: z.string().min(1).max(150),
     /** Privacy mkvid uploads a track with. */
-    privacy: z.enum(['public', 'unlisted', 'private']),
+    privacy: z.enum(["public", "unlisted", "private"]),
     /** Push to every device when a track was ripped and uploaded. */
     notifyUploaded: z.boolean(),
     /** Failed attempts before a request is parked as failed (default 3). */
     maxAttempts: z.number().int().min(1).max(10),
-    /** A retryable failure waits this × attempts (default 6 h). */
-    retryBackoffHours: z.number().min(0.25).max(24 * 7),
+    /** A retryable failure waits this x attempts (default 6 h). */
+    retryBackoffHours: z
+      .number()
+      .min(0.25)
+      .max(24 * 7),
     /** mkvid refuses a rip shorter than this share of the expected length (a preview clip; default 0.85). */
     minDurationRatio: z.number().min(0).max(1),
   }),
@@ -132,12 +169,22 @@ export const AppSettingsSchema = z.object({
     /** Scheduler tick history is kept this many days (default 14). */
     tickHistoryDays: z.number().int().min(1).max(365),
   }),
-})
+});
 
-export type AppSettings = z.infer<typeof AppSettingsSchema>
+export type AppSettings = z.infer<typeof AppSettingsSchema>;
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  mkvid: { dailyClaimCap: null, sharedDailyClaimCap: null, claimTtlMinutes: null, maxAttempts: 3, retryBackoffHours: 6, unverifiedRetryMinutes: 60, privacy: 'unlisted', goneCheckHours: 6, removedBurstCount: 3 },
+  mkvid: {
+    dailyClaimCap: null,
+    sharedDailyClaimCap: null,
+    claimTtlMinutes: null,
+    maxAttempts: 3,
+    retryBackoffHours: 6,
+    unverifiedRetryMinutes: 60,
+    privacy: "unlisted",
+    goneCheckHours: 6,
+    removedBurstCount: 3,
+  },
   playlists: {
     sweepDryRun: null,
     sweepDailyRemovals: null,
@@ -157,7 +204,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     recheckIntervalHours: 12,
     jitterFraction: 0.15,
     maxPerTick: 1,
-    priority: 'recheck',
+    priority: "recheck",
     retryMinutes: 60,
     notifyFound: true,
     likeOnYouTube: true,
@@ -168,10 +215,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   trackUploads: {
     enabled: true,
     minWatchDays: 5,
-    allowedSources: ['soundcloud', 'bandcamp', 'hearthis', 'mixcloud'],
+    allowedSources: ["soundcloud", "bandcamp", "hearthis", "mixcloud"],
     dailyCap: 4,
-    playlistTitle: 'Track uploads',
-    privacy: 'unlisted',
+    playlistTitle: "Track uploads",
+    privacy: "unlisted",
     notifyUploaded: true,
     maxAttempts: 3,
     retryBackoffHours: 6,
@@ -179,38 +226,49 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
   linkPrewarm: { enabled: true, maxPerTick: 3 },
   retention: { auditDays: 90, tickHistoryDays: 14 },
-}
+};
 
-const memo = new WeakMap<object, { at: number; value: AppSettings }>()
+const memo = new WeakMap<object, { at: number; value: AppSettings }>();
 
 /** Current settings: the stored document over the defaults (memoised MEMO_MS). One that no longer validates is ignored. */
-export async function getAppSettings(env: Partial<Pick<Env, 'SUBS'>>): Promise<AppSettings> {
-  const kv = env.SUBS
-  if (!kv) return DEFAULT_APP_SETTINGS
-  const hit = memo.get(kv)
-  if (hit && Date.now() - hit.at < MEMO_MS) return hit.value
-  let stored: unknown = null
+export async function getAppSettings(env: Partial<Pick<Env, "SUBS">>): Promise<AppSettings> {
+  const kv = env.SUBS;
+  if (!kv) return DEFAULT_APP_SETTINGS;
+  const hit = memo.get(kv);
+  if (hit && Date.now() - hit.at < MEMO_MS) return hit.value;
+  let stored: unknown;
   try {
-    stored = await kv.get(APP_SETTINGS_KEY, 'json')
+    stored = await kv.get(APP_SETTINGS_KEY, "json");
   } catch {
-    stored = null
+    stored = null;
   }
-  const parsed = stored ? AppSettingsSchema.safeParse(mergeSettings(DEFAULT_APP_SETTINGS, stored)) : null
-  const value = parsed?.success ? parsed.data : DEFAULT_APP_SETTINGS
-  memo.set(kv, { at: Date.now(), value })
-  return value
+  const parsed = stored
+    ? AppSettingsSchema.safeParse(mergeSettings(DEFAULT_APP_SETTINGS, stored))
+    : null;
+  const value = parsed?.success ? parsed.data : DEFAULT_APP_SETTINGS;
+  memo.set(kv, { at: Date.now(), value });
+  return value;
 }
 
-export type AppSettingsUpdate = { ok: true; settings: AppSettings } | { ok: false; issues: string[] }
+export type AppSettingsUpdate =
+  { ok: true; settings: AppSettings } | { ok: false; issues: string[] };
 
 /** Apply a partial update (deep-merged over the current settings), validate, store. `null` resets an env-backed field. */
-export async function updateAppSettings(env: Pick<Env, 'SUBS'>, patch: unknown): Promise<AppSettingsUpdate> {
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, issues: ['body: expected a JSON object'] }
-  memo.delete(env.SUBS)
-  const current = await getAppSettings(env)
-  const parsed = AppSettingsSchema.safeParse(mergeSettings(current, patch))
-  if (!parsed.success) return { ok: false, issues: parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`) }
-  await env.SUBS.put(APP_SETTINGS_KEY, JSON.stringify(parsed.data))
-  memo.set(env.SUBS, { at: Date.now(), value: parsed.data })
-  return { ok: true, settings: parsed.data }
+export async function updateAppSettings(
+  env: Pick<Env, "SUBS">,
+  patch: unknown,
+): Promise<AppSettingsUpdate> {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch))
+    return { ok: false, issues: ["body: expected a JSON object"] };
+  memo.delete(env.SUBS);
+  const current = await getAppSettings(env);
+  const parsed = AppSettingsSchema.safeParse(mergeSettings(current, patch));
+  if (!parsed.success)
+    return {
+      ok: false,
+      issues: parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`),
+    };
+  await env.SUBS.put(APP_SETTINGS_KEY, JSON.stringify(parsed.data));
+  memo.set(env.SUBS, { at: Date.now(), value: parsed.data });
+  return { ok: true, settings: parsed.data };
 }

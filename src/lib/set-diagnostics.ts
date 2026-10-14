@@ -2,108 +2,205 @@
 // schedule, verification, full-recording verdict, playlist and hygiene
 // evidence and mkvid state, from D1 and cached facts only. It never calls
 // YouTube, tlpool or 1001tracklists, and never writes.
-import type { Env } from '../types'
-import { dbOf } from './db'
-import { getVerification } from './verification'
-import { loadSetFacts, judgeVideo, judgeOptions, mkvidUploadedIds, REASON_LABELS } from './playlist-hygiene'
-import { readCachedVideoMeta } from './video-meta'
-import { isOverridden } from './playlist-blocklist'
-import { getMkvidRequestForSet, mkvidQueuePosition } from './mkvid'
-import { mkvidOutcome, mkvidOutcomeDetail, mkvidOutcomeLine, type MkvidOutcome } from './mkvid-outcome'
-import { removedBurstSince } from './mkvid-removed-burst'
-import { readinessFor, type MkvidReadiness } from './mkvid-readiness'
-import { supersededReason } from './activity'
-import { describeYouTubeError, type YouTubeErrorView } from './youtube-error'
+import type { Env } from "../types";
+import { dbOf } from "./db";
+import { getVerification } from "./verification";
+import {
+  loadSetFacts,
+  judgeVideo,
+  judgeOptions,
+  mkvidUploadedIds,
+  REASON_LABELS,
+} from "./playlist-hygiene";
+import { readCachedVideoMeta } from "./video-meta";
+import { isOverridden } from "./playlist-blocklist";
+import { getMkvidRequestForSet, mkvidQueuePosition } from "./mkvid";
+import {
+  mkvidOutcome,
+  mkvidOutcomeDetail,
+  mkvidOutcomeLine,
+  type MkvidOutcome,
+} from "./mkvid-outcome";
+import { removedBurstSince } from "./mkvid-removed-burst";
+import { readinessFor, type MkvidReadiness } from "./mkvid-readiness";
+import { supersededReason } from "./activity";
+import { describeYouTubeError, type YouTubeErrorView } from "./youtube-error";
 
 export type SetDiagnostics = {
-  url: string
-  now: number
-  discovered: Array<{ slug: string; artistName: string | null; discoveredAt: number; processed: boolean; abandoned: boolean; failureCount: number; videoKnown: boolean; videoId: string | null; videoSource: string | null; checkedAt: number | null }>
-  schedule: { setDate: string | null; nextDueAt: number | null; lastFetchedAt: number | null; hasIdRows: boolean; noGoodVideo: boolean; retryAt: number | null; attemptDay: string | null; attemptsToday: number } | null
-  verification: { state: 'pending' | 'verified'; rowCount: number; firstAccount: string | null; firstFetchedAt: number; verifyDueAt: number | null; secondAccount: string | null; secondFetchedAt: number | null; verifiedAt: number | null; mismatches: number } | null
-  media: { videoId: string | null; noFullNotice: boolean; lastCueSeconds: number | null; audioMaxSeconds: number | null; audioKind: string | null; setTitle: string | null; setDate: string | null; trackCount: number | null; idedCount: number | null; fetchedAt: number } | null
+  url: string;
+  now: number;
+  discovered: Array<{
+    slug: string;
+    artistName: string | null;
+    discoveredAt: number;
+    processed: boolean;
+    abandoned: boolean;
+    failureCount: number;
+    videoKnown: boolean;
+    videoId: string | null;
+    videoSource: string | null;
+    checkedAt: number | null;
+  }>;
+  schedule: {
+    setDate: string | null;
+    nextDueAt: number | null;
+    lastFetchedAt: number | null;
+    hasIdRows: boolean;
+    noGoodVideo: boolean;
+    retryAt: number | null;
+    attemptDay: string | null;
+    attemptsToday: number;
+  } | null;
+  verification: {
+    state: "pending" | "verified";
+    rowCount: number;
+    firstAccount: string | null;
+    firstFetchedAt: number;
+    verifyDueAt: number | null;
+    secondAccount: string | null;
+    secondFetchedAt: number | null;
+    verifiedAt: number | null;
+    mismatches: number;
+  } | null;
+  media: {
+    videoId: string | null;
+    noFullNotice: boolean;
+    lastCueSeconds: number | null;
+    audioMaxSeconds: number | null;
+    audioKind: string | null;
+    setTitle: string | null;
+    setDate: string | null;
+    trackCount: number | null;
+    idedCount: number | null;
+    fetchedAt: number;
+  } | null;
   video: {
-    id: string
+    id: string;
     /** Where the id was found: a discovered tracklists row, the set page's facts only, or the mkvid request only. */
-    from: 'tracklists' | 'media' | 'mkvid'
+    from: "tracklists" | "media" | "mkvid";
     /**
      * Who made the video: 'mkvid' when the tracklists row says so or the id is
      * one mkvid uploaded (mkvidUploadedIds, the sweep's own exemption list);
      * otherwise '1001tl' (a missing video_source is 1001tl, as in the sweep).
      */
-    source: '1001tl' | 'mkvid'
+    source: "1001tl" | "mkvid";
     /** True when the id is a discovered tracklists row's video_id, i.e. the set's recording. A media-only id was turned down. */
-    current: boolean
+    current: boolean;
     /** 'mkvid' when the full-recording rule does not apply (the sweep never judges mkvid uploads); verdict is then null. */
-    exempt: 'mkvid' | null
-    meta: { durationSeconds: number | null; embedWidth: number | null; embedHeight: number | null; privacy: string | null; uploadStatus: string | null; alive: boolean; fetchedAt: number } | null
-    verdict: { ok: true } | { ok: false; reason: string; label: string; detail: string } | null
-    override: boolean
-  } | null
+    exempt: "mkvid" | null;
+    meta: {
+      durationSeconds: number | null;
+      embedWidth: number | null;
+      embedHeight: number | null;
+      privacy: string | null;
+      uploadStatus: string | null;
+      alive: boolean;
+      fetchedAt: number;
+    } | null;
+    verdict: { ok: true } | { ok: false; reason: string; label: string; detail: string } | null;
+    override: boolean;
+  } | null;
   playlist: {
-    additions: Array<{ key: string; ts: number; status: string; slug: string; videoId: string | null; message: string | null; youtube: YouTubeErrorView | null }>
-    confirmed: Array<{ playlistId: string; state: 'in' | 'out'; source: string; at: number }>
-  }
+    additions: Array<{
+      key: string;
+      ts: number;
+      status: string;
+      slug: string;
+      videoId: string | null;
+      message: string | null;
+      youtube: YouTubeErrorView | null;
+    }>;
+    confirmed: Array<{ playlistId: string; state: "in" | "out"; source: string; at: number }>;
+  };
   hygiene: {
-    removed: Array<{ playlistId: string; reason: string; at: number; slug: string | null }>
-    removals: Array<{ id: number; at: number; source: string; status: string; playlistKind: string; reason: string; detail: string | null }>
-  }
+    removed: Array<{ playlistId: string; reason: string; at: number; slug: string | null }>;
+    removals: Array<{
+      id: number;
+      at: number;
+      source: string;
+      status: string;
+      playlistKind: string;
+      reason: string;
+      detail: string | null;
+    }>;
+  };
   mkvid: {
-    id: string
-    status: string
-    position: number | null
-    readiness: MkvidReadiness | null
-    attempts: number
-    notBefore: number | null
-    error: string | null
+    id: string;
+    status: string;
+    position: number | null;
+    readiness: MkvidReadiness | null;
+    attempts: number;
+    notBefore: number | null;
+    error: string | null;
     /** Where a finished request ended (lib/mkvid-outcome.ts): a `failed` one may be a no-recording kind, which is not a problem, or `removed_unconfirmed`, which is one. */
-    outcome: MkvidOutcome | null
+    outcome: MkvidOutcome | null;
     /** A no-recording outcome in plain words: one line, and the line plus what it means. Else null. */
-    outcomeLine: string | null
-    outcomeDetail: string | null
+    outcomeLine: string | null;
+    outcomeDetail: string | null;
     /** Friendly cause when status is superseded (duplicate URL vs official recording), else null. */
-    supersededReason: string | null
-    videoId: string | null
-    style: string | null
-    account: string
-    skipIdWait: boolean
-    list: { trackCount: number; idRows: number | null; trusted: boolean; named: number; mismatched: number; scrapedAt: number } | null
-  } | null
-}
+    supersededReason: string | null;
+    videoId: string | null;
+    style: string | null;
+    account: string;
+    skipIdWait: boolean;
+    list: {
+      trackCount: number;
+      idRows: number | null;
+      trusted: boolean;
+      named: number;
+      mismatched: number;
+      scrapedAt: number;
+    } | null;
+  } | null;
+};
 
-const ACCT = /^acct-\d+$/
-const acct = (s: string | null | undefined): string | null => (s && ACCT.test(s) ? s : null)
-const numOrNull = (x: unknown): number | null => (x === null || x === undefined ? null : Number(x))
+const ACCT = /^acct-\d+$/;
+const acct = (s: string | null | undefined): string | null => (s && ACCT.test(s) ? s : null);
+const numOrNull = (x: unknown): number | null => (x === null || x === undefined ? null : Number(x));
 
 type TracklistRow = {
-  slug: string
-  artist_name: string | null
-  discovered_at: number
-  processed: number
-  abandoned: number
-  failure_count: number
-  video_known: number
-  video_id: string | null
-  video_source: string | null
-  checked_at: number | null
-}
+  slug: string;
+  artist_name: string | null;
+  discovered_at: number;
+  processed: number;
+  abandoned: number;
+  failure_count: number;
+  video_known: number;
+  video_id: string | null;
+  video_source: string | null;
+  checked_at: number | null;
+};
 type ScheduleRow = {
-  set_date: string | null
-  next_due_at: number | null
-  last_fetched_at: number | null
-  has_id_rows: number
-  no_good_video: number
-  retry_at: number | null
-  attempt_day: string | null
-  attempts_today: number
-}
-type AdditionRow = { id: number; ts: number; status: string; slug: string; video_id: string | null; msg: string | null }
-type TrackListRow = { track_count: number; id_rows: number | null; trusted: number; named: number; mismatched: number; scraped_at: number }
+  set_date: string | null;
+  next_due_at: number | null;
+  last_fetched_at: number | null;
+  has_id_rows: number;
+  no_good_video: number;
+  retry_at: number | null;
+  attempt_day: string | null;
+  attempts_today: number;
+};
+type AdditionRow = {
+  id: number;
+  ts: number;
+  status: string;
+  slug: string;
+  video_id: string | null;
+  msg: string | null;
+};
+type TrackListRow = {
+  track_count: number;
+  id_rows: number | null;
+  trusted: number;
+  named: number;
+  mismatched: number;
+  scraped_at: number;
+};
 
 /** `url` must already be normalized (normalizeTracklistUrl). */
 export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnostics> {
-  const db = dbOf(env)
-  const now = Math.floor(Date.now() / 1000)
+  const db = dbOf(env);
+  const now = Math.floor(Date.now() / 1000);
 
   const [tl, sched, ver, factsMap, adds, req] = await Promise.all([
     db
@@ -115,7 +212,7 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
       )
       .bind(url)
       .all<TracklistRow>(),
-    db.prepare('SELECT * FROM set_schedule WHERE url = ?').bind(url).first<ScheduleRow>(),
+    db.prepare("SELECT * FROM set_schedule WHERE url = ?").bind(url).first<ScheduleRow>(),
     getVerification(env, url),
     loadSetFacts(env, [url]),
     db
@@ -126,21 +223,23 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
       .bind(url)
       .all<AdditionRow>(),
     getMkvidRequestForSet(env, url),
-  ])
+  ]);
 
-  const facts = factsMap.get(url) ?? null
+  const facts = factsMap.get(url) ?? null;
   // A removal in the open burst reads `removed_unconfirmed` (lib/mkvid-removed-burst.ts); only a failed request can be one.
-  const burstSince = req?.status === 'failed' ? await removedBurstSince(env) : null
+  const burstSince = req?.status === "failed" ? await removedBurstSince(env) : null;
   const [position, readiness, listRow] = req
     ? await Promise.all([
-        req.status === 'pending' ? mkvidQueuePosition(env, req.id) : Promise.resolve(null),
+        req.status === "pending" ? mkvidQueuePosition(env, req.id) : Promise.resolve(null),
         readinessFor(env, [req]).then((m) => m.get(req.id) ?? null),
         db
-          .prepare('SELECT track_count, id_rows, trusted, named, mismatched, scraped_at FROM mkvid_request_tracks WHERE request_id = ?')
+          .prepare(
+            "SELECT track_count, id_rows, trusted, named, mismatched, scraped_at FROM mkvid_request_tracks WHERE request_id = ?",
+          )
           .bind(req.id)
           .first<TrackListRow>(),
       ])
-    : [null, null, null]
+    : [null, null, null];
 
   const discovered = tl.results.map((r) => ({
     slug: r.slug,
@@ -153,51 +252,68 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
     videoId: r.video_id,
     videoSource: r.video_source,
     checkedAt: numOrNull(r.checked_at),
-  }))
+  }));
 
-  let videoId: string | null = null
-  let from: 'tracklists' | 'media' | 'mkvid' = 'tracklists'
-  const tlRow = discovered.find((d) => d.videoId) ?? null
-  if (tlRow) videoId = tlRow.videoId
+  let videoId: string | null = null;
+  let from: "tracklists" | "media" | "mkvid" = "tracklists";
+  const tlRow = discovered.find((d) => d.videoId) ?? null;
+  if (tlRow) videoId = tlRow.videoId;
   else if (facts?.videoId) {
-    videoId = facts.videoId
-    from = 'media'
+    videoId = facts.videoId;
+    from = "media";
   } else if (req?.videoId) {
-    videoId = req.videoId
-    from = 'mkvid'
+    videoId = req.videoId;
+    from = "mkvid";
   }
 
-  let video: SetDiagnostics['video'] = null
-  let confirmed: SetDiagnostics['playlist']['confirmed'] = []
-  let removed: SetDiagnostics['hygiene']['removed'] = []
-  let removals: SetDiagnostics['hygiene']['removals'] = []
+  let video: SetDiagnostics["video"] = null;
+  let confirmed: SetDiagnostics["playlist"]["confirmed"] = [];
+  let removed: SetDiagnostics["hygiene"]["removed"] = [];
+  let removals: SetDiagnostics["hygiene"]["removals"] = [];
   if (videoId) {
     const [metaMap, override, conf, rem, rems, mkvidOwn] = await Promise.all([
       readCachedVideoMeta(env, [videoId]),
       isOverridden(env, videoId),
       db
-        .prepare('SELECT playlist_id, state, source, at FROM playlist_confirmed WHERE video_id = ? ORDER BY at DESC, playlist_id ASC')
+        .prepare(
+          "SELECT playlist_id, state, source, at FROM playlist_confirmed WHERE video_id = ? ORDER BY at DESC, playlist_id ASC",
+        )
         .bind(videoId)
         .all<{ playlist_id: string; state: string; source: string; at: number }>(),
       db
-        .prepare('SELECT playlist_id, reason, at, slug FROM removed_videos WHERE video_id = ? ORDER BY at DESC, playlist_id ASC')
+        .prepare(
+          "SELECT playlist_id, reason, at, slug FROM removed_videos WHERE video_id = ? ORDER BY at DESC, playlist_id ASC",
+        )
         .bind(videoId)
         .all<{ playlist_id: string; reason: string; at: number; slug: string | null }>(),
       db
-        .prepare('SELECT id, at, source, status, playlist_kind, reason, detail FROM playlist_removals WHERE video_id = ? ORDER BY at DESC, id DESC LIMIT 20')
+        .prepare(
+          "SELECT id, at, source, status, playlist_kind, reason, detail FROM playlist_removals WHERE video_id = ? ORDER BY at DESC, id DESC LIMIT 20",
+        )
         .bind(videoId)
-        .all<{ id: number; at: number; source: string; status: string; playlist_kind: string; reason: string; detail: string | null }>(),
+        .all<{
+          id: number;
+          at: number;
+          source: string;
+          status: string;
+          playlist_kind: string;
+          reason: string;
+          detail: string | null;
+        }>(),
       mkvidUploadedIds(env),
-    ])
-    const meta = metaMap.get(videoId) ?? null
-    const source: '1001tl' | 'mkvid' = from === 'mkvid' || tlRow?.videoSource === 'mkvid' || mkvidOwn.has(videoId) ? 'mkvid' : '1001tl'
-    const exempt = source === 'mkvid' ? 'mkvid' : null
-    const v = !exempt && (facts || meta) ? judgeVideo(facts, meta, await judgeOptions(env)) : null
+    ]);
+    const meta = metaMap.get(videoId) ?? null;
+    const source: "1001tl" | "mkvid" =
+      from === "mkvid" || tlRow?.videoSource === "mkvid" || mkvidOwn.has(videoId)
+        ? "mkvid"
+        : "1001tl";
+    const exempt = source === "mkvid" ? "mkvid" : null;
+    const v = !exempt && (facts || meta) ? judgeVideo(facts, meta, await judgeOptions(env)) : null;
     video = {
       id: videoId,
       from,
       source,
-      current: from === 'tracklists',
+      current: from === "tracklists",
       exempt,
       meta: meta
         ? {
@@ -210,12 +326,39 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
             fetchedAt: meta.fetchedAt,
           }
         : null,
-      verdict: v ? (v.ok ? { ok: true } : { ok: false, reason: v.reason, label: REASON_LABELS[v.reason] ?? v.reason, detail: v.detail }) : null,
+      verdict: v
+        ? v.ok
+          ? { ok: true }
+          : {
+              ok: false,
+              reason: v.reason,
+              label: REASON_LABELS[v.reason] ?? v.reason,
+              detail: v.detail,
+            }
+        : null,
       override,
-    }
-    confirmed = conf.results.map((r) => ({ playlistId: r.playlist_id, state: r.state === 'in' ? 'in' : 'out', source: r.source, at: Number(r.at) }))
-    removed = rem.results.map((r) => ({ playlistId: r.playlist_id, reason: r.reason, at: Number(r.at), slug: r.slug }))
-    removals = rems.results.map((r) => ({ id: Number(r.id), at: Number(r.at), source: r.source, status: r.status, playlistKind: r.playlist_kind, reason: r.reason, detail: r.detail }))
+    };
+    confirmed = conf.results.map((r) => ({
+      playlistId: r.playlist_id,
+      state: r.state === "in" ? "in" : "out",
+      source: r.source,
+      at: Number(r.at),
+    }));
+    removed = rem.results.map((r) => ({
+      playlistId: r.playlist_id,
+      reason: r.reason,
+      at: Number(r.at),
+      slug: r.slug,
+    }));
+    removals = rems.results.map((r) => ({
+      id: Number(r.id),
+      at: Number(r.at),
+      source: r.source,
+      status: r.status,
+      playlistKind: r.playlist_kind,
+      reason: r.reason,
+      detail: r.detail,
+    }));
   }
 
   return {
@@ -263,7 +406,15 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
       : null,
     video,
     playlist: {
-      additions: adds.results.map((r) => ({ key: String(r.id), ts: Number(r.ts), status: r.status, slug: r.slug, videoId: r.video_id, message: r.msg ?? null, youtube: describeYouTubeError(r.msg, r.status) })),
+      additions: adds.results.map((r) => ({
+        key: String(r.id),
+        ts: Number(r.ts),
+        status: r.status,
+        slug: r.slug,
+        videoId: r.video_id,
+        message: r.msg ?? null,
+        youtube: describeYouTubeError(r.msg, r.status),
+      })),
       confirmed,
     },
     hygiene: { removed, removals },
@@ -279,7 +430,7 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
           outcome: mkvidOutcome(req, burstSince),
           outcomeLine: mkvidOutcomeLine(req, burstSince),
           outcomeDetail: mkvidOutcomeDetail(req, burstSince),
-          supersededReason: req.status === 'superseded' ? supersededReason(req.error) : null,
+          supersededReason: req.status === "superseded" ? supersededReason(req.error) : null,
           videoId: req.videoId,
           style: req.style,
           account: req.account,
@@ -296,5 +447,5 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
             : null,
         }
       : null,
-  }
+  };
 }

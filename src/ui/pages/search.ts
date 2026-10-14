@@ -14,24 +14,30 @@
 // run this script in a stub DOM). Every upstream string goes through esc, every
 // external href through safeHref, and highlight() escapes the original text
 // piece by piece, so no markup can come from data.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { TRACK_ROW_CSS, TRACK_ROW_JS } from "./track-row";
 
-const TABS: Array<[string, string]> = [['all', 'All'], ['tracks', 'Tracks'], ['sets', 'Sets'], ['djs', 'DJs']]
+const TABS: Array<[string, string]> = [
+  ["all", "All"],
+  ["tracks", "Tracks"],
+  ["sets", "Sets"],
+  ["djs", "DJs"],
+];
 const TAB_TIPS: Record<string, string> = {
-  all: 'DJs first, then tracks and sets ranked together by relevance.',
-  tracks: 'Individual tracks, with the sets they were played in. Up to 200, as a table you can sort and filter.',
-  sets: 'Whole DJ sets, by title or by a track played in them. Up to 200, as a table you can sort and filter.',
-  djs: 'DJs, subscribed or not, that appear in the searched track lists.',
-}
+  all: "DJs first, then tracks and sets ranked together by relevance.",
+  tracks:
+    "Individual tracks, with the sets they were played in. Up to 200, as a table you can sort and filter.",
+  sets: "Whole DJ sets, by title or by a track played in them. Up to 200, as a table you can sort and filter.",
+  djs: "DJs, subscribed or not, that appear in the searched track lists.",
+};
 /** Results per kind on a single-kind tab (the API's maximum). */
-const TAB_LIMIT = 200
+const TAB_LIMIT = 200;
 
 const BODY = /* html */ `
 <div class="sq-bar"><input id="sq" type="search" autofocus autocomplete="off" aria-label="Search tracks, sets, DJs" placeholder="Track, set or DJ" role="combobox" aria-controls="sq-results" aria-expanded="true"></div>
-<div id="sq-tabs" class="chips" role="group" aria-label="Result type">${TABS.map(([k, l]) => `<button type="button" class="chip${k === 'all' ? ' on' : ''}" data-kind="${k}" aria-pressed="${k === 'all'}"${tipAttr(TAB_TIPS[k])}>${l}</button>`).join('')}</div>
+<div id="sq-tabs" class="chips" role="group" aria-label="Result type">${TABS.map(([k, l]) => `<button type="button" class="chip${k === "all" ? " on" : ""}" data-kind="${k}" aria-pressed="${k === "all"}"${tipAttr(TAB_TIPS[k])}>${l}</button>`).join("")}</div>
 <div id="sq-corrected" class="sq-corrected" role="status" hidden></div>
 <div id="sq-results" role="listbox" aria-label="Search results"></div>
 <div id="sq-tables" class="sq-tables" role="listbox" aria-label="Search results">
@@ -41,7 +47,7 @@ const BODY = /* html */ `
   <p id="sq-cap" class="muted sq-cap" hidden></p>
 </div>
 <div id="sq-empty" class="empty" role="status">Search every verified track list: tracks, sets and DJs.</div>
-`
+`;
 
 export const SEARCH_CSS = /* css */ `
   mark { background: var(--accent-soft); color: inherit; border-radius: 2px; }
@@ -86,7 +92,7 @@ export const SEARCH_CSS = /* css */ `
   }
   ${TRACK_ROW_CSS}
   .sq-acts .btn.saved { border-color: var(--accent); color: var(--accent); text-decoration: none; }
-`
+`;
 
 const JS = /* js */ `
 (() => {
@@ -99,7 +105,7 @@ ${TRACK_ROW_JS}
   const $sq = $('sq'), $tabs = $('sq-tabs'), $note = $('sq-corrected'), $res = $('sq-results'), $tables = $('sq-tables'), $empty = $('sq-empty'), $cap = $('sq-cap');
   const EMPTY_HINT = 'Search every verified track list: tracks, sets and DJs.';
 
-  // ── state: q and kind are mirrored to the query string ──
+  // -- state: q and kind are mirrored to the query string --
   const known = TABS.map((t) => t[0]);
   let kind = known.indexOf(TK.qs.get('kind') || '') >= 0 ? TK.qs.get('kind') : 'all';
   let exact = false, seq = 0, ctl = null, timer = 0, data = null, tokens = [], active = -1;
@@ -109,8 +115,8 @@ ${TRACK_ROW_JS}
   // psState[trackKey]: 'busy' while saving, else the pre-save { id, stage } (kept across searches).
   const psState = {};
 
-  // ── text matching: case-, diacritic- and apostrophe-insensitive ──
-  function fold(ch) { return (ch.normalize ? ch.normalize('NFKD') : ch).replace(/\\p{M}+/gu, '').toLowerCase().replace(/['’‘\`´]/g, ''); }
+  // -- text matching: case-, diacritic- and apostrophe-insensitive --
+  function fold(ch) { return (ch.normalize ? ch.normalize('NFKD') : ch).replace(/\\p{M}+/gu, '').toLowerCase().replace(/['\u2019\u2018\`\u00b4]/g, ''); }
   function wordsOf(s) { return [...String(s == null ? '' : s)].map(fold).join('').split(/[^\\p{L}\\p{N}]+/u).filter(Boolean); }
   // highlight(text, tokens): the text escaped, with the start of every word that
   // begins with a token wrapped in <mark>. Matching runs on a folded copy, the
@@ -145,7 +151,7 @@ ${TRACK_ROW_JS}
     return '/ui/api/search?q=' + encodeURIComponent(q) + '&kind=' + encodeURIComponent(k) + '&limit=' + (k === 'all' ? 20 : TAB_LIMIT) + (ex ? '&exact=1' : '');
   }
 
-  // ── rendering ──
+  // -- rendering --
   const setHref = (url) => '/ui/set?url=' + encodeURIComponent(url);
   const ext = (url, label, cls) => { const h = TK.safeHref(url); return h ? '<a class="' + (cls || 'pill') + '" href="' + esc(h) + '" target="_blank" rel="noreferrer noopener"' + TK.tip(EXT_TIPS[label]) + '>' + esc(label) + '</a>' : ''; };
   const hl = (s) => highlight(s, tokens);
@@ -205,7 +211,7 @@ ${TRACK_ROW_JS}
       '<a href="' + esc(setHref(s.url)) + '">Set page</a>' + ext(s.url, '1001tl', 'sq-ext') + '</li>').join('') + '</ul>';
   }
   // The table has its own Label column, so its Track cell leaves the label out (noLabel).
-  const trackTitle = (t, noLabel) => '<span class="sq-ttl">' + hl(t.artist) + ' – ' + hl(t.title) + '</span>' +
+  const trackTitle = (t, noLabel) => '<span class="sq-ttl">' + hl(t.artist) + ' - ' + hl(t.title) + '</span>' +
     (t.label && !noLabel ? '<span class="badge neutral"' + TK.tip('The record label of this track.') + '>' + hl(t.label) + '</span>' : '');
   function trackRowHtml(t, n) {
     nav[n] = { id: 'sq-r' + n, href: trackHref(t) };
@@ -244,7 +250,7 @@ ${TRACK_ROW_JS}
     return list('djs').concat(rest);
   }
 
-  // ── the single-kind tables ──
+  // -- the single-kind tables --
   // Each result gets _n (its relevance rank) once per response: the row's id is sq-<kind>-<_n>.
   const MATCH_TIP = 'Relevance: 100 is every word matching exactly; a recent set, a video or a subscribed DJ adds a little.';
   const match = (r) => '<span class="sq-match"' + TK.tip(MATCH_TIP) + '>' + Math.round(score(r) * 100) + '</span>';
@@ -252,12 +258,12 @@ ${TRACK_ROW_JS}
   const djNames = (t) => { const seen = []; for (const s of t.sets || []) if (s.djName && seen.indexOf(s.djName) < 0) seen.push(s.djName); return seen; };
   const COLS = {
     tracks: [
-      { key: 'title', label: 'Track', type: 'text', value: (t) => t.artist + ' – ' + t.title,
+      { key: 'title', label: 'Track', type: 'text', value: (t) => t.artist + ' - ' + t.title,
         render: (t) => cell(t.image, t.artist, 'tracks', '<div class="sq-main">' + trackTitle(t, true) + '</div><div class="sq-acts">' + trackLinks(t) + '</div>' + trackSetsHtml(t)) },
       { key: 'artist', label: 'Artist', type: 'text', hideOn: 'phone', render: (t) => hl(t.artist) },
-      { key: 'label', label: 'Label', type: 'text', hideOn: 'phone', render: (t) => (t.label ? hl(t.label) : '<span class="tkt-nil">–</span>') },
+      { key: 'label', label: 'Label', type: 'text', hideOn: 'phone', render: (t) => (t.label ? hl(t.label) : '<span class="tkt-nil">-</span>') },
       { key: 'djs', label: 'Played by', type: 'text', hideOn: 'phone', value: (t) => djNames(t).join(', ') || null,
-        render: (t) => { const n = djNames(t); return n.length ? n.slice(0, 2).map(hl).join(', ') + (n.length > 2 ? ' <span class="muted">+' + (n.length - 2) + '</span>' : '') : '<span class="tkt-nil">–</span>'; } },
+        render: (t) => { const n = djNames(t); return n.length ? n.slice(0, 2).map(hl).join(', ') + (n.length > 2 ? ' <span class="muted">+' + (n.length - 2) + '</span>' : '') : '<span class="tkt-nil">-</span>'; } },
       { key: 'setCount', label: 'Sets', type: 'number', value: (t) => (t.sets || []).length, render: setsButton, tip: 'Sets this track was played in. Press to list them.' },
       { key: 'date', label: 'Last played', type: 'date', value: (t) => { const b = newestSet(t); return b && b.date ? String(b.date).slice(0, 10) : null; } },
       { key: 'score', label: 'Match', type: 'number', render: match, tip: MATCH_TIP },
@@ -349,7 +355,7 @@ ${TRACK_ROW_JS}
     $note.hidden = false;
   }
 
-  // ── searching: one request in flight, the newest wins ──
+  // -- searching: one request in flight, the newest wins --
   function sync(q) { TKTable.qs.merge({ q, kind: kind === 'all' ? '' : kind }); }
   function clearOut() { data = null; active = -1; nav = []; paint(); }
   async function run() {
@@ -377,13 +383,13 @@ ${TRACK_ROW_JS}
     showNote(q);
     paint(true);
     const count = (kind === 'all' || kind === 'tracks' ? d.tracks.length : 0) + (kind === 'all' || kind === 'sets' ? (d.sets || []).length : 0) + (kind === 'all' || kind === 'djs' ? (d.djs || []).length : 0);
-    if (count) $empty.hidden = true; else showEmpty('Nothing found for “' + q + '”.');
+    if (count) $empty.hidden = true; else showEmpty('Nothing found for \u201c' + q + '\u201d.');
     if (kind === 'all' || kind === 'tracks') lookupPresaved(d.tracks).catch(() => {});
   }
   function schedule() { clearTimeout(timer); timer = setTimeout(run, 150); }
   function setKind(k) { if (k === kind || known.indexOf(k) < 0) return; kind = k; renderTabs(); clearTimeout(timer); run(); }
 
-  // ── events ──
+  // -- events --
   $sq.addEventListener('input', () => { exact = false; schedule(); });
   $sq.addEventListener('keydown', (ev) => {
     const key = ev && ev.key;
@@ -476,21 +482,21 @@ ${TRACK_ROW_JS}
   $res.addEventListener('error', dropImg, true);
   $tables.addEventListener('error', dropImg, true);
 
-  // ── start ──
+  // -- start --
   renderTabs();
   $sq.value = TK.qs.get('q') || '';
   if ($sq.value.trim()) run(); else showEmpty(EMPTY_HINT);
 })();
-`
+`;
 
 export const SEARCH_PAGE: UiPage = {
-  path: '/search',
+  path: "/search",
   html: shell({
-    nav: 'search',
-    title: 'Search',
-    description: 'Tracks, sets and DJs from every verified track list.',
+    nav: "search",
+    title: "Search",
+    description: "Tracks, sets and DJs from every verified track list.",
     body: BODY,
     css: SEARCH_CSS,
     js: JS,
   }),
-}
+};

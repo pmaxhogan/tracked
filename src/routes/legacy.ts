@@ -7,18 +7,24 @@
  * the old registration and its push subscription client-side, after subscribing under /ui/.
  * No handler serves content, so none needs Access. Keep until the owner retires the old prefix.
  */
-import { Hono } from 'hono'
+import { Hono } from "hono";
 
-export const LEGACY_PAGE_MAP: Record<string, string> = { '/tracklist': '/set' }
+export const LEGACY_PAGE_MAP: Record<string, string> = { "/tracklist": "/set" };
 
-export const legacyApp = new Hono()
+export const legacyApp = new Hono();
 
-legacyApp.all('*', (c) => {
-  const url = new URL(c.req.url)
-  const rest = url.pathname.replace(/^\/subscriptions/, '') // '' | '/' | '/pool' | '/api/…'
-  if (rest === '/sw.js' || rest.startsWith('/api/') || rest === '/api' || rest.startsWith('/oauth/') || rest === '/oauth') {
-    return c.json({ error: 'moved', message: `This API moved to /ui${rest}` }, 410)
+legacyApp.all("*", (c) => {
+  const url = new URL(c.req.url);
+  const rest = url.pathname.replace(/^\/subscriptions/, ""); // '' | '/' | '/pool' | '/api/...'
+  if (
+    rest === "/sw.js" ||
+    rest.startsWith("/api/") ||
+    rest === "/api" ||
+    rest.startsWith("/oauth/") ||
+    rest === "/oauth"
+  ) {
+    return c.json({ error: "moved", message: `This API moved to /ui${rest}` }, 410);
   }
-  const mapped = LEGACY_PAGE_MAP[rest] ?? rest
-  return c.redirect(`/ui${mapped}${url.search}`, 301)
-})
+  const mapped = LEGACY_PAGE_MAP[rest] ?? rest;
+  return c.redirect(`/ui${mapped}${url.search}`, 301);
+});

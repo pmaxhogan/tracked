@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi } from "vitest";
 import {
   addVideoToPlaylist,
   authedFetch,
@@ -14,323 +14,435 @@ import {
   PlaylistNotFoundError,
   removeVideoFromPlaylist,
   YouTubeApiError,
-} from '../src/lib/youtube-playlists'
+} from "../src/lib/youtube-playlists";
 
 function jsonResponse(body: unknown, init: ResponseInit = { status: 200 }): Response {
-  return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' }, ...init })
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
 }
 
-describe('findPlaylistByTitle', () => {
-  it('returns the matching playlist on the first page', async () => {
+describe("findPlaylistByTitle", () => {
+  it("returns the matching playlist on the first page", async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(
       jsonResponse({
         items: [
-          { id: 'p1', snippet: { title: 'Other' } },
-          { id: 'p2', snippet: { title: 'Lilly Palmer (1001tklists)' } },
+          { id: "p1", snippet: { title: "Other" } },
+          { id: "p2", snippet: { title: "Lilly Palmer (1001tklists)" } },
         ],
       }),
-    ) as unknown as typeof fetch
-    const r = await findPlaylistByTitle('Lilly Palmer (1001tklists)', 'tok', fetcher)
-    expect(r).toEqual({ id: 'p2', title: 'Lilly Palmer (1001tklists)' })
-    expect(fetcher).toHaveBeenCalledTimes(1)
-  })
+    ) as unknown as typeof fetch;
+    const r = await findPlaylistByTitle("Lilly Palmer (1001tklists)", "tok", fetcher);
+    expect(r).toEqual({ id: "p2", title: "Lilly Palmer (1001tklists)" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
 
-  it('paginates with nextPageToken and returns null when nothing matches', async () => {
+  it("paginates with nextPageToken and returns null when nothing matches", async () => {
     const fetcher = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'a', snippet: { title: 'A' } }], nextPageToken: 't2' }))
-      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'b', snippet: { title: 'B' } }] })) as unknown as typeof fetch
-    const r = await findPlaylistByTitle('Nonexistent', 'tok', fetcher)
-    expect(r).toBeNull()
-    expect((fetcher as unknown as { mock: { calls: unknown[][] } }).mock.calls.length).toBe(2)
-    const url2 = (fetcher as unknown as { mock: { calls: string[][] } }).mock.calls[1]![0]!
-    expect(url2).toContain('pageToken=t2')
-  })
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [{ id: "a", snippet: { title: "A" } }], nextPageToken: "t2" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [{ id: "b", snippet: { title: "B" } }] }),
+      ) as unknown as typeof fetch;
+    const r = await findPlaylistByTitle("Nonexistent", "tok", fetcher);
+    expect(r).toBeNull();
+    expect((fetcher as unknown as { mock: { calls: unknown[][] } }).mock.calls.length).toBe(2);
+    const url2 = (fetcher as unknown as { mock: { calls: string[][] } }).mock.calls[1]![0]!;
+    expect(url2).toContain("pageToken=t2");
+  });
 
-  it('throws with status + body on non-2xx', async () => {
-    const fetcher = vi.fn().mockResolvedValue(new Response('quotaExceeded', { status: 403 })) as unknown as typeof fetch
-    await expect(findPlaylistByTitle('x', 'tok', fetcher)).rejects.toThrow(/playlists\.list 403/)
-  })
+  it("throws with status + body on non-2xx", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(new Response("quotaExceeded", { status: 403 })) as unknown as typeof fetch;
+    await expect(findPlaylistByTitle("x", "tok", fetcher)).rejects.toThrow(/playlists\.list 403/);
+  });
 
-  it('always sends mine=true and an Authorization bearer header', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch
-    await findPlaylistByTitle('x', 'tok-abc', fetcher)
-    const [url, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!
-    expect(url).toContain('mine=true')
-    expect(new Headers(init!.headers).get('Authorization')).toBe('Bearer tok-abc')
-  })
-})
+  it("always sends mine=true and an Authorization bearer header", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch;
+    await findPlaylistByTitle("x", "tok-abc", fetcher);
+    const [url, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock
+      .calls[0]!;
+    expect(url).toContain("mine=true");
+    expect(new Headers(init!.headers).get("Authorization")).toBe("Bearer tok-abc");
+  });
+});
 
-describe('createPlaylist', () => {
-  it('POSTs the title + public status by default', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(
-      jsonResponse({ id: 'newPL', snippet: { title: 'A (1001tklists)' } }),
-    ) as unknown as typeof fetch
-    const r = await createPlaylist({ title: 'A (1001tklists)' }, 'tok', fetcher)
-    expect(r).toEqual({ id: 'newPL', title: 'A (1001tklists)' })
-    const init = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]![1]!
-    expect(init.method).toBe('POST')
-    const body = JSON.parse(init.body as string)
-    expect(body.snippet.title).toBe('A (1001tklists)')
-    expect(body.status.privacyStatus).toBe('public')
-  })
+describe("createPlaylist", () => {
+  it("POSTs the title + public status by default", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ id: "newPL", snippet: { title: "A (1001tklists)" } }),
+      ) as unknown as typeof fetch;
+    const r = await createPlaylist({ title: "A (1001tklists)" }, "tok", fetcher);
+    expect(r).toEqual({ id: "newPL", title: "A (1001tklists)" });
+    const init = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock
+      .calls[0]![1]!;
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(init.body as string);
+    expect(body.snippet.title).toBe("A (1001tklists)");
+    expect(body.status.privacyStatus).toBe("public");
+  });
 
-  it('respects an explicit privacyStatus override', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ id: 'p', snippet: { title: 't' } })) as unknown as typeof fetch
-    await createPlaylist({ title: 't', privacyStatus: 'unlisted' }, 'tok', fetcher)
+  it("respects an explicit privacyStatus override", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ id: "p", snippet: { title: "t" } }),
+      ) as unknown as typeof fetch;
+    await createPlaylist({ title: "t", privacyStatus: "unlisted" }, "tok", fetcher);
     const body = JSON.parse(
-      (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]![1]!.body as string,
-    )
-    expect(body.status.privacyStatus).toBe('unlisted')
-  })
-})
+      (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]![1]!
+        .body as string,
+    );
+    expect(body.status.privacyStatus).toBe("unlisted");
+  });
+});
 
-describe('listPlaylistVideoIds', () => {
-  it('paginates and returns the union of all videoIds as a Set', async () => {
+describe("listPlaylistVideoIds", () => {
+  it("paginates and returns the union of all videoIds as a Set", async () => {
     const fetcher = vi
       .fn()
       .mockResolvedValueOnce(
         jsonResponse({
-          items: [{ contentDetails: { videoId: 'a1' } }, { contentDetails: { videoId: 'b2' } }],
-          nextPageToken: 't',
+          items: [{ contentDetails: { videoId: "a1" } }, { contentDetails: { videoId: "b2" } }],
+          nextPageToken: "t",
         }),
       )
       .mockResolvedValueOnce(
-        jsonResponse({ items: [{ contentDetails: { videoId: 'c3' } }, { contentDetails: { videoId: 'a1' } }] }),
-      ) as unknown as typeof fetch
-    const r = await listPlaylistVideoIds('PLx', 'tok', fetcher)
-    expect([...r].sort()).toEqual(['a1', 'b2', 'c3'])
-  })
+        jsonResponse({
+          items: [{ contentDetails: { videoId: "c3" } }, { contentDetails: { videoId: "a1" } }],
+        }),
+      ) as unknown as typeof fetch;
+    const r = await listPlaylistVideoIds("PLx", "tok", fetcher);
+    expect([...r].sort()).toEqual(["a1", "b2", "c3"]);
+  });
 
-  it('returns an empty set when the playlist has no items', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch
-    expect((await listPlaylistVideoIds('PLx', 'tok', fetcher)).size).toBe(0)
-  })
-})
+  it("returns an empty set when the playlist has no items", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch;
+    expect((await listPlaylistVideoIds("PLx", "tok", fetcher)).size).toBe(0);
+  });
+});
 
-describe('addVideoToPlaylist', () => {
-  it('POSTs a snippet with the playlistId + videoId', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ id: 'item' })) as unknown as typeof fetch
-    await addVideoToPlaylist('PLx', 'vidVidVidVi', 'tok', fetcher)
-    const [, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!
-    const body = JSON.parse(init!.body as string)
+describe("addVideoToPlaylist", () => {
+  it("POSTs a snippet with the playlistId + videoId", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ id: "item" })) as unknown as typeof fetch;
+    await addVideoToPlaylist("PLx", "vidVidVidVi", "tok", fetcher);
+    const [, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock
+      .calls[0]!;
+    const body = JSON.parse(init!.body as string);
     expect(body).toEqual({
-      snippet: { playlistId: 'PLx', resourceId: { kind: 'youtube#video', videoId: 'vidVidVidVi' } },
-    })
-  })
+      snippet: { playlistId: "PLx", resourceId: { kind: "youtube#video", videoId: "vidVidVidVi" } },
+    });
+  });
 
-  it('throws with response body when YouTube rejects the insert', async () => {
-    const fetcher = vi.fn().mockResolvedValue(
-      new Response('videoNotFound', { status: 404 }),
-    ) as unknown as typeof fetch
-    await expect(addVideoToPlaylist('PLx', 'missingVid0', 'tok', fetcher)).rejects.toThrow(/playlistItems\.insert 404/)
-  })
-})
+  it("throws with response body when YouTube rejects the insert", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(new Response("videoNotFound", { status: 404 })) as unknown as typeof fetch;
+    await expect(addVideoToPlaylist("PLx", "missingVid0", "tok", fetcher)).rejects.toThrow(
+      /playlistItems\.insert 404/,
+    );
+  });
+});
 
-describe('error classification (YouTubeApiError)', () => {
+describe("error classification (YouTubeApiError)", () => {
   const apiError = (status: number, reason: string) =>
-    jsonResponse({ error: { code: status, message: 'x', errors: [{ reason, domain: 'youtube' }] } }, { status })
+    jsonResponse(
+      { error: { code: status, message: "x", errors: [{ reason, domain: "youtube" }] } },
+      { status },
+    );
 
-  it('carries status + parsed reason on non-2xx responses', async () => {
-    const fetcher = vi.fn().mockResolvedValue(apiError(404, 'videoNotFound')) as unknown as typeof fetch
-    const err = await addVideoToPlaylist('PLx', 'goneVideo12', 'tok', fetcher).catch((e) => e)
-    expect(err).toBeInstanceOf(YouTubeApiError)
-    expect(err.status).toBe(404)
-    expect(err.reason).toBe('videoNotFound')
-  })
+  it("carries status + parsed reason on non-2xx responses", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(apiError(404, "videoNotFound")) as unknown as typeof fetch;
+    const err = await addVideoToPlaylist("PLx", "goneVideo12", "tok", fetcher).catch((e) => e);
+    expect(err).toBeInstanceOf(YouTubeApiError);
+    expect(err.status).toBe(404);
+    expect(err.reason).toBe("videoNotFound");
+  });
 
-  it('classifies quotaExceeded as a quota error, not a permanent one', async () => {
-    const fetcher = vi.fn().mockResolvedValue(apiError(403, 'quotaExceeded')) as unknown as typeof fetch
-    const err = await addVideoToPlaylist('PLx', 'anyVideo123', 'tok', fetcher).catch((e) => e)
-    expect(isQuotaError(err)).toBe(true)
-    expect(isPermanentInsertError(err)).toBe(false)
-  })
+  it("classifies quotaExceeded as a quota error, not a permanent one", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(apiError(403, "quotaExceeded")) as unknown as typeof fetch;
+    const err = await addVideoToPlaylist("PLx", "anyVideo123", "tok", fetcher).catch((e) => e);
+    expect(isQuotaError(err)).toBe(true);
+    expect(isPermanentInsertError(err)).toBe(false);
+  });
 
-  it('classifies 404 videoNotFound and 400 as permanent insert errors', async () => {
-    for (const [status, reason] of [[404, 'videoNotFound'], [400, 'invalidResourceId']] as const) {
-      const fetcher = vi.fn().mockResolvedValue(apiError(status, reason)) as unknown as typeof fetch
-      const err = await addVideoToPlaylist('PLx', 'deadVideo12', 'tok', fetcher).catch((e) => e)
-      expect(isPermanentInsertError(err)).toBe(true)
-      expect(isQuotaError(err)).toBe(false)
+  it("classifies 404 videoNotFound and 400 as permanent insert errors", async () => {
+    for (const [status, reason] of [
+      [404, "videoNotFound"],
+      [400, "invalidResourceId"],
+    ] as const) {
+      const fetcher = vi
+        .fn()
+        .mockResolvedValue(apiError(status, reason)) as unknown as typeof fetch;
+      const err = await addVideoToPlaylist("PLx", "deadVideo12", "tok", fetcher).catch((e) => e);
+      expect(isPermanentInsertError(err)).toBe(true);
+      expect(isQuotaError(err)).toBe(false);
     }
-  })
+  });
 
-  it('treats 5xx and plain Errors as transient (neither quota nor permanent)', async () => {
-    const fetcher = vi.fn().mockResolvedValue(new Response('oops', { status: 503 })) as unknown as typeof fetch
-    const err = await addVideoToPlaylist('PLx', 'flakyVideo1', 'tok', fetcher).catch((e) => e)
-    expect(isPermanentInsertError(err)).toBe(false)
-    expect(isQuotaError(err)).toBe(false)
-    expect(isPermanentInsertError(new Error('network'))).toBe(false)
-  })
-
-  it('still classifies by status when the error body is not JSON', async () => {
-    const fetcher = vi.fn().mockResolvedValue(new Response('<html>gateway</html>', { status: 404 })) as unknown as typeof fetch
-    const err = await addVideoToPlaylist('PLx', 'deadVideo12', 'tok', fetcher).catch((e) => e)
-    expect(err.reason).toBeNull()
-    expect(isPermanentInsertError(err)).toBe(true)
-  })
-})
-
-describe('findPlaylistItemIds', () => {
-  it('filters playlistItems.list by videoId and returns the item ids across pages', async () => {
+  it("treats 5xx and plain Errors as transient (neither quota nor permanent)", async () => {
     const fetcher = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'item1' }], nextPageToken: 'p2' }))
-      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'item2' }] })) as unknown as typeof fetch
-    const ids = await findPlaylistItemIds('PL', 'vidA1234567', 'tok', fetcher)
-    expect(ids).toEqual(['item1', 'item2'])
-    const url1 = (fetcher as unknown as { mock: { calls: string[][] } }).mock.calls[0]![0]!
-    expect(url1).toContain('playlistId=PL')
-    expect(url1).toContain('videoId=vidA1234567')
-    expect(url1).toContain('part=id')
-  })
+      .mockResolvedValue(new Response("oops", { status: 503 })) as unknown as typeof fetch;
+    const err = await addVideoToPlaylist("PLx", "flakyVideo1", "tok", fetcher).catch((e) => e);
+    expect(isPermanentInsertError(err)).toBe(false);
+    expect(isQuotaError(err)).toBe(false);
+    expect(isPermanentInsertError(new Error("network"))).toBe(false);
+  });
 
-  it('returns an empty list when the video is not in the playlist', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch
-    expect(await findPlaylistItemIds('PL', 'vidA1234567', 'tok', fetcher)).toEqual([])
-  })
-
-  it('surfaces playlistNotFound as PlaylistNotFoundError', async () => {
+  it("still classifies by status when the error body is not JSON", async () => {
     const fetcher = vi
       .fn()
-      .mockResolvedValue(new Response('{"error":{"errors":[{"reason":"playlistNotFound"}]}}', { status: 404 })) as unknown as typeof fetch
-    await expect(findPlaylistItemIds('PLgone', 'vidA1234567', 'tok', fetcher)).rejects.toBeInstanceOf(PlaylistNotFoundError)
-  })
-})
+      .mockResolvedValue(
+        new Response("<html>gateway</html>", { status: 404 }),
+      ) as unknown as typeof fetch;
+    const err = await addVideoToPlaylist("PLx", "deadVideo12", "tok", fetcher).catch((e) => e);
+    expect(err.reason).toBeNull();
+    expect(isPermanentInsertError(err)).toBe(true);
+  });
+});
 
-describe('isUnavailableItem (the husk of a deleted or foreign private video)', () => {
-  const item = (snippet: Record<string, unknown>, privacyStatus?: string, contentDetails: Record<string, unknown> = {}) => ({
-    id: 'item-1',
-    snippet: { resourceId: { videoId: 'v' }, ...snippet },
-    contentDetails: { videoId: 'v', ...contentDetails },
+describe("findPlaylistItemIds", () => {
+  it("filters playlistItems.list by videoId and returns the item ids across pages", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: "item1" }], nextPageToken: "p2" }))
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: "item2" }] })) as unknown as typeof fetch;
+    const ids = await findPlaylistItemIds("PL", "vidA1234567", "tok", fetcher);
+    expect(ids).toEqual(["item1", "item2"]);
+    const url1 = (fetcher as unknown as { mock: { calls: string[][] } }).mock.calls[0]![0]!;
+    expect(url1).toContain("playlistId=PL");
+    expect(url1).toContain("videoId=vidA1234567");
+    expect(url1).toContain("part=id");
+  });
+
+  it("returns an empty list when the video is not in the playlist", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch;
+    expect(await findPlaylistItemIds("PL", "vidA1234567", "tok", fetcher)).toEqual([]);
+  });
+
+  it("surfaces playlistNotFound as PlaylistNotFoundError", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(
+        new Response('{"error":{"errors":[{"reason":"playlistNotFound"}]}}', { status: 404 }),
+      ) as unknown as typeof fetch;
+    await expect(
+      findPlaylistItemIds("PLgone", "vidA1234567", "tok", fetcher),
+    ).rejects.toBeInstanceOf(PlaylistNotFoundError);
+  });
+});
+
+describe("isUnavailableItem (the husk of a deleted or foreign private video)", () => {
+  const item = (
+    snippet: Record<string, unknown>,
+    privacyStatus?: string,
+    contentDetails: Record<string, unknown> = {},
+  ) => ({
+    id: "item-1",
+    snippet: { resourceId: { videoId: "v" }, ...snippet },
+    contentDetails: { videoId: "v", ...contentDetails },
     ...(privacyStatus ? { status: { privacyStatus } } : {}),
-  })
+  });
 
   it("is one for somebody else's private video and for a deleted one", () => {
     // What the FISHER playlist lists for its private video: the placeholder title, no channel, no publish date.
-    expect(isUnavailableItem(item({ title: 'Private video', description: 'This video is private.' }, 'private'))).toBe(true)
-    expect(isUnavailableItem(item({ title: 'Deleted video', description: 'This video is unavailable.' }, 'privacyStatusUnspecified'))).toBe(true)
-    expect(isUnavailableItem(item({ title: 'Deleted video' }))).toBe(true)
-  })
+    expect(
+      isUnavailableItem(
+        item({ title: "Private video", description: "This video is private." }, "private"),
+      ),
+    ).toBe(true);
+    expect(
+      isUnavailableItem(
+        item(
+          { title: "Deleted video", description: "This video is unavailable." },
+          "privacyStatusUnspecified",
+        ),
+      ),
+    ).toBe(true);
+    expect(isUnavailableItem(item({ title: "Deleted video" }))).toBe(true);
+  });
 
-  it('is never one for a public or unlisted video, whatever it is called', () => {
-    for (const title of ['Private video', 'Deleted video']) {
-      expect(isUnavailableItem(item({ title }, 'public'))).toBe(false)
-      expect(isUnavailableItem(item({ title }, 'unlisted'))).toBe(false)
+  it("is never one for a public or unlisted video, whatever it is called", () => {
+    for (const title of ["Private video", "Deleted video"]) {
+      expect(isUnavailableItem(item({ title }, "public"))).toBe(false);
+      expect(isUnavailableItem(item({ title }, "unlisted"))).toBe(false);
     }
-  })
+  });
 
   it("is not one for the owner's own private upload, which lists with its channel and publish date", () => {
-    expect(isUnavailableItem(item({ title: 'My set', videoOwnerChannelId: 'UCme', videoOwnerChannelTitle: 'Me' }, 'private', { videoPublishedAt: '2026-01-01T00:00:00Z' }))).toBe(false)
+    expect(
+      isUnavailableItem(
+        item(
+          { title: "My set", videoOwnerChannelId: "UCme", videoOwnerChannelTitle: "Me" },
+          "private",
+          { videoPublishedAt: "2026-01-01T00:00:00Z" },
+        ),
+      ),
+    ).toBe(false);
     // Even one the owner named "Private video".
-    expect(isUnavailableItem(item({ title: 'Private video', videoOwnerChannelId: 'UCme', videoOwnerChannelTitle: 'Me' }, 'private'))).toBe(false)
-    expect(isUnavailableItem(item({ title: 'Private video', videoOwnerChannelTitle: 'Me' }, 'private'))).toBe(false)
-    expect(isUnavailableItem(item({ title: 'Deleted video' }, 'private', { videoPublishedAt: '2026-01-01T00:00:00Z' }))).toBe(false)
-  })
+    expect(
+      isUnavailableItem(
+        item(
+          { title: "Private video", videoOwnerChannelId: "UCme", videoOwnerChannelTitle: "Me" },
+          "private",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isUnavailableItem(item({ title: "Private video", videoOwnerChannelTitle: "Me" }, "private")),
+    ).toBe(false);
+    expect(
+      isUnavailableItem(
+        item({ title: "Deleted video" }, "private", { videoPublishedAt: "2026-01-01T00:00:00Z" }),
+      ),
+    ).toBe(false);
+  });
 
   it('is not one when the listing left out what it needs: a "Private video" without its status, an item without a title', () => {
-    expect(isUnavailableItem(item({ title: 'Private video' }))).toBe(false)
-    expect(isUnavailableItem(item({}, 'private'))).toBe(false)
-    expect(isUnavailableItem(item({ title: 'Some set' }, 'private'))).toBe(false)
-    expect(isUnavailableItem({ id: 'x' })).toBe(false)
-  })
-})
+    expect(isUnavailableItem(item({ title: "Private video" }))).toBe(false);
+    expect(isUnavailableItem(item({}, "private"))).toBe(false);
+    expect(isUnavailableItem(item({ title: "Some set" }, "private"))).toBe(false);
+    expect(isUnavailableItem({ id: "x" })).toBe(false);
+  });
+});
 
-describe('deletePlaylistItem', () => {
-  it('DELETEs by playlistItem id', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 204 })) as unknown as typeof fetch
-    await deletePlaylistItem('item1', 'tok', fetcher)
-    const [url, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!
-    expect(url).toContain('/playlistItems?id=item1')
-    expect(init!.method).toBe('DELETE')
-    expect(new Headers(init!.headers).get('Authorization')).toBe('Bearer tok')
-  })
-
-  it('treats a 404 (already gone) as success', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(new Response('playlistItemNotFound', { status: 404 })) as unknown as typeof fetch
-    await expect(deletePlaylistItem('item1', 'tok', fetcher)).resolves.toBeUndefined()
-  })
-
-  it('throws on any other non-2xx', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(new Response('forbidden', { status: 403 })) as unknown as typeof fetch
-    await expect(deletePlaylistItem('item1', 'tok', fetcher)).rejects.toThrow(/playlistItems\.delete 403/)
-  })
-})
-
-describe('removeVideoFromPlaylist', () => {
-  it('looks the item up by videoId, deletes every occurrence, and reports the count', async () => {
+describe("deletePlaylistItem", () => {
+  it("DELETEs by playlistItem id", async () => {
     const fetcher = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'item1' }, { id: 'item1dupe' }] }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 })) as unknown as typeof fetch;
+    await deletePlaylistItem("item1", "tok", fetcher);
+    const [url, init] = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock
+      .calls[0]!;
+    expect(url).toContain("/playlistItems?id=item1");
+    expect(init!.method).toBe("DELETE");
+    expect(new Headers(init!.headers).get("Authorization")).toBe("Bearer tok");
+  });
+
+  it("treats a 404 (already gone) as success", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("playlistItemNotFound", { status: 404 }),
+      ) as unknown as typeof fetch;
+    await expect(deletePlaylistItem("item1", "tok", fetcher)).resolves.toBeUndefined();
+  });
+
+  it("throws on any other non-2xx", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("forbidden", { status: 403 })) as unknown as typeof fetch;
+    await expect(deletePlaylistItem("item1", "tok", fetcher)).rejects.toThrow(
+      /playlistItems\.delete 403/,
+    );
+  });
+});
+
+describe("removeVideoFromPlaylist", () => {
+  it("looks the item up by videoId, deletes every occurrence, and reports the count", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [{ id: "item1" }, { id: "item1dupe" }] }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
-      .mockResolvedValueOnce(new Response(null, { status: 204 })) as unknown as typeof fetch
-    expect(await removeVideoFromPlaylist('PL', 'vidA1234567', 'tok', fetcher)).toBe(2)
-    const calls = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls
-    expect(calls).toHaveLength(3)
-    expect(calls[1]![0]).toContain('id=item1')
-    expect(calls[2]![0]).toContain('id=item1dupe')
-  })
+      .mockResolvedValueOnce(new Response(null, { status: 204 })) as unknown as typeof fetch;
+    expect(await removeVideoFromPlaylist("PL", "vidA1234567", "tok", fetcher)).toBe(2);
+    const calls = (fetcher as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls;
+    expect(calls).toHaveLength(3);
+    expect(calls[1]![0]).toContain("id=item1");
+    expect(calls[2]![0]).toContain("id=item1dupe");
+  });
 
-  it('makes no delete call when the video is not in the playlist', async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch
-    expect(await removeVideoFromPlaylist('PL', 'vidA1234567', 'tok', fetcher)).toBe(0)
-    expect(fetcher).toHaveBeenCalledTimes(1)
-  })
-})
+  it("makes no delete call when the video is not in the playlist", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [] })) as unknown as typeof fetch;
+    expect(await removeVideoFromPlaylist("PL", "vidA1234567", "tok", fetcher)).toBe(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
 
-describe('authedFetch 401 retry', () => {
-  it('retries once with a refreshed token and reuses it for later calls holding the stale one', async () => {
-    const seen: string[] = []
+describe("authedFetch 401 retry", () => {
+  it("retries once with a refreshed token and reuses it for later calls holding the stale one", async () => {
+    const seen: string[] = [];
     const fetcher = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
-      const auth = new Headers(init?.headers).get('Authorization')!
-      seen.push(auth)
-      return new Response('{}', { status: auth === 'Bearer stale' ? 401 : 200 })
-    }) as unknown as typeof fetch
-    const refresh = vi.fn(async () => 'fresh')
-    setAccessTokenRefresher(refresh)
+      const auth = new Headers(init?.headers).get("Authorization")!;
+      seen.push(auth);
+      return new Response("{}", { status: auth === "Bearer stale" ? 401 : 200 });
+    }) as unknown as typeof fetch;
+    const refresh = vi.fn(async () => "fresh");
+    setAccessTokenRefresher(refresh);
     try {
-      expect((await authedFetch('https://x/a', 'stale', {}, fetcher)).status).toBe(200)
-      expect((await authedFetch('https://x/b', 'stale', {}, fetcher)).status).toBe(200)
-      expect(seen).toEqual(['Bearer stale', 'Bearer fresh', 'Bearer fresh'])
-      expect(refresh).toHaveBeenCalledTimes(1)
+      expect((await authedFetch("https://x/a", "stale", {}, fetcher)).status).toBe(200);
+      expect((await authedFetch("https://x/b", "stale", {}, fetcher)).status).toBe(200);
+      expect(seen).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
+      expect(refresh).toHaveBeenCalledTimes(1);
     } finally {
-      setAccessTokenRefresher(null)
+      setAccessTokenRefresher(null);
     }
-  })
+  });
 
-  it('tries the fresh token again after a pause when it is refused too, and logs the attempts', async () => {
-    let n = 0
-    const fetcher = vi.fn(async () => new Response('{}', { status: ++n <= 3 ? 401 : 200 })) as unknown as typeof fetch
-    const warn = vi.fn()
-    setAccessTokenRefresher(async () => 'fresh', { log: { warn }, delaysMs: [0, 0] })
+  it("tries the fresh token again after a pause when it is refused too, and logs the attempts", async () => {
+    let n = 0;
+    const fetcher = vi.fn(
+      async () => new Response("{}", { status: ++n <= 3 ? 401 : 200 }),
+    ) as unknown as typeof fetch;
+    const warn = vi.fn();
+    setAccessTokenRefresher(async () => "fresh", { log: { warn }, delaysMs: [0, 0] });
     try {
-      expect((await authedFetch('https://x/a?k=1', 'stale', {}, fetcher)).status).toBe(200)
-      expect(fetcher).toHaveBeenCalledTimes(4)
-      expect(warn).toHaveBeenCalledWith('youtube.auth_401_persisted', { url: 'https://x/a', statuses: [401, 401, 401, 200], final: 200 })
+      expect((await authedFetch("https://x/a?k=1", "stale", {}, fetcher)).status).toBe(200);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(warn).toHaveBeenCalledWith("youtube.auth_401_persisted", {
+        url: "https://x/a",
+        statuses: [401, 401, 401, 200],
+        final: 200,
+      });
     } finally {
-      setAccessTokenRefresher(null)
+      setAccessTokenRefresher(null);
     }
-  })
+  });
 
-  it('gives up after the pauses and returns the last 401', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 401 })) as unknown as typeof fetch
-    setAccessTokenRefresher(async () => 'fresh', { delaysMs: [0, 0] })
+  it("gives up after the pauses and returns the last 401", async () => {
+    const fetcher = vi.fn(
+      async () => new Response("{}", { status: 401 }),
+    ) as unknown as typeof fetch;
+    setAccessTokenRefresher(async () => "fresh", { delaysMs: [0, 0] });
     try {
-      expect((await authedFetch('https://x/a', 'stale', {}, fetcher)).status).toBe(401)
-      expect(fetcher).toHaveBeenCalledTimes(4)
+      expect((await authedFetch("https://x/a", "stale", {}, fetcher)).status).toBe(401);
+      expect(fetcher).toHaveBeenCalledTimes(4);
     } finally {
-      setAccessTokenRefresher(null)
+      setAccessTokenRefresher(null);
     }
-  })
+  });
 
-  it('returns the 401 when no fresh token can be had', async () => {
-    const fetcher = vi.fn(async () => new Response('{}', { status: 401 })) as unknown as typeof fetch
-    setAccessTokenRefresher(async () => null)
+  it("returns the 401 when no fresh token can be had", async () => {
+    const fetcher = vi.fn(
+      async () => new Response("{}", { status: 401 }),
+    ) as unknown as typeof fetch;
+    setAccessTokenRefresher(async () => null);
     try {
-      expect((await authedFetch('https://x/a', 'stale', {}, fetcher)).status).toBe(401)
-      expect(fetcher).toHaveBeenCalledTimes(1)
+      expect((await authedFetch("https://x/a", "stale", {}, fetcher)).status).toBe(401);
+      expect(fetcher).toHaveBeenCalledTimes(1);
     } finally {
-      setAccessTokenRefresher(null)
+      setAccessTokenRefresher(null);
     }
-  })
-})
+  });
+});

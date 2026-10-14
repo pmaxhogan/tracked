@@ -12,28 +12,28 @@
 // Everything renders through innerHTML strings with delegated clicks (the
 // tests run this script in a stub DOM without appendChild), and every
 // upstream value goes through TK.esc.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { MKVID_STATE_JS } from './mkvid-state'
-import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from './dj-actions'
-import { ACTIVITY_DETAIL_CSS, ACTIVITY_DETAIL_JS } from './activity-detail'
-import { ACTIVITY_DRAWER_JS, ACTIVITY_ROW_CSS, ACTIVITY_ROW_JS } from './activity'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { MKVID_STATE_JS } from "./mkvid-state";
+import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from "./dj-actions";
+import { ACTIVITY_DETAIL_CSS, ACTIVITY_DETAIL_JS } from "./activity-detail";
+import { ACTIVITY_DRAWER_JS, ACTIVITY_ROW_CSS, ACTIVITY_ROW_JS } from "./activity";
 
 const ACTIONS = /* html */ `
-<button id="h-sync-all" type="button" class="btn"${tipAttr('Syncs every DJ one after another: looks for new sets and adds their videos. Each DJ is limited to a few fetches per press.')}>Sync all</button>
-<button id="h-backfill" type="button" class="btn"${tipAttr('Adds videos missing from the combined playlist (every artist playlist in one), up to the daily YouTube insert cap. This also happens by itself on every scheduler tick.')}>Backfill combined</button>
-<button id="h-compare" type="button" class="btn"${tipAttr('Lists every playlist on YouTube now and compares it with what tracked put there, to notice videos you removed by hand. A playlist that lost too many videos is held for your approval. Normally runs every 6 hours.')}>Run hygiene compare</button>`
+<button id="h-sync-all" type="button" class="btn"${tipAttr("Syncs every DJ one after another: looks for new sets and adds their videos. Each DJ is limited to a few fetches per press.")}>Sync all</button>
+<button id="h-backfill" type="button" class="btn"${tipAttr("Adds videos missing from the combined playlist (every artist playlist in one), up to the daily YouTube insert cap. This also happens by itself on every scheduler tick.")}>Backfill combined</button>
+<button id="h-compare" type="button" class="btn"${tipAttr("Lists every playlist on YouTube now and compares it with what tracked put there, to notice videos you removed by hand. A playlist that lost too many videos is held for your approval. Normally runs every 6 hours.")}>Run hygiene compare</button>`;
 
 const tile = (id: string, href: string, label: string, tip: string) => /* html */ `
-  <a class="tk-tile h-tile" href="${href}"${tipAttr(tip)}><div class="k">${label}</div><div id="${id}"><div class="v"><span class="skel w"></span></div><div class="s">&nbsp;</div></div></a>`
+  <a class="tk-tile h-tile" href="${href}"${tipAttr(tip)}><div class="k">${label}</div><div id="${id}"><div class="v"><span class="skel w"></span></div><div class="s">&nbsp;</div></div></a>`;
 
 const BODY = /* html */ `
 <div class="tk-tiles h-tiles">
-  ${tile('t-fetch', '/ui/pool', 'Fetching', 'Whether fetching from 1001tracklists is running, and how many of today\'s page views the pool of accounts has used.')}
-  ${tile('t-yt', '/ui/playlists', 'YouTube', 'The connected YouTube channel and how many of today\'s combined-playlist inserts are used.')}
-  ${tile('t-mk', '/ui/mkvid', 'mkvid', 'The mkvid renderer, which makes videos for sets that have no recording, and how much of each Google project\'s daily upload cap is used.')}
-  ${tile('t-chal', '/ui/captcha', 'Challenges', 'Captchas that a pool account ran into and that need a person to solve them. Unsolved ones expire.')}
+  ${tile("t-fetch", "/ui/pool", "Fetching", "Whether fetching from 1001tracklists is running, and how many of today's page views the pool of accounts has used.")}
+  ${tile("t-yt", "/ui/playlists", "YouTube", "The connected YouTube channel and how many of today's combined-playlist inserts are used.")}
+  ${tile("t-mk", "/ui/mkvid", "mkvid", "The mkvid renderer, which makes videos for sets that have no recording, and how much of each Google project's daily upload cap is used.")}
+  ${tile("t-chal", "/ui/captcha", "Challenges", "Captchas that a pool account ran into and that need a person to solve them. Unsolved ones expire.")}
 </div>
 <div class="tk-card h-attn-card">
   <h2><span class="tip-term"${tipAttr('Problems found by the checks below. A red "fix" is broken or blocking something; an amber "check" is worth a look but nothing is blocked.')}>Needs attention</span></h2>
@@ -44,11 +44,11 @@ const BODY = /* html */ `
 <div class="tk-card h-recent">
   <div class="h-recent-head">
     <h2>Recent activity</h2>
-    <span class="h-recent-links"><a href="/ui/activity"${tipAttr('The full log of syncs, additions and other events.')}>View all</a><a href="/ui/activity?problems=1"${tipAttr('Only the events that failed or were abandoned.')}>Problems</a></span>
+    <span class="h-recent-links"><a href="/ui/activity"${tipAttr("The full log of syncs, additions and other events.")}>View all</a><a href="/ui/activity?problems=1"${tipAttr("Only the events that failed or were abandoned.")}>Problems</a></span>
   </div>
   <div id="act-table" class="a-table h-act"></div>
 </div>
-`
+`;
 
 const CSS = /* css */ `
   .h-tiles { grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); }
@@ -74,7 +74,7 @@ const CSS = /* css */ `
   .h-act .tkt-empty { margin-top: 0; }
 ${ACTIVITY_ROW_CSS}
 ${ACTIVITY_DETAIL_CSS}
-${DJ_ACTIONS_CSS}`
+${DJ_ACTIONS_CSS}`;
 
 const JS = /* js */ `
 (() => {
@@ -94,7 +94,7 @@ ${ACTIVITY_DRAWER_JS}
     el.innerHTML = '<div class="v' + (opts.vcls ? ' ' + opts.vcls : '') + '">' + v + '</div><div class="s' + (opts.scls ? ' ' + opts.scls : '') + '">' + (s || '&nbsp;') + '</div>' + (opts.meter || '');
   }
 
-  // ── needs attention ──
+  // -- needs attention --
   // One entry per source: undefined while loading, { items } or { error }.
   const ORDER = ['ban', 'challenges', 'accounts', 'holds', 'mkvid', 'djs'];
   const NAMES = { ban: 'fetch status', challenges: 'challenges', accounts: 'pool accounts', holds: 'held playlists', mkvid: 'mkvid', djs: 'DJ syncs' };
@@ -112,7 +112,7 @@ ${ACTIVITY_DRAWER_JS}
     }
     $('attn').innerHTML = items.map((it) => '<li><a href="' + esc(it.href) + '"><span class="badge ' + esc(it.kind) + '"' + TK.tip(it.kind === 'bad' ? 'Something is broken or blocked and needs you.' : 'Worth a look, but nothing is blocked.') + '>' + (it.kind === 'bad' ? 'fix' : 'check') + '</span>' +
       '<span class="txt">' + esc(it.text) + '</span>' + (it.sub ? '<span class="sub">' + esc(it.sub) + '</span>' : '') +
-      '<span class="go">' + esc(it.go || 'Open') + ' →</span></a></li>').join('');
+      '<span class="go">' + esc(it.go || 'Open') + ' -></span></a></li>').join('');
     const $empty = $('attn-empty'), $err = $('attn-err');
     $empty.hidden = items.length > 0;
     $empty.textContent = pending ? 'Checking…' : failed.length ? 'Nothing found in the checks that loaded.' : 'Nothing needs you right now.';
@@ -120,7 +120,7 @@ ${ACTIVITY_DRAWER_JS}
     $err.textContent = failed.length ? 'Could not check: ' + failed.join(', ') + '.' : '';
   }
 
-  // ── Fetching tile: ban status + pool budget ──
+  // -- Fetching tile: ban status + pool budget --
   let banS, poolS; // undefined = loading, null = failed (with banErr / poolErr), object = loaded
   let banErr = '', poolErr = '';
   function renderFetch() {
@@ -167,11 +167,11 @@ ${ACTIVITY_DRAWER_JS}
     setAttn('accounts', { items });
   }
 
-  // ── Challenges tile ──
+  // -- Challenges tile --
   async function loadChallenges() {
     const res = await TK.api.get('/ui/api/pool/challenges');
     const list = res.ok && res.data && res.data.challenges;
-    if (!Array.isArray(list)) { const e = failText(res); tileHtml('t-chal', '—', esc(e), { scls: 'bad' }); setAttn('challenges', { error: e }); return; }
+    if (!Array.isArray(list)) { const e = failText(res); tileHtml('t-chal', '-', esc(e), { scls: 'bad' }); setAttn('challenges', { error: e }); return; }
     const open = list.filter((c) => c && c.state === 'pending' && c.ready !== false);
     TK.navCount(open.length);
     const left = (iso) => { const t = Date.parse(iso); if (isNaN(t)) return ''; return t <= Date.now() ? 'expired' : TK.fmt.until(t / 1000).replace(/^in /, '') + ' left'; };
@@ -183,7 +183,7 @@ ${ACTIVITY_DRAWER_JS}
       [c.accountId || 'no account yet', c.expiresAt ? left(c.expiresAt) : ''].filter(Boolean).join(' · '), 'Solve')) });
   }
 
-  // ── YouTube tile: channel + combined inserts ──
+  // -- YouTube tile: channel + combined inserts --
   let ytS, cmbS, ytErr = '', cmbErr = '';
   function renderYt() {
     if (ytS === undefined && cmbS === undefined) return;
@@ -215,11 +215,11 @@ ${ACTIVITY_DRAWER_JS}
     });
   }
 
-  // ── mkvid tile ──
+  // -- mkvid tile --
   async function loadMkvid() {
     await TK.api.swr('/ui/api/mkvid?limit=1', (res) => {
       const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
-      if (!d) { const e = failText(res); tileHtml('t-mk', '—', esc(e), { scls: 'bad' }); setAttn('mkvid', { error: e }); return; }
+      if (!d) { const e = failText(res); tileHtml('t-mk', '-', esc(e), { scls: 'bad' }); setAttn('mkvid', { error: e }); return; }
       const st = mkState(d), eff = mkEffective(d);
       const caps = (d.accounts || []).map((a) => esc(a.label || a.account) + ' ' + esc(a.used) + ' / ' + esc(a.cap)).join(' · ');
       tileHtml('t-mk', esc(st[1]), caps || esc(st[2]), { vcls: 'small ' + st[0], meter: meter(eff.used, eff.cap) });
@@ -238,7 +238,7 @@ ${ACTIVITY_DRAWER_JS}
     });
   }
 
-  // ── held playlists ──
+  // -- held playlists --
   async function loadHolds() {
     await TK.api.swr('/ui/api/removals?limit=1', (res) => {
       const holds = res.ok && res.data && res.data.holds;
@@ -249,7 +249,7 @@ ${ACTIVITY_DRAWER_JS}
     });
   }
 
-  // ── DJs whose last sync errored ──
+  // -- DJs whose last sync errored --
   let djSlugs = null;
   async function loadDjs() {
     const res = await TK.api.get('/ui/api/list');
@@ -267,7 +267,7 @@ ${ACTIVITY_DRAWER_JS}
     setAttn('djs', failedStates && !errs.length ? { error: failedStates + ' sync state' + (failedStates === 1 ? '' : 's') + ' unavailable' } : { items: errs });
   }
 
-  // ── recent activity: the newest twelve rows of the Activity log (last 7 days) ──
+  // -- recent activity: the newest twelve rows of the Activity log (last 7 days) --
   // Tiles, attention items and activity paint from the responses this browser
   // stored at the last view (TK.api.swr), then correct themselves from the live ones.
   // The range start is rounded down to 10 minutes so that stored copy matches the next view's URL.
@@ -285,7 +285,7 @@ ${ACTIVITY_DRAWER_JS}
     empty: 'No activity in the last 7 days.',
   });
 
-  // ── quick actions ──
+  // -- quick actions --
   const $syncAll = $('h-sync-all'), $backfill = $('h-backfill'), $compare = $('h-compare');
 
   // Serial, never parallel: it keeps us under YouTube quota and the 1001tracklists rate limits.
@@ -311,7 +311,7 @@ ${ACTIVITY_DRAWER_JS}
       return;
     }
     if (data.ok === false) {
-      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet — sync a DJ first' : 'backfill skipped: ' + data.reason, 'bad');
+      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet - sync a DJ first' : 'backfill skipped: ' + data.reason, 'bad');
     } else {
       TK.toast('combined playlist: added ' + (data.inserted || 0) + ' video' + (data.inserted === 1 ? '' : 's') +
         (data.pending ? ' · ' + data.pending + ' still pending (' + (data.cappedBy || 'capped') + ')' : ''), 'ok');
@@ -341,19 +341,19 @@ ${ACTIVITY_DRAWER_JS}
   loadHolds();
   loadDjs();
 })();
-`
+`;
 
 export const HOME_PAGE: UiPage = {
-  path: '/',
+  path: "/",
   html: shell({
-    nav: 'home',
-    title: 'Home',
-    description: 'What is running, what needs you, and what happened last.',
+    nav: "home",
+    title: "Home",
+    description: "What is running, what needs you, and what happened last.",
     actions: ACTIONS,
     body: BODY,
     css: CSS,
     js: JS,
-    banPage: 'home',
+    banPage: "home",
     ownNavCount: true,
   }),
-}
+};

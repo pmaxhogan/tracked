@@ -3,16 +3,16 @@
 // Beside it (above it on narrow screens) the diagnostics column says why the
 // set is or is not in the playlists, from GET /ui/api/set (set-diag.ts); the
 // two calls run in parallel and either renders without the other.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { TRACK_ROW_CSS, TRACK_ROW_JS } from './track-row'
-import { SET_DIAG_CSS, SET_DIAG_JS } from './set-diag'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { TRACK_ROW_CSS, TRACK_ROW_JS } from "./track-row";
+import { SET_DIAG_CSS, SET_DIAG_JS } from "./set-diag";
 
 const BODY = /* html */ `
   <form id="load-form" class="tk-card set-form">
     <div class="field grow"><label for="url">Tracklist URL</label><input id="url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" required autofocus /></div>
-    <button id="load-btn" type="submit" class="btn primary"${tipAttr('Fetches the tracklist (from cache when recent; otherwise one 1001tracklists page view) and shows why it is or is not in your playlists.')}>Load</button>
+    <button id="load-btn" type="submit" class="btn primary"${tipAttr("Fetches the tracklist (from cache when recent; otherwise one 1001tracklists page view) and shows why it is or is not in your playlists.")}>Load</button>
   </form>
   <div class="set-layout">
   <aside id="diag" class="tk-card set-diag" aria-label="Diagnostics" hidden></aside>
@@ -21,8 +21,8 @@ const BODY = /* html */ `
   <div id="setmeta" class="tk-row muted set-meta" hidden></div>
   <div id="cachebar" class="tk-row cachebar" hidden>
     <span id="cache-age" class="muted"></span>
-    <button type="button" id="refresh" class="btn small"${tipAttr('Throws away the cached track list and fetches the page again. Costs one 1001tracklists page view and is limited per set and per day.')}>Refresh track list</button>
-    <button type="button" id="load-links" class="btn small"${tipAttr('Looks up Apple Music and YouTube links for every identified track. Costs one 1001tracklists page view per track not already cached (cached for 30 days).')}>Load links</button>
+    <button type="button" id="refresh" class="btn small"${tipAttr("Throws away the cached track list and fetches the page again. Costs one 1001tracklists page view and is limited per set and per day.")}>Refresh track list</button>
+    <button type="button" id="load-links" class="btn small"${tipAttr("Looks up Apple Music and YouTube links for every identified track. Costs one 1001tracklists page view per track not already cached (cached for 30 days).")}>Load links</button>
     <span id="refresh-result" class="result muted" role="status"></span>
   </div>
   <div id="tracks-skel" class="tk-card" hidden></div>
@@ -30,7 +30,7 @@ const BODY = /* html */ `
   <div id="empty" class="empty" hidden></div>
   </div>
   </div>
-`
+`;
 
 const CSS = /* css */ `
   .set-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-3); margin-bottom: var(--sp-3); }
@@ -40,7 +40,7 @@ const CSS = /* css */ `
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
   .set-meta .ytm { text-decoration: none; }
 ${TRACK_ROW_CSS}
-${SET_DIAG_CSS}`
+${SET_DIAG_CSS}`;
 
 const JS = /* js */ `
 (() => {
@@ -201,7 +201,7 @@ ${SET_DIAG_JS}
       const res = await TK.api.post('/ui/api/tracklist/purge', { url: currentUrl });
       const d = res.data || {};
       if (!res.ok) {
-        setResult('Refresh failed: ' + TK.errText(res, 'HTTP ' + res.status) + (d.stale ? ' — still showing the list ' + fmtAge(d.fetchedAt ? Math.round((Date.now() - Date.parse(d.fetchedAt)) / 1000) : null) : ''), true);
+        setResult('Refresh failed: ' + TK.errText(res, 'HTTP ' + res.status) + (d.stale ? ' - still showing the list ' + fmtAge(d.fetchedAt ? Math.round((Date.now() - Date.parse(d.fetchedAt)) / 1000) : null) : ''), true);
         return;
       }
       setResult(d.refreshed === false
@@ -215,16 +215,17 @@ ${SET_DIAG_JS}
   const pre = TK.qs.get('url');
   if (pre) { $url.value = pre; load(pre); }
 })();
-`
+`;
 
 export const SET_PAGE: UiPage = {
-  path: '/set',
+  path: "/set",
   html: shell({
     nav: null,
-    title: 'Set',
-    description: 'Paste a 1001tracklists tracklist URL to see its tracks, links and why it is or is not in your playlists.',
+    title: "Set",
+    description:
+      "Paste a 1001tracklists tracklist URL to see its tracks, links and why it is or is not in your playlists.",
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

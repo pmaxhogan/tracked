@@ -1,38 +1,41 @@
-import { parse, type HTMLElement } from 'node-html-parser'
-import type { ParsedTrack } from '../types'
-import type { ChallengeState } from './fetch'
-import { fetch1001, isStopTheBatchError, type Fetch1001Opts as CascadeOpts } from './upstream1001'
-import { parseSetYouTubeId } from './dj-index'
-import type { Logger } from './log'
-import { parseTime } from './timestamp'
-import { decodeEntities } from './html-entities'
+import { parse, type HTMLElement } from "node-html-parser";
+import type { ParsedTrack } from "../types";
+import type { ChallengeState } from "./fetch";
+import { fetch1001, isStopTheBatchError, type Fetch1001Opts as CascadeOpts } from "./upstream1001";
+import { parseSetYouTubeId } from "./dj-index";
+import type { Logger } from "./log";
+import { parseTime } from "./timestamp";
+import { decodeEntities } from "./html-entities";
 
-const ORIGIN = 'https://www.1001tracklists.com'
+const ORIGIN = "https://www.1001tracklists.com";
 
 /** Source codes used by 1001tracklists' medialink AJAX. */
 const SOURCE = {
-  BEATPORT: '1',
-  APPLE: '2',
-  TRAXSOURCE: '4',
-  SOUNDCLOUD: '10',
-  YOUTUBE: '13',
-  SPOTIFY: '36',
-} as const
+  BEATPORT: "1",
+  APPLE: "2",
+  TRAXSOURCE: "4",
+  SOUNDCLOUD: "10",
+  YOUTUBE: "13",
+  SPOTIFY: "36",
+} as const;
 
-export type SearchResult = { tracklistUrl: string } | { tracklistUrl: null }
+export type SearchResult = { tracklistUrl: string } | { tracklistUrl: null };
 
 /** Route options for the two search POSTs: through the pool, kind `search` (lib/upstream1001.ts). */
-export type SearchOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
+export type SearchOpts = Omit<CascadeOpts, "method" | "form" | "kind">;
 
-async function search1001(form: Record<string, string>, opts: SearchOpts): Promise<{ html: string; state: ChallengeState; via: string }> {
+async function search1001(
+  form: Record<string, string>,
+  opts: SearchOpts,
+): Promise<{ html: string; state: ChallengeState; via: string }> {
   const r = await fetch1001(`${ORIGIN}/search/result.php`, {
     ...opts,
-    kind: 'search',
-    method: 'POST',
+    kind: "search",
+    method: "POST",
     form,
     headers: { Referer: `${ORIGIN}/search/result.php`, ...(opts.headers ?? {}) },
-  })
-  return { html: r.html, state: r.state, via: r.via }
+  });
+  return { html: r.html, state: r.state, via: r.via };
 }
 
 export async function searchByYouTubeUrl(
@@ -40,40 +43,63 @@ export async function searchByYouTubeUrl(
   stateOrOpts?: ChallengeState | SearchOpts,
   maybeLog?: Logger,
 ): Promise<{ result: SearchResult; state: ChallengeState }> {
-  const opts: SearchOpts = stateOrOpts && 'cookie' in stateOrOpts ? { state: stateOrOpts, log: maybeLog } : { ...(stateOrOpts ?? {}), log: (stateOrOpts as SearchOpts | undefined)?.log ?? maybeLog }
-  const log = opts.log
-  log?.info('1001search.start', { videoUrl })
-  const start = Date.now()
-  const { html, state: s2, via } = await search1001(
+  const opts: SearchOpts =
+    stateOrOpts && "cookie" in stateOrOpts
+      ? { state: stateOrOpts, log: maybeLog }
+      : { ...(stateOrOpts ?? {}), log: (stateOrOpts as SearchOpts | undefined)?.log ?? maybeLog };
+  const log = opts.log;
+  log?.info("1001search.start", { videoUrl });
+  const start = Date.now();
+  const {
+    html,
+    state: s2,
+    via,
+  } = await search1001(
     {
       main_search: videoUrl,
-      search_selection: '9',
-      orderby: 'added',
-      'MediaSource[13]': '13',
+      search_selection: "9",
+      orderby: "added",
+      "MediaSource[13]": "13",
     },
     opts,
-  )
-  const { result, echo, textFallback } = parseUrlSearchResult(html, videoUrl)
+  );
+  const { result, echo, textFallback } = parseUrlSearchResult(html, videoUrl);
   if (textFallback) {
-    log?.warn('1001search.text_fallback', { videoUrl, echo, htmlBytes: html.length, ms: Date.now() - start })
+    log?.warn("1001search.text_fallback", {
+      videoUrl,
+      echo,
+      htmlBytes: html.length,
+      ms: Date.now() - start,
+    });
   }
-  log?.info('1001search.done', { videoUrl, via, htmlBytes: html.length, tracklistUrl: result.tracklistUrl, textFallback, ms: Date.now() - start })
-  return { result, state: s2 }
+  log?.info("1001search.done", {
+    videoUrl,
+    via,
+    htmlBytes: html.length,
+    tracklistUrl: result.tracklistUrl,
+    textFallback,
+    ms: Date.now() - start,
+  });
+  return { result, state: s2 };
 }
 
 /**
  * The query 1001tl actually ran, as echoed in the page `<title>`
- * (`Tracklists search result for "…"`). Present on every results page, empty
+ * (`Tracklists search result for "..."`). Present on every results page, empty
  * result sets included; null only if the page is not a search results page.
  */
 export function parseSearchQueryEcho(html: string): string | null {
-  const m = html.match(/<title>\s*Tracklists search result for &quot;(.*?)&quot;\s*<\/title>/s)
-  return m ? decodeEntities(m[1]!) : null
+  const m = html.match(/<title>\s*Tracklists search result for &quot;(.*?)&quot;\s*<\/title>/s);
+  return m ? decodeEntities(m[1]!) : null;
 }
 
 /** Video id from a youtube.com/watch?v= or youtu.be/ URL; null if neither. */
 function youTubeIdFromUrl(url: string): string | null {
-  return url.match(/[?&]v=([A-Za-z0-9_-]{11})(?:[&#]|$)/)?.[1] ?? url.match(/youtu\.be\/([A-Za-z0-9_-]{11})(?:[?&#]|$)/)?.[1] ?? null
+  return (
+    url.match(/[?&]v=([A-Za-z0-9_-]{11})(?:[&#]|$)/)?.[1] ??
+    url.match(/youtu\.be\/([A-Za-z0-9_-]{11})(?:[?&#]|$)/)?.[1] ??
+    null
+  );
 }
 
 /**
@@ -81,9 +107,9 @@ function youTubeIdFromUrl(url: string): string | null {
  * fallback. A genuine media-link search returns only tracklists carrying that
  * link and echoes the URL verbatim. But 1001tl sanitizes the query before
  * matching it as a URL, replacing the hyphens of a video id that contains two
- * or more of them with spaces (`watch?v=-R-Lmvn7sVg` → `watch?v= R Lmvn7sVg`).
+ * or more of them with spaces (`watch?v=-R-Lmvn7sVg` -> `watch?v= R Lmvn7sVg`).
  * The mangled string no longer parses as a media link, so the site runs a
- * plain word search on the URL's tokens ("youtube", "watch", …) ordered
+ * plain word search on the URL's tokens ("youtube", "watch", ...) ordered
  * newest-first and returns a full page of unrelated tracklists. Detect that
  * by checking the echoed query still contains the video id we sent; when it
  * does not, report no match so the caller falls through to a title search.
@@ -92,44 +118,44 @@ export function parseUrlSearchResult(
   html: string,
   videoUrl: string,
 ): { result: SearchResult; echo: string | null; textFallback: boolean } {
-  const echo = parseSearchQueryEcho(html)
-  const videoId = youTubeIdFromUrl(videoUrl)
-  const textFallback = echo !== null && (videoId ? !echo.includes(videoId) : echo !== videoUrl)
-  if (textFallback) return { result: { tracklistUrl: null }, echo, textFallback }
-  return { result: parseSearchResult(html), echo, textFallback }
+  const echo = parseSearchQueryEcho(html);
+  const videoId = youTubeIdFromUrl(videoUrl);
+  const textFallback = echo !== null && (videoId ? !echo.includes(videoId) : echo !== videoUrl);
+  if (textFallback) return { result: { tracklistUrl: null }, echo, textFallback };
+  return { result: parseSearchResult(html), echo, textFallback };
 }
 
 /** A single tracklist row on a `/search/result.php` results page. */
-export type TracklistCandidate = { tracklistUrl: string; title: string }
+export type TracklistCandidate = { tracklistUrl: string; title: string };
 
 /**
  * Parse every tracklist result row (`div.bItm.action.oItm`) into a
  * {url, visible title} pair. The URL comes from the row's `window.open(...)`
  * onclick; the title from the `.bTitle a` anchor. Order is preserved (the page
- * orders by whatever `orderby` was posted — default `added`, newest first).
+ * orders by whatever `orderby` was posted - default `added`, newest first).
  */
 export function parseSearchResults(html: string): TracklistCandidate[] {
-  const root = parse(html)
-  const rows = root.querySelectorAll('div.bItm.action.oItm')
-  const out: TracklistCandidate[] = []
+  const root = parse(html);
+  const rows = root.querySelectorAll("div.bItm.action.oItm");
+  const out: TracklistCandidate[] = [];
   for (const r of rows) {
-    const onclick = r.getAttribute('onclick') ?? ''
-    const m = onclick.match(/window\.open\('(\/tracklist\/[^']+)'/)
-    if (!m) continue
-    const anchor = r.querySelector('div.bTitle a') ?? r.querySelector('.bTitle')
-    const title = decodeEntities((anchor?.text ?? '').trim())
-    out.push({ tracklistUrl: ORIGIN + m[1], title })
+    const onclick = r.getAttribute("onclick") ?? "";
+    const m = onclick.match(/window\.open\('(\/tracklist\/[^']+)'/);
+    if (!m) continue;
+    const anchor = r.querySelector("div.bTitle a") ?? r.querySelector(".bTitle");
+    const title = decodeEntities((anchor?.text ?? "").trim());
+    out.push({ tracklistUrl: ORIGIN + m[1], title });
   }
-  return out
+  return out;
 }
 
 export function parseSearchResult(html: string): SearchResult {
-  const first = parseSearchResults(html)[0]
-  return { tracklistUrl: first ? first.tracklistUrl : null }
+  const first = parseSearchResults(html)[0];
+  return { tracklistUrl: first ? first.tracklistUrl : null };
 }
 
 /**
- * Tracklist text-search (search_selection=9, no media-source filter) — used as
+ * Tracklist text-search (search_selection=9, no media-source filter) - used as
  * a fallback when we don't have (or couldn't confirm) a YouTube URL to pin the
  * match. 1001tl returns any tracklist whose name matches the query text, so we
  * rank the rows against `title` and only accept a confident match (or a lone
@@ -140,60 +166,86 @@ export async function searchByTitle(
   stateOrOpts?: ChallengeState | SearchOpts,
   maybeLog?: Logger,
 ): Promise<{ result: SearchResult; state: ChallengeState }> {
-  const opts: SearchOpts = stateOrOpts && 'cookie' in stateOrOpts ? { state: stateOrOpts, log: maybeLog } : { ...(stateOrOpts ?? {}), log: (stateOrOpts as SearchOpts | undefined)?.log ?? maybeLog }
-  const log = opts.log
-  log?.info('1001titlesearch.start', { title })
-  const start = Date.now()
-  const { html, state: s2, via } = await search1001(
-    { main_search: title, search_selection: '9', orderby: 'added' },
-    opts,
-  )
-  const candidates = parseSearchResults(html)
-  const best = pickBestTracklist(title, candidates)
-  log?.info('1001titlesearch.done', {
+  const opts: SearchOpts =
+    stateOrOpts && "cookie" in stateOrOpts
+      ? { state: stateOrOpts, log: maybeLog }
+      : { ...(stateOrOpts ?? {}), log: (stateOrOpts as SearchOpts | undefined)?.log ?? maybeLog };
+  const log = opts.log;
+  log?.info("1001titlesearch.start", { title });
+  const start = Date.now();
+  const {
+    html,
+    state: s2,
+    via,
+  } = await search1001({ main_search: title, search_selection: "9", orderby: "added" }, opts);
+  const candidates = parseSearchResults(html);
+  const best = pickBestTracklist(title, candidates);
+  log?.info("1001titlesearch.done", {
     title,
     via,
     htmlBytes: html.length,
     candidateCount: candidates.length,
     candidates: candidates.slice(0, 8).map((c) => ({ title: c.title, url: c.tracklistUrl })),
-    chosen: best ? { title: best.title, url: best.tracklistUrl, score: Number(best.score.toFixed(3)) } : null,
+    chosen: best
+      ? { title: best.title, url: best.tracklistUrl, score: Number(best.score.toFixed(3)) }
+      : null,
     ms: Date.now() - start,
-  })
-  return { result: { tracklistUrl: best ? best.tracklistUrl : null }, state: s2 }
+  });
+  return { result: { tracklistUrl: best ? best.tracklistUrl : null }, state: s2 };
 }
 
 /** Lowercase, drop punctuation to spaces, collapse whitespace. */
 function normText(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 /**
  * Boilerplate tokens that carry no matching signal in a DJ-set title: articles
  * and the YouTube-title cruft that never appears in 1001tl's canonical title
- * ("4hr set", "official video", "full set", …). Stripped before scoring so they
- * don't dilute the token overlap. NOT a venue/geography list — those are
+ * ("4hr set", "official video", "full set", ...). Stripped before scoring so they
+ * don't dilute the token overlap. NOT a venue/geography list - those are
  * downweighted dynamically via IDF (see pickBestTracklist), because "which words
  * are boilerplate" depends on the result set (a search full of Club Space Miami
  * sets makes "space/miami" uninformative; a different search wouldn't).
  */
 const NOISE_TOKENS = new Set([
-  'the', 'a', 'an', 'set', 'live', 'liveset', 'dj', 'mix', 'full', 'fullset',
-  'official', 'video', 'audio', 'hd', 'hq', '4k', '1080p', '720p',
-  'from', 'at',
-])
-const DURATION_TOKEN = /^\d+(h|hr|hrs|hour|hours|min|mins|m)$/
+  "the",
+  "a",
+  "an",
+  "set",
+  "live",
+  "liveset",
+  "dj",
+  "mix",
+  "full",
+  "fullset",
+  "official",
+  "video",
+  "audio",
+  "hd",
+  "hq",
+  "4k",
+  "1080p",
+  "720p",
+  "from",
+  "at",
+]);
+const DURATION_TOKEN = /^\d+(h|hr|hrs|hour|hours|min|mins|m)$/;
 /**
- * 1001tl appends the set date to many visible titles ("… Croatia 2025-07-13");
+ * 1001tl appends the set date to many visible titles ("... Croatia 2025-07-13");
  * YouTube titles almost never carry it. Dropped before tokenizing so a
  * candidate isn't charged three unmatched tokens for being dated.
  */
-const ISO_DATE = /\b\d{4}-\d{2}-\d{2}\b/g
+const ISO_DATE = /\b\d{4}-\d{2}-\d{2}\b/g;
 /**
  * Episode codes fuse a show prefix and a number ("DCR786", "ABGT500",
  * "ASOT1000") while 1001tl's title spells the number out ("Drumcode Radio
  * 786"). Split into prefix + number so the number matches either way.
  */
-const EPISODE_CODE = /^([a-z]{2,})(\d{2,})$/
+const EPISODE_CODE = /^([a-z]{2,})(\d{2,})$/;
 
 /**
  * Episode/edition numbers in a title's significant tokens ("786" from
@@ -202,9 +254,9 @@ const EPISODE_CODE = /^([a-z]{2,})(\d{2,})$/
  * stripped by sigTokens, so a dated title contributes no numbers.
  */
 function numberTokens(tokens: Set<string>): Set<string> {
-  const out = new Set<string>()
-  for (const t of tokens) if (/^\d{2,}$/.test(t)) out.add(t)
-  return out
+  const out = new Set<string>();
+  for (const t of tokens) if (/^\d{2,}$/.test(t)) out.add(t);
+  return out;
 }
 
 /**
@@ -214,48 +266,48 @@ function numberTokens(tokens: Set<string>): Set<string> {
  * conflict.
  */
 function numbersConflict(a: Set<string>, b: Set<string>): boolean {
-  const na = numberTokens(a)
-  const nb = numberTokens(b)
-  if (na.size === 0 || nb.size === 0) return false
-  for (const n of na) if (nb.has(n)) return false
-  return true
+  const na = numberTokens(a);
+  const nb = numberTokens(b);
+  if (na.size === 0 || nb.size === 0) return false;
+  for (const n of na) if (nb.has(n)) return false;
+  return true;
 }
 
 /** Significant (non-noise) tokens of a title, as a set. */
 function sigTokens(s: string): Set<string> {
-  const out = new Set<string>()
-  for (const t of normText(s.replace(ISO_DATE, ' ')).split(' ')) {
-    if (!t || NOISE_TOKENS.has(t) || DURATION_TOKEN.test(t)) continue
-    const m = t.match(EPISODE_CODE)
+  const out = new Set<string>();
+  for (const t of normText(s.replace(ISO_DATE, " ")).split(" ")) {
+    if (!t || NOISE_TOKENS.has(t) || DURATION_TOKEN.test(t)) continue;
+    const m = t.match(EPISODE_CODE);
     if (m) {
-      out.add(m[1]!)
-      out.add(m[2]!)
+      out.add(m[1]!);
+      out.add(m[2]!);
     } else {
-      out.add(t)
+      out.add(t);
     }
   }
-  return out
+  return out;
 }
 
 /**
  * Pairwise title similarity in [0,1] with no result-set context: exact = 1,
  * containment = 0.9, else token overlap coefficient (|shared| / |smaller set|).
- * Overlap coefficient (not Jaccard) so a noisy query — the YouTube title with
- * an extra date / "4hr set" — isn't penalized for its surplus tokens. Used as
+ * Overlap coefficient (not Jaccard) so a noisy query - the YouTube title with
+ * an extra date / "4hr set" - isn't penalized for its surplus tokens. Used as
  * the fallback when there's only one candidate (no IDF signal to weight with).
  */
 export function scoreTitleMatch(query: string, candidate: string): number {
-  const nq = normText(query)
-  const nc = normText(candidate)
-  if (!nq || !nc) return 0
-  if (nq === nc) return 1
-  if (nq.includes(nc) || nc.includes(nq)) return 0.9
-  const tq = sigTokens(query)
-  const tc = sigTokens(candidate)
-  if (tq.size === 0 || tc.size === 0) return 0
-  let inter = 0
-  for (const t of tc) if (tq.has(t)) inter++
-  return inter / Math.min(tq.size, tc.size)
+  const nq = normText(query);
+  const nc = normText(candidate);
+  if (!nq || !nc) return 0;
+  if (nq === nc) return 1;
+  if (nq.includes(nc) || nc.includes(nq)) return 0.9;
+  const tq = sigTokens(query);
+  const tc = sigTokens(candidate);
+  if (tq.size === 0 || tc.size === 0) return 0;
+  let inter = 0;
+  for (const t of tc) if (tq.has(t)) inter++;
+  return inter / Math.min(tq.size, tc.size);
 }
 
 /**
@@ -263,15 +315,15 @@ export function scoreTitleMatch(query: string, candidate: string): number {
  *
  * Two hard facts about this data shaped the algorithm:
  *  1. Same-venue sets share an IDENTICAL visible title ("Gorgon City @ Club
- *     Space Miami, United States" appears 7× for different dates — the date is
+ *     Space Miami, United States" appears 7x for different dates - the date is
  *     only in the URL). So a text score literally cannot pick the right date;
  *     only 1001tl's own ranking (which sees the date) can. We therefore walk
  *     candidates in 1001tl's order and take the FIRST that clears the bar,
  *     rather than re-sorting by score.
  *  2. Venue/geography words ("club space miami united states") are shared
  *     boilerplate across most results, so overlap on them is meaningless. We
- *     weight each token by IDF over the candidate set — tokens common across
- *     results (venue) count little; rare tokens (the artist/event) count a lot —
+ *     weight each token by IDF over the candidate set - tokens common across
+ *     results (venue) count little; rare tokens (the artist/event) count a lot -
  *     and require the match to include a distinctive shared token, so a query
  *     that only shares the venue with an unrelated set is rejected.
  *
@@ -281,7 +333,7 @@ export function scoreTitleMatch(query: string, candidate: string): number {
  *  - Episode numbers must agree. A same-show sibling ("Adam Beyer @ Drumcode
  *    Radio 377 (Resistance Stage, Ultra Brasil)") matches a DCR786 query on
  *    every word but the number, and the number is the only thing that tells
- *    the two apart — so a candidate whose numbers share nothing with the
+ *    the two apart - so a candidate whose numbers share nothing with the
  *    query's is rejected outright (see numbersConflict).
  *  - A short unrelated title ("Adam Beyer - Drumcode 153") can score well by
  *    sharing only the artist and show name, so a candidate must also account
@@ -290,64 +342,69 @@ export function scoreTitleMatch(query: string, candidate: string): number {
  *    from every candidate (a date, "4hr set") carry no discriminating signal
  *    within the set and are ignored there, so surplus YouTube-title cruft
  *    cannot sink a real match.
- * Returns null when nothing clears the bar — better "not found" than a
+ * Returns null when nothing clears the bar - better "not found" than a
  * confidently-wrong tracklist.
  */
 export function pickBestTracklist(
   query: string,
   candidates: TracklistCandidate[],
 ): (TracklistCandidate & { score: number }) | null {
-  if (candidates.length === 0) return null
+  if (candidates.length === 0) return null;
   if (candidates.length === 1) {
-    const only = candidates[0]!
-    if (numbersConflict(sigTokens(query), sigTokens(only.title))) return null
-    const score = scoreTitleMatch(query, only.title)
+    const only = candidates[0]!;
+    if (numbersConflict(sigTokens(query), sigTokens(only.title))) return null;
+    const score = scoreTitleMatch(query, only.title);
     // A lone hit for a specific set query is almost always right; require only
     // that it shares some real token, to reject a totally unrelated single row.
-    return score > 0 ? { ...only, score } : null
+    return score > 0 ? { ...only, score } : null;
   }
 
-  const N = candidates.length
-  const qt = sigTokens(query)
-  const cts = candidates.map((c) => sigTokens(c.title))
-  const df = new Map<string, number>()
-  for (const ct of cts) for (const t of ct) df.set(t, (df.get(t) ?? 0) + 1)
-  const idf = (t: string) => Math.log((N + 1) / ((df.get(t) ?? 0) + 1)) + 1
+  const N = candidates.length;
+  const qt = sigTokens(query);
+  const cts = candidates.map((c) => sigTokens(c.title));
+  const df = new Map<string, number>();
+  for (const ct of cts) for (const t of ct) df.set(t, (df.get(t) ?? 0) + 1);
+  const idf = (t: string) => Math.log((N + 1) / ((df.get(t) ?? 0) + 1)) + 1;
   // A token is "boilerplate" only when it recurs across most of the result set.
-  const isCommon = (t: string) => (df.get(t) ?? 0) > N / 2
+  const isCommon = (t: string) => (df.get(t) ?? 0) > N / 2;
 
-  const ACCEPT = 0.5
+  const ACCEPT = 0.5;
   // Minimum share of the query's in-set token mass a candidate must cover.
-  const QUERY_FLOOR = 0.3
-  let queryMass = 0
-  for (const t of qt) if (df.has(t)) queryMass += idf(t)
-  let best: (TracklistCandidate & { score: number }) | null = null
+  const QUERY_FLOOR = 0.3;
+  let queryMass = 0;
+  for (const t of qt) if (df.has(t)) queryMass += idf(t);
+  let best: (TracklistCandidate & { score: number }) | null = null;
   for (let i = 0; i < N; i++) {
-    const c = candidates[i]!
-    const nq = normText(query)
-    const nc = normText(c.title)
-    let score: number
+    const c = candidates[i]!;
+    const nq = normText(query);
+    const nc = normText(c.title);
+    let score: number;
     if (nq === nc || (nc && (nq.includes(nc) || nc.includes(nq)))) {
-      score = 0.95
+      score = 0.95;
     } else {
-      const ct = cts[i]!
-      const shared = [...ct].filter((t) => qt.has(t))
-      const distinctive = shared.some((t) => !isCommon(t))
-      let sharedMass = 0
-      for (const t of shared) sharedMass += idf(t)
-      const queryCoverage = queryMass > 0 ? sharedMass / queryMass : 0
-      if (shared.length < 2 || !distinctive || queryCoverage < QUERY_FLOOR || numbersConflict(qt, ct)) {
-        score = 0
+      const ct = cts[i]!;
+      const shared = [...ct].filter((t) => qt.has(t));
+      const distinctive = shared.some((t) => !isCommon(t));
+      let sharedMass = 0;
+      for (const t of shared) sharedMass += idf(t);
+      const queryCoverage = queryMass > 0 ? sharedMass / queryMass : 0;
+      if (
+        shared.length < 2 ||
+        !distinctive ||
+        queryCoverage < QUERY_FLOOR ||
+        numbersConflict(qt, ct)
+      ) {
+        score = 0;
       } else {
-        let den = 0
-        for (const t of ct) den += idf(t)
-        score = den > 0 ? sharedMass / den : 0
+        let den = 0;
+        for (const t of ct) den += idf(t);
+        score = den > 0 ? sharedMass / den : 0;
       }
     }
-    if (!best || score > best.score) best = { ...c, score }
-    if (score >= ACCEPT) return { ...c, score } // first over the bar, in 1001tl relevance order
+    if (!best || score > best.score) best = { ...c, score };
+    if (score >= ACCEPT) return { ...c, score }; // first over the bar, in 1001tl relevance order
   }
-  return null
+  return null;
 }
 
 /**
@@ -362,22 +419,22 @@ export function pickBestTracklist(
  * hosts, bare slugs). Returns null on reject.
  */
 export function normalizeTracklistUrl(input: string): string | null {
-  const s = input.trim()
-  if (!s) return null
-  const urlStr = /^https?:\/\//i.test(s) ? s : `https://${s}`
-  let u: URL
+  const s = input.trim();
+  if (!s) return null;
+  const urlStr = /^https?:\/\//i.test(s) ? s : `https://${s}`;
+  let u: URL;
   try {
-    u = new URL(urlStr)
+    u = new URL(urlStr);
   } catch {
-    return null
+    return null;
   }
-  if (!/^(www\.)?1001tracklists\.com$/i.test(u.hostname)) return null
+  if (!/^(www\.)?1001tracklists\.com$/i.test(u.hostname)) return null;
   // Path must be /tracklist/<id>[/<name>...]. The id is 1001tl's short
   // alphanumeric slug (e.g. "l3uw499").
-  const m = u.pathname.match(/^\/tracklist\/[a-z0-9]+(?:\/[^?#]*)?$/i)
-  if (!m) return null
+  const m = u.pathname.match(/^\/tracklist\/[a-z0-9]+(?:\/[^?#]*)?$/i);
+  if (!m) return null;
   // Drop query/fragment; force the canonical www host.
-  return `${ORIGIN}${u.pathname}`
+  return `${ORIGIN}${u.pathname}`;
 }
 
 /** A page row: a ParsedTrack, or a fully anonymous "ID - ID" row with no microdata. */
@@ -388,26 +445,26 @@ export function normalizeTracklistUrl(input: string): string | null {
  * Absent on parsed lists cached before it existed.
  */
 export type PageRow = ParsedTrack & {
-  anonymous: boolean
-  label: string | null
-  mediaId?: string | null
+  anonymous: boolean;
+  label: string | null;
+  mediaId?: string | null;
   /**
    * The row's Spotify "Pre-Save N" badge (people who pre-saved the Spotify
    * release, shown while it is not out), null when the row has none. On an ID
    * row the badge is keyed to the row (`idTLP`), on a track to its medialink id.
    */
-  presaveCount?: number | null
+  presaveCount?: number | null;
   /** The row's media icons: an active YouTube / Spotify player icon (lit = 1001tracklists has that link). */
-  hasYoutube?: boolean
-  hasSpotify?: boolean
-}
+  hasYoutube?: boolean;
+  hasSpotify?: boolean;
+};
 
 /** "Pre-Save 15" on the row's Spotify badge; null without one. */
 export function rowPresaveCount(row: HTMLElement): number | null {
-  const badge = row.querySelector('span.badgeSpotify')
-  if (!badge) return null
-  const m = /Pre-Save\s*(\d+)/i.exec(badge.text)
-  return m ? Number(m[1]) : null
+  const badge = row.querySelector("span.badgeSpotify");
+  if (!badge) return null;
+  const m = /Pre-Save\s*(\d+)/i.exec(badge.text);
+  return m ? Number(m[1]) : null;
 }
 
 /**
@@ -415,48 +472,51 @@ export function rowPresaveCount(row: HTMLElement): number | null {
  * `<i class="mAction fa colorized fa-24 fa-video-camera" title="open YouTube player">`;
  * a site with no link shows `<i class="fa fa-24 fa-spotify mIcon" title="Spotify players">`.
  */
-export function rowMediaLinks(mediaRow: HTMLElement | null): { hasYoutube: boolean; hasSpotify: boolean } {
-  let hasYoutube = false
-  let hasSpotify = false
-  for (const i of mediaRow?.querySelectorAll('i') ?? []) {
-    const cls = ` ${i.getAttribute('class') ?? ''} `
-    if (!cls.includes(' colorized ')) continue
-    if (cls.includes(' fa-video-camera ') || cls.includes(' fa-youtube ')) hasYoutube = true
-    if (cls.includes(' fa-spotify ')) hasSpotify = true
+export function rowMediaLinks(mediaRow: HTMLElement | null): {
+  hasYoutube: boolean;
+  hasSpotify: boolean;
+} {
+  let hasYoutube = false;
+  let hasSpotify = false;
+  for (const i of mediaRow?.querySelectorAll("i") ?? []) {
+    const cls = ` ${i.getAttribute("class") ?? ""} `;
+    if (!cls.includes(" colorized ")) continue;
+    if (cls.includes(" fa-video-camera ") || cls.includes(" fa-youtube ")) hasYoutube = true;
+    if (cls.includes(" fa-spotify ")) hasSpotify = true;
   }
-  return { hasYoutube, hasSpotify }
+  return { hasYoutube, hasSpotify };
 }
 
 export type ScrapedTracklist = {
-  slug: string
+  slug: string;
   /** Apple Music album/playlist link for the whole set, when 1001tl embeds one. null otherwise. */
-  setAppleLink: string | null
+  setAppleLink: string | null;
   /** YouTube watch URL for the set's primary recording, when 1001tl embeds one. null otherwise. */
-  setYoutubeLink: string | null
+  setYoutubeLink: string | null;
   /** SoundCloud widget-player URL for the whole set's recording, when 1001tl embeds one. null otherwise. */
-  setSoundcloudLink: string | null
+  setSoundcloudLink: string | null;
   /**
-   * The named rows — what every consumer but mkvid's track list uses (counts,
+   * The named rows - what every consumer but mkvid's track list uses (counts,
    * /now-playing, /tracklist, the sync). Anonymous "ID - ID" rows are not in it.
    */
-  tracks: ParsedTrack[]
+  tracks: ParsedTrack[];
   /**
    * Every track row on the page in order, anonymous "ID - ID" rows included
    * (`anonymous: true`: artist and title 'ID', no id-page, no art, their own
    * cue). A "w/" row on an anonymous row is linked to it here. Only the list
    * handed to mkvid reads this, so the video shows "ID" while one plays.
    */
-  rows: PageRow[]
-  /** How many rows contradict themselves — see `looksLikeDecoy`. */
-  decoy: DecoySignal
-}
+  rows: PageRow[];
+  /** How many rows contradict themselves - see `looksLikeDecoy`. */
+  decoy: DecoySignal;
+};
 
 /**
  * Evidence that the page carries decoy track data.
  *
  * 2026-09-26: 1001tracklists started answering accounts it has flagged as
  * scrapers with the real page chrome, real cue times, real track ids and real
- * artwork — and randomized names. Every fetch of the same page gives other
+ * artwork - and randomized names. Every fetch of the same page gives other
  * names; within one row the microdata name (`meta[itemprop=name]`), the
  * visible text (`span.trackValue`) and the link slug disagree with each
  * other. On a real page all three agree on every row (0 of 89 rows across
@@ -467,35 +527,35 @@ export type ScrapedTracklist = {
  */
 export type DecoySignal = {
   /** Rows that had both a microdata name and visible text to compare. */
-  named: number
+  named: number;
   /**
    * Rows whose microdata name and visible text disagree in substance ("far",
    * see `isNearMismatch`). This is the decoy evidence every check reads.
    */
-  mismatched: number
+  mismatched: number;
   /**
    * Rows whose two names differ only in a benign way: the visible text adds a
    * parenthetical ("(USA)", "(Start The Dance)") or repeats an artist. Real
    * pages have the odd one of these; they never count as decoy evidence.
    * Diagnostics only.
    */
-  nearMismatched: number
+  nearMismatched: number;
   /** `looksLikeDecoy` of the two counts. */
-  suspected: boolean
+  suspected: boolean;
   /**
-   * The far rows as `microdata ⇄ visible` pairs, in page order; absent when
+   * The far rows as `microdata <-> visible` pairs, in page order; absent when
    * there are none. A decoy draws new names on every fetch, while a quirk of
    * the site's own data (2026-10-07: "Tones & I" vs "Tones and I", an "x
    * ANOTR" credit moved into the title) is the same on every fetch by every
    * account, so these pairs go into the verification fingerprint: a second
    * account that sees exactly the same ones verifies the list.
    */
-  far?: string[]
-}
+  far?: string[];
+};
 
 /** A few named rows, and a majority of them disagreeing with themselves. */
 export function looksLikeDecoy(d: { named: number; mismatched: number }): boolean {
-  return d.named >= 3 && d.mismatched * 2 >= d.named
+  return d.named >= 3 && d.mismatched * 2 >= d.named;
 }
 
 /**
@@ -505,20 +565,22 @@ export function looksLikeDecoy(d: { named: number; mismatched: number }): boolea
  * caller reports that plainly instead of showing them.
  */
 export class DecoyTracklistError extends Error {
-  readonly url: string
-  readonly named: number
-  readonly mismatched: number
+  readonly url: string;
+  readonly named: number;
+  readonly mismatched: number;
   constructor(url: string, d: { named: number; mismatched: number }) {
     // `mismatched` counts far mismatches only (DecoySignal).
-    super(`decoy — 1001tracklists is serving randomized track names to our accounts (${d.mismatched} of ${d.named} rows contradict themselves); refusing to show wrong names`)
-    this.name = 'DecoyTracklistError'
-    this.url = url
-    this.named = d.named
-    this.mismatched = d.mismatched
+    super(
+      `decoy - 1001tracklists is serving randomized track names to our accounts (${d.mismatched} of ${d.named} rows contradict themselves); refusing to show wrong names`,
+    );
+    this.name = "DecoyTracklistError";
+    this.url = url;
+    this.named = d.named;
+    this.mismatched = d.mismatched;
   }
 }
 
-export type FetchTracklistOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
+export type FetchTracklistOpts = Omit<CascadeOpts, "method" | "form" | "kind">;
 
 /**
  * Scrape a tracklist page through the pool (lib/upstream1001.ts, kind `set`)
@@ -531,13 +593,20 @@ export type FetchTracklistOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
 export async function fetchTracklist(
   tracklistUrl: string,
   opts: FetchTracklistOpts = {},
-): Promise<{ result: ScrapedTracklist; html: string; state: ChallengeState; via: string; accountId?: string; fetchedAt?: string }> {
-  const log = opts.log
-  log?.info('1001scrape.start', { tracklistUrl, priority: opts.priority ?? 'phone' })
-  const start = Date.now()
-  const r = await fetch1001(tracklistUrl, { ...opts, kind: 'set' })
-  const result = parseTracklist(tracklistUrl, r.html)
-  log?.info('1001scrape.parsed', {
+): Promise<{
+  result: ScrapedTracklist;
+  html: string;
+  state: ChallengeState;
+  via: string;
+  accountId?: string;
+  fetchedAt?: string;
+}> {
+  const log = opts.log;
+  log?.info("1001scrape.start", { tracklistUrl, priority: opts.priority ?? "phone" });
+  const start = Date.now();
+  const r = await fetch1001(tracklistUrl, { ...opts, kind: "set" });
+  const result = parseTracklist(tracklistUrl, r.html);
+  log?.info("1001scrape.parsed", {
     tracklistUrl,
     via: r.via,
     accountId: r.accountId,
@@ -549,10 +618,10 @@ export async function fetchTracklist(
     decoyMismatched: result.decoy.mismatched,
     decoyNearMismatched: result.decoy.nearMismatched,
     ms: Date.now() - start,
-  })
-  if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log)
+  });
+  if (result.tracks.length === 0) logEmptyParseDiagnostics(r.html, tracklistUrl, log);
   if (result.decoy.suspected) {
-    log?.error('1001scrape.decoy', {
+    log?.error("1001scrape.decoy", {
       tracklistUrl,
       via: r.via,
       accountId: r.accountId,
@@ -560,10 +629,22 @@ export async function fetchTracklist(
       named: result.decoy.named,
       mismatched: result.decoy.mismatched,
       nearMismatched: result.decoy.nearMismatched,
-      sample: result.tracks.slice(0, 3).map((t) => `${t.artist} - ${t.title} @ ${t.trackUrl?.split('/track/')[1]?.split('/index')[0] ?? '?'}`),
-    })
+      sample: result.tracks
+        .slice(0, 3)
+        .map(
+          (t) =>
+            `${t.artist} - ${t.title} @ ${t.trackUrl?.split("/track/")[1]?.split("/index")[0] ?? "?"}`,
+        ),
+    });
   }
-  return { result, html: r.html, state: r.state, via: r.via, accountId: r.accountId, fetchedAt: r.fetchedAt }
+  return {
+    result,
+    html: r.html,
+    state: r.state,
+    via: r.via,
+    accountId: r.accountId,
+    fetchedAt: r.fetchedAt,
+  };
 }
 
 /**
@@ -572,12 +653,12 @@ export async function fetchTracklist(
  * served a captcha (transient), or returned a real empty page. No raw HTML.
  */
 function logEmptyParseDiagnostics(html: string, tracklistUrl: string, log?: Logger): void {
-  if (!log) return
+  if (!log) return;
   const sample = (re: RegExp, n = 1) => {
-    const m = html.match(re)
-    return m ? m.slice(0, n) : null
-  }
-  log.warn('1001scrape.empty_diagnostics', {
+    const m = html.match(re);
+    return m ? m.slice(0, n) : null;
+  };
+  log.warn("1001scrape.empty_diagnostics", {
     tracklistUrl,
     htmlBytes: html.length,
     hasTurnstile: /turnstile|cf-mitigated|sitekey/.test(html),
@@ -588,57 +669,69 @@ function logEmptyParseDiagnostics(html: string, tracklistUrl: string, log?: Logg
     contentDivCount: (html.match(/id="tlp\d+_content"/g) ?? []).length,
     hasJsBuffer: /jsbuffer|jsAsyncReady/.test(html),
     titleHint: sample(/<title>([^<]{1,140})/)?.[0]?.slice(0, 200) ?? null,
-    classListSample: [...new Set((html.match(/class="[a-zA-Z][^"]{0,40}"/g) ?? []).slice(0, 30))].slice(0, 15),
+    classListSample: [
+      ...new Set((html.match(/class="[a-zA-Z][^"]{0,40}"/g) ?? []).slice(0, 30)),
+    ].slice(0, 15),
     bodyTail: html.slice(-400),
-  })
+  });
 }
 
 export function parseTracklist(tracklistUrl: string, html: string): ScrapedTracklist {
-  const root = parse(html)
-  const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl
+  const root = parse(html);
+  const slug = tracklistUrl.match(/\/tracklist\/([^/]+)\//)?.[1] ?? tracklistUrl;
 
-  const cueMap = parseCueEntries(html)
-  const rows = root.querySelectorAll('div.tlpItem')
-  const pageRows: PageRow[] = []
-  const tracks: ParsedTrack[] = []
-  let named = 0
-  let mismatched = 0
-  let nearMismatched = 0
-  const far: string[] = []
+  const cueMap = parseCueEntries(html);
+  const rows = root.querySelectorAll("div.tlpItem");
+  const pageRows: PageRow[] = [];
+  const tracks: ParsedTrack[] = [];
+  let named = 0;
+  let mismatched = 0;
+  let nearMismatched = 0;
+  const far: string[] = [];
   // Whether the page row right before this one made it into the list being
-  // built. A "w/" row is only linked when its base did — otherwise linking it
+  // built. A "w/" row is only linked when its base did - otherwise linking it
   // to whatever row came before would put it on top of the wrong track.
-  let prevRow = false
-  let prevTrack = false
+  let prevRow = false;
+  let prevTrack = false;
   for (const row of rows) {
-    const r = parseRow(row, cueMap)
+    const r = parseRow(row, cueMap);
     if (!r) {
-      prevRow = prevTrack = false
-      continue
+      prevRow = prevTrack = false;
+      continue;
     }
-    pageRows.push(unlinkedUnless(r, prevRow && pageRows.length > 0))
-    prevRow = true
+    pageRows.push(unlinkedUnless(r, prevRow && pageRows.length > 0));
+    prevRow = true;
     // `tracks` leaves anonymous rows out, as it always has.
     if (r.anonymous) {
-      prevTrack = false
-      continue
+      prevTrack = false;
+      continue;
     }
-    const { anonymous: _, label: _label, mediaId: _mediaId, presaveCount: _ps, hasYoutube: _yt, hasSpotify: _sp, ...track } = r
-    const t = unlinkedUnless(track, prevTrack && tracks.length > 0)
-    prevTrack = true
-    tracks.push(t)
+    const {
+      anonymous: _,
+      label: _label,
+      mediaId: _mediaId,
+      presaveCount: _ps,
+      hasYoutube: _yt,
+      hasSpotify: _sp,
+      ...track
+    } = r;
+    const t = unlinkedUnless(track, prevTrack && tracks.length > 0);
+    prevTrack = true;
+    tracks.push(t);
     // Decoy check: the row's microdata name against the text the page shows.
     // On a real page they are the same string (bar the odd benign variant,
     // see isNearMismatch); on a decoy page each was randomized on its own.
-    const metaName = normalizeName(decodeEntities(row.querySelector('meta[itemprop="name"]')?.getAttribute('content') ?? ''))
-    const visible = normalizeName(decodeEntities(row.querySelector('span.trackValue')?.text ?? ''))
-    if (!metaName || !visible) continue
-    named++
-    if (metaName === visible) continue
-    if (isNearMismatch(metaName, visible)) nearMismatched++
+    const metaName = normalizeName(
+      decodeEntities(row.querySelector('meta[itemprop="name"]')?.getAttribute("content") ?? ""),
+    );
+    const visible = normalizeName(decodeEntities(row.querySelector("span.trackValue")?.text ?? ""));
+    if (!metaName || !visible) continue;
+    named++;
+    if (metaName === visible) continue;
+    if (isNearMismatch(metaName, visible)) nearMismatched++;
     else {
-      mismatched++
-      far.push(`${metaName} ⇄ ${visible}`)
+      mismatched++;
+      far.push(`${metaName} ⇄ ${visible}`);
     }
   }
 
@@ -649,8 +742,14 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
     setSoundcloudLink: extractSetSoundcloudLink(html),
     tracks,
     rows: pageRows,
-    decoy: { named, mismatched, nearMismatched, suspected: looksLikeDecoy({ named, mismatched }), ...(far.length ? { far } : {}) },
-  }
+    decoy: {
+      named,
+      mismatched,
+      nearMismatched,
+      suspected: looksLikeDecoy({ named, mismatched }),
+      ...(far.length ? { far } : {}),
+    },
+  };
 }
 
 /**
@@ -659,17 +758,17 @@ export function parseTracklist(tracklistUrl: string, html: string): ScrapedTrack
  * cued anonymous rows to what it selects from.
  */
 export function keepRows(rows: readonly PageRow[], keep: (r: PageRow) => boolean): PageRow[] {
-  const out: PageRow[] = []
-  let prev = false
+  const out: PageRow[] = [];
+  let prev = false;
   for (const r of rows) {
     if (!keep(r)) {
-      prev = false
-      continue
+      prev = false;
+      continue;
     }
-    out.push(unlinkedUnless(r, prev && out.length > 0))
-    prev = true
+    out.push(unlinkedUnless(r, prev && out.length > 0));
+    prev = true;
   }
-  return out
+  return out;
 }
 
 /**
@@ -678,25 +777,25 @@ export function keepRows(rows: readonly PageRow[], keep: (r: PageRow) => boolean
  * in) is its own. Returns a copy; `rows` and `tracks` may disagree on this.
  */
 function unlinkedUnless<T extends ParsedTrack>(t: T, hasBase: boolean): T {
-  if (!t.isMashupLinked || hasBase) return { ...t }
-  return { ...t, isMashupLinked: false, ownStartSeconds: t.startSeconds }
+  if (!t.isMashupLinked || hasBase) return { ...t };
+  return { ...t, isMashupLinked: false, ownStartSeconds: t.startSeconds };
 }
 
 /** Case- and whitespace-insensitive form of a track name for the decoy comparison. */
 function normalizeName(s: string): string {
-  return s.replace(/\s+/g, ' ').trim().toLowerCase()
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 /** The distinct word tokens of a track name: lowercased, accents folded, punctuation dropped, "feat"/"featuring" read as "ft". */
 function nameTokens(s: string): Set<string> {
   const words = s
     .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean)
-    .map((w) => (w === 'feat' || w === 'featuring' ? 'ft' : w))
-  return new Set(words)
+    .map((w) => (w === "feat" || w === "featuring" ? "ft" : w));
+  return new Set(words);
 }
 
 /**
@@ -734,72 +833,74 @@ function nameTokens(s: string): Set<string> {
  * account's fetch must give the same rows).
  */
 export function isNearMismatch(metaName: string, visible: string): boolean {
-  const meta = splitName(metaName)
-  const shown = splitName(visible)
-  if (meta.length !== shown.length) return false
-  let metaWords = 0
+  const meta = splitName(metaName);
+  const shown = splitName(visible);
+  if (meta.length !== shown.length) return false;
+  let metaWords = 0;
   for (let i = 0; i < meta.length; i++) {
-    metaWords += nameTokens(meta[i]!).size
-    const core = nameTokens(coreName(meta[i]!))
-    if (core.size === 0 || !sameWords(core, nameTokens(coreName(shown[i]!)))) return false
-    const shownGroups = new Set(parentheticals(shown[i]!))
-    for (const g of parentheticals(meta[i]!)) if (!shownGroups.has(g) && !isCountryTag(g)) return false
+    metaWords += nameTokens(meta[i]!).size;
+    const core = nameTokens(coreName(meta[i]!));
+    if (core.size === 0 || !sameWords(core, nameTokens(coreName(shown[i]!)))) return false;
+    const shownGroups = new Set(parentheticals(shown[i]!));
+    for (const g of parentheticals(meta[i]!))
+      if (!shownGroups.has(g) && !isCountryTag(g)) return false;
   }
-  return metaWords >= 2
+  return metaWords >= 2;
 }
 
-const sameWords = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((w) => b.has(w))
+const sameWords = (a: Set<string>, b: Set<string>): boolean =>
+  a.size === b.size && [...a].every((w) => b.has(w));
 
-/** The name without its parentheticals and without a featured-artist credit ("Coolio ft. L.V." → "Coolio"). */
+/** The name without its parentheticals and without a featured-artist credit ("Coolio ft. L.V." -> "Coolio"). */
 function coreName(s: string): string {
-  const core = withoutParentheticals(s)
-  const ft = core.search(/(?:^|\s)(?:ft|feat|featuring)\b/i)
-  return ft >= 0 ? core.slice(0, ft) : core
+  const core = withoutParentheticals(s);
+  const ft = core.search(/(?:^|\s)(?:ft|feat|featuring)\b/i);
+  return ft >= 0 ? core.slice(0, ft) : core;
 }
 
 /** Each (...) / [...] group's words, innermost first, as one comparable string per group. */
 function parentheticals(s: string): string[] {
-  const out: string[] = []
-  let prev: string
+  const out: string[] = [];
+  let prev: string;
   do {
-    prev = s
+    prev = s;
     s = s.replace(/\(([^()]*)\)|\[([^[\]]*)\]/g, (_m, a?: string, b?: string) => {
-      out.push([...nameTokens(a ?? b ?? '')].join(' '))
-      return ' '
-    })
-  } while (s !== prev)
-  return out
+      out.push([...nameTokens(a ?? b ?? "")].join(" "));
+      return " ";
+    });
+  } while (s !== prev);
+  return out;
 }
 
 /** "(BR)", "(US)", "(COL)": a one-word tag of at most 3 letters. */
-const isCountryTag = (group: string): boolean => /^\p{L}{1,3}$/u.test(group)
+const isCountryTag = (group: string): boolean => /^\p{L}{1,3}$/u.test(group);
 
 /** [artist, title] at the first " - ", or [name] when there is none. */
 function splitName(s: string): string[] {
-  const dash = s.indexOf(' - ')
-  return dash >= 0 ? [s.slice(0, dash), s.slice(dash + 3)] : [s]
+  const dash = s.indexOf(" - ");
+  return dash >= 0 ? [s.slice(0, dash), s.slice(dash + 3)] : [s];
 }
 
 /** The text with every (...) and [...] group removed, innermost first. */
 function withoutParentheticals(s: string): string {
-  let prev: string
+  let prev: string;
   do {
-    prev = s
-    s = s.replace(/\([^()]*\)|\[[^[\]]*\]/g, ' ')
-  } while (s !== prev)
-  return s
+    prev = s;
+    s = s.replace(/\([^()]*\)|\[[^[\]]*\]/g, " ");
+  } while (s !== prev);
+  return s;
 }
 
 /**
  * YouTube watch URL for the set's primary recording. Delegates to
  * parseSetYouTubeId (dj-index.ts), which already knows every way 1001tl has
  * embedded the player over time (embed iframe, og:video, data attributes,
- * JS variables) and returns the first hit — the main media lives near the
+ * JS variables) and returns the first hit - the main media lives near the
  * top of the page, above any incidental per-track references.
  */
 export function extractSetYouTubeLink(html: string): string | null {
-  const id = parseSetYouTubeId(html)
-  return id ? `https://www.youtube.com/watch?v=${id}` : null
+  const id = parseSetYouTubeId(html);
+  return id ? `https://www.youtube.com/watch?v=${id}` : null;
 }
 
 /**
@@ -810,9 +911,9 @@ export function extractSetYouTubeLink(html: string): string | null {
  * Returned in the same widget-player form as MediaLinks.soundcloudLink.
  */
 export function extractSetSoundcloudLink(html: string): string | null {
-  const m = html.match(/api\.soundcloud\.com\/tracks\/(\d+)/)
-  if (!m) return null
-  return `https://w.soundcloud.com/player/?url=${encodeURIComponent(`https://api.soundcloud.com/tracks/${m[1]}`)}`
+  const m = html.match(/api\.soundcloud\.com\/tracks\/(\d+)/);
+  if (!m) return null;
+  return `https://w.soundcloud.com/player/?url=${encodeURIComponent(`https://api.soundcloud.com/tracks/${m[1]}`)}`;
 }
 
 /**
@@ -823,14 +924,14 @@ export function extractSetSoundcloudLink(html: string): string | null {
  * like they start at 0:00. The JS map only contains real cues, so use it as
  * the source of truth and fall back to null for anything not listed.
  *
- * A single `cueValuesEntry` may hold multiple `ids[N]` entries — 1001tl uses
+ * A single `cueValuesEntry` may hold multiple `ids[N]` entries - 1001tl uses
  * `ids[1+]` for additional rows that share the parent cue (e.g. a track and
  * its mashup partner both cued at 12:30). Capture every `ids[N]` so those
  * sibling rows aren't left looking uncued, which would otherwise leave a
  * null gap in the timeline and confuse `selectCurrent`'s range matcher.
  */
 export function parseCueValueData(html: string): Map<string, number> {
-  return new Map([...parseCueEntries(html)].map(([id, e]) => [id, e.seconds]))
+  return new Map([...parseCueEntries(html)].map(([id, e]) => [id, e.seconds]));
 }
 
 /**
@@ -838,21 +939,21 @@ export function parseCueValueData(html: string): Map<string, number> {
  * entry belongs to; ids[1+] only share it (a "w/" row inherits its base's cue).
  */
 function parseCueEntries(html: string): Map<string, { seconds: number; own: boolean }> {
-  const out = new Map<string, { seconds: number; own: boolean }>()
+  const out = new Map<string, { seconds: number; own: boolean }>();
   // Walk each entry block (delimited by `cueValuesEntry = {}`) and pair its
   // .seconds with every .ids[N] in the same block.
-  const blocks = html.split(/cueValuesEntry\s*=\s*\{\}/)
+  const blocks = html.split(/cueValuesEntry\s*=\s*\{\}/);
   for (const block of blocks) {
-    const sm = block.match(/cueValuesEntry\.seconds\s*=\s*(\d+)/)
-    if (!sm) continue
-    const seconds = Number(sm[1])
-    const idRe = /cueValuesEntry\.ids\[(\d+)\]\s*=\s*'([^']+)'/g
-    let im
+    const sm = block.match(/cueValuesEntry\.seconds\s*=\s*(\d+)/);
+    if (!sm) continue;
+    const seconds = Number(sm[1]);
+    const idRe = /cueValuesEntry\.ids\[(\d+)\]\s*=\s*'([^']+)'/g;
+    let im;
     while ((im = idRe.exec(block))) {
-      out.set(im[2]!, { seconds, own: im[1] === '0' })
+      out.set(im[2]!, { seconds, own: im[1] === "0" });
     }
   }
-  return out
+  return out;
 }
 
 /**
@@ -860,16 +961,16 @@ function parseCueEntries(html: string): Map<string, { seconds: number; own: bool
  * embedded near the top of the page (in the media-tabs section, parallel to
  * the YouTube video). When present, the iframe src is of the form:
  *   embed.music.apple.com/album/<slug>/<id>/<country>/album/<slug>/<id>?app=music&at=...
- * — the country code lives in the middle of the path after the first
+ * - the country code lives in the middle of the path after the first
  * /album/<slug>/<id> repeats. We rebuild the canonical user-facing URL.
  */
 export function extractSetAppleLink(html: string): string | null {
   const m = html.match(
     /embed\.music\.apple\.com\/album\/[^/"]+\/\d+\/(\w{2})\/album\/([^/"]+)\/(\d+)([^"\s]*)/,
-  )
-  if (!m) return null
-  const [, country, slug, albumId, query] = m
-  return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ''}`
+  );
+  if (!m) return null;
+  const [, country, slug, albumId, query] = m;
+  return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ""}`;
 }
 
 /**
@@ -879,31 +980,41 @@ export function extractSetAppleLink(html: string): string | null {
  */
 function parseRowLabel(row: HTMLElement): string | null {
   const clean = (xs: string[]): string | null => {
-    const labels = xs.map((x) => decodeEntities(x).replace(/\s+/g, ' ').trim()).filter((x) => x && !/^not on label$/i.test(x))
-    return labels.length ? labels.join(' / ') : null
-  }
-  const pub = row.querySelector('meta[itemprop="publisher"]')?.getAttribute('content')
-  if (pub) return clean(parse(decodeEntities(pub)).querySelectorAll('.trackLabel').map((e) => e.text))
-  return clean(row.querySelectorAll('span.trackLabel').map((e) => e.text))
+    const labels = xs
+      .map((x) => decodeEntities(x).replace(/\s+/g, " ").trim())
+      .filter((x) => x && !/^not on label$/i.test(x));
+    return labels.length ? labels.join(" / ") : null;
+  };
+  const pub = row.querySelector('meta[itemprop="publisher"]')?.getAttribute("content");
+  if (pub)
+    return clean(
+      parse(decodeEntities(pub))
+        .querySelectorAll(".trackLabel")
+        .map((e) => e.text),
+    );
+  return clean(row.querySelectorAll("span.trackLabel").map((e) => e.text));
 }
 
-function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: boolean }>): PageRow | null {
-  const dataId = row.getAttribute('data-id') ?? null
-  const cls = row.getAttribute('class') ?? ''
+function parseRow(
+  row: HTMLElement,
+  cueMap: Map<string, { seconds: number; own: boolean }>,
+): PageRow | null {
+  const dataId = row.getAttribute("data-id") ?? null;
+  const cls = row.getAttribute("class") ?? "";
   // "w/" row: class `con`, the parent's trRow number repeated, and a
   // `<span title="played together with previous track"> w/ </span>` where the
   // track number goes.
-  const isMashupLinked = / con(\s|$)/.test(cls)
+  const isMashupLinked = / con(\s|$)/.test(cls);
 
   // Source of truth for the cue is the JS-emitted cueValueData map keyed by
   // tlp{N}_content. Rows that aren't in the map (mashup-linked, trailing
   // untimed extras) get null even when their hidden form input reads "0".
-  const contentDiv = row.querySelector('[id^="tlp"][id$="_content"]')
-  const contentId = contentDiv?.getAttribute('id') ?? ''
-  const cueEntry = cueMap.get(contentId)
-  const startSeconds = cueEntry === undefined ? null : cueEntry.seconds
-  const cueDiv = row.querySelector('div.cue')
-  const startTime = (cueDiv?.text ?? '').trim()
+  const contentDiv = row.querySelector('[id^="tlp"][id$="_content"]');
+  const contentId = contentDiv?.getAttribute("id") ?? "";
+  const cueEntry = cueMap.get(contentId);
+  const startSeconds = cueEntry === undefined ? null : cueEntry.seconds;
+  const cueDiv = row.querySelector("div.cue");
+  const startTime = (cueDiv?.text ?? "").trim();
   // A "w/" row's startSeconds is usually its base's (ids[1+] of the base's
   // entry). Its own cue is the time printed on the row, or an entry of its own.
   const ownStartSeconds = !isMashupLinked
@@ -912,23 +1023,23 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
       ? parseTime(startTime)
       : cueEntry?.own
         ? cueEntry.seconds
-        : null
+        : null;
 
-  const nameMeta = row.querySelector('meta[itemprop="name"]')
-  const artistMeta = row.querySelector('meta[itemprop="byArtist"]')
-  const fullName = decodeEntities(nameMeta?.getAttribute('content') ?? '')
-  const artistRaw = decodeEntities(artistMeta?.getAttribute('content') ?? '')
+  const nameMeta = row.querySelector('meta[itemprop="name"]');
+  const artistMeta = row.querySelector('meta[itemprop="byArtist"]');
+  const fullName = decodeEntities(nameMeta?.getAttribute("content") ?? "");
+  const artistRaw = decodeEntities(artistMeta?.getAttribute("content") ?? "");
 
   if (!fullName) {
-    // A fully anonymous "ID - ID" row: no microdata, no track page, no art —
+    // A fully anonymous "ID - ID" row: no microdata, no track page, no art -
     // only its place in the list and (usually) its cue. Not a row at all
     // without the content div.
-    if (!contentDiv) return null
+    if (!contentDiv) return null;
     return {
-      startTime: startTime || (startSeconds !== null ? formatCue(startSeconds) : ''),
+      startTime: startTime || (startSeconds !== null ? formatCue(startSeconds) : ""),
       startSeconds,
-      artist: 'ID',
-      title: 'ID',
+      artist: "ID",
+      title: "ID",
       trackId: dataId,
       trackUrl: null,
       artworkUrl: null,
@@ -942,54 +1053,56 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
       presaveCount: rowPresaveCount(row),
       hasYoutube: false,
       hasSpotify: false,
-    }
+    };
   }
 
-  let title = ''
-  let artist = artistRaw
-  const dash = fullName.indexOf(' - ')
+  let title: string;
+  let artist = artistRaw;
+  const dash = fullName.indexOf(" - ");
   if (dash >= 0) {
-    const left = fullName.slice(0, dash).trim()
-    title = fullName.slice(dash + 3).trim()
-    if (!artist) artist = left
+    const left = fullName.slice(0, dash).trim();
+    title = fullName.slice(dash + 3).trim();
+    if (!artist) artist = left;
   } else {
-    title = fullName
+    title = fullName;
   }
 
   // 1001tl marks partial-ID variants ("ID Remix", "ID Edit", etc.) with a
   // <span class="trackStatus"> next to the title. The base track is known;
   // only the variant is uncertain. We propagate that signal as idStatus.
-  const trackStatus = row.querySelector('span.trackStatus')
-  const trackStatusText = (trackStatus?.text ?? '').trim()
-  const idStatus = trackStatusText && /\bID\b/.test(trackStatusText)
-    ? trackStatusText.replace(/^\(|\)$/g, '').trim()
-    : null
+  const trackStatus = row.querySelector("span.trackStatus");
+  const trackStatusText = (trackStatus?.text ?? "").trim();
+  const idStatus =
+    trackStatusText && /\bID\b/.test(trackStatusText)
+      ? trackStatusText.replace(/^\(|\)$/g, "").trim()
+      : null;
 
   // Fully unidentified = the playing track itself has no name (e.g.
   // "Cave Studio - ID"). Partial variants (idStatus set) are NOT unidentified
-  // — the artist + title describe the base track and are useful.
-  const isUnidentified = idStatus === null && (title === 'ID' || /^ID\b/.test(title) || !artist || artist === 'ID')
+  // - the artist + title describe the base track and are useful.
+  const isUnidentified =
+    idStatus === null && (title === "ID" || /^ID\b/.test(title) || !artist || artist === "ID");
 
-  const mediaRow = row.querySelector('div.mediaRow')
-  const mediaTrackId = mediaRow?.getAttribute('data-trackid') ?? null
+  const mediaRow = row.querySelector("div.mediaRow");
+  const mediaTrackId = mediaRow?.getAttribute("data-trackid") ?? null;
 
-  const urlMeta = row.querySelector('meta[itemprop="url"]')
-  const urlPath = urlMeta?.getAttribute('content') ?? ''
-  const trackUrl = urlPath ? new URL(urlPath, ORIGIN).toString() : null
+  const urlMeta = row.querySelector('meta[itemprop="url"]');
+  const urlPath = urlMeta?.getAttribute("content") ?? "";
+  const trackUrl = urlPath ? new URL(urlPath, ORIGIN).toString() : null;
 
   // Album art lives on the row's `img.artM`. Two layouts:
-  //   - real art: <img data-src="<CDN URL>" src="/images/static/empty.png" class="artwork artM" …>
-  //   - no art: <img src="…/default_100.png" class="artM" …>  (no `artwork` class, no data-src)
+  //   - real art: <img data-src="<CDN URL>" src="/images/static/empty.png" class="artwork artM" ...>
+  //   - no art: <img src=".../default_100.png" class="artM" ...>  (no `artwork` class, no data-src)
   // Prefer data-src; fall back to src. The normalizer maps both placeholders to null.
-  const artImg = row.querySelector('img.artM')
-  const artRaw = artImg?.getAttribute('data-src') ?? artImg?.getAttribute('src') ?? ''
-  const artworkUrl = normalizeArtworkUrl(artRaw)
+  const artImg = row.querySelector("img.artM");
+  const artRaw = artImg?.getAttribute("data-src") ?? artImg?.getAttribute("src") ?? "";
+  const artworkUrl = normalizeArtworkUrl(artRaw);
 
   return {
-    startTime: startTime || (Number.isFinite(startSeconds!) ? formatCue(startSeconds!) : ''),
+    startTime: startTime || (Number.isFinite(startSeconds!) ? formatCue(startSeconds!) : ""),
     startSeconds: Number.isFinite(startSeconds!) ? (startSeconds as number) : null,
     artist,
-    title: title || 'ID',
+    title: title || "ID",
     trackId: mediaTrackId ?? dataId,
     trackUrl,
     artworkUrl,
@@ -1002,67 +1115,68 @@ function parseRow(row: HTMLElement, cueMap: Map<string, { seconds: number; own: 
     mediaId: mediaTrackId,
     presaveCount: rowPresaveCount(row),
     ...rowMediaLinks(mediaRow),
-  }
+  };
 }
 
 /**
- * Normalize a 1001tl-embedded album-art URL to a 300×300 square. Returns null
+ * Normalize a 1001tl-embedded album-art URL to a 300x300 square. Returns null
  * for any of the known placeholders (1001tl's default_100.png + the lazy-load
  * empty.png). Unknown CDNs are passed through unchanged so we still surface
- * something — the contract is "300×300 if we can, raw URL otherwise."
+ * something - the contract is "300x300 if we can, raw URL otherwise."
  *
  * Beatport (geo-media.beatport.com) supports any size via dynamic resizer.
  * SoundCloud (i1.sndcdn.com / iN.sndcdn.com) only honors a fixed list of
  * sizes; 300 is in that list so we use it.
  */
 export function normalizeArtworkUrl(raw: string): string | null {
-  if (!raw) return null
-  // 1001tl placeholders — both relative and absolute forms.
+  if (!raw) return null;
+  // 1001tl placeholders - both relative and absolute forms.
   if (
     /\/images\/static\/empty\.png$/.test(raw) ||
     /\/images\/artworks\/default_\d+\.png$/.test(raw)
   ) {
-    return null
+    return null;
   }
   // Beatport: image_size/<W>x<H>/<uuid>.<ext>
-  const beatport = raw.match(/^(https:\/\/[^/]*beatport\.com\/image_size\/)\d+x\d+(\/[^/?#]+)/)
-  if (beatport) return `${beatport[1]}300x300${beatport[2]}`
+  const beatport = raw.match(/^(https:\/\/[^/]*beatport\.com\/image_size\/)\d+x\d+(\/[^/?#]+)/);
+  if (beatport) return `${beatport[1]}300x300${beatport[2]}`;
   // SoundCloud: artworks-<id>-t<W>x<H>.<ext>  (or the named alias forms)
-  const sndcdn = raw.match(/^(https:\/\/i\d*\.sndcdn\.com\/artworks-[^.-]+-(?:[^./-]+-)?)t?\d+x\d+(\.[a-z]+)/)
-  if (sndcdn) return `${sndcdn[1]}t300x300${sndcdn[2]}`
-  // Unknown CDN — pass through unmodified.
-  return /^https?:\/\//.test(raw) ? raw : null
+  const sndcdn = raw.match(
+    /^(https:\/\/i\d*\.sndcdn\.com\/artworks-[^.-]+-(?:[^./-]+-)?)t?\d+x\d+(\.[a-z]+)/,
+  );
+  if (sndcdn) return `${sndcdn[1]}t300x300${sndcdn[2]}`;
+  // Unknown CDN - pass through unmodified.
+  return /^https?:\/\//.test(raw) ? raw : null;
 }
 
 function formatCue(seconds: number): string {
-  const s = Math.floor(seconds)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
+  const s = Math.floor(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
 
-
 export type MediaLinks = {
-  appleLink: string | null
-  youtubeLink: string | null
+  appleLink: string | null;
+  youtubeLink: string | null;
   /** SoundCloud widget-player URL (plays free w/ ads in a browser tab, and
    *  yt-dlp can download it without cookies). null when 1001tl has no
    *  SoundCloud source for the track. */
-  soundcloudLink: string | null
-}
+  soundcloudLink: string | null;
+};
 
-const NO_LINKS: MediaLinks = { appleLink: null, youtubeLink: null, soundcloudLink: null }
+const NO_LINKS: MediaLinks = { appleLink: null, youtubeLink: null, soundcloudLink: null };
 
 export type MedialinkResponse = {
-  success: boolean
-  data?: Array<{ source: string; playerId: string; player?: string }>
-  more?: Array<{ source: string; idLink: string; type?: string }>
-}
+  success: boolean;
+  data?: Array<{ source: string; playerId: string; player?: string }>;
+  more?: Array<{ source: string; idLink: string; type?: string }>;
+};
 
 /** Pool options for a medialink lookup (kind `medialink`, counted against the account budget like a page view). */
-export type FetchMediaLinksOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
+export type FetchMediaLinksOpts = Omit<CascadeOpts, "method" | "form" | "kind">;
 
 /**
  * Resolve per-track Apple Music + YouTube (+ SoundCloud) links from 1001tl's
@@ -1070,39 +1184,57 @@ export type FetchMediaLinksOpts = Omit<CascadeOpts, 'method' | 'form' | 'kind'>
  *
  * Never throws: a lookup that fails comes back as no links with `failed:
  * true`, so a caller that caches (lib/tracklist-resolve.ts) can skip caching
- * a failure — a pool refusal must not poison the entry for its TTL.
+ * a failure - a pool refusal must not poison the entry for its TTL.
  */
 export async function fetchMediaLinks(
   mediaItemId: string,
   opts: FetchMediaLinksOpts = {},
 ): Promise<{ result: MediaLinks; state: ChallengeState; failed?: boolean }> {
-  const log = opts.log
-  const url = `${ORIGIN}/ajax/get_medialink.php?idObject=5&idItem=${encodeURIComponent(mediaItemId)}`
-  log?.info('medialink.start', { mediaItemId })
-  const start = Date.now()
+  const log = opts.log;
+  const url = `${ORIGIN}/ajax/get_medialink.php?idObject=5&idItem=${encodeURIComponent(mediaItemId)}`;
+  log?.info("medialink.start", { mediaItemId });
+  const start = Date.now();
   try {
     const r = await fetch1001(url, {
       ...opts,
-      kind: 'medialink',
-      headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json,text/javascript,*/*;q=0.01', Referer: ORIGIN + '/', ...(opts.headers ?? {}) },
-    })
-    return { result: parseAndLog(mediaItemId, r.html, log, start), state: { cookie: '' } }
+      kind: "medialink",
+      headers: {
+        "X-Requested-With": "XMLHttpRequest",
+        Accept: "application/json,text/javascript,*/*;q=0.01",
+        Referer: ORIGIN + "/",
+        ...(opts.headers ?? {}),
+      },
+    });
+    return { result: parseAndLog(mediaItemId, r.html, log, start), state: { cookie: "" } };
   } catch (e) {
-    log?.[isStopTheBatchError(e) ? 'warn' : 'error']('medialink.failed', { mediaItemId, error: e instanceof Error ? e.message : String(e), ms: Date.now() - start })
-    return { result: { ...NO_LINKS }, state: { cookie: '' }, failed: true }
+    log?.[isStopTheBatchError(e) ? "warn" : "error"]("medialink.failed", {
+      mediaItemId,
+      error: e instanceof Error ? e.message : String(e),
+      ms: Date.now() - start,
+    });
+    return { result: { ...NO_LINKS }, state: { cookie: "" }, failed: true };
   }
 }
 
-function parseAndLog(mediaItemId: string, text: string, log: Logger | undefined, start: number): MediaLinks {
-  let json: MedialinkResponse
+function parseAndLog(
+  mediaItemId: string,
+  text: string,
+  log: Logger | undefined,
+  start: number,
+): MediaLinks {
+  let json: MedialinkResponse;
   try {
-    json = JSON.parse(text)
+    json = JSON.parse(text);
   } catch {
-    log?.warn('medialink.parse_failed', { mediaItemId, body: text.slice(0, 500), ms: Date.now() - start })
-    throw new Error('medialink parse_failed')
+    log?.warn("medialink.parse_failed", {
+      mediaItemId,
+      body: text.slice(0, 500),
+      ms: Date.now() - start,
+    });
+    throw new Error("medialink parse_failed");
   }
-  const result = parseMediaLinks(json)
-  log?.info('medialink.done', {
+  const result = parseMediaLinks(json);
+  log?.info("medialink.done", {
     mediaItemId,
     success: json.success,
     sourcesData: (json.data ?? []).map((d) => d.source),
@@ -1111,20 +1243,20 @@ function parseAndLog(mediaItemId: string, text: string, log: Logger | undefined,
     youtubeLink: result.youtubeLink,
     soundcloudLink: result.soundcloudLink,
     ms: Date.now() - start,
-  })
-  return result
+  });
+  return result;
 }
 
 export function parseMediaLinks(json: MedialinkResponse): MediaLinks {
-  if (!json.success) return { ...NO_LINKS }
-  const apple = json.data?.find((d) => d.source === SOURCE.APPLE)
-  const youtube = json.more?.find((m) => m.source === SOURCE.YOUTUBE)
-  const soundcloud = json.data?.find((d) => d.source === SOURCE.SOUNDCLOUD)
+  if (!json.success) return { ...NO_LINKS };
+  const apple = json.data?.find((d) => d.source === SOURCE.APPLE);
+  const youtube = json.more?.find((m) => m.source === SOURCE.YOUTUBE);
+  const soundcloud = json.data?.find((d) => d.source === SOURCE.SOUNDCLOUD);
   return {
     appleLink: apple ? buildAppleLink(apple) : null,
     youtubeLink: youtube?.idLink ? `https://www.youtube.com/watch?v=${youtube.idLink}` : null,
     soundcloudLink: soundcloud ? buildSoundcloudLink(soundcloud) : null,
-  }
+  };
 }
 
 /**
@@ -1136,28 +1268,28 @@ export function parseMediaLinks(json: MedialinkResponse): MediaLinks {
  * parsing the api URL out of the iframe when `playerId` isn't the bare id.
  */
 function buildSoundcloudLink(entry: { playerId?: string; player?: string }): string | null {
-  let apiUrl: string | null = null
+  let apiUrl: string | null = null;
   if (entry.playerId && /^\d+$/.test(entry.playerId)) {
-    apiUrl = `https://api.soundcloud.com/tracks/${entry.playerId}`
+    apiUrl = `https://api.soundcloud.com/tracks/${entry.playerId}`;
   } else {
     // The iframe src is `...player/?url=https://api.soundcloud.com/tracks/<id>&amp;...`
-    const m = (entry.player ?? '').match(/[?&]url=(https?:\/\/api\.soundcloud\.com\/tracks\/\d+)/)
-    if (m) apiUrl = m[1]!
+    const m = (entry.player ?? "").match(/[?&]url=(https?:\/\/api\.soundcloud\.com\/tracks\/\d+)/);
+    if (m) apiUrl = m[1]!;
   }
-  if (!apiUrl) return null
-  return `https://w.soundcloud.com/player/?url=${encodeURIComponent(apiUrl)}`
+  if (!apiUrl) return null;
+  return `https://w.soundcloud.com/player/?url=${encodeURIComponent(apiUrl)}`;
 }
 
 export function buildAppleLink(entry: { playerId: string; player?: string }): string | null {
-  const player = entry.player ?? ''
+  const player = entry.player ?? "";
   // Player iframe src example:
   //   https://embed.music.apple.com/us/album/where-ya-at/1696220774?i=1696221102app=music&at=...
-  const m = player.match(/embed\.music\.apple\.com\/(\w+)\/album\/([^/]+)\/(\d+)\?i=(\d+)/)
+  const m = player.match(/embed\.music\.apple\.com\/(\w+)\/album\/([^/]+)\/(\d+)\?i=(\d+)/);
   if (m) {
-    const [, country, slug, albumId, songId] = m
-    return `https://music.apple.com/${country}/album/${slug}/${albumId}?i=${songId}`
+    const [, country, slug, albumId, songId] = m;
+    return `https://music.apple.com/${country}/album/${slug}/${albumId}?i=${songId}`;
   }
   // Fallback: song-id direct link (Apple redirects this).
-  if (entry.playerId) return `https://music.apple.com/us/song/${entry.playerId}`
-  return null
+  if (entry.playerId) return `https://music.apple.com/us/song/${entry.playerId}`;
+  return null;
 }

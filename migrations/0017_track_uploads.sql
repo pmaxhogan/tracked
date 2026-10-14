@@ -4,7 +4,7 @@
 -- visualizer and uploads it; the Worker adds it to the "Track uploads"
 -- playlist. Same pull model as mkvid_requests (POST /mkvid/track/*).
 --
--- status: pending → claimed → done | failed ; banned (the owner banned its
+-- status: pending -> claimed -> done | failed ; banned (the owner banned its
 -- source URL) ; superseded (1001tracklists got a YouTube link meanwhile, or
 -- the presave was dismissed).
 CREATE TABLE IF NOT EXISTS track_uploads (
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS track_uploads (
   title TEXT,
   artwork_url TEXT,
   track_url TEXT,
-  source_name TEXT NOT NULL,         -- soundcloud | bandcamp | hearthis | mixcloud | …
+  source_name TEXT NOT NULL,         -- soundcloud | bandcamp | hearthis | mixcloud | ...
   source_url TEXT NOT NULL,          -- handed to yt-dlp as-is
   expected_duration_seconds INTEGER, -- from the medialink entries; mkvid refuses a much shorter rip (a preview)
   status TEXT NOT NULL DEFAULT 'pending',

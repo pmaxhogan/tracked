@@ -14,50 +14,58 @@
  * ordinary failures.
  */
 
-import { IPBlockedError } from './fetch'
+import { IPBlockedError } from "./fetch";
 
 export class UpstreamPausedError extends Error {
-  readonly until: string | null
-  readonly reason: string
+  readonly until: string | null;
+  readonly reason: string;
   constructor(reason: string, until: string | null) {
-    super(until ? `1001tracklists fetching paused (${reason}) until ${until}` : `1001tracklists fetching paused (${reason})`)
-    this.name = 'UpstreamPausedError'
-    this.until = until
-    this.reason = reason
+    super(
+      until
+        ? `1001tracklists fetching paused (${reason}) until ${until}`
+        : `1001tracklists fetching paused (${reason})`,
+    );
+    this.name = "UpstreamPausedError";
+    this.until = until;
+    this.reason = reason;
   }
 }
 
 export class UpstreamUnavailableError extends Error {
-  readonly reason: string
+  readonly reason: string;
   constructor(reason: string) {
-    super(`1001tracklists unreachable (${reason})`)
-    this.name = 'UpstreamUnavailableError'
-    this.reason = reason
+    super(`1001tracklists unreachable (${reason})`);
+    this.name = "UpstreamUnavailableError";
+    this.reason = reason;
   }
 }
 
 /** 1001tracklists answered a definitive 404/410: the URL is gone. Charged like any failure of that URL. */
 export class UpstreamHttpError extends Error {
-  readonly status: number
-  readonly url: string
+  readonly status: number;
+  readonly url: string;
   constructor(status: number, url: string) {
-    super(`1001tracklists answered ${status} for ${url}`)
-    this.name = 'UpstreamHttpError'
-    this.status = status
-    this.url = url
+    super(`1001tracklists answered ${status} for ${url}`);
+    this.name = "UpstreamHttpError";
+    this.status = status;
+    this.url = url;
   }
 }
 
 /** 1001tracklists itself answered an error page (5xx / unexpected status). A blip: one ordinary failure, retried on a later tick. */
 export class UpstreamTransportError extends Error {
-  readonly url: string
+  readonly url: string;
   constructor(url: string, detail: string) {
-    super(`1001tracklists could not serve ${url} (${detail})`)
-    this.name = 'UpstreamTransportError'
-    this.url = url
+    super(`1001tracklists could not serve ${url} (${detail})`);
+    this.name = "UpstreamTransportError";
+    this.url = url;
   }
 }
 
 export function isStopTheBatchError(e: unknown): boolean {
-  return e instanceof UpstreamPausedError || e instanceof UpstreamUnavailableError || e instanceof IPBlockedError
+  return (
+    e instanceof UpstreamPausedError ||
+    e instanceof UpstreamUnavailableError ||
+    e instanceof IPBlockedError
+  );
 }

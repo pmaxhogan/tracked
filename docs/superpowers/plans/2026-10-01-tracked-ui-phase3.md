@@ -5,6 +5,7 @@
 **Goal:** Fuzzy search over every verified tracklist: tracks, sets and DJs from one box (`/ui/search`, `GET /ui/api/search`), fed by verified fetches and a Tools backfill. The search index lives in its own D1 database.
 
 **Architecture:**
+
 - **Storage:**
   - The index lives in a separate D1 database, `tracked-search`, bound as `SEARCH_DB`, with migrations in `migrations-search/`.
   - It holds two base tables (`search_sets`, `search_tracks`), a link table, a vocabulary, and three FTS5 tables.
@@ -16,9 +17,10 @@
 
 **Tech Stack:** Cloudflare Workers, Hono, D1 with FTS5 (`unicode61 remove_diacritics 2` and `trigram` tokenizers), vitest, `@sqlite.org/sqlite-wasm` for the test D1, `node:vm` stub DOMs.
 
-**Spec:** `docs/superpowers/specs/2026-09-30-tracked-ui-redesign-design.md`: sections "Search (phase 3)" (§6), §9, "Tools", §3 non-negotiables, and §10. The phase 2 plan has the conventions: `docs/superpowers/plans/2026-10-01-tracked-ui-phase2.md`.
+**Spec:** `docs/superpowers/specs/2026-09-30-tracked-ui-redesign-design.md`: sections "Search (phase 3)" (section 6), section 9, "Tools", section 3 non-negotiables, and section 10. The phase 2 plan has the conventions: `docs/superpowers/plans/2026-10-01-tracked-ui-phase2.md`.
 
 **Deviations from the spec, decided 2026-10-01:**
+
 1. **The index lives in its own D1 database, `tracked-search`, not in migration `0013` of `tracked`.**
    - Cloudflare documents: "Export is not supported for virtual tables, including databases with virtual tables". FTS5 in `tracked` would end the export-before-migration step for good.
    - The owner chose a separate DB. It was created 2026-10-01 with id `4ee888df-562d-4937-9b25-8e1b4da2ea88`.
@@ -76,6 +78,7 @@
 **Model:** opus. Every test in the suite depends on this harness.
 
 **Files:**
+
 - Modify: `test/helpers/fake-d1.ts` (engine swap; keep every exported name)
 - Modify: `test/migrations.test.ts` (it imports `sql.js` directly)
 - Modify: `test/mkvid.test.ts:241` (comment mentions sql.js; reword only)
@@ -83,6 +86,7 @@
 - Test: `test/fake-d1.test.ts` (new)
 
 **Interfaces:**
+
 - Produces:
   - `fakeD1(opts?: { migrations?: 'main' | 'search' }): FakeD1`. The default is `'main'`, which reads `migrations/`. `'search'` reads `migrations-search/`; if that directory does not exist yet, it applies nothing.
   - `applyMigrations(db, dir?)`
@@ -90,6 +94,7 @@
   - Callers that used `_db` must keep working. Grep `_db` in `test/` and adapt every caller in this task.
 
 **Behaviour to keep (the fake's contract, from its header comment):**
+
 - An `undefined` or boolean bind throws the D1 messages verbatim.
 - `first()` returns `null` on a miss, and `first(col)` returns the column or `null`.
 - `bind()` returns a fresh statement.
@@ -102,39 +107,59 @@
 - [ ] **Step 1: Write the failing test** `test/fake-d1.test.ts`
 
 ```ts
-import { describe, it, expect } from 'vitest'
-import { fakeD1 } from './helpers/fake-d1'
+import { describe, it, expect } from "vitest";
+import { fakeD1 } from "./helpers/fake-d1";
 
-describe('fakeD1 engine', () => {
-  it('has FTS5 with unicode61 remove_diacritics and trigram, and bm25', async () => {
-    const db = fakeD1()
-    await db.exec(`CREATE VIRTUAL TABLE t_u USING fts5(a, b, tokenize='unicode61 remove_diacritics 2')`)
-    await db.exec(`CREATE VIRTUAL TABLE t_g USING fts5(term, tokenize='trigram')`)
-    await db.prepare('INSERT INTO t_u (rowid, a, b) VALUES (?, ?, ?)').bind(7, 'Café Ünïcode', 'x').run()
-    await db.prepare('INSERT INTO t_g (rowid, term) VALUES (?, ?)').bind(1, 'palmer').run()
-    expect(await db.prepare(`SELECT rowid AS id, bm25(t_u, 3.0, 1.0) AS s FROM t_u WHERE t_u MATCH ?`).bind('"cafe" "unico"*').first('id')).toBe(7)
-    expect(await db.prepare(`SELECT term FROM t_g WHERE t_g MATCH ?`).bind('"alm"').first('term')).toBe('palmer')
-  })
-  it('keeps D1 strictness: undefined/boolean binds throw, first() is null on a miss', async () => {
-    const db = fakeD1()
-    expect(() => db.prepare('SELECT 1').bind(undefined)).toThrow(/D1_TYPE_ERROR/)
-    expect(() => db.prepare('SELECT 1').bind(true)).toThrow(/D1_TYPE_ERROR/)
-    expect(await db.prepare('SELECT slug FROM subscriptions WHERE slug = ?').bind('none').first()).toBeNull()
-  })
-  it('batch is one transaction and run() reports changes and last_row_id as numbers', async () => {
-    const db = fakeD1()
-    const ins = db.prepare('INSERT INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, ?, ?)')
-    const r = await ins.bind('a', 'u', 1, 1).run()
-    expect(r.meta.changes).toBe(1)
-    expect(typeof r.meta.last_row_id).toBe('number')
-    await expect(db.batch([ins.bind('b', 'u', 1, 2), ins.bind('a', 'u', 1, 3)])).rejects.toThrow()
-    expect(await db.prepare('SELECT COUNT(*) AS n FROM subscriptions').first('n')).toBe(1)
-  })
-  it('opens the search migrations on request', async () => {
-    const db = fakeD1({ migrations: 'search' })
-    expect(await db.prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'subscriptions'`).first('n')).toBe(0)
-  })
-})
+describe("fakeD1 engine", () => {
+  it("has FTS5 with unicode61 remove_diacritics and trigram, and bm25", async () => {
+    const db = fakeD1();
+    await db.exec(
+      `CREATE VIRTUAL TABLE t_u USING fts5(a, b, tokenize='unicode61 remove_diacritics 2')`,
+    );
+    await db.exec(`CREATE VIRTUAL TABLE t_g USING fts5(term, tokenize='trigram')`);
+    await db
+      .prepare("INSERT INTO t_u (rowid, a, b) VALUES (?, ?, ?)")
+      .bind(7, "Café Ünïcode", "x")
+      .run();
+    await db.prepare("INSERT INTO t_g (rowid, term) VALUES (?, ?)").bind(1, "palmer").run();
+    expect(
+      await db
+        .prepare(`SELECT rowid AS id, bm25(t_u, 3.0, 1.0) AS s FROM t_u WHERE t_u MATCH ?`)
+        .bind('"cafe" "unico"*')
+        .first("id"),
+    ).toBe(7);
+    expect(
+      await db.prepare(`SELECT term FROM t_g WHERE t_g MATCH ?`).bind('"alm"').first("term"),
+    ).toBe("palmer");
+  });
+  it("keeps D1 strictness: undefined/boolean binds throw, first() is null on a miss", async () => {
+    const db = fakeD1();
+    expect(() => db.prepare("SELECT 1").bind(undefined)).toThrow(/D1_TYPE_ERROR/);
+    expect(() => db.prepare("SELECT 1").bind(true)).toThrow(/D1_TYPE_ERROR/);
+    expect(
+      await db.prepare("SELECT slug FROM subscriptions WHERE slug = ?").bind("none").first(),
+    ).toBeNull();
+  });
+  it("batch is one transaction and run() reports changes and last_row_id as numbers", async () => {
+    const db = fakeD1();
+    const ins = db.prepare(
+      "INSERT INTO subscriptions (slug, source_url, added_at, position) VALUES (?, ?, ?, ?)",
+    );
+    const r = await ins.bind("a", "u", 1, 1).run();
+    expect(r.meta.changes).toBe(1);
+    expect(typeof r.meta.last_row_id).toBe("number");
+    await expect(db.batch([ins.bind("b", "u", 1, 2), ins.bind("a", "u", 1, 3)])).rejects.toThrow();
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM subscriptions").first("n")).toBe(1);
+  });
+  it("opens the search migrations on request", async () => {
+    const db = fakeD1({ migrations: "search" });
+    expect(
+      await db
+        .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'subscriptions'`)
+        .first("n"),
+    ).toBe(0);
+  });
+});
 ```
 
 - [ ] **Step 2: Run it.** `npx vitest run test/fake-d1.test.ts`. Expected: FAIL. sql.js has no fts5 ("no such module: fts5"), and `fakeD1` takes no options.
@@ -160,6 +185,7 @@ describe('fakeD1 engine', () => {
 **Model:** sonnet.
 
 **Files:**
+
 - Create: `migrations-search/0001_search.sql`
 - Modify: `wrangler.jsonc` (second `d1_databases` entry)
 - Modify: `src/types.ts` (`SEARCH_DB?: D1Database` with a doc comment)
@@ -169,6 +195,7 @@ describe('fakeD1 engine', () => {
 - Test: `test/search-normalize.test.ts`, `test/search-schema.test.ts`; extend the existing parser test file (`grep -ln "parseTracklist" test`) with label assertions.
 
 **Interfaces:**
+
 - Consumes: `fakeD1({ migrations: 'search' })` (Task 0).
 - Produces:
   - `searchDbOf(env: Env): D1Database`. Returns `env.SEARCH_DB`; throws `Error('search_db_missing')` when unbound.
@@ -181,7 +208,7 @@ describe('fakeD1 engine', () => {
 - [ ] **Step 1: Schema file** `migrations-search/0001_search.sql`, exactly:
 
 ```sql
--- Search index (docs/superpowers/specs/2026-09-30-tracked-ui-redesign-design.md §9),
+-- Search index (docs/superpowers/specs/2026-09-30-tracked-ui-redesign-design.md section 9),
 -- in its own D1 database: FTS5 virtual tables would stop `wrangler d1 export`
 -- working for the main database. Everything here is rebuildable from verified
 -- lists (src/lib/search/index.ts), so this database is never exported.
@@ -236,64 +263,89 @@ CREATE VIRTUAL TABLE vocab_fts USING fts5(term, tokenize='trigram');
 ```
 
 - [ ] **Step 2: Binding.** In `wrangler.jsonc` `d1_databases`, add:
-  `{ "binding": "SEARCH_DB", "database_name": "tracked-search", "database_id": "4ee888df-562d-4937-9b25-8e1b4da2ea88", "migrations_dir": "migrations-search" }`.
-  In `src/types.ts`, add `SEARCH_DB?: D1Database` after `DB`, with this doc comment: "Search index (migrations-search/); optional so a Worker without it still serves everything else (search returns 503 search_unavailable)."
+      `{ "binding": "SEARCH_DB", "database_name": "tracked-search", "database_id": "4ee888df-562d-4937-9b25-8e1b4da2ea88", "migrations_dir": "migrations-search" }`.
+      In `src/types.ts`, add `SEARCH_DB?: D1Database` after `DB`, with this doc comment: "Search index (migrations-search/); optional so a Worker without it still serves everything else (search returns 503 search_unavailable)."
 
 - [ ] **Step 3: Write the failing tests** `test/search-normalize.test.ts`:
 
 ```ts
-import { describe, it, expect } from 'vitest'
-import { normalizeText, slugWords, trackKey } from '../src/lib/search/normalize'
+import { describe, it, expect } from "vitest";
+import { normalizeText, slugWords, trackKey } from "../src/lib/search/normalize";
 
-describe('normalizeText', () => {
-  it('lowercases, strips diacritics, drops apostrophes, & to and', () => {
-    expect(normalizeText("Don't Stop")).toEqual(['dont', 'stop'])
-    expect(normalizeText('Tiësto & Sevenn')).toEqual(['tiesto', 'and', 'sevenn'])
-    expect(normalizeText('Rian Wood & Version 34')).toEqual(['rian', 'wood', 'and', 'version', '34'])
-    expect(normalizeText('l’amour')).toEqual(['lamour'])
-  })
-  it('maps synonyms: feat/ft/featuring, rmx/remix, vs/versus, w/ to with, pt/part', () => {
-    expect(normalizeText('A ft. B featuring C feat D')).toEqual(['a', 'feat', 'b', 'feat', 'c', 'feat', 'd'])
-    expect(normalizeText('X (Y Rmx)')).toEqual(['x', 'y', 'remix'])
-    expect(normalizeText('A vs. B versus C')).toEqual(['a', 'vs', 'b', 'vs', 'c'])
-    expect(normalizeText('A w/ B')).toEqual(['a', 'with', 'b'])
-    expect(normalizeText('Pt. 2 part 3')).toEqual(['part', '2', 'part', '3'])
-  })
-  it('splits on non-alphanumerics and drops empties; null and blank give []', () => {
-    expect(normalizeText('Mau P - Neck [BLACK BOOK]')).toEqual(['mau', 'p', 'neck', 'black', 'book'])
-    expect(normalizeText('  ')).toEqual([])
-    expect(normalizeText(null)).toEqual([])
-  })
-})
+describe("normalizeText", () => {
+  it("lowercases, strips diacritics, drops apostrophes, & to and", () => {
+    expect(normalizeText("Don't Stop")).toEqual(["dont", "stop"]);
+    expect(normalizeText("Tiësto & Sevenn")).toEqual(["tiesto", "and", "sevenn"]);
+    expect(normalizeText("Rian Wood & Version 34")).toEqual([
+      "rian",
+      "wood",
+      "and",
+      "version",
+      "34",
+    ]);
+    expect(normalizeText("l'amour")).toEqual(["lamour"]);
+  });
+  it("maps synonyms: feat/ft/featuring, rmx/remix, vs/versus, w/ to with, pt/part", () => {
+    expect(normalizeText("A ft. B featuring C feat D")).toEqual([
+      "a",
+      "feat",
+      "b",
+      "feat",
+      "c",
+      "feat",
+      "d",
+    ]);
+    expect(normalizeText("X (Y Rmx)")).toEqual(["x", "y", "remix"]);
+    expect(normalizeText("A vs. B versus C")).toEqual(["a", "vs", "b", "vs", "c"]);
+    expect(normalizeText("A w/ B")).toEqual(["a", "with", "b"]);
+    expect(normalizeText("Pt. 2 part 3")).toEqual(["part", "2", "part", "3"]);
+  });
+  it("splits on non-alphanumerics and drops empties; null and blank give []", () => {
+    expect(normalizeText("Mau P - Neck [BLACK BOOK]")).toEqual([
+      "mau",
+      "p",
+      "neck",
+      "black",
+      "book",
+    ]);
+    expect(normalizeText("  ")).toEqual([]);
+    expect(normalizeText(null)).toEqual([]);
+  });
+});
 
-describe('slugWords', () => {
-  it('reads the set slug without the date and extension', () => {
-    expect(slugWords('https://www.1001tracklists.com/tracklist/2abc/eli-brown-mainstage-ultra-music-festival-miami-united-states-2026-03-28.html'))
-      .toBe('eli brown mainstage ultra music festival miami united states')
-  })
-})
+describe("slugWords", () => {
+  it("reads the set slug without the date and extension", () => {
+    expect(
+      slugWords(
+        "https://www.1001tracklists.com/tracklist/2abc/eli-brown-mainstage-ultra-music-festival-miami-united-states-2026-03-28.html",
+      ),
+    ).toBe("eli brown mainstage ultra music festival miami united states");
+  });
+});
 
-describe('trackKey', () => {
-  it('uses the 1001tl id when there is one, else a stable hash of normalized artist + title', async () => {
-    expect(await trackKey({ trackId: '909720', artist: 'Mau P', title: 'Neck' })).toBe('t:909720')
-    const a = await trackKey({ trackId: null, artist: 'Mau P', title: 'Neck' })
-    expect(a).toMatch(/^h:[0-9a-f]{32}$/)
-    expect(await trackKey({ trackId: null, artist: 'MAU  P', title: 'neck' })).toBe(a)
-    expect(await trackKey({ trackId: 'abc', artist: 'Mau P', title: 'Neck' })).toBe(a)
-  })
-})
+describe("trackKey", () => {
+  it("uses the 1001tl id when there is one, else a stable hash of normalized artist + title", async () => {
+    expect(await trackKey({ trackId: "909720", artist: "Mau P", title: "Neck" })).toBe("t:909720");
+    const a = await trackKey({ trackId: null, artist: "Mau P", title: "Neck" });
+    expect(a).toMatch(/^h:[0-9a-f]{32}$/);
+    expect(await trackKey({ trackId: null, artist: "MAU  P", title: "neck" })).toBe(a);
+    expect(await trackKey({ trackId: "abc", artist: "Mau P", title: "Neck" })).toBe(a);
+  });
+});
 ```
 
-  `test/search-schema.test.ts`: open `fakeD1({ migrations: 'search' })` and assert:
-  - all seven tables exist;
-  - the `tracks_fts` columns are in the order `artist, title, label, djs, set_titles` (read `PRAGMA table_info(tracks_fts)`);
-  - a `vocab_fts` trigram MATCH finds `'palmer'` from `'"alm"'`.
+`test/search-schema.test.ts`: open `fakeD1({ migrations: 'search' })` and assert:
 
-  Parser test: the label of a fixture row comes from the row's `trackLabel` span. Take one known row from `tracklist-matroda.html`:
-  - Its first row's `publisher` meta carries `Not On Label`, so `label` is `null` (treat "Not On Label" as none).
-  - A row with `BLACK BOOK` gives `'BLACK BOOK'`. Find one with `grep -o 'trackLabel noWrap&quot;&gt;&lt;a[^;]*;[^&]*' test/fixtures/tracklist-*.html | head`.
-  - An anonymous row's `label` is `null`.
-  - `tracks` entries (`ParsedTrack`) have no `label` key: `expect('label' in parsed.tracks[0]).toBe(false)`.
+- all seven tables exist;
+- the `tracks_fts` columns are in the order `artist, title, label, djs, set_titles` (read `PRAGMA table_info(tracks_fts)`);
+- a `vocab_fts` trigram MATCH finds `'palmer'` from `'"alm"'`.
+
+Parser test: the label of a fixture row comes from the row's `trackLabel` span. Take one known row from `tracklist-matroda.html`:
+
+- Its first row's `publisher` meta carries `Not On Label`, so `label` is `null` (treat "Not On Label" as none).
+- A row with `BLACK BOOK` gives `'BLACK BOOK'`. Find one with `grep -o 'trackLabel noWrap&quot;&gt;&lt;a[^;]*;[^&]*' test/fixtures/tracklist-*.html | head`.
+- An anonymous row's `label` is `null`.
+- `tracks` entries (`ParsedTrack`) have no `label` key: `expect('label' in parsed.tracks[0]).toBe(false)`.
 
 - [ ] **Step 4: Run.** `npx vitest run test/search-normalize.test.ts test/search-schema.test.ts <parser test>`. Expected: FAIL (module missing, label missing).
 
@@ -301,66 +353,82 @@ describe('trackKey', () => {
 
 ```ts
 /**
- * One normalization for both sides of search (spec §9): the text written to
+ * One normalization for both sides of search (spec section 9): the text written to
  * the FTS columns and the vocabulary, and the query. Lowercase, diacritics
- * stripped, apostrophes dropped (don't → dont), & → and, "w/" → with, split on
+ * stripped, apostrophes dropped (don't -> dont), & -> and, "w/" -> with, split on
  * anything not a letter or digit, then the synonym map.
  */
-const SYNONYMS: Record<string, string> = { ft: 'feat', featuring: 'feat', rmx: 'remix', versus: 'vs', pt: 'part' }
+const SYNONYMS: Record<string, string> = {
+  ft: "feat",
+  featuring: "feat",
+  rmx: "remix",
+  versus: "vs",
+  pt: "part",
+};
 
 export function normalizeText(s: string | null | undefined): string[] {
-  if (!s) return []
+  if (!s) return [];
   const t = s
-    .normalize('NFKD')
-    .replace(/\p{M}+/gu, '')
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .toLowerCase()
-    .replace(/['’‘`´]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/(^|[^\p{L}\p{N}])w\//gu, '$1with ')
+    .replace(/['''`']/g, "")
+    .replace(/&/g, " and ")
+    .replace(/(^|[^\p{L}\p{N}])w\//gu, "$1with ");
   return t
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean)
-    .map((w) => SYNONYMS[w] ?? w)
+    .map((w) => SYNONYMS[w] ?? w);
 }
 
-export const normalizedJoin = (s: string | null | undefined): string => normalizeText(s).join(' ')
+export const normalizedJoin = (s: string | null | undefined): string => normalizeText(s).join(" ");
 
 /** Words of a 1001tracklists set URL's slug, date and extension dropped. */
 export function slugWords(url: string): string {
-  const last = url.split(/[?#]/)[0]!.split('/').filter(Boolean).pop() ?? ''
-  return normalizedJoin(last.replace(/\.html$/i, '').replace(/-\d{4}-\d{2}-\d{2}$/, '').replace(/-/g, ' '))
+  const last = url.split(/[?#]/)[0]!.split("/").filter(Boolean).pop() ?? "";
+  return normalizedJoin(
+    last
+      .replace(/\.html$/i, "")
+      .replace(/-\d{4}-\d{2}-\d{2}$/, "")
+      .replace(/-/g, " "),
+  );
 }
 
 async function sha256hex(s: string): Promise<string> {
-  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
-  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('')
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** The index key of a track: its 1001tracklists id, else a hash of normalized artist + title. */
-export async function trackKey(t: { trackId: string | null; artist: string; title: string }): Promise<string> {
-  if (t.trackId && /^\d{1,12}$/.test(t.trackId)) return `t:${t.trackId}`
-  return `h:${(await sha256hex(`${normalizedJoin(t.artist)}\u0000${normalizedJoin(t.title)}`)).slice(0, 32)}`
+export async function trackKey(t: {
+  trackId: string | null;
+  artist: string;
+  title: string;
+}): Promise<string> {
+  if (t.trackId && /^\d{1,12}$/.test(t.trackId)) return `t:${t.trackId}`;
+  return `h:${(await sha256hex(`${normalizedJoin(t.artist)}\u0000${normalizedJoin(t.title)}`)).slice(0, 32)}`;
 }
 ```
 
-  `src/lib/search/db.ts`:
+`src/lib/search/db.ts`:
 
 ```ts
-import type { Env } from '../../types'
+import type { Env } from "../../types";
 /** The search index database (migrations-search/). Throws when the binding is missing. */
 export function searchDbOf(env: Env): D1Database {
-  if (!env.SEARCH_DB) throw new Error('search_db_missing')
-  return env.SEARCH_DB
+  if (!env.SEARCH_DB) throw new Error("search_db_missing");
+  return env.SEARCH_DB;
 }
 ```
 
-  **Parser:** in `parseTracklist`, read each row's label and put it on its `PageRow` only.
-  - Source: the visible `span.trackLabel` text in the row. Where the label lives only in the entity-encoded `meta[itemprop=publisher]`, decode that with `decodeEntities` and take the `.trackLabel` text out of it.
-  - Several labels: join them with `' / '`.
-  - `"Not On Label"` (case-insensitive), empty, or an anonymous row: `null`.
-  - Strip `label` before pushing the row into `tracks`, the same way `anonymous` is stripped today (`const { anonymous: _, ...track } = r`). `tracks` must keep the `ParsedTrack` shape.
-  - Check with `grep -rn "\.rows\b" src` that no route serialises `rows` into a response or a KV value a test pins. List the hits in your report. `CachedTracklist` gaining a field is acceptable only if no test pins its exact shape; otherwise strip it there too.
-  - Leave `fingerprintInput` untouched.
+**Parser:** in `parseTracklist`, read each row's label and put it on its `PageRow` only.
+
+- Source: the visible `span.trackLabel` text in the row. Where the label lives only in the entity-encoded `meta[itemprop=publisher]`, decode that with `decodeEntities` and take the `.trackLabel` text out of it.
+- Several labels: join them with `' / '`.
+- `"Not On Label"` (case-insensitive), empty, or an anonymous row: `null`.
+- Strip `label` before pushing the row into `tracks`, the same way `anonymous` is stripped today (`const { anonymous: _, ...track } = r`). `tracks` must keep the `ParsedTrack` shape.
+- Check with `grep -rn "\.rows\b" src` that no route serialises `rows` into a response or a KV value a test pins. List the hits in your report. `CachedTracklist` gaining a field is acceptable only if no test pins its exact shape; otherwise strip it there too.
+- Leave `fingerprintInput` untouched.
 
 - [ ] **Step 6: Run** the three test files, then `npx vitest run` and `npx tsc --noEmit`. Expected: green.
 
@@ -373,12 +441,14 @@ export function searchDbOf(env: Env): D1Database {
 **Model:** opus. This is the sync path; a mistake here costs fetches or index integrity.
 
 **Files:**
+
 - Create: `src/lib/search/index.ts`
 - Modify: `src/lib/fetch-scheduler.ts` (`recordSetFetch`: one call after `noteSetFetch`)
 - Modify: `src/index.ts` (drain in the `*` middleware next to `drainPageCaptures`; an awaited drain at the end of the `scheduled` `waitUntil` body)
 - Test: `test/search-index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `searchDbOf`, `normalizeText`, `normalizedJoin`, `slugWords`, `trackKey` (Task 1); `verifiedFingerprint`, `tracklistFingerprint` (`src/lib/verification.ts`); `extractSetTitle`, `extractSetDate` (`src/lib/mkvid.ts`); `prettifySlug` (`src/lib/sync.ts`; if importing sync.ts into lib/search creates an import cycle, move `prettifySlug` to a small shared module and re-export it from sync.ts); `dbOf` (`src/lib/db.ts`); `PageRow` with `label`.
 - Produces:
   - `export type IndexTrack = { trackId: string | null; trackUrl: string | null; artist: string; title: string; label: string | null; cueSeconds: number | null; layered: boolean }`
@@ -390,6 +460,7 @@ export function searchDbOf(env: Env): D1Database {
   - `export async function drainSearchIndex(): Promise<void>`
 
 **`indexVerifiedFetch` steps:**
+
 1. `const fp = await verifiedFingerprint(env, setUrl)`. If `fp` is null or `fp !== await tracklistFingerprint(parsed)`, return `'not_verified'`.
 2. One main-DB read for `MIN(t.slug)`, the `artist_name` of that slug, the URL's `video_source`, and the verification time:
 
@@ -403,6 +474,7 @@ export function searchDbOf(env: Env): D1Database {
    ```
 
    No row means `'not_verified'`.
+
 3. One `SEARCH_DB` read: `SELECT source, indexed_at, video_id FROM search_sets WHERE set_url = ?`. Skip with `'skipped'` when `source = 'page' AND indexed_at >= verified_at AND video_id IS videoId`.
 4. Build the input and call `indexSet`.
    - `title`: `extractSetTitle(html) ?? slugWords(setUrl)`.
@@ -413,13 +485,14 @@ export function searchDbOf(env: Env): D1Database {
    - `source`: `'page'`.
 
 **`indexSet` (one batch, in this order):**
+
 1. **Read first**, outside the batch: the track keys this set had, `SELECT track_key FROM search_track_sets WHERE set_url = ?`, so their counts and FTS rows get recomputed.
 2. **Set row:** upsert `search_sets` (`ON CONFLICT(set_url) DO UPDATE SET` every column). Then `DELETE FROM sets_fts WHERE rowid = (SELECT id FROM search_sets WHERE set_url = ?)` and `INSERT INTO sets_fts (rowid, title, dj, slug_words) SELECT id, ?, ?, ? FROM search_sets WHERE set_url = ?`. The values are `normalizedJoin(title)`, `normalizedJoin(djName) + ' ' + normalizedJoin(djSlug.replace(/[._-]+/g, ' '))` and `slugWords(setUrl)`.
 3. **Old links:** `DELETE FROM search_track_sets WHERE set_url = ?`.
 4. **Each new track,** first occurrence of a key only:
    - Upsert `search_tracks`: `ON CONFLICT(track_key) DO UPDATE SET artist, title, track_url = COALESCE(excluded.track_url, track_url), label = COALESCE(excluded.label, label), updated_at`. Never overwrite `youtube_link` with null.
    - `INSERT INTO search_track_sets (...)`.
-5. **Every touched key** (old ∪ new):
+5. **Every touched key** (old union new):
    - `UPDATE search_tracks SET sets_count = (SELECT COUNT(*) FROM search_track_sets WHERE track_key = ?) WHERE track_key = ?`.
    - Refresh its FTS row: `DELETE FROM tracks_fts WHERE rowid = (SELECT id FROM search_tracks WHERE track_key = ?)`, then:
 
@@ -432,18 +505,23 @@ export function searchDbOf(env: Env): D1Database {
      ```
 
    - The first three binds are the normalized artist, title and label. For an old key not in the new list, read them in step 1 as well: extend the read to `SELECT ts.track_key, t.artist, t.title, t.label FROM search_track_sets ts JOIN search_tracks t USING (track_key) WHERE ts.set_url = ?`.
-6. **Vocabulary:** every distinct normalized term of length ≥ 3 from the set title, the DJ name and each track's artist, title and label.
+6. **Vocabulary:** every distinct normalized term of length >= 3 from the set title, the DJ name and each track's artist, title and label.
    - `INSERT INTO search_vocab (term, df) VALUES (?, 1) ON CONFLICT(term) DO UPDATE SET df = df + 1`.
    - Then `INSERT INTO vocab_fts (rowid, term) SELECT id, term FROM search_vocab WHERE term = ? AND id NOT IN (SELECT rowid FROM vocab_fts)`.
 
 **Hook** in `recordSetFetch`, right after `out.verification = await noteSetFetch(...)`:
 
 ```ts
-      // Search index (lib/search/index.ts): verified lists only, fire-and-forget, drained via waitUntil.
-      queueSearchIndex(env, { setUrl: f.setUrl, html: f.html, parsed, videoId: f.videoId, log: f.log }, out.verification.outcome)
+// Search index (lib/search/index.ts): verified lists only, fire-and-forget, drained via waitUntil.
+queueSearchIndex(
+  env,
+  { setUrl: f.setUrl, html: f.html, parsed, videoId: f.videoId, log: f.log },
+  out.verification.outcome,
+);
 ```
 
 **Drains** (`src/index.ts`):
+
 - In the `*` middleware, change `c.executionCtx.waitUntil(drainPageCaptures())` to `c.executionCtx.waitUntil(Promise.all([drainPageCaptures(), drainSearchIndex()]))`.
 - In `scheduled`, add `await drainSearchIndex()` as the last statement inside the existing `try` of the `waitUntil` body, wrapped in its own `try/catch` so a drain can never fail the tick.
 
@@ -494,17 +572,21 @@ export function searchDbOf(env: Env): D1Database {
   - The pending set mirrors `src/lib/page-store.ts:197-208`:
 
     ```ts
-    const pending = new Set<Promise<unknown>>()
-    export function queueSearchIndex(env: Env, f: VerifiedFetch, outcome: VerificationOutcome | undefined): void {
-      if (outcome !== 'verified' && outcome !== 'unchanged') return
-      if (!env.SEARCH_DB) return
+    const pending = new Set<Promise<unknown>>();
+    export function queueSearchIndex(
+      env: Env,
+      f: VerifiedFetch,
+      outcome: VerificationOutcome | undefined,
+    ): void {
+      if (outcome !== "verified" && outcome !== "unchanged") return;
+      if (!env.SEARCH_DB) return;
       const p: Promise<unknown> = indexVerifiedFetch(env, f)
-        .catch((e) => f.log?.warn('search.index_failed', { setUrl: f.setUrl, ...errorFields(e) }))
-        .finally(() => pending.delete(p))
-      pending.add(p)
+        .catch((e) => f.log?.warn("search.index_failed", { setUrl: f.setUrl, ...errorFields(e) }))
+        .finally(() => pending.delete(p));
+      pending.add(p);
     }
     export async function drainSearchIndex(): Promise<void> {
-      while (pending.size) await Promise.allSettled([...pending])
+      while (pending.size) await Promise.allSettled([...pending]);
     }
     ```
 
@@ -521,6 +603,7 @@ export function searchDbOf(env: Env): D1Database {
 **Model:** opus. Ranking quality is the feature.
 
 **Files:**
+
 - Create: `src/lib/search/score.ts` (Damerau-Levenshtein, per-field matching, final score)
 - Create: `src/lib/search/query.ts` (expand, recall, re-rank, assemble)
 - Create: `src/routes/search.ts` (`searchApp`: `GET /api/search`; Task 4 adds more)
@@ -528,6 +611,7 @@ export function searchDbOf(env: Env): D1Database {
 - Test: `test/search-score.test.ts`, `test/search-query.test.ts`
 
 **Interfaces:**
+
 - Consumes: Task 1 and Task 2 exports (tests index fixtures through `indexSet`).
 - Produces:
   - `export function damerauLevenshtein(a: string, b: string, max: number): number`: optimal string alignment distance. It returns `max + 1` as soon as the distance must exceed `max`.
@@ -535,7 +619,7 @@ export function searchDbOf(env: Env): D1Database {
   - `export type QueryToken = { text: string; variants: Array<{ term: string; kind: MatchKind; distance: number }> }`
   - `export function tokenFieldScore(token: QueryToken, fieldTokens: readonly string[]): number`: exact 1.0, prefix 0.9, corrected `0.7 - 0.1 * (distance - 1)`, best variant wins, 0 when none matches.
   - `export function rankScore(tokens: QueryToken[], fields: Array<{ tokens: readonly string[]; weight: number }>, boosts: { youtube?: boolean; recencyDays?: number | null; subscribed?: boolean }): number`
-    - The base is, per token, the max over fields of `tokenFieldScore × weight`, summed over tokens.
+    - The base is, per token, the max over fields of `tokenFieldScore x weight`, summed over tokens.
     - That base is multiplied by `(matchedTokens / tokens.length) ** 2`.
     - Then by `1.05` when `youtube`, by `1 + 0.1 * max(0, 1 - recencyDays / 730)`, and by `1.05` when `subscribed`.
   - `export type SearchKind = 'all' | 'sets' | 'tracks' | 'djs'`
@@ -561,18 +645,19 @@ export function searchDbOf(env: Env): D1Database {
     - `503 { error: 'search_unavailable', message: 'The search index is not bound to this Worker.' }` when `SEARCH_DB` is unbound.
 
 **Pipeline (`search`):**
+
 1. **Normalize.** `tokens = normalizeText(q).slice(0, 8)`, deduped. Empty means an empty response, with `q` echoed.
 2. **Expand each token.**
-   - Variants: exact; `prefix` when length ≥ 3.
-   - Correction runs unless `exact`, and only when the token has length ≥ 3 and is not in `search_vocab`.
+   - Variants: exact; `prefix` when length >= 3.
+   - Correction runs unless `exact`, and only when the token has length >= 3 and is not in `search_vocab`.
    - To correct, take the token's trigrams, query `SELECT v.term AS term, v.df AS df FROM vocab_fts f JOIN search_vocab v ON v.id = f.rowid WHERE vocab_fts MATCH ? LIMIT 50` with the MATCH string `trigrams.map(g => '"' + g + '"').join(' OR ')`.
    - Keep terms with `damerauLevenshtein(token, term, max) <= max`, where `max = token.length >= 7 ? 2 : 1`. Sort by distance, then `df` DESC; keep 5.
    - Push each kept term to `corrected` as `{ from: token, to: term }`, but only the best one per token.
-   - For 3-letter tokens the trigram OR is a single trigram and finds only supersets. That is accepted: corrections need length ≥ 4 to be useful.
+   - For 3-letter tokens the trigram OR is a single trigram and finds only supersets. That is accepted: corrections need length >= 4 to be useful.
 3. **Build the FTS MATCH for one kind.**
    - Each token becomes a group `("t" OR "t"* OR "c1" OR "c2")`, every term double-quoted with `"` doubled inside. Tokens are `[\p{L}\p{N}]` only after normalization, but quote anyway.
-   - Groups are joined with ` AND `.
-   - If that recall returns fewer than 10 rows, run again with ` OR ` and merge, dedupe by rowid.
+   - Groups are joined with `AND`.
+   - If that recall returns fewer than 10 rows, run again with `OR` and merge, dedupe by rowid.
    - Tracks:
 
      ```sql
@@ -602,10 +687,11 @@ export function searchDbOf(env: Env): D1Database {
    ```
 
    Every set is listed ("with every set it appears on"); no cap below 50 per track.
+
 6. **DJs** (kind `all` or `djs`).
    - Read `SELECT s.slug, ss.artist_name FROM subscriptions s LEFT JOIN sub_sync ss ON ss.slug = s.slug` and set counts `SELECT slug, COUNT(*) AS n FROM tracklists WHERE processed = 1 GROUP BY slug` from the main DB.
    - Fields: name (weight 3) and slug words (weight 1). Use the same `QueryToken`s, so a corrected token matches too.
-   - Keep `rankScore > 0` with the matched fraction ≥ 0.5, best first, `limit`.
+   - Keep `rankScore > 0` with the matched fraction >= 0.5, best first, `limit`.
    - `subscribed: true` for all (they come from the subscription list). `trackUrl` for tracks is `track_url`.
 7. **Kind filtering.** `kind = tracks` runs only the tracks recall; `sets` only sets; `djs` only DJs. The other groups come back as `[]`.
 
@@ -621,15 +707,14 @@ export function searchDbOf(env: Env): D1Database {
 - [ ] **Step 2: Write the failing route tests** `test/search-query.test.ts`.
   - Index the fixture through `indexSet` with `source: 'page'`. Use synthetic, public names. Every distractor is required.
 
-  | set (url slug, date) | dj (slug / name) | tracks (artist - title [label], trackId) |
-  |---|---|---|
-  | `lilly-palmer-circuitgrounds-edc-las-vegas-united-states-2026-05-16` | `lillypalmer` / Lilly Palmer | `Rian Wood & Version 34 - Don't Stop [RAVE WORLD]` (1001), `Mau P - Neck [BLACK BOOK]` (2002), `Lilly Palmer - Before I Go [Spannung]` (1003) |
-  | `lilly-palmer-awakenings-festival-netherlands-2025-06-28` | `lillypalmer` / Lilly Palmer | `Lilly Palmer - Before I Go [Spannung]` (1003), `Amelie Lens - Feel It [LENSKE]` (1004) |
-  | `eli-brown-mainstage-ultra-music-festival-miami-united-states-2026-03-28` | `elibrown` / Eli Brown | `Mau P - Neck [BLACK BOOK]` (2002), `Eli Brown - Me & U [Repopulate Mars]` (1005) |
-  | `eli-brown-mainstage-ultra-music-festival-miami-united-states-2025-03-29` | `elibrown` / Eli Brown | `Eli Brown - Diamonds [Repopulate Mars]` (1006) |
-  | `eli-brown-hi-ibiza-spain-2026-07-04` | `elibrown` / Eli Brown | `Mau P - Neck [BLACK BOOK]` (2002) |
-  | `john-summit-ultra-music-festival-miami-united-states-2026-03-29` | `johnsummit` / John Summit | `Dom Dolla - Don't Stop [Sweat It Out]` (1007), `Neck Deep - December [Hopeless]` (1008) |
-
+  | set (url slug, date)                                                      | dj (slug / name)             | tracks (artist - title [label], trackId)                                                                                                      |
+  | ------------------------------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `lilly-palmer-circuitgrounds-edc-las-vegas-united-states-2026-05-16`      | `lillypalmer` / Lilly Palmer | `Rian Wood & Version 34 - Don't Stop [RAVE WORLD]` (1001), `Mau P - Neck [BLACK BOOK]` (2002), `Lilly Palmer - Before I Go [Spannung]` (1003) |
+  | `lilly-palmer-awakenings-festival-netherlands-2025-06-28`                 | `lillypalmer` / Lilly Palmer | `Lilly Palmer - Before I Go [Spannung]` (1003), `Amelie Lens - Feel It [LENSKE]` (1004)                                                       |
+  | `eli-brown-mainstage-ultra-music-festival-miami-united-states-2026-03-28` | `elibrown` / Eli Brown       | `Mau P - Neck [BLACK BOOK]` (2002), `Eli Brown - Me & U [Repopulate Mars]` (1005)                                                             |
+  | `eli-brown-mainstage-ultra-music-festival-miami-united-states-2025-03-29` | `elibrown` / Eli Brown       | `Eli Brown - Diamonds [Repopulate Mars]` (1006)                                                                                               |
+  | `eli-brown-hi-ibiza-spain-2026-07-04`                                     | `elibrown` / Eli Brown       | `Mau P - Neck [BLACK BOOK]` (2002)                                                                                                            |
+  | `john-summit-ultra-music-festival-miami-united-states-2026-03-29`         | `johnsummit` / John Summit   | `Dom Dolla - Don't Stop [Sweat It Out]` (1007), `Neck Deep - December [Hopeless]` (1008)                                                      |
   - Each set's title is the 1001tl-style `<title>` text, for example `Eli Brown @ Mainstage, Ultra Music Festival Miami, United States 2026-03-28`.
   - Seed `subscriptions` and `sub_sync` in the main DB for the three DJs.
 
@@ -651,7 +736,7 @@ export function searchDbOf(env: Env): D1Database {
   - **"an empty q is 200 with empty groups; bad kind is 400; no SEARCH_DB is 503"**
   - **"Access guards /ui/api/search"**: extend the Access-gate sweep in the existing gate test (`grep -rln "ui/api/activity" test`) with `/ui/api/search`.
 
-  - Route tests call `app.request('/ui/api/search?q=…', {}, env)` the way `test/activity.test.ts` does.
+  - Route tests call `app.request('/ui/api/search?q=...', {}, env)` the way `test/activity.test.ts` does.
 
 - [ ] **Step 3: Run** both files. Expected: FAIL.
 
@@ -668,6 +753,7 @@ export function searchDbOf(env: Env): D1Database {
 **Model:** sonnet.
 
 **Files:**
+
 - Create: `src/lib/search/backfill.ts`
 - Modify: `src/routes/search.ts` (`GET /api/search/status`, `POST /api/search/backfill`)
 - Modify: `src/routes/subscriptions.ts` (the lazy-links handler: write back found YouTube links)
@@ -675,6 +761,7 @@ export function searchDbOf(env: Env): D1Database {
 - Test: `test/search-backfill.test.ts`; extend `test/ui-pages.test.ts` (Tools card ids)
 
 **Interfaces:**
+
 - Consumes: `indexSet`, `IndexTrack`, `searchDbOf` (Tasks 1 and 2); `prettifySlug`.
 - Produces:
   - `export async function backfillSearch(env: Env, opts: { cursor: string | null; limit: number; deadlineMs: number; nowSec?: number }): Promise<{ indexed: number; skipped: number; cursor: string | null; done: boolean }>`
@@ -690,6 +777,7 @@ export function searchDbOf(env: Env): D1Database {
     - Both routes return 503 `search_unavailable` without `SEARCH_DB`.
 
 **Backfill rules** (put them in the file header):
+
 - **Source:**
 
   ```sql
@@ -704,7 +792,8 @@ export function searchDbOf(env: Env): D1Database {
   - The cursor is the last `set_url` handled; `''` starts from the beginning.
   - Comment why `trusted = 1` with `verified` stands in for the fingerprint match (deviation 4 above).
   - Never read KV. Never run on the cron.
-- **Skip** (counts as `skipped`, no writes): a `search_sets` row exists with `source = 'page'`, or with `source = 'mkvid'` and `indexed_at >= verified_at`. Read existing rows for the whole page in one `SELECT … WHERE set_url IN (…)` (chunk at 50 binds).
+
+- **Skip** (counts as `skipped`, no writes): a `search_sets` row exists with `source = 'page'`, or with `source = 'mkvid'` and `indexed_at >= verified_at`. Read existing rows for the whole page in one `SELECT ... WHERE set_url IN (...)` (chunk at 50 binds).
 - **Tracks:** parse `tracks` JSON defensively (`parseJson`, array check). Keep rows with `!isId` and non-empty `artist` and `title`.
   - `trackId: null`, `trackUrl: null`, `label: null`.
   - `cueSeconds`: the row's `cueSeconds`. `layered`: the row's `layered`.
@@ -715,15 +804,25 @@ export function searchDbOf(env: Env): D1Database {
 - **Errors:** an `indexSet` error on one set is logged at warn (`search.backfill_set_failed`), counted as skipped, and the backfill moves on.
 - **Done:** `done: true` when the page returned fewer than `limit` rows and the loop finished.
 
-**Links write-back:** in `POST /api/tracklist/links`, after the loop (and in the 502 partial branch, before returning), run `await noteTrackYoutubeLinks(c.env, links)` inside `try { … } catch {}`. It does nothing when `SEARCH_DB` is unbound. `/now-playing`'s `resolveLinks` is not touched.
+**Links write-back:** in `POST /api/tracklist/links`, after the loop (and in the 502 partial branch, before returning), run `await noteTrackYoutubeLinks(c.env, links)` inside `try { ... } catch {}`. It does nothing when `SEARCH_DB` is unbound. `/now-playing`'s `resolveLinks` is not touched.
 
 **Tools card**, between "Migration status" and the end. Keep the card style of `tools.ts`:
 
 ```html
 <div class="tk-card" id="search-card">
   <h2>Search index</h2>
-  <p class="muted tl-note">Verified track lists are indexed as they verify. Rebuild adds sets from trusted mkvid track lists, 500 per press.</p>
-  <dl class="kv" id="si-stats"><dt>Sets</dt><dd id="si-sets">—</dd><dt>Tracks</dt><dd id="si-tracks">—</dd><dt>Last indexed</dt><dd id="si-last">—</dd></dl>
+  <p class="muted tl-note">
+    Verified track lists are indexed as they verify. Rebuild adds sets from trusted mkvid track
+    lists, 500 per press.
+  </p>
+  <dl class="kv" id="si-stats">
+    <dt>Sets</dt>
+    <dd id="si-sets">-</dd>
+    <dt>Tracks</dt>
+    <dd id="si-tracks">-</dd>
+    <dt>Last indexed</dt>
+    <dd id="si-last">-</dd>
+  </dl>
   <button class="btn primary" id="si-rebuild" type="button">Rebuild 500 more</button>
   <div class="tl-status muted" id="si-status" role="status"></div>
 </div>
@@ -731,7 +830,7 @@ export function searchDbOf(env: Env): D1Database {
 
 - If `dl.kv` is not an existing class, use the phase-2 `dl` style from `ACTIVITY_DETAIL_CSS`, or plain `<p>` lines. Do not add a new component.
 - JS on load: `TK.api.get('/ui/api/search/status')` fills the counts; a 503 shows "Search index not bound".
-- The button runs `TK.busy(btn, 'Rebuilding…', …)` posting `{ cursor, limit: 500 }`, keeps the returned `cursor` in a page variable, refreshes the counts, and says "Indexed N, skipped M." plus "Done: every trusted list is indexed." or "Press again for more."
+- The button runs `TK.busy(btn, 'Rebuilding...', ...)` posting `{ cursor, limit: 500 }`, keeps the returned `cursor` in a page variable, refreshes the counts, and says "Indexed N, skipped M." plus "Done: every trusted list is indexed." or "Press again for more."
 - Errors use `TK.errText`.
 
 - [ ] **Step 1: Write the failing tests** `test/search-backfill.test.ts`:
@@ -764,6 +863,7 @@ export function searchDbOf(env: Env): D1Database {
 **Model:** sonnet.
 
 **Files:**
+
 - Create: `src/ui/pages/search.ts` (`SEARCH_PAGE: UiPage`, `SEARCH_JS`, `SEARCH_CSS`)
 - Modify: `src/routes/search.ts` (`GET /search` serves the page with `servePage`)
 - Modify: `src/ui/shell.ts` (`SEARCH_HREF = '/ui/search'`; the top form becomes `action="/ui/search"`, placeholder and aria-label `Search tracks, sets, DJs`, `name="q"` kept; fix the comment that says "until the Search page ships")
@@ -773,18 +873,20 @@ export function searchDbOf(env: Env): D1Database {
 - Test: `test/search-page.test.ts`
 
 **Interfaces:**
+
 - Consumes: `GET /ui/api/search` and its `SearchResponse` (Task 3); `TRACK_ROW_JS`'s `lazyLinkButton` and `fetchLinks` from `src/ui/pages/track-row.ts` for the per-track "links" button.
 - Produces:
-  - `SEARCH_PAGE = { path: '/search', html: shell({ nav: 'search', title: 'Search', … }) }`
+  - `SEARCH_PAGE = { path: '/search', html: shell({ nav: 'search', title: 'Search', ... }) }`
   - The page script defines `renderResults(data, groupKind)`, `highlight(text, tokens)` and `searchUrl(q, kind, exact)`.
 
-**Page behaviour (spec §6 "Search"):**
+**Page behaviour (spec section 6 "Search"):**
+
 - **The input.** `<input id="sq" type="search" autofocus aria-label="Search tracks, sets, DJs" placeholder="Track, set or DJ">` is prefilled from `TK.qs.get('q')`, and a non-empty value searches on load. It searches as you type with a 150 ms debounce (`setTimeout`/`clearTimeout`). Each new request aborts the previous one when `typeof AbortController !== 'undefined'`, and a sequence number guards out-of-order replies either way.
 - **Query string.** `q` and `kind` are mirrored to the URL with `history.replaceState`, guarded by `typeof history !== 'undefined'`.
 - **Group tabs.** `All / Tracks / Sets / DJs` are `.tk-chip` buttons with `aria-pressed`. "All" shows three sections (Tracks, Sets, DJs), each with up to 5 rows and a "Show all N" link that switches the tab. A tab other than All requests `kind=<tab>`.
 - **Corrected-query notice.** When `corrected` is non-empty, `#sq-corrected` shows "Showing results for **lilly palmer dont**." plus a "Search exactly for lily plamer dont" button that re-runs with `exact=1`.
 - **Highlights.** `highlight()` escapes first, then wraps each case-insensitive, diacritic-insensitive match of a query token or its correction in `<mark>`, over the escaped text. Do it by normalizing a copy for matching and mapping indexes back, or match on the escaped text with a regex built from escaped tokens. It must never inject markup from data. Test it with `<b>` in a title.
-- **Track result.** Artist – title, then the label as a muted badge.
+- **Track result.** Artist - title, then the label as a muted badge.
   - Links: 1001tracklists track (`TK.safeHref(trackUrl)`); YouTube when `youtubeLink`, else the lazy "links" button (only when `trackId` is numeric).
   - Then "N sets", expandable. Each set line has the DJ, the date, the cue `TK.fmt.clock(cueSeconds)`, a "Set page" link (`/ui/set?url=` + `encodeURIComponent`) and a 1001tl link.
 - **Set result.** Title, DJ (link `/ui/dj/<slug>`), date, completeness `idedCount/trackCount IDs`, a video badge (`ok` when `videoId`, else `warn` "no video"), a Set page link and a 1001tl link.
@@ -793,7 +895,7 @@ export function searchDbOf(env: Env): D1Database {
   - Up and Down move a highlighted result (`aria-activedescendant` on the input, `role="listbox"` and `role="option"` on rows). Enter opens its primary link (track: Set page of its newest set; set: Set page; DJ: profile).
   - Escape clears the input.
   - `/` from the shell focuses `#tk-search`. On the Search page, focus `#sq` instead: when `#sq` exists, the shell's handler focuses it. Change `SHELL_JS` to prefer `#sq`, then `#tk-search`.
-- **Empty states.** No query: "Search every verified track list: tracks, sets and DJs." No results: "Nothing found for …". A 503: "The search index is not set up on this Worker." Other errors: `TK.errText`.
+- **Empty states.** No query: "Search every verified track list: tracks, sets and DJs." No results: "Nothing found for ...". A 503: "The search index is not set up on this Worker." Other errors: `TK.errText`.
 - **Layout.** Width from the shell. Result rows are cards in one column, with chips wrapping under 800px. Use the phase-2 `.tk-chip` and the badge classes; add only `mark` styling (`background: var(--accent-soft); color: inherit`).
 
 - [ ] **Step 1: Write the failing tests** `test/search-page.test.ts`. Extract `SEARCH_PAGE`'s page script and run it in a richer stub. Copy the `scriptsOf` and stub style from `test/activity-page` tests (`grep -ln "ACTIVITY_PAGE" test`).

@@ -46,4 +46,4 @@ export const TOKENS_CSS = /* css */ `
   --danger: #cf222e; --danger-bg: #fbe9e9; --info: #0969da; --info-bg: #e5f0fb;
   --shadow-float: 0 12px 32px rgba(0,0,0,.18);
 }
-`
+`;

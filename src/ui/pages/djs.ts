@@ -3,24 +3,24 @@
 // filtered, searched and paged on the server). Add, remove, sync one or all
 // (serially), Invalidate & resync one or all (all is ONE request), and the
 // "fix titles" dialog.
-import { shell } from '../shell'
-import type { UiPage } from './index'
-import { tipAttr } from '../tip'
-import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from './dj-actions'
+import { shell } from "../shell";
+import type { UiPage } from "./index";
+import { tipAttr } from "../tip";
+import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from "./dj-actions";
 
 const ACTIONS = /* html */ `
 <form id="add-form" class="dj-add">
   <input id="url" type="url" placeholder="1001tracklists DJ URL" aria-label="1001tracklists DJ URL" required />
   <button id="add-btn" type="submit" class="btn primary"${tipAttr("Subscribes to this DJ. Their sets are found over the next scheduler ticks and each one gets a video added to the DJ's YouTube playlist.")}>Add DJ</button>
 </form>
-<button id="sync-all" type="button" class="btn" hidden${tipAttr('Syncs every DJ one after another: looks for new sets and adds their videos. Each DJ is limited to a few fetches per press.')}>Sync all</button>
-<button id="resync-all" type="button" class="btn danger" hidden${tipAttr('Marks every set of every DJ as due for a re-check and re-reads the playlists from YouTube, so swapped recordings get replaced. One shared budget of 10 fetches per press; the scheduler drains the rest over the next few ticks.')}>Invalidate &amp; resync all</button>
-<button id="fix-titles" type="button" class="btn"${tipAttr(FIX_TITLES_TITLE)}>Fix titles</button>`
+<button id="sync-all" type="button" class="btn" hidden${tipAttr("Syncs every DJ one after another: looks for new sets and adds their videos. Each DJ is limited to a few fetches per press.")}>Sync all</button>
+<button id="resync-all" type="button" class="btn danger" hidden${tipAttr("Marks every set of every DJ as due for a re-check and re-reads the playlists from YouTube, so swapped recordings get replaced. One shared budget of 10 fetches per press; the scheduler drains the rest over the next few ticks.")}>Invalidate &amp; resync all</button>
+<button id="fix-titles" type="button" class="btn"${tipAttr(FIX_TITLES_TITLE)}>Fix titles</button>`;
 
 const BODY = /* html */ `
 <div id="djs"></div>
 ${FIX_DIALOG_HTML}
-`
+`;
 
 const CSS = /* css */ `
   .dj-add { display: flex; gap: var(--sp-2); flex: 1 1 22rem; min-width: 0; }
@@ -32,7 +32,7 @@ const CSS = /* css */ `
   .dj-pl { white-space: nowrap; }
   .dj-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); justify-content: flex-end; }
   .tkt-table td .badge { text-transform: none; }
-${DJ_ACTIONS_CSS}`
+${DJ_ACTIONS_CSS}`;
 
 const JS = /* js */ `
 (() => {
@@ -54,7 +54,7 @@ ${DJ_ACTIONS_JS}
       '<span class="dj-sub">' + (r.name !== r.slug ? esc(r.slug) + ' · ' : '') + (open ? '<a href="' + esc(open) + '" target="_blank" rel="noreferrer noopener"' + TK.tip('This DJ on 1001tracklists') + '>1001tl ↗</a>' : '') + '</span></span>';
   }
   function setsHtml(r) {
-    if (!r.sets) return '<span class="tkt-nil">–</span>';
+    if (!r.sets) return '<span class="tkt-nil">-</span>';
     return esc(r.processed + ' of ' + r.sets);
   }
   function pendingHtml(r) {
@@ -70,7 +70,7 @@ ${DJ_ACTIONS_JS}
   }
   function playlistHtml(r) {
     const href = TK.safeHref(r.playlistUrl);
-    if (!href) return '<span class="tkt-nil">–</span>';
+    if (!href) return '<span class="tkt-nil">-</span>';
     return '<span class="dj-pl"><a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener">Playlist ↗</a> <span class="muted">' + esc(plural(r.videos, 'video')) + '</span></span>';
   }
   function actionsHtml(r) {
@@ -205,17 +205,17 @@ ${DJ_ACTIONS_JS}
     });
   });
 })();
-`
+`;
 
 export const DJS_PAGE: UiPage = {
-  path: '/djs',
+  path: "/djs",
   html: shell({
-    nav: 'djs',
-    title: 'DJs',
-    description: 'Subscribed 1001tracklists DJs and the state of each one\'s playlist.',
+    nav: "djs",
+    title: "DJs",
+    description: "Subscribed 1001tracklists DJs and the state of each one's playlist.",
     actions: ACTIONS,
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

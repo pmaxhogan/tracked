@@ -8,7 +8,7 @@
  * indicator only revealed by visiting the set itself. Selectors break on
  * minor template changes; pattern extraction is selector-free and survives
  * layout churn. Same for the set page: the embedded player is always a
- * `youtube.com/embed/<11-char id>` URL — finding it doesn't require knowing
+ * `youtube.com/embed/<11-char id>` URL - finding it doesn't require knowing
  * the exact iframe structure.
  *
  * The two fetch helpers `fetch1001Html` + this module's parsers are kept
@@ -16,73 +16,75 @@
  * exercised live against unstable selectors.
  */
 
-import { parse } from 'node-html-parser'
-import type { ChallengeState } from './fetch'
-import { fetch1001, type Fetch1001Opts as CascadeOpts, type Via } from './upstream1001'
-import type { Logger } from './log'
-import { decodeEntities } from './html-entities'
+import { parse } from "node-html-parser";
+import type { ChallengeState } from "./fetch";
+import { fetch1001, type Fetch1001Opts as CascadeOpts, type Via } from "./upstream1001";
+import { decodeEntities } from "./html-entities";
 
-const ORIGIN = 'https://www.1001tracklists.com'
-const TRACKLIST_HREF_RE = /href="(\/tracklist\/[^"#?]+\.html)"/g
-const VIDEO_ID_RE = /[A-Za-z0-9_-]{11}/
+const ORIGIN = "https://www.1001tracklists.com";
+const TRACKLIST_HREF_RE = /href="(\/tracklist\/[^"#?]+\.html)"/g;
+const VIDEO_ID_RE = /[A-Za-z0-9_-]{11}/;
 // Match the player iframe URL (the canonical "this set has a YouTube
 // recording" signal). Both youtube.com/embed and the privacy-enhanced
 // youtube-nocookie.com/embed are valid; 1001tl has used both over time.
-const EMBED_RE = /(?:youtube(?:-nocookie)?\.com)\/embed\/([A-Za-z0-9_-]{11})/g
+const EMBED_RE = /(?:youtube(?:-nocookie)?\.com)\/embed\/([A-Za-z0-9_-]{11})/g;
 // og:video / og:video:url tags occasionally surface the watch URL too.
-const WATCH_RE = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/v\/)([A-Za-z0-9_-]{11})/g
+const WATCH_RE = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/v\/)([A-Za-z0-9_-]{11})/g;
 // Common JS-variable / data-attribute carriers for the set's video id when
 // the player iframe is rendered lazily.
-const DATA_ATTR_RE = /data-(?:yt|youtube)(?:-?id)?="([A-Za-z0-9_-]{11})"/g
-const JS_VAR_RE = /(?:videoId|ytId|youtubeId)\s*[:=]\s*["']([A-Za-z0-9_-]{11})["']/g
+const DATA_ATTR_RE = /data-(?:yt|youtube)(?:-?id)?="([A-Za-z0-9_-]{11})"/g;
+const JS_VAR_RE = /(?:videoId|ytId|youtubeId)\s*[:=]\s*["']([A-Za-z0-9_-]{11})["']/g;
 
 export type ParsedDjIndex = {
   /** Best guess at the DJ's display name. Falls back to slug-prettified when missing. */
-  artistName: string | null
+  artistName: string | null;
   /**
    * Absolute tracklist URLs in the order they appear on the page. De-duped.
    * Newest sets typically appear first on 1001tl DJ pages.
    */
-  tracklistUrls: string[]
-}
+  tracklistUrls: string[];
+};
 
 /**
  * Pull the DJ display name + tracklist URLs out of a DJ index page. Pure;
  * does not fetch.
  *
  * The H1 selector (`h1.titleNameH1`) is the only CSS-selector dependency in
- * here, and we degrade to null on miss — caller falls back to slug.
+ * here, and we degrade to null on miss - caller falls back to slug.
  */
 export function parseDjIndex(html: string): ParsedDjIndex {
-  const root = parse(html)
+  const root = parse(html);
   // The H1 was `h1.titleNameH1` "<Artist> Tracklists Overview" until mid
   // 2026; since the July 2026 redesign it is `h1#pageTitle` "Tracklists By
   // <Artist>". Accept either and strip the template words so the playlist
   // name is just the artist.
-  let artistName: string | null = null
-  const h1 = root.querySelector('h1#pageTitle') ?? root.querySelector('h1.titleNameH1') ?? root.querySelector('h1')
+  let artistName: string | null = null;
+  const h1 =
+    root.querySelector("h1#pageTitle") ??
+    root.querySelector("h1.titleNameH1") ??
+    root.querySelector("h1");
   if (h1) {
-    const raw = decodeEntities(h1.text).trim().replace(/\s+/g, ' ')
+    const raw = decodeEntities(h1.text).trim().replace(/\s+/g, " ");
     const trimmed = raw
-      .replace(/\s+Tracklists Overview\s*$/i, '')
-      .replace(/^Tracklists By\s+/i, '')
-      .trim()
-    artistName = trimmed || null
+      .replace(/\s+Tracklists Overview\s*$/i, "")
+      .replace(/^Tracklists By\s+/i, "")
+      .trim();
+    artistName = trimmed || null;
   }
 
-  const seen = new Set<string>()
-  const out: string[] = []
-  let m: RegExpExecArray | null
+  const seen = new Set<string>();
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
   while ((m = TRACKLIST_HREF_RE.exec(html))) {
-    const path = m[1]!
-    const abs = ORIGIN + path
+    const path = m[1]!;
+    const abs = ORIGIN + path;
     if (!seen.has(abs)) {
-      seen.add(abs)
-      out.push(abs)
+      seen.add(abs);
+      out.push(abs);
     }
   }
 
-  return { artistName, tracklistUrls: out }
+  return { artistName, tracklistUrls: out };
 }
 
 /**
@@ -95,16 +97,16 @@ export function parseDjIndex(html: string): ParsedDjIndex {
  * happen to live inside other attributes.
  */
 export function parseSetYouTubeId(html: string): string | null {
-  const candidates: string[] = []
+  const candidates: string[] = [];
   for (const re of [EMBED_RE, WATCH_RE, DATA_ATTR_RE, JS_VAR_RE]) {
-    re.lastIndex = 0
-    let m: RegExpExecArray | null
-    while ((m = re.exec(html))) candidates.push(m[1]!)
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html))) candidates.push(m[1]!);
   }
   for (const c of candidates) {
-    if (VIDEO_ID_RE.test(c) && !isYouTubeChannelLike(c)) return c
+    if (VIDEO_ID_RE.test(c) && !isYouTubeChannelLike(c)) return c;
   }
-  return null
+  return null;
 }
 
 /**
@@ -113,12 +115,12 @@ export function parseSetYouTubeId(html: string): string | null {
  * is missing real embeds vs. the page truly has none. No hot-path use.
  */
 export function youtubeFingerprint(html: string): {
-  htmlBytes: number
-  embedCount: number
-  watchCount: number
-  shortLinkCount: number
-  channelCount: number
-  iframeCount: number
+  htmlBytes: number;
+  embedCount: number;
+  watchCount: number;
+  shortLinkCount: number;
+  channelCount: number;
+  iframeCount: number;
 } {
   return {
     htmlBytes: html.length,
@@ -127,16 +129,15 @@ export function youtubeFingerprint(html: string): {
     shortLinkCount: (html.match(/youtu\.be\//g) ?? []).length,
     channelCount: (html.match(/youtube\.com\/(?:channel|user|@)/g) ?? []).length,
     iframeCount: (html.match(/<iframe[^>]*youtube/gi) ?? []).length,
-  }
+  };
 }
 
 // Channel ids start with "UC" + 22 chars and aren't 11 chars long, so the
 // 11-char regex above already excludes them. This guard is paranoia for
 // future regex tweaks.
 function isYouTubeChannelLike(id: string): boolean {
-  return /^UC/.test(id) && id.length !== 11
+  return /^UC/.test(id) && id.length !== 11;
 }
-
 
 // 1001tl's DJ-index page is JS infinite-scroll: the initial HTML renders the
 // 15 newest sets, and framework.js's `InfiniteScrollEvent` POSTs to
@@ -145,7 +146,7 @@ function isYouTubeChannelLike(id: string): boolean {
 // `type=overview` protocol is gone) the scroll list is
 //
 //   <div class="sDiv " id="sDivTracklists" data-type="artist" data-id="q43lgd">
-//     <div class="bItm action oItm" data-id="<tracklist short id>">…</div> ×15
+//     <div class="bItm action oItm" data-id="<tracklist short id>">...</div> x15
 //
 // and the form-encoded request is (framework.js?ver=2026-08-29):
 //
@@ -162,72 +163,81 @@ function isYouTubeChannelLike(id: string): boolean {
 // asks for a human check (we stop, never solve it). Like every
 // 1001tracklists request it goes through tlpool (kind `dj`) and counts
 // against an account's budget (quest decision 11).
-const O_ITM_DATA_ID_RE = /<div[^>]*\boItm\b[^>]*\bdata-id="([^"]+)"/g
-const SDIV_TAG_RE = /<div\b[^>]*\bclass="[^"]*\bsDiv\b[^"]*"[^>]*>/g
-const AJAX_URL = `${ORIGIN}/ajax/get_data.php`
+const O_ITM_DATA_ID_RE = /<div[^>]*\boItm\b[^>]*\bdata-id="([^"]+)"/g;
+const SDIV_TAG_RE = /<div\b[^>]*\bclass="[^"]*\bsDiv\b[^"]*"[^>]*>/g;
+const AJAX_URL = `${ORIGIN}/ajax/get_data.php`;
 /** Rows per scroll step, as the browser asks for. */
-const SCROLL_COUNT = 10
+const SCROLL_COUNT = 10;
 
 /** Where the next scroll step starts: rows already shown + the last row's data-id. */
-export type ScrollCursor = { pos: number; id: string }
+export type ScrollCursor = { pos: number; id: string };
 
-export type ScrollKeys = { type: string; idScrollObject: string; subtype: string }
+export type ScrollKeys = { type: string; idScrollObject: string; subtype: string };
 
-export type DjCrawlStopReason = 'end' | 'known' | 'no_new' | 'max_pages' | 'deadline' | 'fetch_failed' | 'no_pagination'
+export type DjCrawlStopReason =
+  "end" | "known" | "no_new" | "max_pages" | "deadline" | "fetch_failed" | "no_pagination";
 
 export type DjCrawlResult = {
-  artistName: string | null
+  artistName: string | null;
   /** Head walk + backfill URLs, head first (newest first), de-duplicated. */
-  tracklistUrls: string[]
+  tracklistUrls: string[];
   /** Pages fetched by the head walk (1 = page 1 only). */
-  pagesWalked: number
+  pagesWalked: number;
   /** Why the head walk stopped. */
-  stopReason: DjCrawlStopReason
+  stopReason: DjCrawlStopReason;
   /** Where the head walk left the list (null: end of list reached, or no scroll keys). */
-  tail: ScrollCursor | null
+  tail: ScrollCursor | null;
   /** The scroll request keys page 1 carried; stored so a later backfill step needs no page-1 fetch. */
-  keys?: ScrollKeys | null
+  keys?: ScrollKeys | null;
   /** What page 1's fetch threw (stopReason `fetch_failed` with nothing walked), for a caller that reports it. */
-  page1Error?: unknown
+  page1Error?: unknown;
   /** Present when a backfill was asked for. */
   backfill?: {
     /** Scroll steps spent on the backfill this call. */
-    steps: number
+    steps: number;
     /** Sets the backfill saw that the head walk had not. */
-    added: number
+    added: number;
     /** Resume point for the next backfill; null once `done`. */
-    cursor: ScrollCursor | null
+    cursor: ScrollCursor | null;
     /** The end of the DJ's list was reached: the listing is complete. */
-    done: boolean
-  }
-}
+    done: boolean;
+  };
+};
 
 function attr(tag: string, name: string): string | null {
-  return tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1] ?? null
+  return tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1] ?? null;
 }
 
 /**
  * The scroll request keys from a DJ page: the tracklist list's `div.sDiv`
  * (by id `sDivTracklists`, else the first visible sDiv with a data-id), with
- * the page-global `window.scrollObject` / `window.idScrollObject` as fallback —
+ * the page-global `window.scrollObject` / `window.idScrollObject` as fallback -
  * the same precedence framework.js applies.
  */
 export function parseScrollKeys(html: string): ScrollKeys | null {
-  const tags = [...html.matchAll(SDIV_TAG_RE)].map((m) => m[0])
+  const tags = [...html.matchAll(SDIV_TAG_RE)].map((m) => m[0]);
   const div =
-    tags.find((t) => attr(t, 'id') === 'sDivTracklists') ??
-    tags.find((t) => !/\bclass="[^"]*\bhidden\b/.test(t) && attr(t, 'data-id'))
-  const type = (div && attr(div, 'data-type')) || html.match(/window\.scrollObject\s*=\s*["']([^"']+)["']/)?.[1] || null
-  const idScrollObject = (div && attr(div, 'data-id')) || html.match(/window\.idScrollObject\s*=\s*["']([^"']+)["']/)?.[1] || null
-  const divId = div ? attr(div, 'id') : null
-  const subtype = (div && attr(div, 'data-subtype')) || (divId && divId.length > 4 ? divId.slice(4).toLowerCase() : 'tracklists')
-  if (!type || !idScrollObject) return null
-  return { type, idScrollObject, subtype }
+    tags.find((t) => attr(t, "id") === "sDivTracklists") ??
+    tags.find((t) => !/\bclass="[^"]*\bhidden\b/.test(t) && attr(t, "data-id"));
+  const type =
+    (div && attr(div, "data-type")) ||
+    html.match(/window\.scrollObject\s*=\s*["']([^"']+)["']/)?.[1] ||
+    null;
+  const idScrollObject =
+    (div && attr(div, "data-id")) ||
+    html.match(/window\.idScrollObject\s*=\s*["']([^"']+)["']/)?.[1] ||
+    null;
+  const divId = div ? attr(div, "id") : null;
+  const subtype =
+    (div && attr(div, "data-subtype")) ||
+    (divId && divId.length > 4 ? divId.slice(4).toLowerCase() : "tracklists");
+  if (!type || !idScrollObject) return null;
+  return { type, idScrollObject, subtype };
 }
 
 function oItmIds(html: string): string[] {
-  O_ITM_DATA_ID_RE.lastIndex = 0
-  return [...html.matchAll(O_ITM_DATA_ID_RE)].map((m) => m[1]!)
+  O_ITM_DATA_ID_RE.lastIndex = 0;
+  return [...html.matchAll(O_ITM_DATA_ID_RE)].map((m) => m[1]!);
 }
 
 /**
@@ -249,161 +259,207 @@ function oItmIds(html: string): string[] {
  *
  * Other stops: `end` (the site says there is no more), `no_new` (a head step
  * added nothing), `deadline` (wall clock), `fetch_failed` (a step threw or
- * was refused — what was collected is kept), `no_pagination` (page 1 has no
+ * was refused - what was collected is kept), `no_pagination` (page 1 has no
  * scroll keys: the markup changed again; see the log `no_pagination_keys`).
  */
 export async function crawlDjIndex(
   slug: string,
   opts: Fetch1001Opts & {
-    maxPages?: number
-    deadlineMs?: number
-    knownUrls?: ReadonlySet<string>
-    backfill?: { from: ScrollCursor | null; maxSteps: number }
+    maxPages?: number;
+    deadlineMs?: number;
+    knownUrls?: ReadonlySet<string>;
+    backfill?: { from: ScrollCursor | null; maxSteps: number };
   } = {},
 ): Promise<DjCrawlResult> {
-  const maxPages = opts.maxPages ?? 4
-  const log = opts.log
-  const known = opts.knownUrls ?? new Set<string>()
+  const maxPages = opts.maxPages ?? 4;
+  const log = opts.log;
+  const known = opts.knownUrls ?? new Set<string>();
 
-  let page1Html: string
+  let page1Html: string;
   try {
-    const r = await fetch1001Html(`${ORIGIN}/dj/${slug}/index.html`, { ...opts, kind: 'dj' })
-    page1Html = r.html
+    const r = await fetch1001Html(`${ORIGIN}/dj/${slug}/index.html`, { ...opts, kind: "dj" });
+    page1Html = r.html;
   } catch (e) {
-    log?.warn('crawlDjIndex.page1_failed', { slug, error: e instanceof Error ? e.message : String(e) })
-    return { artistName: null, tracklistUrls: [], pagesWalked: 0, stopReason: 'fetch_failed', tail: null, page1Error: e }
+    log?.warn("crawlDjIndex.page1_failed", {
+      slug,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return {
+      artistName: null,
+      tracklistUrls: [],
+      pagesWalked: 0,
+      stopReason: "fetch_failed",
+      tail: null,
+      page1Error: e,
+    };
   }
-  const parsed1 = parseDjIndex(page1Html)
-  const seenSet = new Set<string>(parsed1.tracklistUrls)
-  const all: string[] = [...parsed1.tracklistUrls]
-  let pagesWalked = 1
-  const reachedKnown1 = parsed1.tracklistUrls.some((u) => known.has(u))
-  log?.info('crawlDjIndex.page_done', {
+  const parsed1 = parseDjIndex(page1Html);
+  const seenSet = new Set<string>(parsed1.tracklistUrls);
+  const all: string[] = [...parsed1.tracklistUrls];
+  let pagesWalked = 1;
+  const reachedKnown1 = parsed1.tracklistUrls.some((u) => known.has(u));
+  log?.info("crawlDjIndex.page_done", {
     slug,
     page: 1,
-    via: 'static',
+    via: "static",
     urlsOnPage: parsed1.tracklistUrls.length,
     addedNew: parsed1.tracklistUrls.length,
     reachedKnown: reachedKnown1,
-  })
+  });
 
-  const keys = parseScrollKeys(page1Html)
-  const rows1 = oItmIds(page1Html)
+  const keys = parseScrollKeys(page1Html);
+  const rows1 = oItmIds(page1Html);
   if (!keys || rows1.length === 0 || parsed1.tracklistUrls.length === 0) {
-    log?.warn('crawlDjIndex.no_pagination_keys', {
+    log?.warn("crawlDjIndex.no_pagination_keys", {
       slug,
       hasScrollKeys: !!keys,
       rowsOnPage1: rows1.length,
       urlsOnPage1: parsed1.tracklistUrls.length,
-    })
-    return { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason: 'no_pagination', tail: null, keys: null }
+    });
+    return {
+      artistName: parsed1.artistName,
+      tracklistUrls: all,
+      pagesWalked,
+      stopReason: "no_pagination",
+      tail: null,
+      keys: null,
+    };
   }
 
-  const step = async (cursor: ScrollCursor, phase: 'head' | 'backfill', n: number) => {
+  const step = async (cursor: ScrollCursor, phase: "head" | "backfill", n: number) => {
     // The backfill is the lowest-priority work there is (decision 12); the
     // head walk is how new sets are discovered and runs at the caller's.
-    const s = await djScrollStep(slug, keys, cursor, phase === 'backfill' ? { ...opts, priority: 'backfill' } : opts)
+    const s = await djScrollStep(
+      slug,
+      keys,
+      cursor,
+      phase === "backfill" ? { ...opts, priority: "backfill" } : opts,
+    );
     if (!s) {
-      log?.warn('crawlDjIndex.ajax_not_ok', { slug, phase, step: n })
-      return null
+      log?.warn("crawlDjIndex.ajax_not_ok", { slug, phase, step: n });
+      return null;
     }
-    let added = 0
+    let added = 0;
     for (const u of s.urls) {
       if (!seenSet.has(u)) {
-        seenSet.add(u)
-        all.push(u)
-        added++
+        seenSet.add(u);
+        all.push(u);
+        added++;
       }
     }
-    const reachedKnown = s.urls.some((u) => known.has(u))
-    log?.info('crawlDjIndex.page_done', { slug, phase, step: n, via: 'ajax', urlsOnPage: s.urls.length, addedNew: added, end: s.end, reachedKnown })
-    return { added, end: s.end, next: s.next, reachedKnown }
-  }
+    const reachedKnown = s.urls.some((u) => known.has(u));
+    log?.info("crawlDjIndex.page_done", {
+      slug,
+      phase,
+      step: n,
+      via: "ajax",
+      urlsOnPage: s.urls.length,
+      addedNew: added,
+      end: s.end,
+      reachedKnown,
+    });
+    return { added, end: s.end, next: s.next, reachedKnown };
+  };
 
-  // ── Head walk: from the top down to the first known set. ────────────────
-  let tail: ScrollCursor | null = { pos: rows1.length, id: rows1[rows1.length - 1]! }
-  let stopReason: DjCrawlStopReason = reachedKnown1 ? 'known' : 'max_pages'
+  // -- Head walk: from the top down to the first known set. ----------------
+  let tail: ScrollCursor | null = { pos: rows1.length, id: rows1[rows1.length - 1]! };
+  let stopReason: DjCrawlStopReason = reachedKnown1 ? "known" : "max_pages";
   if (!reachedKnown1) {
     for (let page = 2; page <= maxPages; page++) {
       if (opts.deadlineMs && Date.now() >= opts.deadlineMs) {
-        log?.warn('crawlDjIndex.deadline', { slug, pagesWalked })
-        stopReason = 'deadline'
-        break
+        log?.warn("crawlDjIndex.deadline", { slug, pagesWalked });
+        stopReason = "deadline";
+        break;
       }
-      let s: Awaited<ReturnType<typeof step>>
+      let s: Awaited<ReturnType<typeof step>>;
       try {
-        s = await step(tail!, 'head', page)
+        s = await step(tail!, "head", page);
       } catch (e) {
-        log?.warn('crawlDjIndex.ajax_failed', { slug, page, error: e instanceof Error ? e.message : String(e) })
-        s = null
+        log?.warn("crawlDjIndex.ajax_failed", {
+          slug,
+          page,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        s = null;
       }
       if (!s) {
-        stopReason = 'fetch_failed'
-        break
+        stopReason = "fetch_failed";
+        break;
       }
-      pagesWalked++
-      tail = s.next
+      pagesWalked++;
+      tail = s.next;
       if (s.end) {
-        stopReason = 'end'
-        break
+        stopReason = "end";
+        break;
       }
       if (s.reachedKnown) {
-        stopReason = 'known'
-        break
+        stopReason = "known";
+        break;
       }
       if (s.added === 0) {
-        stopReason = 'no_new'
-        break
+        stopReason = "no_new";
+        break;
       }
     }
   }
-  const result: DjCrawlResult = { artistName: parsed1.artistName, tracklistUrls: all, pagesWalked, stopReason, tail, keys }
+  const result: DjCrawlResult = {
+    artistName: parsed1.artistName,
+    tracklistUrls: all,
+    pagesWalked,
+    stopReason,
+    tail,
+    keys,
+  };
 
-  // ── Backfill: a few steps further into the DJ's history. ────────────────
+  // -- Backfill: a few steps further into the DJ's history. ----------------
   if (opts.backfill) {
-    const bf = { steps: 0, added: 0, cursor: opts.backfill.from ?? tail, done: false }
-    if (stopReason === 'end') {
-      bf.cursor = null
-      bf.done = true
-    } else if (bf.cursor && stopReason !== 'fetch_failed' && stopReason !== 'deadline') {
+    const bf = { steps: 0, added: 0, cursor: opts.backfill.from ?? tail, done: false };
+    if (stopReason === "end") {
+      bf.cursor = null;
+      bf.done = true;
+    } else if (bf.cursor && stopReason !== "fetch_failed" && stopReason !== "deadline") {
       while (bf.steps < opts.backfill.maxSteps) {
-        if (opts.deadlineMs && Date.now() >= opts.deadlineMs) break
-        let s: Awaited<ReturnType<typeof step>>
+        if (opts.deadlineMs && Date.now() >= opts.deadlineMs) break;
+        let s: Awaited<ReturnType<typeof step>>;
         try {
-          s = await step(bf.cursor!, 'backfill', bf.steps + 1)
+          s = await step(bf.cursor!, "backfill", bf.steps + 1);
         } catch (e) {
-          log?.warn('crawlDjIndex.ajax_failed', { slug, phase: 'backfill', error: e instanceof Error ? e.message : String(e) })
-          s = null
+          log?.warn("crawlDjIndex.ajax_failed", {
+            slug,
+            phase: "backfill",
+            error: e instanceof Error ? e.message : String(e),
+          });
+          s = null;
         }
-        if (!s) break // keep the cursor: the next call retries the same step
-        bf.steps++
-        bf.added += s.added
-        bf.cursor = s.next
+        if (!s) break; // keep the cursor: the next call retries the same step
+        bf.steps++;
+        bf.added += s.added;
+        bf.cursor = s.next;
         if (s.end) {
-          bf.done = true
-          break
+          bf.done = true;
+          break;
         }
       }
     }
-    result.backfill = bf
-    log?.info('crawlDjIndex.backfill', { slug, ...bf })
+    result.backfill = bf;
+    log?.info("crawlDjIndex.backfill", { slug, ...bf });
   }
-  return result
+  return result;
 }
 
 function extractTracklistUrls(html: string): string[] {
-  const out: string[] = []
-  const seen = new Set<string>()
-  let m: RegExpExecArray | null
-  TRACKLIST_HREF_RE.lastIndex = 0
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  TRACKLIST_HREF_RE.lastIndex = 0;
   while ((m = TRACKLIST_HREF_RE.exec(html))) {
-    const abs = ORIGIN + m[1]!
+    const abs = ORIGIN + m[1]!;
     if (!seen.has(abs)) {
-      seen.add(abs)
-      out.push(abs)
+      seen.add(abs);
+      out.push(abs);
     }
   }
-  return out
+  return out;
 }
 
 /**
@@ -423,13 +479,18 @@ export async function djScrollStep(
   cursor: ScrollCursor,
   opts: Fetch1001Opts,
 ): Promise<{ urls: string[]; end: boolean; next: ScrollCursor | null } | null> {
-  const chunk = await fetchInfiniteScrollChunk({ ...keys, pos: cursor.pos, dataId: cursor.id, refererSlug: slug }, opts)
-  if (!chunk.ok) return null
-  const rows = oItmIds(chunk.dataHtml)
-  const urls = extractTracklistUrls(chunk.dataHtml)
-  const end = chunk.end || rows.length === 0
-  const next: ScrollCursor | null = end ? null : { pos: cursor.pos + rows.length, id: rows[rows.length - 1]! }
-  return { urls, end, next }
+  const chunk = await fetchInfiniteScrollChunk(
+    { ...keys, pos: cursor.pos, dataId: cursor.id, refererSlug: slug },
+    opts,
+  );
+  if (!chunk.ok) return null;
+  const rows = oItmIds(chunk.dataHtml);
+  const urls = extractTracklistUrls(chunk.dataHtml);
+  const end = chunk.end || rows.length === 0;
+  const next: ScrollCursor | null = end
+    ? null
+    : { pos: cursor.pos + rows.length, id: rows[rows.length - 1]! };
+  return { urls, end, next };
 }
 
 /**
@@ -443,50 +504,62 @@ async function fetchInfiniteScrollChunk(
   opts: Fetch1001Opts,
 ): Promise<{ ok: boolean; end: boolean; dataHtml: string }> {
   const form = {
-    width: '1920',
+    width: "1920",
     type: cursor.type,
     idScrollObject: cursor.idScrollObject,
     subtype: cursor.subtype,
     count: String(SCROLL_COUNT),
     pos: String(cursor.pos),
     id: cursor.dataId,
-  }
-  const referer = `${ORIGIN}/dj/${cursor.refererSlug}/index.html`
-  const start = Date.now()
+  };
+  const referer = `${ORIGIN}/dj/${cursor.refererSlug}/index.html`;
+  const start = Date.now();
   const r = await fetch1001(AJAX_URL, {
     ...opts,
-    kind: 'dj',
-    method: 'POST',
+    kind: "dj",
+    method: "POST",
     form,
     headers: {
-      'X-Requested-With': 'XMLHttpRequest',
-      Accept: 'application/json, text/javascript, */*; q=0.01',
+      "X-Requested-With": "XMLHttpRequest",
+      Accept: "application/json, text/javascript, */*; q=0.01",
       Referer: referer,
     },
-  })
-  const text = r.html
-  let json: { success?: boolean; end?: unknown; data?: string; captcha?: boolean; message?: string }
+  });
+  const text = r.html;
+  let json: {
+    success?: boolean;
+    end?: unknown;
+    data?: string;
+    captcha?: boolean;
+    message?: string;
+  };
   try {
-    json = JSON.parse(text)
+    json = JSON.parse(text);
   } catch {
-    opts.log?.warn('crawlDjIndex.ajax_parse_failed', { ms: Date.now() - start, body: text.slice(0, 300) })
-    return { ok: false, end: false, dataHtml: '' }
+    opts.log?.warn("crawlDjIndex.ajax_parse_failed", {
+      ms: Date.now() - start,
+      body: text.slice(0, 300),
+    });
+    return { ok: false, end: false, dataHtml: "" };
   }
   if (json.captcha) {
-    opts.log?.warn('crawlDjIndex.ajax_captcha', { ms: Date.now() - start, accountId: r.accountId })
-    return { ok: false, end: false, dataHtml: '' }
+    opts.log?.warn("crawlDjIndex.ajax_captcha", { ms: Date.now() - start, accountId: r.accountId });
+    return { ok: false, end: false, dataHtml: "" };
   }
   // framework.js ends the list on `message` or on any defined `end`.
-  const end = json.end !== undefined || json.message !== undefined
+  const end = json.end !== undefined || json.message !== undefined;
   if (!json.success && !end) {
-    opts.log?.warn('crawlDjIndex.ajax_unsuccessful', { ms: Date.now() - start, body: text.slice(0, 300) })
-    return { ok: false, end: false, dataHtml: '' }
+    opts.log?.warn("crawlDjIndex.ajax_unsuccessful", {
+      ms: Date.now() - start,
+      body: text.slice(0, 300),
+    });
+    return { ok: false, end: false, dataHtml: "" };
   }
-  return { ok: true, end, dataHtml: json.success ? (json.data ?? '') : '' }
+  return { ok: true, end, dataHtml: json.success ? (json.data ?? "") : "" };
 }
 
 /** Options for the 1001tracklists fetch path - see lib/upstream1001.ts. */
-export type Fetch1001Opts = Omit<CascadeOpts, 'method' | 'form'>
+export type Fetch1001Opts = Omit<CascadeOpts, "method" | "form">;
 
 /**
  * Fetch a 1001tracklists page through the pool (lib/upstream1001.ts) and
@@ -500,7 +573,21 @@ export type Fetch1001Opts = Omit<CascadeOpts, 'method' | 'form'>
 export async function fetch1001Html(
   url: string,
   opts: Fetch1001Opts = {},
-): Promise<{ html: string; via: Via; state: ChallengeState; accountId?: string; exitLabel?: string; fetchedAt?: string }> {
-  const r = await fetch1001(url, opts)
-  return { html: r.html, via: r.via, state: r.state, accountId: r.accountId, exitLabel: r.exitLabel, fetchedAt: r.fetchedAt }
+): Promise<{
+  html: string;
+  via: Via;
+  state: ChallengeState;
+  accountId?: string;
+  exitLabel?: string;
+  fetchedAt?: string;
+}> {
+  const r = await fetch1001(url, opts);
+  return {
+    html: r.html,
+    via: r.via,
+    state: r.state,
+    accountId: r.accountId,
+    exitLabel: r.exitLabel,
+    fetchedAt: r.fetchedAt,
+  };
 }

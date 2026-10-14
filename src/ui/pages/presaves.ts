@@ -8,13 +8,13 @@
 // Page scripts are template literals: no backticks and no dollar-brace inside,
 // and every regex backslash is doubled. Upstream text (artist, title, URLs) is
 // only placed through TK.esc, hrefs only through TK.safeHref.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
 
 /** Where the presave and track-upload settings groups live (src/ui/pages/settings.ts form ids). */
-export const PRESAVE_SETTINGS_HREF = '/ui/settings#sf-presave'
-export const TRACK_UPLOADS_SETTINGS_HREF = '/ui/settings#sf-track-uploads'
+export const PRESAVE_SETTINGS_HREF = "/ui/settings#sf-presave";
+export const TRACK_UPLOADS_SETTINGS_HREF = "/ui/settings#sf-track-uploads";
 
 /** CSS shared by the three pages: track cells, artwork, stage badges, link chips. */
 export const PRESAVE_UI_CSS = /* css */ `
@@ -60,7 +60,7 @@ export const PRESAVE_UI_CSS = /* css */ `
     .tkt-table td:has(> .ps-track) { padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 2px; }
     .tkt-table .ps-chips { justify-content: flex-end; }
   }
-`
+`;
 
 /**
  * Helpers for the page IIFEs (needs TK). Declares: STAGE, STAGE_OPTS, RESULT,
@@ -179,24 +179,24 @@ export const PRESAVE_UI_JS = /* js */ `
     } else TK.toast(TK.errText(res, 'Recheck failed (' + res.status + ')'), 'bad');
     return res;
   }
-`
+`;
 
 const BODY = /* html */ `
   <form id="ps-add" class="tk-card ps-add" autocomplete="off" novalidate>
     <div class="ps-add-row">
       <label class="ps-add-url"><span class="lbl">Pre-save a track</span><input id="ps-add-url" type="text" inputmode="url" placeholder="1001tracklists track URL, or a set URL with a cue" aria-label="1001tracklists track or set URL"></label>
       <label class="ps-add-cue"><span class="lbl">Cue</span><input id="ps-add-cue" type="text" placeholder="1:02:30" aria-label="Cue in the set (for a set URL)"></label>
-      <button type="submit" id="ps-add-go" class="btn primary"${tipAttr('Saves it and looks it up right away (one 1001tracklists lookup).')}>Pre-save</button>
+      <button type="submit" id="ps-add-go" class="btn primary"${tipAttr("Saves it and looks it up right away (one 1001tracklists lookup).")}>Pre-save</button>
     </div>
     <p id="ps-add-msg" class="ps-add-msg" role="status"></p>
   </form>
   <div id="ps-views" class="chips ps-views" role="group" aria-label="List">
-    <button type="button" class="chip on" data-view="saved" aria-pressed="true"${tipAttr('Tracks you pre-saved: watched until YouTube has them.')}>Pre-saved</button>
-    <button type="button" class="chip" data-view="candidates" aria-pressed="false"${tipAttr('Tracks people pre-saved on Spotify that have no YouTube or Spotify link yet, read off your verified sets every time one is rechecked.')}>Candidates</button>
+    <button type="button" class="chip on" data-view="saved" aria-pressed="true"${tipAttr("Tracks you pre-saved: watched until YouTube has them.")}>Pre-saved</button>
+    <button type="button" class="chip" data-view="candidates" aria-pressed="false"${tipAttr("Tracks people pre-saved on Spotify that have no YouTube or Spotify link yet, read off your verified sets every time one is rechecked.")}>Candidates</button>
   </div>
   <div id="ps-table"></div>
   <div id="ps-cand" hidden></div>
-`
+`;
 
 const CSS = /* css */ `
   ${PRESAVE_UI_CSS}
@@ -215,7 +215,7 @@ const CSS = /* css */ `
   .ps-add-msg.bad { color: var(--danger); }
   .ps-add-msg a { color: var(--accent); }
   @media (max-width: 699px) { .ps-add-cue { flex: 1 1 6rem; } .ps-add-row .btn { flex: 1 1 8rem; } }
-`
+`;
 
 const JS = /* js */ `
 (() => {
@@ -273,7 +273,7 @@ ${PRESAVE_UI_JS}
     },
   });
 
-  // ── candidates: tracks people pre-saved on Spotify, no YouTube or Spotify link yet ──
+  // -- candidates: tracks people pre-saved on Spotify, no YouTube or Spotify link yet --
   // Made the first time the tab is shown: the default view costs no extra request.
   let candTable = null;
   const candOpts = {
@@ -284,7 +284,7 @@ ${PRESAVE_UI_JS}
       { key: 'presaveCount', label: 'Spotify pre-saves', type: 'number', render: (c) => '<span class="ps-count">' + esc(String(c.presaveCount)) + '<span class="u">' + (c.presaveCount === 1 ? 'person' : 'people') + '</span></span>', tip: 'People who pre-saved the Spotify release on 1001tracklists, as of the last time the set was fetched.' },
       { key: 'presaved', label: 'Stage', type: 'bool', render: (c) => (c.presaveId ? stageBadge(c.presaveStage) : '<span class="badge neutral"' + TK.tip('Not pre-saved yet.') + '>Candidate</span>') },
       { key: 'isId', label: 'Kind', type: 'bool', hideOn: 'phone', render: (c) => (c.isId ? '<span class="badge warn"' + TK.tip('Not identified yet: pre-saving it watches the row until it is.') + '>ID</span>' : 'Track') },
-      { key: 'djSlug', label: 'DJ', type: 'text', hideOn: 'phone', render: (c) => (c.djSlug ? '<a class="ps-dj" href="' + esc(djHref(c.djSlug)) + '">' + esc(c.djSlug) + '</a>' : '<span class="tkt-nil">–</span>') },
+      { key: 'djSlug', label: 'DJ', type: 'text', hideOn: 'phone', render: (c) => (c.djSlug ? '<a class="ps-dj" href="' + esc(djHref(c.djSlug)) + '">' + esc(c.djSlug) + '</a>' : '<span class="tkt-nil">-</span>') },
       { key: 'firstSeenAt', label: 'First seen', type: 'datetime', hideOn: 'phone', render: (c) => whenCell(c.firstSeenAt) },
       { key: 'updatedAt', label: 'Count from', type: 'datetime', render: (c) => whenCell(c.updatedAt), tip: 'When the set this count was read from was last fetched.' },
     ],
@@ -317,7 +317,7 @@ ${PRESAVE_UI_JS}
     },
   };
 
-  // ── which list: ?view=candidates ──
+  // -- which list: ?view=candidates --
   const $views = $('ps-views');
   function setView(v) {
     const cand = v === 'candidates';
@@ -331,7 +331,7 @@ ${PRESAVE_UI_JS}
   if ($views && typeof $views.addEventListener === 'function') $views.addEventListener('click', (e) => { const b = e.target && e.target.closest ? e.target.closest('[data-view]') : null; if (b) setView(b.dataset.view); });
   setView(TK.qs.get('view') === 'candidates' ? 'candidates' : 'saved');
 
-  // ── add from the web ──
+  // -- add from the web --
   const $form = $('ps-add'), $url = $('ps-add-url'), $cue = $('ps-add-cue'), $go = $('ps-add-go'), $msg = $('ps-add-msg');
   // "1:02:30", "62:30" or plain seconds; null when it is not a time.
   function parseCue(s) {
@@ -374,17 +374,18 @@ ${PRESAVE_UI_JS}
   }
   if ($form && typeof $form.addEventListener === 'function') $form.addEventListener('submit', (e) => { if (e && e.preventDefault) e.preventDefault(); add(); });
 })();
-`
+`;
 
 export const PRESAVES_PAGE: UiPage = {
-  path: '/presaves',
+  path: "/presaves",
   html: shell({
-    nav: 'presaves',
-    title: 'Pre-saves',
-    description: 'Tracks with no YouTube video yet, looked up again until 1001tracklists links one. Found ones push to every device.',
-    actions: `<a class="btn" href="/ui/track-uploads"${tipAttr('Tracks mkvid rips from another site when YouTube never gets one.')}>Track uploads</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr('How often tracks are looked up, pushes, giving up.')}>Settings</a>`,
+    nav: "presaves",
+    title: "Pre-saves",
+    description:
+      "Tracks with no YouTube video yet, looked up again until 1001tracklists links one. Found ones push to every device.",
+    actions: `<a class="btn" href="/ui/track-uploads"${tipAttr("Tracks mkvid rips from another site when YouTube never gets one.")}>Track uploads</a><a class="btn ghost" href="${PRESAVE_SETTINGS_HREF}"${tipAttr("How often tracks are looked up, pushes, giving up.")}>Settings</a>`,
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

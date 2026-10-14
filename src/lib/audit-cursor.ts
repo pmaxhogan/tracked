@@ -6,18 +6,18 @@
  */
 
 export type AuditPage = {
-  records: Array<Record<string, unknown> & { key: string }>
+  records: Array<Record<string, unknown> & { key: string }>;
   /** Pass back as `cursor` to fetch the next (older) page; null when this was the last page. */
-  cursor: string | null
-}
+  cursor: string | null;
+};
 
 export function encodeCursor(ts: number, id: number): string {
-  return `${ts}:${id}`
+  return `${ts}:${id}`;
 }
 
 export function decodeCursor(cursor: string | null | undefined): { ts: number; id: number } | null {
-  if (!cursor) return null
-  const m = cursor.match(/^(\d+):(\d+)$/)
-  if (!m) return null
-  return { ts: Number(m[1]), id: Number(m[2]) }
+  if (!cursor) return null;
+  const m = cursor.match(/^(\d+):(\d+)$/);
+  if (!m) return null;
+  return { ts: Number(m[1]), id: Number(m[2]) };
 }

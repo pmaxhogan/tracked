@@ -4,7 +4,7 @@
 // DATA_TABLE_CSS and DATA_TABLE_JS on every page, after the runtime (TK) and
 // before the page's own script.
 //
-// ── Usage ───────────────────────────────────────────────────────────────────
+// -- Usage -------------------------------------------------------------------
 //
 //   <div id="ps-table"></div>
 //
@@ -35,7 +35,7 @@
 //   })
 //   table.reload()   // after an action changed the data (keeps page, sort and filters)
 //
-// ── Config (TKTable.create(el, config)) ─────────────────────────────────────
+// -- Config (TKTable.create(el, config)) -------------------------------------
 //
 //   id          URL state prefix and element-id prefix (default 'tkt1', 'tkt2', ...).
 //   urlState    false: keep state out of the URL (default true when id is given, false in compact).
@@ -71,7 +71,7 @@
 //   onData      (resp) after each answer (server JSON, or the local result), e.g. for counts
 //   compact     no toolbar, no pager and no filter buttons (previews); shows pageSize rows
 //
-// ── Returned handle ─────────────────────────────────────────────────────────
+// -- Returned handle ---------------------------------------------------------
 //
 //   reload()                    refetch (server) or recompute (local), keeping page/sort/filters
 //   setFilter(col, op, value)   replace col's filters with one (op null = remove them); back to page 1
@@ -80,14 +80,14 @@
 //   setRows(rows)               local mode: new rows
 //   setSort('-a,b'), setPage(n), state(), rows(), response()
 //
-// ── URL state ───────────────────────────────────────────────────────────────
+// -- URL state ---------------------------------------------------------------
 //
 // <id>.page, <id>.size, <id>.sort, <id>.q, <id>.chip and <id>.f.<col> (repeatable) live in the page's
 // query string next to the page's own params, which are kept (history.replaceState). Defaults are
 // omitted. NOTE: TK.qs.set() rebuilds the whole query string and would drop table state; a page with a
 // table sets its own params with TKTable.qs.merge({ name: value | null }) instead.
 //
-// ── Constraints ─────────────────────────────────────────────────────────────
+// -- Constraints -------------------------------------------------------------
 //
 // Define-only at load (the pool pages' stub DOM runs this): the only top-level name is `var TKTable`,
 // no timers, fetches or DOM access until create(). Rendering is innerHTML strings into regions found
@@ -97,7 +97,7 @@
 // String.raw template: no backticks and no dollar-brace in the script.
 
 export const DATA_TABLE_CSS = /* css */ `
-/* ── data table (TKTable) ── */
+/* -- data table (TKTable) -- */
 .tkt { min-width: 0; }
 .tkt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-2); }
 .tkt-bar:empty { display: none; }
@@ -192,7 +192,7 @@ export const DATA_TABLE_CSS = /* css */ `
   .tkt-range { flex-basis: 100%; }
   .tkt-pop { left: 0 !important; right: 0; top: auto !important; bottom: 0; width: 100%; max-height: 85vh; max-height: 85dvh; border-radius: var(--r-card) var(--r-card) 0 0; padding-bottom: calc(var(--sp-3) + env(safe-area-inset-bottom)); }
 }
-`
+`;
 
 export const DATA_TABLE_JS = String.raw`
 var TKTable = (() => {
@@ -200,7 +200,7 @@ var TKTable = (() => {
   const SIZES = [10, 25, 50, 100, 200];
   const FUNNEL = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1.5 2.5h13l-5 6v5l-3-1.5V8.5z" fill="currentColor"/></svg>';
 
-  // ── small helpers (TK is looked up lazily: nothing runs at load) ──
+  // -- small helpers (TK is looked up lazily: nothing runs at load) --
   const hasTK = () => typeof TK !== 'undefined' && TK;
   function esc(s) {
     if (hasTK()) return TK.esc(s);
@@ -219,7 +219,7 @@ var TKTable = (() => {
   const numOrNull = (v) => { const t = String(v == null ? '' : v).trim(); if (t === '' || !/^-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t)) return null; const n = Number(t); return isFinite(n) ? n : null; };
   const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
-  // ── sort strings ──
+  // -- sort strings --
   function parseSort(s, cols) {
     const out = [];
     if (Array.isArray(s)) { for (const x of s) if (x && cols[x.col] && !out.some((o) => o.col === x.col)) out.push({ col: x.col, dir: x.dir === 'desc' ? 'desc' : 'asc' }); return out; }
@@ -233,7 +233,7 @@ var TKTable = (() => {
   }
   const sortStr = (list) => list.map((s) => (s.dir === 'desc' ? '-' : '') + s.col).join(',');
 
-  // ── URL state, keeping the page's own params ──
+  // -- URL state, keeping the page's own params --
   function readUrl() {
     try { if (typeof location === 'undefined' || typeof URLSearchParams === 'undefined') return null; return new URLSearchParams(location.search || ''); } catch (e) { return null; }
   }
@@ -252,7 +252,7 @@ var TKTable = (() => {
     get(name) { const p = readUrl(); return p ? p.get(name) : null; },
   };
 
-  // ── columns ──
+  // -- columns --
   function normCols(list) {
     const cols = {}, order = [];
     for (const c0 of list || []) {
@@ -278,7 +278,7 @@ var TKTable = (() => {
   }
   const multiList = (v) => (v == null ? null : Array.isArray(v) ? v.map(String) : String(v).split(',').filter(Boolean));
 
-  // ── local engine: the semantics of runLocalTable in src/lib/table-query.ts ──
+  // -- local engine: the semantics of runLocalTable in src/lib/table-query.ts --
   function cmpRaw(a, b) {
     const an = typeof a === 'number', bn = typeof b === 'number';
     if (an && bn) return a - b;
@@ -400,9 +400,9 @@ var TKTable = (() => {
     return { rows: slice, total, page, size, pageCount, sort, filters: (opts.filters || []).slice(), q };
   }
 
-  // ── filter text for chips ──
+  // -- filter text for chips --
   const TEXT_OPS = [['has', 'contains'], ['eq', 'is'], ['ne', 'is not'], ['nhas', 'does not contain'], ['sw', 'starts with'], ['ew', 'ends with'], ['empty', 'is empty'], ['nempty', 'is not empty']];
-  const NUM_OPS = [['between', 'between'], ['eq', '='], ['ne', '≠'], ['gt', '>'], ['gte', '≥'], ['lt', '<'], ['lte', '≤'], ['empty', 'is empty'], ['nempty', 'is not empty']];
+  const NUM_OPS = [['between', 'between'], ['eq', '='], ['ne', '!='], ['gt', '>'], ['gte', '>='], ['lt', '<'], ['lte', '<='], ['empty', 'is empty'], ['nempty', 'is not empty']];
   const DAY_OPS = [['on', 'on'], ['before', 'before'], ['after', 'after'], ['between', 'between'], ['empty', 'is empty'], ['nempty', 'is not empty']];
   const opName = (list, op) => { for (const x of list) if (x[0] === op) return x[1]; return op; };
   function whenText(ms, end) { if (end && isMidnight(ms + 1)) return fmtDay(ms); return isMidnight(ms) ? fmtDay(ms) : fmtWhen(ms); }
@@ -416,7 +416,7 @@ var TKTable = (() => {
       if (f.op === 'between') {
         const a = numOrNull(parts[0]), b = numOrNull(parts[1]);
         if (a != null && b != null && isMidnight(a) && isMidnight(b + 1) && ymd(a) === ymd(b)) return L + ' on ' + fmtDay(a);
-        if (a != null && b != null) return L + ' ' + whenText(a) + ' – ' + whenText(b, true);
+        if (a != null && b != null) return L + ' ' + whenText(a) + ' - ' + whenText(b, true);
         return a != null ? L + ' since ' + whenText(a) : L + ' until ' + whenText(b, true);
       }
       if (n == null) return L + ' ' + f.op + ' ' + v;
@@ -424,11 +424,11 @@ var TKTable = (() => {
       return L + ' ' + word + ' ' + (f.op === 'lte' ? whenText(n, true) : whenText(n));
     }
     if (c.type === 'date') {
-      if (f.op === 'between') return parts[0] && parts[1] ? L + ' ' + parts[0] + ' – ' + parts[1] : parts[0] ? L + ' from ' + parts[0] : L + ' until ' + (parts[1] || '');
+      if (f.op === 'between') return parts[0] && parts[1] ? L + ' ' + parts[0] + ' - ' + parts[1] : parts[0] ? L + ' from ' + parts[0] : L + ' until ' + (parts[1] || '');
       return L + ' ' + opName(DAY_OPS, f.op === 'eq' ? 'on' : f.op) + ' ' + v;
     }
     if (c.type === 'number') {
-      if (f.op === 'between') return parts[0] !== '' && parts[1] !== '' && parts[1] != null ? L + ' ' + fmtNum(parts[0]) + ' – ' + fmtNum(parts[1]) : parts[0] !== '' ? L + ' ≥ ' + fmtNum(parts[0]) : L + ' ≤ ' + fmtNum(parts[1]);
+      if (f.op === 'between') return parts[0] !== '' && parts[1] !== '' && parts[1] != null ? L + ' ' + fmtNum(parts[0]) + ' - ' + fmtNum(parts[1]) : parts[0] !== '' ? L + ' >= ' + fmtNum(parts[0]) : L + ' <= ' + fmtNum(parts[1]);
       return L + ' ' + opName(NUM_OPS, f.op) + ' ' + fmtNum(v);
     }
     if (c.type === 'enum') {
@@ -440,11 +440,11 @@ var TKTable = (() => {
     return L + ' ' + opName(TEXT_OPS, f.op) + ' "' + v + '"';
   }
 
-  // ── default cells ──
+  // -- default cells --
   function cellHtml(c, row) {
     if (c.render) { const h = c.render(row); return h == null ? '' : String(h); }
     const v = rawOf(c, row);
-    if (v == null || v === '') return '<span class="tkt-nil">–</span>';
+    if (v == null || v === '') return '<span class="tkt-nil">-</span>';
     if (c.type === 'number') return esc(fmtNum(v));
     if (c.type === 'datetime') { const ms = toMs(v, c.storage); return ms == null ? esc(v) : '<span class="tkt-when">' + esc(fmtWhen(ms)) + '</span>'; }
     if (c.type === 'bool') return v && v !== '0' ? 'Yes' : 'No';
@@ -460,7 +460,7 @@ var TKTable = (() => {
     return s;
   }
 
-  // ── pager numbers: 1 … 4 5 6 … 20 ──
+  // -- pager numbers: 1 … 4 5 6 … 20 --
   function pageList(page, count) {
     if (count <= 7) { const a = []; for (let i = 1; i <= count; i++) a.push(i); return a; }
     const out = [1];
@@ -508,7 +508,7 @@ var TKTable = (() => {
 
     let seq = 0, ctrl = null, loaded = false, loading = false, lastResp = null, rowsNow = [], qTimer = null, err = '', pop = null, popState = null, popOff = null;
 
-    // ── derived state ──
+    // -- derived state --
     const activeChips = () => st.chips.map(chipById).filter(Boolean);
     function effFilters() { const out = []; for (const c of activeChips()) for (const f of c.filters || []) out.push({ col: f.col, op: f.op, value: f.value == null ? '' : String(f.value) }); return out.concat(st.filters); }
     function baseSort() { for (const c of activeChips()) if (c.sort) return parseSort(c.sort, cols); return parseSort(cfg.defaultSort || '', cols); }
@@ -544,7 +544,7 @@ var TKTable = (() => {
       return url + (url.indexOf('?') >= 0 ? '&' : '?') + parts.join('&');
     }
 
-    // ── regions ──
+    // -- regions --
     function part(name) {
       const pid = id + '-' + name;
       let n = null;
@@ -659,7 +659,7 @@ var TKTable = (() => {
     function pagerHtml(r) {
       if (!r || !r.total) return '';
       const first = (r.page - 1) * r.size + 1, last = Math.min(r.total, r.page * r.size);
-      let h = '<span class="tkt-range">' + fmtNum(first) + '–' + fmtNum(last) + ' of ' + fmtNum(r.total) + '</span>';
+      let h = '<span class="tkt-range">' + fmtNum(first) + '-' + fmtNum(last) + ' of ' + fmtNum(r.total) + '</span>';
       if (r.pageCount > 1) {
         const btn = (pg, label, aria, dis, on) => '<button type="button" class="tkt-pg' + (on ? ' on' : '') + '" data-tkt="page" data-page="' + pg + '" aria-label="' + aria + '"' + (on ? ' aria-current="page"' : '') + (dis ? ' disabled' : '') + '>' + label + '</button>';
         h += '<nav class="tkt-pages" aria-label="Pages">';
@@ -706,7 +706,7 @@ var TKTable = (() => {
       }
       if (!compact) setHtml('pager', pagerHtml(r));
       const total = r && typeof r.total === 'number' ? r.total : rowsNow.length;
-      setHtml('status', total ? fmtNum((r.page - 1) * r.size + 1) + '–' + fmtNum(Math.min(total, r.page * r.size)) + ' of ' + fmtNum(total) + ' rows' : 'No rows');
+      setHtml('status', total ? fmtNum((r.page - 1) * r.size + 1) + '-' + fmtNum(Math.min(total, r.page * r.size)) + ' of ' + fmtNum(total) + ' rows' : 'No rows');
       paintChrome();
       paintLoading();
     }
@@ -716,7 +716,7 @@ var TKTable = (() => {
       if (n) n.innerHTML = err ? '<div class="err-state" role="alert"><span class="grow">' + esc(err) + '</span><button type="button" class="btn" data-tkt="retry">Retry</button></div>' : '';
     }
 
-    // ── loading ──
+    // -- loading --
     async function load() {
       if (local) {
         const src = cfg.source.rows;
@@ -759,7 +759,7 @@ var TKTable = (() => {
     }
     function changed(resetPage) { if (resetPage) st.page = 1; saveUrl(); paintChrome(); return load(); }
 
-    // ── sort ──
+    // -- sort --
     function cycleSort(col, multi) {
       const c = cols[col]; if (!c || !c.sortable) return;
       const base = st.sort.length ? st.sort : multi ? baseSort() : [];
@@ -774,7 +774,7 @@ var TKTable = (() => {
       changed(true);
     }
 
-    // ── filters ──
+    // -- filters --
     function setFilter(col, op, value) {
       if (!cols[col]) return;
       st.filters = st.filters.filter((f) => f.col !== col);
@@ -786,7 +786,7 @@ var TKTable = (() => {
       return changed(true);
     }
 
-    // ── filter popover ──
+    // -- filter popover --
     function closePop(focusBack) {
       if (popOff) { try { popOff(); } catch (e) {} popOff = null; }
       if (pop) { pop.hidden = true; pop.innerHTML = ''; }
@@ -952,7 +952,7 @@ var TKTable = (() => {
       else if (act === 'quick') { const col = popState.col; const list = quickFilters(cols[col], t.getAttribute('data-q')); closePop(true); setColFilters(col, list); }
     }
 
-    // ── events (delegated on the root) ──
+    // -- events (delegated on the root) --
     function onClick(e) {
       const t = e && e.target;
       if (!t || typeof t.closest !== 'function') return;
@@ -1019,7 +1019,7 @@ var TKTable = (() => {
       return changed(true);
     }
 
-    // ── mount ──
+    // -- mount --
     if (el) {
       el.innerHTML = frame();
       if (typeof el.addEventListener === 'function') {
@@ -1060,4 +1060,4 @@ var TKTable = (() => {
 
   return { create, runLocal, parseSort, qs, version: 1 };
 })();
-`
+`;

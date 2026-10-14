@@ -1,13 +1,19 @@
-import type { Env } from '../types'
-import { fetchTracklist, fetchMediaLinks, DecoyTracklistError, type MediaLinks, type FetchTracklistOpts } from './tracklists1001'
-import { TTL, getJson, putJson } from './cache'
-import type { Logger } from './log'
-import { recordPageFacts } from './playlist-hygiene'
-import type { PoolPriority } from './pool'
-import { fetchOptsFromEnv } from './upstream1001'
-import { MEDIALINK_CACHE_VERSION, mediaLinksCacheKey } from './medialinks-all'
-import { presaveOnSetParsed } from './presave'
-import type { PageRow } from './tracklists1001'
+import type { Env } from "../types";
+import {
+  fetchTracklist,
+  fetchMediaLinks,
+  DecoyTracklistError,
+  type MediaLinks,
+  type FetchTracklistOpts,
+} from "./tracklists1001";
+import { TTL, getJson, putJson } from "./cache";
+import type { Logger } from "./log";
+import { recordPageFacts } from "./playlist-hygiene";
+import type { PoolPriority } from "./pool";
+import { fetchOptsFromEnv } from "./upstream1001";
+import { MEDIALINK_CACHE_VERSION, mediaLinksCacheKey } from "./medialinks-all";
+import { presaveOnSetParsed } from "./presave";
+import type { PageRow } from "./tracklists1001";
 import {
   TRACKLIST_CACHE_VERSION,
   cacheAgeSeconds,
@@ -16,43 +22,43 @@ import {
   tracklistCacheKey,
   tracklistSlug,
   type CachedTracklist,
-} from './tracklist-cache'
+} from "./tracklist-cache";
 
-export type { CachedTracklist } from './tracklist-cache'
+export type { CachedTracklist } from "./tracklist-cache";
 
 /**
  * Cache-key versions for the shared 1001tracklists resolve helpers. Every
  * cached value embeds the version of the logic that produced it
- * (`family:v<N>:…`), so bumping the number here makes stale entries from the
+ * (`family:v<N>:...`), so bumping the number here makes stale entries from the
  * old code age out via TTL instead of being served. Bump the family whose
  * shape or semantics changed.
  *
  * These live here (not in a route file) because both `/now-playing` and
  * `/tracklist` resolve the same underlying data and must share the same cache
- * keys — a bump in one place must invalidate for both callers. The tracklist
+ * keys - a bump in one place must invalidate for both callers. The tracklist
  * family's history is in lib/tracklist-cache.ts.
  */
 export const TRACKLIST_CV = {
-  tracklist: TRACKLIST_CACHE_VERSION, // parsed tracklist page → CachedTracklist
+  tracklist: TRACKLIST_CACHE_VERSION, // parsed tracklist page -> CachedTracklist
   medialink: MEDIALINK_CACHE_VERSION, // per-track Apple/YouTube links (lib/medialinks-all.ts writes the same key)
-} as const
+} as const;
 
 /** Fetch priority (spec: phone, new, verify, recheck, backfill), handed to tlpool. */
-export type FetchPriority = PoolPriority
+export type FetchPriority = PoolPriority;
 
 export type ResolveTracklistOpts = {
   /** Skip the cache read and fetch now (the purge path). The result is still written. */
-  force?: boolean
+  force?: boolean;
   /** Handed to the fetch layer. Default 'phone': every caller here is a person waiting. */
-  priority?: FetchPriority
+  priority?: FetchPriority;
   /**
    * Stale-while-revalidate (the phone): an entry past its TTL but still in KV
    * (TRACKLIST_TTL.STALE_KEEP) answers at once and the page is fetched again
    * in the background, handed to this (the request's waitUntil). Without it a
    * stale entry is a miss, as before.
    */
-  background?: (p: Promise<unknown>) => void
-}
+  background?: (p: Promise<unknown>) => void;
+};
 
 /**
  * Scrape (or serve from cache) the full parsed tracklist for a 1001tracklists
@@ -62,98 +68,123 @@ export type ResolveTracklistOpts = {
  * parse (usually a transient captcha) is NOT cached, so the next call retries
  * instead of serving an empty set; a decoy page throws DecoyTracklistError.
  */
-export async function resolveTracklistPage(env: Env, tracklistUrl: string, log: Logger, opts: ResolveTracklistOpts = {}): Promise<CachedTracklist> {
-  const slug = tracklistSlug(tracklistUrl)
-  const key = tracklistCacheKey(slug)
+export async function resolveTracklistPage(
+  env: Env,
+  tracklistUrl: string,
+  log: Logger,
+  opts: ResolveTracklistOpts = {},
+): Promise<CachedTracklist> {
+  const slug = tracklistSlug(tracklistUrl);
+  const key = tracklistCacheKey(slug);
   if (!opts.force) {
     // Older entries may be a bare ParsedTrack[]; readCachedTracklistEntry normalizes them.
-    const entry = await readCachedTracklistEntry(env, slug)
-    const cached = entry?.value
+    const entry = await readCachedTracklistEntry(env, slug);
+    const cached = entry?.value;
     if (entry && cached && (!entry.stale || opts.background)) {
-      log.counters.cacheHits++
-      log.info('cache.hit', { key, trackCount: cached.tracks.length, setAppleLink: cached.setAppleLink, ageSeconds: cacheAgeSeconds(cached), ttlSeconds: cached.ttlSeconds ?? null, stale: entry.stale })
+      log.counters.cacheHits++;
+      log.info("cache.hit", {
+        key,
+        trackCount: cached.tracks.length,
+        setAppleLink: cached.setAppleLink,
+        ageSeconds: cacheAgeSeconds(cached),
+        ttlSeconds: cached.ttlSeconds ?? null,
+        stale: entry.stale,
+      });
       if (entry.stale && opts.background) {
         // Never throws into the request: the answer is already the kept list.
         opts.background(
-          fetchAndCacheTracklistPage(env, tracklistUrl, log, opts.priority ?? 'phone').then(
-            (v) => log.info('cache.revalidated', { key, trackCount: v.tracks.length }),
-            (e) => log.warn('cache.revalidate_failed', { key, error: (e as Error).message }),
+          fetchAndCacheTracklistPage(env, tracklistUrl, log, opts.priority ?? "phone").then(
+            (v) => log.info("cache.revalidated", { key, trackCount: v.tracks.length }),
+            (e) => log.warn("cache.revalidate_failed", { key, error: (e as Error).message }),
           ),
-        )
+        );
       }
-      return cached
+      return cached;
     }
-    log.counters.cacheMisses++
-    log.info('cache.miss', { key, stale: entry?.stale ?? false })
+    log.counters.cacheMisses++;
+    log.info("cache.miss", { key, stale: entry?.stale ?? false });
   } else {
-    log.info('cache.bypass', { key, reason: 'force' })
+    log.info("cache.bypass", { key, reason: "force" });
   }
-  return fetchAndCacheTracklistPage(env, tracklistUrl, log, opts.priority ?? 'phone')
+  return fetchAndCacheTracklistPage(env, tracklistUrl, log, opts.priority ?? "phone");
 }
 
 /** One set page through the pool, parsed and written to the cache (decoy: thrown, empty: not cached). */
-async function fetchAndCacheTracklistPage(env: Env, tracklistUrl: string, log: Logger, priority: FetchPriority): Promise<CachedTracklist> {
-  const fetchOpts: FetchTracklistOpts = fetchOptsFromEnv(env, log, { priority })
-  const { result, html } = await fetchTracklist(tracklistUrl, fetchOpts)
+async function fetchAndCacheTracklistPage(
+  env: Env,
+  tracklistUrl: string,
+  log: Logger,
+  priority: FetchPriority,
+): Promise<CachedTracklist> {
+  const fetchOpts: FetchTracklistOpts = fetchOptsFromEnv(env, log, { priority });
+  const { result, html } = await fetchTracklist(tracklistUrl, fetchOpts);
   // The page's media facts (W6's full-recording rule reads them) from every set page fetch.
-  await recordPageFacts(env, tracklistUrl, html, log)
+  await recordPageFacts(env, tracklistUrl, html, log);
   // With the html, the set date also comes from the page (datePublished / title), as in the sync.
-  const written = await cacheParsedTracklist(env, tracklistUrl, result, log, { source: 'resolve', html })
+  const written = await cacheParsedTracklist(env, tracklistUrl, result, log, {
+    source: "resolve",
+    html,
+  });
   if (written.cached) {
     // Pre-saved ID rows of this set look for their row on the fresh page (never throws).
-    await presaveOnSetParsed(env, tracklistUrl, result, log)
-    return written.value
+    await presaveOnSetParsed(env, tracklistUrl, result, log);
+    return written.value;
   }
-  if (written.reason === 'decoy') {
+  if (written.reason === "decoy") {
     // Never cache and never serve: the names are randomized (see
     // DecoySignal). fetchTracklist already logged the details.
-    throw new DecoyTracklistError(tracklistUrl, result.decoy)
+    throw new DecoyTracklistError(tracklistUrl, result.decoy);
   }
-  return { tracks: [], setAppleLink: result.setAppleLink, setYoutubeLink: result.setYoutubeLink, setSoundcloudLink: result.setSoundcloudLink }
+  return {
+    tracks: [],
+    setAppleLink: result.setAppleLink,
+    setYoutubeLink: result.setYoutubeLink,
+    setSoundcloudLink: result.setSoundcloudLink,
+  };
 }
 
 /** Most per-track link lookups one /tracklist call makes (the rest answer null links). */
-export const MAX_LINK_LOOKUPS_PER_REQUEST = 25
+export const MAX_LINK_LOOKUPS_PER_REQUEST = 25;
 
 /** One track in the flattened, link-enriched output shape. */
 export type TracklistTrackOut = {
-  index: number
-  artist: string
-  title: string
-  startTime: string
-  startSeconds: number | null
-  trackId: string | null
-  trackUrl: string | null
-  artworkUrl: string | null
-  appleLink: string | null
-  youtubeLink: string | null
-  soundcloudLink: string | null
-  isUnidentified: boolean
-  idStatus: string | null
-  isMashupLinked: boolean
+  index: number;
+  artist: string;
+  title: string;
+  startTime: string;
+  startSeconds: number | null;
+  trackId: string | null;
+  trackUrl: string | null;
+  artworkUrl: string | null;
+  appleLink: string | null;
+  youtubeLink: string | null;
+  soundcloudLink: string | null;
+  isUnidentified: boolean;
+  idStatus: string | null;
+  isMashupLinked: boolean;
   /** Whether the connected YouTube account has liked youtubeLink (filled by the routes, null here). */
-  youtubeLiked: boolean | null
+  youtubeLiked: boolean | null;
   /** This track's index in `rows` (every page row); null for a cache entry older than the rows. */
-  rowIndex: number | null
-}
+  rowIndex: number | null;
+};
 
 /** One page row, anonymous "ID - ID" rows included: what a pre-save of an ID row names. */
 export type RowOut = {
-  rowIndex: number
+  rowIndex: number;
   /** The row's own cue (a "w/" row's printed time, else the cue it shares). */
-  cueSeconds: number | null
-  startTime: string
-  artist: string
-  title: string
+  cueSeconds: number | null;
+  startTime: string;
+  artist: string;
+  title: string;
   /** The medialink id; null on an anonymous row or a named one with no media id (its data-id is a page position, not a track). */
-  trackId: string | null
-  trackUrl: string | null
-  artworkUrl: string | null
-  isUnidentified: boolean
-  idStatus: string | null
-  isMashupLinked: boolean
-  anonymous: boolean
-}
+  trackId: string | null;
+  trackUrl: string | null;
+  artworkUrl: string | null;
+  isUnidentified: boolean;
+  idStatus: string | null;
+  isMashupLinked: boolean;
+  anonymous: boolean;
+};
 
 export function rowsOut(rows: readonly PageRow[] | undefined): RowOut[] {
   return (rows ?? []).map((r, rowIndex) => ({
@@ -170,31 +201,36 @@ export function rowsOut(rows: readonly PageRow[] | undefined): RowOut[] {
     idStatus: r.idStatus,
     isMashupLinked: r.isMashupLinked,
     anonymous: r.anonymous,
-  }))
+  }));
 }
 
 /** For each of `tracks` (the named rows, in order), its index in `rows`; nulls when the entry has no rows. */
-export function trackRowIndexes(trackCount: number, rows: readonly PageRow[] | undefined): Array<number | null> {
-  const named: number[] = []
+export function trackRowIndexes(
+  trackCount: number,
+  rows: readonly PageRow[] | undefined,
+): Array<number | null> {
+  const named: number[] = [];
   rows?.forEach((r, i) => {
-    if (!r.anonymous) named.push(i)
-  })
-  return Array.from({ length: trackCount }, (_, k) => (rows && named.length === trackCount ? named[k]! : null))
+    if (!r.anonymous) named.push(i);
+  });
+  return Array.from({ length: trackCount }, (_, k) =>
+    rows && named.length === trackCount ? named[k]! : null,
+  );
 }
 
 export type FullTracklist = {
-  slug: string
-  setAppleLink: string | null
-  setYoutubeLink: string | null
-  setSoundcloudLink: string | null
-  tracks: TracklistTrackOut[]
+  slug: string;
+  setAppleLink: string | null;
+  setYoutubeLink: string | null;
+  setSoundcloudLink: string | null;
+  tracks: TracklistTrackOut[];
   /** Every page row, anonymous ones included ([] for a cache entry older than the rows). */
-  rows: RowOut[]
+  rows: RowOut[];
   /** When the list was fetched from 1001tracklists (ISO), null for an entry older than the stamp. */
-  fetchedAt: string | null
+  fetchedAt: string | null;
   /** Seconds since fetchedAt, null when unknown. */
-  cacheAgeSeconds: number | null
-}
+  cacheAgeSeconds: number | null;
+};
 
 /**
  * Scrape a tracklist and flatten it to the API/UI output shape: one object per
@@ -211,31 +247,41 @@ export async function resolveFullTracklist(
   opts: { resolveLinks: boolean },
   log: Logger,
 ): Promise<FullTracklist> {
-  const scraped = await resolveTracklistPage(env, tracklistUrl, log)
-  const slug = tracklistSlug(tracklistUrl)
+  const scraped = await resolveTracklistPage(env, tracklistUrl, log);
+  const slug = tracklistSlug(tracklistUrl);
 
   // Only rows with a numeric medialink id are eligible for link enrichment
   // (mirrors /now-playing); unidentified rows and rows keyed by a non-numeric
   // data-id are skipped. Dedupe ids so a track repeated in the set is fetched once.
-  const links = new Map<string, MediaLinks>()
+  const links = new Map<string, MediaLinks>();
   if (opts.resolveLinks) {
-    const ids = [...new Set(scraped.tracks.filter((t) => !t.isUnidentified && t.trackId && /^\d+$/.test(t.trackId)).map((t) => t.trackId!))]
-    const planned = ids.slice(0, MAX_LINK_LOOKUPS_PER_REQUEST)
-    log.info('tracklist.links.plan', { eligible: ids.length, planned: planned.length })
+    const ids = [
+      ...new Set(
+        scraped.tracks
+          .filter((t) => !t.isUnidentified && t.trackId && /^\d+$/.test(t.trackId))
+          .map((t) => t.trackId!),
+      ),
+    ];
+    const planned = ids.slice(0, MAX_LINK_LOOKUPS_PER_REQUEST);
+    log.info("tracklist.links.plan", { eligible: ids.length, planned: planned.length });
     // One at a time, never a burst of pool fetches (review W4 #4); cached ids cost nothing.
     for (const id of planned) {
       try {
-        links.set(id, await resolveTrackMediaLinks(env, id, log))
+        links.set(id, await resolveTrackMediaLinks(env, id, log));
       } catch (e) {
-        log.warn('tracklist.links.stopped', { done: links.size, planned: planned.length, error: (e as Error).message })
-        break
+        log.warn("tracklist.links.stopped", {
+          done: links.size,
+          planned: planned.length,
+          error: (e as Error).message,
+        });
+        break;
       }
     }
   }
 
-  const rowIdx = trackRowIndexes(scraped.tracks.length, scraped.rows)
+  const rowIdx = trackRowIndexes(scraped.tracks.length, scraped.rows);
   const tracks: TracklistTrackOut[] = scraped.tracks.map((t, index) => {
-    const ml = t.trackId ? links.get(t.trackId) : undefined
+    const ml = t.trackId ? links.get(t.trackId) : undefined;
     return {
       index,
       artist: t.artist,
@@ -253,8 +299,8 @@ export async function resolveFullTracklist(
       isMashupLinked: t.isMashupLinked,
       youtubeLiked: null,
       rowIndex: rowIdx[index] ?? null,
-    }
-  })
+    };
+  });
 
   return {
     slug,
@@ -265,7 +311,7 @@ export async function resolveFullTracklist(
     rows: rowsOut(scraped.rows),
     fetchedAt: scraped.fetchedAt ?? null,
     cacheAgeSeconds: cacheAgeSeconds(scraped),
-  }
+  };
 }
 
 /**
@@ -275,21 +321,29 @@ export async function resolveFullTracklist(
  * `priority` is `phone` for /now-playing, `recheck` for the admin viewer's
  * lazy per-row lookups (nobody on the road is waiting on those).
  */
-export async function resolveTrackMediaLinks(env: Env, trackId: string, log: Logger, priority: FetchPriority = 'phone'): Promise<MediaLinks> {
-  const key = mediaLinksCacheKey(trackId)
-  const cached = await getJson<MediaLinks>(env.CACHE, key)
+export async function resolveTrackMediaLinks(
+  env: Env,
+  trackId: string,
+  log: Logger,
+  priority: FetchPriority = "phone",
+): Promise<MediaLinks> {
+  const key = mediaLinksCacheKey(trackId);
+  const cached = await getJson<MediaLinks>(env.CACHE, key);
   if (cached) {
-    log.counters.cacheHits++
-    log.info('cache.hit', { key, value: cached })
-    return cached
+    log.counters.cacheHits++;
+    log.info("cache.hit", { key, value: cached });
+    return cached;
   }
-  log.counters.cacheMisses++
-  log.info('cache.miss', { key })
+  log.counters.cacheMisses++;
+  log.info("cache.miss", { key });
   // Through the pool (kind medialink, one budgeted view per call). A failed
   // lookup is not cached, so a pool refusal cannot poison the entry.
-  const { result, failed } = await fetchMediaLinks(trackId, fetchOptsFromEnv(env, log, { priority }))
-  if (failed) return result
-  await putJson(env.CACHE, key, result, TTL.MEDIALINK)
-  log.info('cache.put', { key, value: result, ttlSeconds: TTL.MEDIALINK })
-  return result
+  const { result, failed } = await fetchMediaLinks(
+    trackId,
+    fetchOptsFromEnv(env, log, { priority }),
+  );
+  if (failed) return result;
+  await putJson(env.CACHE, key, result, TTL.MEDIALINK);
+  log.info("cache.put", { key, value: result, ttlSeconds: TTL.MEDIALINK });
+  return result;
 }

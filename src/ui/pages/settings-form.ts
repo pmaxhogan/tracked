@@ -11,22 +11,22 @@
 // comma-separated input as a string array (blanks dropped; max = most items).
 
 export type FormField = {
-  path: string
-  label: string
-  help: string
-  unit?: string
-  min?: number
-  max?: number
-  step?: number
-  kind?: 'number' | 'bool' | 'select' | 'text' | 'list'
+  path: string;
+  label: string;
+  help: string;
+  unit?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  kind?: "number" | "bool" | "select" | "text" | "list";
   /** select: the choices. */
-  options?: Array<{ value: string; label: string }>
+  options?: Array<{ value: string; label: string }>;
   /** text: longest value; list: longest item. */
-  maxLength?: number
+  maxLength?: number;
   /** Blank saves null: the env var, else the code default. */
-  nullable?: boolean
-}
-export type FormGroup = { id: string; title: string; intro?: string; fields: FormField[] }
+  nullable?: boolean;
+};
+export type FormGroup = { id: string; title: string; intro?: string; fields: FormField[] };
 
 export const SETTINGS_FORM_CSS = /* css */ `
   .sf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--sp-2) var(--sp-4); }
@@ -41,7 +41,7 @@ export const SETTINGS_FORM_CSS = /* css */ `
   .sf-foot { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }
   .sf-foot .spacer { flex: 1; }
   .sf-intro { margin-top: 0; }
-`
+`;
 
 export const SETTINGS_FORM_JS = /* js */ `
   const SF = (() => {
@@ -159,4 +159,4 @@ export const SETTINGS_FORM_JS = /* js */ `
     }
     return { mount, fill, read, get, put };
   })();
-`
+`;

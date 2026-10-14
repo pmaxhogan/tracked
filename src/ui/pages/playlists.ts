@@ -2,23 +2,23 @@
 // (with Backfill now), one playlist row per DJ, and the hygiene strip. Data:
 // GET /ui/api/youtube/status, /ui/api/combined, /ui/api/playlist-order, the DJ table GET /ui/api/djs
 // (lib/dj-table.ts, server-sorted and paged; TKTable) and one GET /ui/api/removals.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
-import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from './dj-actions'
-import { YOUTUBE_CARD_CSS, YOUTUBE_CARD_HTML, YOUTUBE_CARD_JS } from './youtube-card'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
+import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from "./dj-actions";
+import { YOUTUBE_CARD_CSS, YOUTUBE_CARD_HTML, YOUTUBE_CARD_JS } from "./youtube-card";
 
-const ACTIONS = /* html */ `<button id="fix-titles" type="button" class="btn"${tipAttr(FIX_TITLES_TITLE)}>Fix titles</button>`
+const ACTIONS = /* html */ `<button id="fix-titles" type="button" class="btn"${tipAttr(FIX_TITLES_TITLE)}>Fix titles</button>`;
 
 const BODY = /* html */ `
 ${YOUTUBE_CARD_HTML}
 <div id="hygiene" class="tk-card pl-hygiene" hidden></div>
 <div id="cmb-card" class="tk-card">
   <div class="pl-head">
-    <h2><span class="tip-term"${tipAttr('One YouTube playlist holding every video from every artist playlist. New videos are added by the sync and a backfill fills in the rest, within the daily insert cap.')}>Combined playlist</span></h2>
+    <h2><span class="tip-term"${tipAttr("One YouTube playlist holding every video from every artist playlist. New videos are added by the sync and a backfill fills in the rest, within the daily insert cap.")}>Combined playlist</span></h2>
     <div class="tk-row">
-      <button id="cmb-backfill" type="button" class="btn small" disabled${tipAttr('Adds videos that are missing from the combined playlist right now, up to the daily insert cap. It also runs by itself on every scheduler tick.')}>Backfill now</button>
-      <button id="cmb-refresh" type="button" class="btn small"${tipAttr('Reads the playlist from YouTube again to update these numbers.')}>Refresh</button>
+      <button id="cmb-backfill" type="button" class="btn small" disabled${tipAttr("Adds videos that are missing from the combined playlist right now, up to the daily insert cap. It also runs by itself on every scheduler tick.")}>Backfill now</button>
+      <button id="cmb-refresh" type="button" class="btn small"${tipAttr("Reads the playlist from YouTube again to update these numbers.")}>Refresh</button>
     </div>
   </div>
   <div id="cmb-body"><span class="muted">Loading…</span></div>
@@ -26,21 +26,21 @@ ${YOUTUBE_CARD_HTML}
 </div>
 <div id="ord-card" class="tk-card">
   <div class="pl-head">
-    <h2><span class="tip-term"${tipAttr('Each DJ playlist is kept in the order the sets took place, earliest first. A new video is inserted at its place. Videos added before this existed are moved there a few a day once you set a daily budget, because each move costs 50 YouTube quota units. The combined playlist is not ordered.')}>Set-date order</span></h2>
+    <h2><span class="tip-term"${tipAttr("Each DJ playlist is kept in the order the sets took place, earliest first. A new video is inserted at its place. Videos added before this existed are moved there a few a day once you set a daily budget, because each move costs 50 YouTube quota units. The combined playlist is not ordered.")}>Set-date order</span></h2>
     <div class="tk-row">
-      <button id="ord-check" type="button" class="btn small"${tipAttr('Dry run: reads the order of every DJ playlist from YouTube now (1 quota unit per 50 videos) and counts the moves still needed. Moves nothing, and works while moving is paused.')}>Check now</button>
-      <button id="ord-run" type="button" class="btn small" disabled${tipAttr('Makes the next few moves now, within the same daily unit budget the scheduler uses.')}>Move now</button>
+      <button id="ord-check" type="button" class="btn small"${tipAttr("Dry run: reads the order of every DJ playlist from YouTube now (1 quota unit per 50 videos) and counts the moves still needed. Moves nothing, and works while moving is paused.")}>Check now</button>
+      <button id="ord-run" type="button" class="btn small" disabled${tipAttr("Makes the next few moves now, within the same daily unit budget the scheduler uses.")}>Move now</button>
     </div>
   </div>
   <div id="ord-body"><span class="muted">Loading…</span></div>
   <details id="ord-details" hidden><summary>Per playlist</summary><div id="ord-table"></div></details>
 </div>
 <div class="tk-card">
-  <div class="pl-head"><h2><span class="tip-term"${tipAttr('Each subscribed DJ has its own YouTube playlist, filled with one video per set.')}>DJ playlists</span></h2></div>
+  <div class="pl-head"><h2><span class="tip-term"${tipAttr("Each subscribed DJ has its own YouTube playlist, filled with one video per set.")}>DJ playlists</span></h2></div>
   <div id="pl"></div>
 </div>
 ${FIX_DIALOG_HTML}
-`
+`;
 
 const CSS = /* css */ `
   .pl-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3); }
@@ -60,7 +60,7 @@ const CSS = /* css */ `
   #ord-table th:first-child, #ord-table td:first-child { text-align: left; }
   #ord-table th { color: var(--muted); font-weight: 500; }
 ${YOUTUBE_CARD_CSS}
-${DJ_ACTIONS_CSS}`
+${DJ_ACTIONS_CSS}`;
 
 const JS = /* js */ `
 (() => {
@@ -75,7 +75,7 @@ ${YOUTUBE_CARD_JS}
     return h ? '<a href="' + esc(h) + '" target="_blank" rel="noreferrer noopener">' + esc(text) + '</a>' : esc(text);
   }
 
-  // ── combined playlist ──
+  // -- combined playlist --
   function renderCombined(d) {
     if (!d || d.connected === false) {
       $cmbBody.textContent = 'Connect a YouTube account to build the combined playlist.';
@@ -133,7 +133,7 @@ ${YOUTUBE_CARD_JS}
       return;
     }
     if (data.ok === false) {
-      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet — sync a DJ first' : 'backfill skipped: ' + data.reason, 'bad');
+      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet - sync a DJ first' : 'backfill skipped: ' + data.reason, 'bad');
     } else {
       TK.toast('combined playlist: added ' + (data.inserted || 0) + ' video' + (data.inserted === 1 ? '' : 's') +
         (data.pending ? ' · ' + data.pending + ' still pending (' + (data.cappedBy || 'capped') + ')' : ''), 'ok');
@@ -141,7 +141,7 @@ ${YOUTUBE_CARD_JS}
     await loadCombined();
   }));
 
-  // ── set-date order: the stored numbers on load, a YouTube reading only on Check now ──
+  // -- set-date order: the stored numbers on load, a YouTube reading only on Check now --
   const $ordBody = $('ord-body'), $ordCheck = $('ord-check'), $ordRun = $('ord-run'), $ordDetails = $('ord-details'), $ordTable = $('ord-table');
   function renderOrder(d) {
     if (!d || !d.connected) {
@@ -224,7 +224,7 @@ ${YOUTUBE_CARD_JS}
     applyOrder(await TK.api.get('/ui/api/playlist-order'));
   });
 
-  // ── per-DJ playlists: one row per subscription from GET /ui/api/djs ──
+  // -- per-DJ playlists: one row per subscription from GET /ui/api/djs --
   TKTable.create($('pl'), {
     id: 'pl',
     source: { url: '/ui/api/djs' },
@@ -248,14 +248,14 @@ ${YOUTUBE_CARD_JS}
     empty: 'No subscriptions yet.',
   });
 
-  // ── hygiene strip ──
+  // -- hygiene strip --
   async function loadHygiene() {
     await TK.api.swr('/ui/api/removals?limit=1', applyHygiene);
   }
   function applyHygiene(res) {
     const d = res.ok && res.data && typeof res.data === 'object' ? res.data : null;
     $hygiene.hidden = false;
-    if (!d) { $hygiene.innerHTML = '<span class="muted">Hygiene status unavailable.</span> <a href="/ui/removed">Removed videos →</a>'; return; }
+    if (!d) { $hygiene.innerHTML = '<span class="muted">Hygiene status unavailable.</span> <a href="/ui/removed">Removed videos -></a>'; return; }
     const s = d.settings || {};
     const held = (d.holds || []).length;
     $hygiene.innerHTML = '<span class="badge ' + (s.dryRun ? 'warn' : 'bad') + '"' + TK.tip(s.dryRun ? 'The sweep only reports which videos it would remove (videos that are not a full recording, for instance); it deletes nothing yet.' : 'The sweep really removes videos that fail the full-recording check, from the artist and combined playlists.') + '>' + (s.dryRun ? 'DRY RUN' : 'LIVE') + '</span>' +
@@ -263,7 +263,7 @@ ${YOUTUBE_CARD_JS}
       '<span class="badge ' + (held ? 'bad' : 'neutral') + '"' + TK.tip(held ? 'Playlists that lost many videos at once and are waiting for you to approve or undo on the Removed videos page.' : 'No playlist is waiting for your approval.') + '>' + held + ' held</span>' +
       // Many dead videos at once in one playlist: none is taken out until you say so. Nothing is lost meanwhile, so it is not red.
       ((d.deadHolds || []).length ? '<span class="badge info"' + TK.tip('Playlists where many videos look deleted or private at once. None of them is taken out until you confirm it on the Removed videos page.') + '>' + d.deadHolds.length + ' with many dead videos</span>' : '') +
-      '<a href="/ui/removed">Removed videos →</a>';
+      '<a href="/ui/removed">Removed videos -></a>';
   }
 
   $fix.addEventListener('click', () => DJA.fixTitles($fix));
@@ -274,17 +274,17 @@ ${YOUTUBE_CARD_JS}
   TK.api.swr('/ui/api/playlist-order', applyOrder);
   loadHygiene();
 })();
-`
+`;
 
 export const PLAYLISTS_PAGE: UiPage = {
-  path: '/playlists',
+  path: "/playlists",
   html: shell({
-    nav: 'playlists',
-    title: 'Playlists',
-    description: 'The YouTube connection, the combined playlist and each DJ\'s playlist.',
+    nav: "playlists",
+    title: "Playlists",
+    description: "The YouTube connection, the combined playlist and each DJ's playlist.",
     actions: ACTIONS,
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

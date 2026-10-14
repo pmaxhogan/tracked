@@ -7,9 +7,9 @@
 //
 // Page scripts are template literals: no backticks and no dollar-brace inside,
 // and every regex backslash is doubled. Upstream text only through TK.esc.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import type { UiPage } from './index'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import type { UiPage } from "./index";
 
 const CSS = /* css */ `
   .st-root {
@@ -58,15 +58,15 @@ const CSS = /* css */ `
   .st-list a { color: inherit; text-decoration: none; } .st-list a:hover { text-decoration: underline; }
   .st-none { color: var(--subtle); font-size: var(--fs-xs); }
   #st-tip { position: fixed; z-index: 50; pointer-events: none; background: var(--elev); color: var(--fg); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 8px; font-size: var(--fs-xs); box-shadow: var(--shadow-float); white-space: pre; font-variant-numeric: tabular-nums; }
-`
+`;
 
 const BODY = /* html */ `
 <div class="st-root">
-  <div class="st-bar"><span id="st-when" class="grow" role="status">Loading…</span><button type="button" id="st-refresh" class="btn small"${tipAttr('Recompute now (the numbers are otherwise up to 5 minutes old).')}>Refresh</button></div>
+  <div class="st-bar"><span id="st-when" class="grow" role="status">Loading…</span><button type="button" id="st-refresh" class="btn small"${tipAttr("Recompute now (the numbers are otherwise up to 5 minutes old).")}>Refresh</button></div>
   <div id="st-grid" aria-live="polite"></div>
   <div id="st-tip" hidden></div>
 </div>
-`
+`;
 
 const JS = /* js */ `
 (() => {
@@ -83,7 +83,7 @@ const JS = /* js */ `
   const niceMax = (v) => { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); const f = v / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p; };
   const tipAttrOf = (s) => ' data-t="' + esc(s) + '"';
 
-  // ── panels ──
+  // -- panels --
   // Every panel is { cls, title, total, body(width) -> html, table: [head, rows] }.
   const panels = [];
   const sec = (title) => panels.push({ sec: title });
@@ -318,7 +318,7 @@ const JS = /* js */ `
     });
   }
 
-  // ── tooltip and crosshair (one for the page) ──
+  // -- tooltip and crosshair (one for the page) --
   function hideTip() { if ($tip) $tip.hidden = true; }
   if ($grid && typeof $grid.addEventListener === 'function') {
     $grid.addEventListener('pointermove', (e) => {
@@ -354,16 +354,17 @@ const JS = /* js */ `
   });
   load(false);
 })();
-`
+`;
 
 export const STATS_PAGE: UiPage = {
-  path: '/stats',
+  path: "/stats",
   html: shell({
-    nav: 'stats',
-    title: 'Stats',
-    description: 'Every count the app keeps: the library, the search index, playlists, mkvid, pre-saves and the account pool, with their history.',
+    nav: "stats",
+    title: "Stats",
+    description:
+      "Every count the app keeps: the library, the search index, playlists, mkvid, pre-saves and the account pool, with their history.",
     body: BODY,
     css: CSS,
     js: JS,
   }),
-}
+};

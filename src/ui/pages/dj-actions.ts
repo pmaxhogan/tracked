@@ -4,7 +4,7 @@
 // a small concurrency pool. DJ_ACTIONS_JS is a fragment embedded inside a
 // page's own IIFE (it declares `const DJA`, nothing at top level and no
 // global); DJ_ACTIONS_CSS and FIX_DIALOG_HTML go in the page's CSS and body.
-import { QUOTA_EXPLANATION } from '../../lib/youtube-error'
+import { QUOTA_EXPLANATION } from "../../lib/youtube-error";
 
 /** The dialog the "Fix titles" button opens: one page-level <dialog>. */
 export const FIX_DIALOG_HTML = /* html */ `
@@ -12,17 +12,18 @@ export const FIX_DIALOG_HTML = /* html */ `
   <h2 id="fix-title">Fix playlist titles</h2>
   <div id="fix-body" class="fix-body"></div>
   <div class="actions"><button id="fix-close" type="button" class="btn">Close</button></div>
-</dialog>`
+</dialog>`;
 
 /** Tooltip text for the Fix titles button (use with tipAttr). */
-export const FIX_TITLES_TITLE = 'Renames DJ playlists still titled "Tracklists By ..." to the artist name. Shows the list first and asks before changing anything on YouTube.'
+export const FIX_TITLES_TITLE =
+  'Renames DJ playlists still titled "Tracklists By ..." to the artist name. Shows the list first and asks before changing anything on YouTube.';
 
 export const DJ_ACTIONS_CSS = /* css */ `
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
   .toast a { font-weight: 600; margin-left: var(--sp-2); }
   .fix-body ul { margin: var(--sp-2) 0 0; padding-left: 1.1rem; }
   .fix-body li { overflow-wrap: anywhere; }
-`
+`;
 
 export const DJ_ACTIONS_JS = /* js */ `
   const DJA = (() => {
@@ -77,7 +78,7 @@ export const DJ_ACTIONS_JS = /* js */ `
         const continuing = [];
         if (pending > 0) continuing.push(pending + ' new pending');
         if (rechecksPending > 0) continuing.push(rechecksPending + ' recheck' + (rechecksPending === 1 ? '' : 's') + ' pending');
-        const more = continuing.length ? ' · ' + continuing.join(', ') + ' — auto-continuing every 5 min' : '';
+        const more = continuing.length ? ' · ' + continuing.join(', ') + ' - auto-continuing every 5 min' : '';
         const combined = stats.combinedVideoIdsAdded ? ' · ' + stats.combinedVideoIdsAdded + ' into the combined playlist' : '';
         const rechecked = stats.tracklistsRechecked ? ' · rechecked ' + stats.tracklistsRechecked + ', replaced ' + (stats.videosReplaced || 0) : '';
         const inv = data.invalidated ? ' (invalidated ' + (data.invalidated.tracklistsMarked || 0) + ' cached videos)' : '';
@@ -88,16 +89,16 @@ export const DJ_ACTIONS_JS = /* js */ `
         // Red only when it needs the owner; otherwise the scheduler carries on by itself.
         if (data.stoppedBy && data.stoppedBy.reason) {
           const needsYou = !data.stoppedBy.level || data.stoppedBy.level === 'error';
-          TK.toast((resync ? 'resync ' : 'sync ') + slug + ' stopped: ' + data.stoppedBy.reason + (needsYou ? '' : ' (the scheduler tries again by itself)') + inv + ' — ' + summary, needsYou ? 'bad' : 'warn');
+          TK.toast((resync ? 'resync ' : 'sync ') + slug + ' stopped: ' + data.stoppedBy.reason + (needsYou ? '' : ' (the scheduler tries again by itself)') + inv + ' - ' + summary, needsYou ? 'bad' : 'warn');
           return { ok: true, stopped: true, data };
         }
         // Out of YouTube quota is a wait, not a failure and not a plain "synced": amber, and why.
         const quota = quotaNote(data.quota);
         if (quota) {
-          TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ': ' + quota + ' — ' + summary, 'warn');
+          TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ': ' + quota + ' - ' + summary, 'warn');
           return { ok: true, quota: true, data };
         }
-        TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' — ' + summary, 'ok');
+        TK.toast((resync ? 'resynced ' : 'synced ') + slug + inv + ' - ' + summary, 'ok');
         return { ok: true, data };
       });
     }
@@ -137,9 +138,9 @@ export const DJ_ACTIONS_JS = /* js */ `
         // The quota ran out during the pass: the DJs after that had their pages read and their writes left waiting.
         const waitingVideos = results.reduce((a, x) => a.concat(x.quota && Array.isArray(x.quota.deferred) ? x.quota.deferred : []), []);
         const quota = quotaNote({ hit: results.some((x) => x.quota && x.quota.hit), deferred: waitingVideos });
-        TK.toast('resynced ' + results.length + ' of ' + total + ' DJs this pass (invalidated ' + invalidated + ' cached videos) — rechecked ' + sum((s) => s.tracklistsRechecked) +
+        TK.toast('resynced ' + results.length + ' of ' + total + ' DJs this pass (invalidated ' + invalidated + ' cached videos) - rechecked ' + sum((s) => s.tracklistsRechecked) +
           ', replaced ' + sum((s) => s.videosReplaced) + ', ' + sum((s) => s.videoIdsAdded) + ' new' +
-          (pending ? ' · ' + pending + ' still pending — auto-continuing every 5 min' : '') +
+          (pending ? ' · ' + pending + ' still pending - auto-continuing every 5 min' : '') +
           (failed.length ? ' · failed: ' + failed.join(', ') : '') +
           (stopped ? ' · stopped at ' + stopped.slug + ': ' + stopped.stoppedBy.reason : '') + (quota ? ' · ' + quota : ''),
           stopped && (!stopped.stoppedBy.level || stopped.stoppedBy.level === 'error') ? 'bad' : stopped || quota ? 'warn' : 'ok');
@@ -147,13 +148,13 @@ export const DJ_ACTIONS_JS = /* js */ `
       });
     }
 
-    // ── fix titles: a dry run in a dialog first, then the rename after a confirm ──
+    // -- fix titles: a dry run in a dialog first, then the rename after a confirm --
     function showFixes(d) {
       const body = TK.$('fix-body');
       const fixes = Array.isArray(d.fixes) ? d.fixes : [];
       if (!body) return;
       if (!fixes.length) { body.textContent = 'All ' + (d.checked || 0) + ' DJ playlist titles are fine.'; return; }
-      body.innerHTML = '<ul>' + fixes.map((f) => '<li>' + esc(f.oldTitle) + ' → ' + esc(f.newTitle) +
+      body.innerHTML = '<ul>' + fixes.map((f) => '<li>' + esc(f.oldTitle) + ' -> ' + esc(f.newTitle) +
         (f.status === 'failed' ? ' (failed: ' + esc(f.error || '') + ')' : f.status === 'renamed' ? ' (renamed)' : '') + '</li>').join('') + '</ul>';
     }
     function openFix() {
@@ -177,7 +178,7 @@ export const DJ_ACTIONS_JS = /* js */ `
       });
     }
 
-    // ── per-DJ sync state (GET /ui/api/state/:slug -> { state }) ──
+    // -- per-DJ sync state (GET /ui/api/state/:slug -> { state }) --
     function summarize(st) {
       if (!st) return null;
       const processed = new Set(st.processedTracklistUrls || []);
@@ -229,4 +230,4 @@ export const DJ_ACTIONS_JS = /* js */ `
 
     return { syncSlug, resyncAll, fixTitles, reauthToast, summarize, playlistHref, lastRun, loadState, storedState, pool };
   })();
-`
+`;

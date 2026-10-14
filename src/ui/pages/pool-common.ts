@@ -82,7 +82,7 @@ export const POOL_CSS = /* css */ `
   .prio .muted { flex: 1 1 12rem; font-size: var(--fs-sm); }
   .prio .btn { margin-left: auto; }
   .prio .btn + .btn { margin-left: 0; }
-`
+`;
 
 /** Shared helpers for every pool page. */
 export const COMMON_JS = /* js */ `
@@ -172,7 +172,7 @@ export const COMMON_JS = /* js */ `
     return base + det + msg;
   }
   function fmtTime(iso) {
-    if (!iso) return '—';
+    if (!iso) return '-';
     const d = new Date(iso);
     const sameDay = d.toDateString() === new Date().toDateString();
     return sameDay ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -184,7 +184,7 @@ export const COMMON_JS = /* js */ `
     if (h < 48) return h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
     return Math.round(h / 24) + ' d';
   }
-  const ago = (iso) => iso ? fmtDur(Date.now() - Date.parse(iso)) + ' ago' : '—';
+  const ago = (iso) => iso ? fmtDur(Date.now() - Date.parse(iso)) + ' ago' : '-';
   function leftText(expiresAt) {
     if (!expiresAt) return { text: 'no expiry known', soon: false };
     const ms = Date.parse(expiresAt) - Date.now();
@@ -198,7 +198,7 @@ export const COMMON_JS = /* js */ `
   const reasonText = (r) => r ? (REASONS[r] || String(r).replace(/_/g, ' ')) : 'The site asked for a human check';
   const typeText = (t) => t === 'checkbox' ? 'checkbox (live view)' : 'image captcha';
   const typeTip = (t) => t === 'checkbox' ? 'An "I am human" checkbox wall. Tap the box in the live view of the pool browser.' : 'A picture of distorted text. Type what you see.';
-`
+`;
 
 /**
  * The captcha widget, used by the captcha page and by the Add-account dialog.
@@ -275,4 +275,4 @@ export const CAPTCHA_JS = /* js */ `
     });
     return { setMsg, disable };
   }
-`
+`;

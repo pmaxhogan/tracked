@@ -15,32 +15,32 @@
   //   - "0 6 * * *"      daily housekeeping only (audit pruning). DJ discovery
   //                      is spread around the clock by the scheduler instead.
   // Both then reconcile the combined "All tracked artists" playlist against
-  // the per-artist ones (YouTube only; bounded per run and per day — see
+  // the per-artist ones (YouTube only; bounded per run and per day - see
   // lib/combined-playlist.ts), and retry Web Pushes whose delivery failed.
   "triggers": { "crons": ["0 6 * * *", "*/5 * * * *"] },
   // Queryable state: subscriptions, per-tracklist sync rows, both audit trails,
   // the mkvid queue. Schema in migrations/; apply with `npm run d1:migrate`
-  // BEFORE pushing (Workers Builds runs `wrangler deploy` only — it never
+  // BEFORE pushing (Workers Builds runs `wrangler deploy` only - it never
   // applies migrations). Create with `npx wrangler d1 create tracked`.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "tracked",
       "database_id": "9c3d6c10-4a1e-47d0-869f-332a19d47828",
-      "migrations_dir": "migrations"
+      "migrations_dir": "migrations",
     },
     {
       "binding": "SEARCH_DB",
       "database_name": "tracked-search",
       "database_id": "4ee888df-562d-4937-9b25-8e1b4da2ea88",
-      "migrations_dir": "migrations-search"
-    }
+      "migrations_dir": "migrations-search",
+    },
   ],
   "kv_namespaces": [
     {
       "binding": "CACHE",
       "id": "8cb267cd79b346baa86d37ec9e1015ef",
-      "preview_id": "c13978cb82b249f6b2b8939f92d1dad9"
+      "preview_id": "c13978cb82b249f6b2b8939f92d1dad9",
     },
     {
       // Durable storage for the /ui mini-app (DJ slugs the user
@@ -51,14 +51,14 @@
       // and paste the ids here.
       "binding": "SUBS",
       "id": "6189a771499e43fe80544efd63bd7830",
-      "preview_id": "9afbf5f55a5541a88c6685bcc1fea10b"
-    }
+      "preview_id": "9afbf5f55a5541a88c6685bcc1fea10b",
+    },
   ],
   // Every 1001tracklists page tlpool returns, gzip, kept for troubleshooting (lib/page-store.ts).
   // Bucket lifecycle by prefix: flagged/ 180 d, clean/ 30 d, other/ 30 d.
   "r2_buckets": [
     { "binding": "PAGES", "bucket_name": "tracked-pages" },
-    { "binding": "IMAGES", "bucket_name": "tracked-images" }
+    { "binding": "IMAGES", "bucket_name": "tracked-images" },
   ],
   "vars": {
     // Cloudflare Access team domain (e.g. "yourteam.cloudflareaccess.com").
@@ -73,8 +73,8 @@
     // Comma-separated list of email addresses allowed to use the mini-app.
     // The CF Access policy should already restrict this, but we double-check
     // here so a misconfigured policy can't grant access.
-    "CF_ACCESS_ALLOWED_EMAILS": "pmaxhogan@gmail.com"
-  }
+    "CF_ACCESS_ALLOWED_EMAILS": "pmaxhogan@gmail.com",
+  },
   // Secrets (set via `wrangler secret put`):
   //   API_TOKEN                  bearer token Tasker uses
   //   LIKED_SONGS_TOKEN          separate bearer token for GET /liked-songs (agents/scripts)
@@ -86,7 +86,7 @@
   //                              REJECT_VERTICAL work the same way (app settings, lib/app-settings.ts).
   //   YOUTUBE_API_KEY            YouTube Data API v3 key
   //   TLPOOL_URL                 tlpool (the NAS browser pool) through the tunnel; every 1001tracklists request goes there
-  //   TLPOOL_TOKEN               bearer for tlpool, both directions (Worker → POST /fetch, tlpool → POST /pool/events)
+  //   TLPOOL_TOKEN               bearer for tlpool, both directions (Worker -> POST /fetch, tlpool -> POST /pool/events)
   //   GOOGLE_OAUTH_CLIENT_ID     OAuth client id for YouTube playlist write access
   //   GOOGLE_OAUTH_CLIENT_SECRET matching client secret
   //   VAPID_PUBLIC_KEY           Web Push identity for the admin page's IP-ban alerts

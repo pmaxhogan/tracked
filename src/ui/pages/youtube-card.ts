@@ -13,14 +13,14 @@ export const YOUTUBE_CARD_HTML = /* html */ `
     <a id="yt-signin" class="btn primary" href="/ui/oauth/start" hidden data-tip="Opens Google's consent screen so tracked can create and update playlists on your channel.">Sign in with YouTube</a>
     <button id="yt-action" type="button" class="btn" hidden></button>
   </div>
-</div>`
+</div>`;
 
 export const YOUTUBE_CARD_CSS = /* css */ `
   .yt-row { flex-wrap: nowrap; justify-content: space-between; gap: var(--sp-3); }
   .yt-info { min-width: 0; flex: 1; }
   .yt-title { font-weight: 600; }
   .yt-info .sub { font-size: var(--fs-sm); overflow-wrap: anywhere; }
-`
+`;
 
 export const YOUTUBE_CARD_JS = /* js */ `
   const YT = (() => {
@@ -74,4 +74,4 @@ export const YOUTUBE_CARD_JS = /* js */ `
 
     return { load, handleReturn };
   })();
-`
+`;

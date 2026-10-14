@@ -17,17 +17,17 @@ export const MKVID_STATE_JS = /* js */ `
   function mkWhy(rd, short, capped) {
     if (!rd) return '';
     const day = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
-    if (rd.state === 'unverified') return '<span class="why"' + TK.tip('Nothing is rendered from an unverified track list. It needs a second fetch, by another account, that matches the first.') + '>not verified' + (short ? '' : ' — the track list needs a second matching fetch before anything is rendered') + '</span>';
+    if (rd.state === 'unverified') return '<span class="why"' + TK.tip('Nothing is rendered from an unverified track list. It needs a second fetch, by another account, that matches the first.') + '>not verified' + (short ? '' : ' - the track list needs a second matching fetch before anything is rendered') + '</span>';
     if (rd.state === 'untimed') return '<span class="why"' + TK.tip('Fewer than 90% of the tracks have a cue time, so the video could not show the right track. Rechecked weekly.') + '>too few cue times' + (short ? '' : ' (' + TK.esc(rd.timedRows) + ' of ' + TK.esc(rd.baseRows) + ' tracks timed, 90% needed; rechecked weekly)') + '</span>';
     if (rd.state === 'waiting_ids') return '<span class="why"' + TK.tip('Some tracks are still unidentified. The set waits until it is 7 days old for names to arrive, then renders with ID shown. Render now skips the wait.') + '>waiting for IDs until ' + TK.esc(day(rd.until)) + (short ? '' : ' (' + TK.esc(rd.idRows) + ' ID row' + (rd.idRows === 1 ? '' : 's') + '; Render now skips the wait)') + '</span>';
     if (rd.state === 'backoff') return '<span class="why"' + TK.tip('A failed attempt is tried again after a pause, so a broken set does not loop.') + '>retry ' + untilTime(rd.until) + '</span>';
-    if (capped) return '<span class="why"' + TK.tip('Every daily upload slot is used. The next set goes out after the caps reset at midnight Pacific.') + '>capped — today’s uploads are used</span>';
+    if (capped) return '<span class="why"' + TK.tip('Every daily upload slot is used. The next set goes out after the caps reset at midnight Pacific.') + '>capped - today\u2019s uploads are used</span>';
     return '<span class="why ready"' + TK.tip('Verified and allowed to render: mkvid takes it when its turn comes.') + '>ready</span>';
   }
 
   // The caps that actually apply: only the accounts mkvid offered on its last
   // poll can be claimed against. (A heartbeat from before accounts existed
-  // names none — treat that as all of them.)
+  // names none - treat that as all of them.)
   function mkEffective(d) {
     const all = d.accounts || [];
     const offered = d.lastPoll && d.lastPoll.accounts ? all.filter((a) => d.lastPoll.accounts.includes(a.account)) : all;
@@ -35,7 +35,7 @@ export const MKVID_STATE_JS = /* js */ `
     return { cap: sum(offered, 'cap'), used: sum(offered, 'used'), idle: all.filter((a) => a.cap > a.used && !offered.includes(a)) };
   }
 
-  // The one line that answers "why is nothing uploading?" — first match wins.
+  // The one line that answers "why is nothing uploading?" - first match wins.
   // Returns [cls ('ok' | 'wait' | 'bad'), title, sub], all plain text.
   function mkState(d) {
     const c = d.counts || {};
@@ -46,16 +46,16 @@ export const MKVID_STATE_JS = /* js */ `
     const idleNote = eff.idle.length ? ' ' + eff.idle.map((a) => a.label + ' has ' + (a.cap - a.used) + ' more, but mkvid has not connected that account.').join(' ') : '';
     // The heartbeat is rewritten at most every 10 min, so only a longer silence means anything.
     const silent = !poll || (d.now || Date.now() / 1000) - poll.at > 25 * 60;
-    if (!d.enabled) return ['bad', 'Off — MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
-    if (cap === 0) return ['bad', 'Paused — every daily cap is 0', 'The daily caps (Settings → mkvid uploads, else MKVID_DAILY_CLAIM_CAP / MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Raise them on /ui/settings to resume.'];
-    // mkvid only polls while its render slot is free, so a long render is silence too — not an outage.
+    if (!d.enabled) return ['bad', 'Off - MKVID_TOKEN is not set', 'Nothing is queued and mkvid cannot claim.'];
+    if (cap === 0) return ['bad', 'Paused - every daily cap is 0', 'The daily caps (Settings -> mkvid uploads, else MKVID_DAILY_CLAIM_CAP / MKVID_SHARED_DAILY_CLAIM_CAP) refuse every claim. Raise them on /ui/settings to resume.'];
+    // mkvid only polls while its render slot is free, so a long render is silence too - not an outage.
     // mkvid works on up to two at once, only one of them rendering.
-    if (c.claimed) return ['ok', (c.claimed === 1 ? 'Rendering 1 set' : 'Working on ' + c.claimed + ' sets') + ' now', used + '/' + cap + ' of today’s uploads used.'];
+    if (c.claimed) return ['ok', (c.claimed === 1 ? 'Rendering 1 set' : 'Working on ' + c.claimed + ' sets') + ' now', used + '/' + cap + ' of today\u2019s uploads used.'];
     if (silent) return ['bad', poll ? 'mkvid last polled ' + TK.fmt.rel(new Date(poll.at * 1000).toISOString()) : 'mkvid has not polled yet', 'It normally polls every minute. Check the mkvid container on the NAS and that it can reach this Worker (TRACKED_URL / TRACKED_TOKEN).'];
     if (poll.outcome === 'error') return ['bad', 'The last claim failed on the Worker side', 'Usually a transient D1 error; mkvid retries every minute.'];
     if (poll.outcome === 'not_connected') return ['bad', 'mkvid has no YouTube account connected', 'Its token expired or was revoked. Open mkvid.maxhogan.dev and connect YouTube again.'];
     if (!c.pending) return ['ok', 'Queue empty', 'Nothing is waiting for mkvid.'];
-    if (eff.used >= eff.cap || poll.outcome === 'capped') return ['wait', 'Today’s ' + eff.cap + ' upload' + (eff.cap === 1 ? ' is' : 's are') + ' used — next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each project allows 100 uploads a day; the caps here keep it to 30 in total).' + idleNote];
-    return ['ok', 'Ready — mkvid takes the next set on its next poll', used + '/' + cap + ' of today’s uploads used.' + idleNote];
+    if (eff.used >= eff.cap || poll.outcome === 'capped') return ['wait', 'Today\u2019s ' + eff.cap + ' upload' + (eff.cap === 1 ? ' is' : 's are') + ' used - next one ' + untilTime(d.quotaResetsAt), 'The caps reset at midnight Pacific with the YouTube quota (each project allows 100 uploads a day; the caps here keep it to 30 in total).' + idleNote];
+    return ['ok', 'Ready - mkvid takes the next set on its next poll', used + '/' + cap + ' of today\u2019s uploads used.' + idleNote];
   }
-`
+`;

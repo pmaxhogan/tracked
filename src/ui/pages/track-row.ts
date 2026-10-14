@@ -34,7 +34,7 @@ export const TRACK_ROW_CSS = /* css */ `
   @media (max-width: 699px) {
     .trt .trt-art { width: 44px; height: 44px; }
   }
-`
+`;
 
 /**
  * Defines, inside the page IIFE: pill(url, label, tip) (an <a> element),
@@ -135,7 +135,7 @@ export const TRACK_ROW_JS = /* js */ `
       if (r.idStatus) h += '<span class="tag"' + TK.tip('Only partly identified: 1001tracklists knows the base track but not the exact version (remix, edit or mashup).') + '>' + esc(r.idStatus) + '</span> ';
       else if (r.anonymous || r.isUnidentified) h += '<span class="tag"' + TK.tip('Not identified yet: nobody has told 1001tracklists what this track is.') + '>ID</span> ';
       if (r.isMashupLinked) h += '<span class="tag mx"' + TK.tip('Played together with the track above it (a mashup or layered over it), not after it.') + '>w/</span>';
-      return h || '<span class="tkt-nil">–</span>';
+      return h || '<span class="tkt-nil">-</span>';
     }
     function linksHtml(r) {
       let h = pillHtml(r.youtubeLink, 'YouTube', 'Play this track on YouTube') +
@@ -292,4 +292,4 @@ export const TRACK_ROW_JS = /* js */ `
 
     return { create, rowsOf };
   })();
-`
+`;

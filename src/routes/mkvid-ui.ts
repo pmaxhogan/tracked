@@ -29,8 +29,8 @@
  * filter or sort on it covers every page; each answer adds `counts`, the whole
  * list by that column, whatever the filters.
  */
-import { Hono, type Context } from 'hono'
-import type { Env } from '../types'
+import { Hono, type Context } from "hono";
+import type { Env } from "../types";
 import {
   countMkvidOutcomes,
   countMkvidRequests,
@@ -45,38 +45,46 @@ import {
   rowToRequest,
   type MkvidRequest,
   type MkvidRow,
-} from '../lib/mkvid'
-import { MKVID_READINESS_STATES, readinessFor, readinessStateSql } from '../lib/mkvid-readiness'
-import { MKVID_OUTCOMES, mkvidOutcomeSql } from '../lib/mkvid-outcome'
-import { getRemovedBurst, removedBurstSince } from '../lib/mkvid-removed-burst'
-import { countOldStyleVideos, listUndeletedOldVideos } from '../lib/mkvid-recreate'
-import { parseTableQuery, runTableQuery, tableErrorBody, TableQueryError, type TableColumn, type TableDef, type TableQuery } from '../lib/table-query'
-import { dbOf } from '../lib/db'
+} from "../lib/mkvid";
+import { MKVID_READINESS_STATES, readinessFor, readinessStateSql } from "../lib/mkvid-readiness";
+import { MKVID_OUTCOMES, mkvidOutcomeSql } from "../lib/mkvid-outcome";
+import { getRemovedBurst, removedBurstSince } from "../lib/mkvid-removed-burst";
+import { countOldStyleVideos, listUndeletedOldVideos } from "../lib/mkvid-recreate";
+import {
+  parseTableQuery,
+  runTableQuery,
+  tableErrorBody,
+  TableQueryError,
+  type TableColumn,
+  type TableDef,
+  type TableQuery,
+} from "../lib/table-query";
+import { dbOf } from "../lib/db";
 
-export const mkvidUiApp = new Hono<{ Bindings: Env; Variables: { cfAccessEmail: string } }>()
+export const mkvidUiApp = new Hono<{ Bindings: Env; Variables: { cfAccessEmail: string } }>();
 
-type QueueDbRow = MkvidRow & { position?: number | null }
+type QueueDbRow = MkvidRow & { position?: number | null };
 
 /** The columns both lists share (stored seconds; filters take unix ms like every datetime). Each list adds its own `status`. */
 const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
-  id: { type: 'text', filterable: false },
-  setDate: { sql: 'set_date', type: 'date' },
-  setTitle: { sql: "COALESCE(set_title, '')", type: 'text', searchable: true },
-  setUrl: { sql: 'set_url', type: 'text', sortable: false, searchable: true },
-  artistName: { sql: "COALESCE(artist_name, '')", type: 'text', searchable: true, sortable: false },
+  id: { type: "text", filterable: false },
+  setDate: { sql: "set_date", type: "date" },
+  setTitle: { sql: "COALESCE(set_title, '')", type: "text", searchable: true },
+  setUrl: { sql: "set_url", type: "text", sortable: false, searchable: true },
+  artistName: { sql: "COALESCE(artist_name, '')", type: "text", searchable: true, sortable: false },
   // The DJ, by slug: the DJ select filters `eq:<slug>`.
-  dj: { sql: 'slug', type: 'text', searchable: true },
-  source: { type: 'enum', options: MKVID_SOURCES },
-  account: { type: 'enum', options: MKVID_ACCOUNTS },
-  attempts: { type: 'number' },
-  createdAt: { sql: 'created_at', type: 'datetime', storage: 's' },
-  updatedAt: { sql: 'updated_at', type: 'datetime', storage: 's' },
-  notBefore: { sql: 'not_before', type: 'datetime', storage: 's' },
-  videoId: { sql: 'video_id', type: 'text' },
-  privacy: { type: 'enum' },
-  style: { type: 'enum' },
-  error: { type: 'text', sortable: false, searchable: true },
-}
+  dj: { sql: "slug", type: "text", searchable: true },
+  source: { type: "enum", options: MKVID_SOURCES },
+  account: { type: "enum", options: MKVID_ACCOUNTS },
+  attempts: { type: "number" },
+  createdAt: { sql: "created_at", type: "datetime", storage: "s" },
+  updatedAt: { sql: "updated_at", type: "datetime", storage: "s" },
+  notBefore: { sql: "not_before", type: "datetime", storage: "s" },
+  videoId: { sql: "video_id", type: "text" },
+  privacy: { type: "enum" },
+  style: { type: "enum" },
+  error: { type: "text", sortable: false, searchable: true },
+};
 
 /**
  * Claim order (lib/mkvid.ts QUEUE_ORDER): newest set first, undated last, ties by most recently queued.
@@ -86,83 +94,129 @@ export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
   return {
     from: `(SELECT r.*, ROW_NUMBER() OVER (ORDER BY r.sort_key DESC, r.created_at DESC, r.rowid ASC) AS position, ${readinessStateSql(now)} AS ready_state
       FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id WHERE r.status = 'pending')`,
-    primaryKey: 'id',
-    defaultSort: 'position',
-    columns: { ...COLUMNS, status: { sql: 'ready_state', type: 'enum', options: MKVID_READINESS_STATES }, position: { type: 'number' } },
-  }
+    primaryKey: "id",
+    defaultSort: "position",
+    columns: {
+      ...COLUMNS,
+      status: { sql: "ready_state", type: "enum", options: MKVID_READINESS_STATES },
+      position: { type: "number" },
+    },
+  };
 }
 
 /** The finished list. `since` is the open removed-recordings burst's start (null = none): a removal from then on reads `removed_unconfirmed`. */
 export function mkvidFinishedTable(since: number | null): TableDef<QueueDbRow> {
   return {
-    from: 'mkvid_requests',
+    from: "mkvid_requests",
     where: MKVID_FINISHED_SQL,
-    primaryKey: 'id',
-    defaultSort: '-updatedAt',
-    columns: { ...COLUMNS, status: { sql: mkvidOutcomeSql('status', 'error', { since }), type: 'enum', options: MKVID_OUTCOMES } },
-  }
+    primaryKey: "id",
+    defaultSort: "-updatedAt",
+    columns: {
+      ...COLUMNS,
+      status: {
+        sql: mkvidOutcomeSql("status", "error", { since }),
+        type: "enum",
+        options: MKVID_OUTCOMES,
+      },
+    },
+  };
 }
 
-type Ctx = Context<{ Bindings: Env; Variables: { cfAccessEmail: string } }>
+type Ctx = Context<{ Bindings: Env; Variables: { cfAccessEmail: string } }>;
 
 /** A table answer whose rows are requestSummary + readiness (+ position in the queue), plus `counts`. */
-async function requestTable(c: Ctx, def: TableDef<QueueDbRow>, now: number, counts: () => Promise<Record<string, number>>, since: number | null = null): Promise<Response> {
-  let query: TableQuery
+async function requestTable(
+  c: Ctx,
+  def: TableDef<QueueDbRow>,
+  now: number,
+  counts: () => Promise<Record<string, number>>,
+  since: number | null = null,
+): Promise<Response> {
+  let query: TableQuery;
   try {
-    query = parseTableQuery(new URL(c.req.url).searchParams, def)
+    query = parseTableQuery(new URL(c.req.url).searchParams, def);
   } catch (e) {
-    if (e instanceof TableQueryError) return c.json(tableErrorBody(e), 400)
-    throw e
+    if (e instanceof TableQueryError) return c.json(tableErrorBody(e), 400);
+    throw e;
   }
-  const result = await runTableQuery<QueueDbRow>(dbOf(c.env), def, query)
-  const reqs = result.rows.map((r) => ({ req: rowToRequest(r), position: r.position == null ? null : Number(r.position) }))
-  const readiness = await readinessFor(c.env, reqs.map((x) => x.req).filter((r) => r.status !== 'done' && r.status !== 'superseded'), now)
+  const result = await runTableQuery<QueueDbRow>(dbOf(c.env), def, query);
+  const reqs = result.rows.map((r) => ({
+    req: rowToRequest(r),
+    position: r.position == null ? null : Number(r.position),
+  }));
+  const readiness = await readinessFor(
+    c.env,
+    reqs.map((x) => x.req).filter((r) => r.status !== "done" && r.status !== "superseded"),
+    now,
+  );
   return c.json({
     ...result,
-    rows: reqs.map((x) => ({ ...summaryOf(x.req, readiness.get(x.req.id) ?? null, since), ...(x.position != null ? { position: x.position } : {}) })),
+    rows: reqs.map((x) => ({
+      ...summaryOf(x.req, readiness.get(x.req.id) ?? null, since),
+      ...(x.position != null ? { position: x.position } : {}),
+    })),
     counts: await counts(),
-  })
+  });
 }
 
-const summaryOf = (r: MkvidRequest, readiness: unknown, since: number | null = null) => ({ ...requestSummary(r, since), readiness })
+const summaryOf = (r: MkvidRequest, readiness: unknown, since: number | null = null) => ({
+  ...requestSummary(r, since),
+  readiness,
+});
 
 /** The whole queue by readiness state. */
-async function countQueueStates(env: Env, def: TableDef<QueueDbRow>): Promise<Record<string, number>> {
-  const res = await dbOf(env).prepare(`SELECT ready_state AS k, COUNT(*) AS n FROM ${def.from} GROUP BY k`).all<{ k: string; n: number }>()
-  const out: Record<string, number> = Object.fromEntries(MKVID_READINESS_STATES.map((k) => [k, 0]))
-  for (const r of res.results) if (r.k in out) out[r.k] = Number(r.n)
-  return out
+async function countQueueStates(
+  env: Env,
+  def: TableDef<QueueDbRow>,
+): Promise<Record<string, number>> {
+  const res = await dbOf(env)
+    .prepare(`SELECT ready_state AS k, COUNT(*) AS n FROM ${def.from} GROUP BY k`)
+    .all<{ k: string; n: number }>();
+  const out: Record<string, number> = Object.fromEntries(MKVID_READINESS_STATES.map((k) => [k, 0]));
+  for (const r of res.results) if (r.k in out) out[r.k] = Number(r.n);
+  return out;
 }
 
-mkvidUiApp.get('/api/mkvid/queue', (c) => {
-  const now = Math.floor(Date.now() / 1000)
-  const def = mkvidQueueTable(now)
-  return requestTable(c, def, now, () => countQueueStates(c.env, def))
-})
-mkvidUiApp.get('/api/mkvid/finished', async (c) => {
-  const since = await removedBurstSince(c.env)
-  return requestTable(c, mkvidFinishedTable(since), Math.floor(Date.now() / 1000), () => countMkvidOutcomes(c.env, since), since)
-})
+mkvidUiApp.get("/api/mkvid/queue", (c) => {
+  const now = Math.floor(Date.now() / 1000);
+  const def = mkvidQueueTable(now);
+  return requestTable(c, def, now, () => countQueueStates(c.env, def));
+});
+mkvidUiApp.get("/api/mkvid/finished", async (c) => {
+  const since = await removedBurstSince(c.env);
+  return requestTable(
+    c,
+    mkvidFinishedTable(since),
+    Math.floor(Date.now() / 1000),
+    () => countMkvidOutcomes(c.env, since),
+    since,
+  );
+});
 
 /**
  * The mkvid header: the three things that decide whether anything moves (the
  * daily caps, how much of them is used, when mkvid last polled), the counts,
  * and the requests rendering now. The lists are the two table endpoints above.
  */
-mkvidUiApp.get('/api/mkvid', async (c) => {
-  const removedBurst = await getRemovedBurst(c.env)
-  const [counts, outcomes, accounts, lastPoll, djs, oldStyleCount, oldVideos, claimed] = await Promise.all([
-    countMkvidRequests(c.env),
-    countMkvidOutcomes(c.env, removedBurst?.since ?? null),
-    mkvidAccountUsage(c.env),
-    getMkvidLastPoll(c.env),
-    listMkvidDjs(c.env),
-    countOldStyleVideos(c.env),
-    listUndeletedOldVideos(c.env),
-    dbOf(c.env).prepare("SELECT * FROM mkvid_requests WHERE status = 'claimed' ORDER BY claimed_at ASC LIMIT 10").all<MkvidRow>(),
-  ])
-  const rendering = claimed.results.map(rowToRequest)
-  const readiness = await readinessFor(c.env, rendering)
+mkvidUiApp.get("/api/mkvid", async (c) => {
+  const removedBurst = await getRemovedBurst(c.env);
+  const [counts, outcomes, accounts, lastPoll, djs, oldStyleCount, oldVideos, claimed] =
+    await Promise.all([
+      countMkvidRequests(c.env),
+      countMkvidOutcomes(c.env, removedBurst?.since ?? null),
+      mkvidAccountUsage(c.env),
+      getMkvidLastPoll(c.env),
+      listMkvidDjs(c.env),
+      countOldStyleVideos(c.env),
+      listUndeletedOldVideos(c.env),
+      dbOf(c.env)
+        .prepare(
+          "SELECT * FROM mkvid_requests WHERE status = 'claimed' ORDER BY claimed_at ASC LIMIT 10",
+        )
+        .all<MkvidRow>(),
+    ]);
+  const rendering = claimed.results.map(rowToRequest);
+  const readiness = await readinessFor(c.env, rendering);
   return c.json({
     enabled: !!c.env.MKVID_TOKEN,
     counts,
@@ -190,5 +244,5 @@ mkvidUiApp.get('/api/mkvid', async (c) => {
     djs,
     /** Requests mkvid has claimed and is working on (oldest claim first). */
     rendering: rendering.map((r) => summaryOf(r, readiness.get(r.id) ?? null)),
-  })
-})
+  });
+});

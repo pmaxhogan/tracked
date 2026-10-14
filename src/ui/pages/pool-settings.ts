@@ -1,123 +1,375 @@
 // Pool settings page: tlpool's budget and browser limits, the recheck schedule, priority order, the render feeder and the manual-sync queue wait.
-import { shell } from '../shell'
-import { tipAttr } from '../tip'
-import { POOL_CSS, COMMON_JS } from './pool-common'
-import { SETTINGS_FORM_CSS, SETTINGS_FORM_JS, type FormGroup } from './settings-form'
-import { TLPOOL_FIELD_GROUPS } from '../../lib/tlpool-settings-fields'
+import { shell } from "../shell";
+import { tipAttr } from "../tip";
+import { POOL_CSS, COMMON_JS } from "./pool-common";
+import { SETTINGS_FORM_CSS, SETTINGS_FORM_JS, type FormGroup } from "./settings-form";
+import { TLPOOL_FIELD_GROUPS } from "../../lib/tlpool-settings-fields";
 
 // More scheduler knobs (lib/pool-settings.ts, PUT /ui/api/pool/settings) and
 // tlpool's numeric settings (PUT /ui/api/pool/limits), as field-table cards.
 const SCHED_GROUPS: FormGroup[] = [
   {
-    id: 'sf-cadence',
-    title: 'Scheduler cadence',
+    id: "sf-cadence",
+    title: "Scheduler cadence",
     fields: [
-      { path: 'tick.minItems', label: 'Fetches per tick, at least', help: 'Each 5-minute tick submits a random number in this range. Default 0.', min: 0, max: 20, step: 1 },
-      { path: 'tick.maxItems', label: 'Fetches per tick, at most', help: 'Default 3.', min: 0, max: 20, step: 1 },
-      { path: 'tick.spreadSeconds', label: "Spread a tick's fetches over", help: 'Each fetch starts at a random moment in this window instead of all at once. Default 150; 0 = back to back.', unit: 's', min: 0, max: 240, step: 1 },
-      { path: 'priorities.newSetMaxAgeDays', label: 'A first fetch counts as new up to', help: 'Older never-fetched sets are backfill. Default 14.', unit: 'days', min: 0, max: 3650, step: 1 },
-      { path: 'recheck.unknownAgeIntervalHours', label: 'Recheck a set of unknown date every', help: 'Default 120 (5 days).', unit: 'h', min: 1, max: 87600, step: 1 },
-      { path: 'recheck.jitterFraction', label: 'Recheck jitter', help: 'Every interval × (1 ± this), so due times never cluster. Default 0.15.', min: 0, max: 0.5, step: 0.01 },
-      { path: 'recheck.mkvidWaitingSpreadHours', label: 'Overdue sets mkvid waits on: spread over', help: 'Instead of their whole interval. Default 48.', unit: 'h', min: 1, max: 720, step: 1 },
-      { path: 'verify.minGapHours', label: 'Second fetch after at least', help: 'Verification waits this long after the first fetch. Default 2.', unit: 'h', min: 2, max: 720 },
-      { path: 'verify.jitterHours', label: 'Second fetch: plus up to', help: 'Random, so second fetches do not line up. Default 2.', unit: 'h', min: 0, max: 168 },
-      { path: 'discovery.intervalHours', label: 'Re-read each DJ page every', help: 'Default 24.', unit: 'h', min: 1, max: 720 },
-      { path: 'discovery.jitterHours', label: 'DJ page: ±', help: 'Default 4.', unit: 'h', min: 0, max: 168 },
-      { path: 'backfill.stepIntervalHours', label: 'One backfill step per DJ every', help: '10 older sets a step. Default 24.', unit: 'h', min: 1, max: 720 },
-      { path: 'backfill.jitterHours', label: 'Backfill step: ±', help: 'Default 6.', unit: 'h', min: 0, max: 168 },
-      { path: 'backfill.overdueSlotHours', label: 'Overdue backfill jumps the queue after', help: 'Gets the first slot of a tick. Default 12; 0 = off.', unit: 'h', min: 0, max: 720 },
+      {
+        path: "tick.minItems",
+        label: "Fetches per tick, at least",
+        help: "Each 5-minute tick submits a random number in this range. Default 0.",
+        min: 0,
+        max: 20,
+        step: 1,
+      },
+      {
+        path: "tick.maxItems",
+        label: "Fetches per tick, at most",
+        help: "Default 3.",
+        min: 0,
+        max: 20,
+        step: 1,
+      },
+      {
+        path: "tick.spreadSeconds",
+        label: "Spread a tick's fetches over",
+        help: "Each fetch starts at a random moment in this window instead of all at once. Default 150; 0 = back to back.",
+        unit: "s",
+        min: 0,
+        max: 240,
+        step: 1,
+      },
+      {
+        path: "priorities.newSetMaxAgeDays",
+        label: "A first fetch counts as new up to",
+        help: "Older never-fetched sets are backfill. Default 14.",
+        unit: "days",
+        min: 0,
+        max: 3650,
+        step: 1,
+      },
+      {
+        path: "recheck.unknownAgeIntervalHours",
+        label: "Recheck a set of unknown date every",
+        help: "Default 120 (5 days).",
+        unit: "h",
+        min: 1,
+        max: 87600,
+        step: 1,
+      },
+      {
+        path: "recheck.jitterFraction",
+        label: "Recheck jitter",
+        help: "Every interval x (1 +/- this), so due times never cluster. Default 0.15.",
+        min: 0,
+        max: 0.5,
+        step: 0.01,
+      },
+      {
+        path: "recheck.mkvidWaitingSpreadHours",
+        label: "Overdue sets mkvid waits on: spread over",
+        help: "Instead of their whole interval. Default 48.",
+        unit: "h",
+        min: 1,
+        max: 720,
+        step: 1,
+      },
+      {
+        path: "verify.minGapHours",
+        label: "Second fetch after at least",
+        help: "Verification waits this long after the first fetch. Default 2.",
+        unit: "h",
+        min: 2,
+        max: 720,
+      },
+      {
+        path: "verify.jitterHours",
+        label: "Second fetch: plus up to",
+        help: "Random, so second fetches do not line up. Default 2.",
+        unit: "h",
+        min: 0,
+        max: 168,
+      },
+      {
+        path: "discovery.intervalHours",
+        label: "Re-read each DJ page every",
+        help: "Default 24.",
+        unit: "h",
+        min: 1,
+        max: 720,
+      },
+      {
+        path: "discovery.jitterHours",
+        label: "DJ page: +/-",
+        help: "Default 4.",
+        unit: "h",
+        min: 0,
+        max: 168,
+      },
+      {
+        path: "backfill.stepIntervalHours",
+        label: "One backfill step per DJ every",
+        help: "10 older sets a step. Default 24.",
+        unit: "h",
+        min: 1,
+        max: 720,
+      },
+      {
+        path: "backfill.jitterHours",
+        label: "Backfill step: +/-",
+        help: "Default 6.",
+        unit: "h",
+        min: 0,
+        max: 168,
+      },
+      {
+        path: "backfill.overdueSlotHours",
+        label: "Overdue backfill jumps the queue after",
+        help: "Gets the first slot of a tick. Default 12; 0 = off.",
+        unit: "h",
+        min: 0,
+        max: 720,
+      },
     ],
   },
   {
-    id: 'sf-retry',
-    title: 'Retries and backoffs',
+    id: "sf-retry",
+    title: "Retries and backoffs",
     fields: [
-      { path: 'retry.maxSetAttemptsPerDay', label: 'Fetch attempts per set per day', help: 'A set that keeps failing stops here until tomorrow. Default 3.', min: 1, max: 50, step: 1 },
-      { path: 'retry.attemptBackoffBaseMinutes', label: 'Wait after a failed attempt', help: 'Doubles per attempt. Default 15.', unit: 'min', min: 1, max: 1440 },
-      { path: 'retry.attemptBackoffMaxHours', label: 'That wait at most', help: 'Default 6.', unit: 'h', min: 0.25, max: 168 },
-      { path: 'retry.claimRecheckHours', label: 'Failed recheck: try again after', help: 'Default 6.', unit: 'h', min: 0.25, max: 168 },
-      { path: 'retry.claimVerifyHours', label: 'Failed verification: try again after', help: 'Default 2.', unit: 'h', min: 0.25, max: 168 },
-      { path: 'retry.djRetryMinutes', label: 'Failed DJ page step: try again after', help: 'Discovery or backfill. Default 60.', unit: 'min', min: 1, max: 1440 },
-      { path: 'retry.poolBackoffMaxHours', label: 'Stand down for the pool, at most', help: 'When tlpool asks ticks to wait. Default 6.', unit: 'h', min: 0.1, max: 48 },
-      { path: 'retry.itemScopedBackoffMinutes', label: 'Every item refused: stand down', help: 'No free account for any item. Default 10.', unit: 'min', min: 1, max: 1440 },
+      {
+        path: "retry.maxSetAttemptsPerDay",
+        label: "Fetch attempts per set per day",
+        help: "A set that keeps failing stops here until tomorrow. Default 3.",
+        min: 1,
+        max: 50,
+        step: 1,
+      },
+      {
+        path: "retry.attemptBackoffBaseMinutes",
+        label: "Wait after a failed attempt",
+        help: "Doubles per attempt. Default 15.",
+        unit: "min",
+        min: 1,
+        max: 1440,
+      },
+      {
+        path: "retry.attemptBackoffMaxHours",
+        label: "That wait at most",
+        help: "Default 6.",
+        unit: "h",
+        min: 0.25,
+        max: 168,
+      },
+      {
+        path: "retry.claimRecheckHours",
+        label: "Failed recheck: try again after",
+        help: "Default 6.",
+        unit: "h",
+        min: 0.25,
+        max: 168,
+      },
+      {
+        path: "retry.claimVerifyHours",
+        label: "Failed verification: try again after",
+        help: "Default 2.",
+        unit: "h",
+        min: 0.25,
+        max: 168,
+      },
+      {
+        path: "retry.djRetryMinutes",
+        label: "Failed DJ page step: try again after",
+        help: "Discovery or backfill. Default 60.",
+        unit: "min",
+        min: 1,
+        max: 1440,
+      },
+      {
+        path: "retry.poolBackoffMaxHours",
+        label: "Stand down for the pool, at most",
+        help: "When tlpool asks ticks to wait. Default 6.",
+        unit: "h",
+        min: 0.1,
+        max: 48,
+      },
+      {
+        path: "retry.itemScopedBackoffMinutes",
+        label: "Every item refused: stand down",
+        help: "No free account for any item. Default 10.",
+        unit: "min",
+        min: 1,
+        max: 1440,
+      },
     ],
   },
   {
-    id: 'sf-feed',
-    title: 'Render feeder pacing',
-    intro: 'Besides the first fetches a day above.',
+    id: "sf-feed",
+    title: "Render feeder pacing",
+    intro: "Besides the first fetches a day above.",
     fields: [
-      { path: 'renderFeed.maxPerTick', label: 'Fed sets per tick, at most', help: 'Default 1.', min: 0, max: 10, step: 1 },
-      { path: 'renderFeed.cooldownHours', label: 'Do not feed a set fetched within', help: 'Doubles per failed feed. Default 48.', unit: 'h', min: 1, max: 1440 },
-      { path: 'renderFeed.maxCooldownDays', label: 'That cooldown at most', help: 'Default 14.', unit: 'days', min: 1, max: 365 },
-      { path: 'renderFeed.maxFailures', label: 'Give a set up after failed feeds', help: 'In a row. Default 3.', min: 1, max: 20, step: 1 },
+      {
+        path: "renderFeed.maxPerTick",
+        label: "Fed sets per tick, at most",
+        help: "Default 1.",
+        min: 0,
+        max: 10,
+        step: 1,
+      },
+      {
+        path: "renderFeed.cooldownHours",
+        label: "Do not feed a set fetched within",
+        help: "Doubles per failed feed. Default 48.",
+        unit: "h",
+        min: 1,
+        max: 1440,
+      },
+      {
+        path: "renderFeed.maxCooldownDays",
+        label: "That cooldown at most",
+        help: "Default 14.",
+        unit: "days",
+        min: 1,
+        max: 365,
+      },
+      {
+        path: "renderFeed.maxFailures",
+        label: "Give a set up after failed feeds",
+        help: "In a row. Default 3.",
+        min: 1,
+        max: 20,
+        step: 1,
+      },
     ],
   },
   {
-    id: 'sf-catchup',
-    title: 'Search index catch-up',
-    intro: 'Search only indexes verified lists, so sets synced before verification and search existed are fetched again, newest first, on top of each tick. Done when the Scheduler page shows no more catch-up items.',
+    id: "sf-catchup",
+    title: "Search index catch-up",
+    intro:
+      "Search only indexes verified lists, so sets synced before verification and search existed are fetched again, newest first, on top of each tick. Done when the Scheduler page shows no more catch-up items.",
     fields: [
-      { path: 'indexCatchUp.perDay', label: 'Catch-up fetches per day', help: 'Each also needs a second fetch to verify. Default 200; 0 = off.', min: 0, max: 2000, step: 1 },
-      { path: 'indexCatchUp.perTick', label: 'Catch-up fetches per tick, at most', help: 'Default 1.', min: 0, max: 10, step: 1 },
-      { path: 'indexCatchUp.cooldownHours', label: 'Do not refetch a set fetched within', help: 'A fetch that did not start a verification waits this long. Default 72.', unit: 'h', min: 1, max: 1440 },
+      {
+        path: "indexCatchUp.perDay",
+        label: "Catch-up fetches per day",
+        help: "Each also needs a second fetch to verify. Default 200; 0 = off.",
+        min: 0,
+        max: 2000,
+        step: 1,
+      },
+      {
+        path: "indexCatchUp.perTick",
+        label: "Catch-up fetches per tick, at most",
+        help: "Default 1.",
+        min: 0,
+        max: 10,
+        step: 1,
+      },
+      {
+        path: "indexCatchUp.cooldownHours",
+        label: "Do not refetch a set fetched within",
+        help: "A fetch that did not start a verification waits this long. Default 72.",
+        unit: "h",
+        min: 1,
+        max: 1440,
+      },
     ],
   },
   {
-    id: 'sf-manual',
-    title: 'Manual fetches and reports',
+    id: "sf-manual",
+    title: "Manual fetches and reports",
     fields: [
-      { path: 'manualMaxFetches', label: 'Fetches per sync or resync button', help: 'Default 10.', min: 0, max: 200, step: 1 },
-      { path: 'forcedRefetch.cooldownSeconds', label: 'Repeat refresh of a set within', help: 'Is answered from the cache. Default 120.', unit: 's', min: 0, max: 86400, step: 1 },
-      { path: 'forcedRefetch.dailyCap', label: 'Forced refetches per day', help: 'Across all sets. Default 40.', min: 0, max: 1000, step: 1 },
-      { path: 'reports.maxPerDay', label: 'Suspect-account reports per day', help: 'Each rests that account. Default 6; 0 = never.', min: 0, max: 100, step: 1 },
-      { path: 'reports.maxRestingShare', label: 'No reports while resting share is over', help: 'Of the non-passive pool. Default 0.5.', min: 0, max: 1, step: 0.05 },
+      {
+        path: "manualMaxFetches",
+        label: "Fetches per sync or resync button",
+        help: "Default 10.",
+        min: 0,
+        max: 200,
+        step: 1,
+      },
+      {
+        path: "forcedRefetch.cooldownSeconds",
+        label: "Repeat refresh of a set within",
+        help: "Is answered from the cache. Default 120.",
+        unit: "s",
+        min: 0,
+        max: 86400,
+        step: 1,
+      },
+      {
+        path: "forcedRefetch.dailyCap",
+        label: "Forced refetches per day",
+        help: "Across all sets. Default 40.",
+        min: 0,
+        max: 1000,
+        step: 1,
+      },
+      {
+        path: "reports.maxPerDay",
+        label: "Suspect-account reports per day",
+        help: "Each rests that account. Default 6; 0 = never.",
+        min: 0,
+        max: 100,
+        step: 1,
+      },
+      {
+        path: "reports.maxRestingShare",
+        label: "No reports while resting share is over",
+        help: "Of the non-passive pool. Default 0.5.",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
     ],
   },
-]
+];
 
 const TLPOOL_GROUPS: FormGroup[] = TLPOOL_FIELD_GROUPS.map((g) => ({
   id: g.id,
-  title: 'tlpool: ' + g.title,
-  fields: g.fields.map((x) => ({ path: x.key, label: x.label, help: x.help + ' Default ' + x.def + '.', unit: x.unit, min: x.min, max: x.max, step: x.step })),
-}))
+  title: "tlpool: " + g.title,
+  fields: g.fields.map((x) => ({
+    path: x.key,
+    label: x.label,
+    help: x.help + " Default " + x.def + ".",
+    unit: x.unit,
+    min: x.min,
+    max: x.max,
+    step: x.step,
+  })),
+}));
 
 const BODY = /* html */ `
 <div class="tk-grid two">
   <form id="lim" class="tk-card" autocomplete="off">
-    <h2><span class="tip-term"${tipAttr('The limits tlpool, the browser pool on the NAS, applies to every account: how many pages it may load a day and what it may load.')}>Budget and browser</span></h2>
+    <h2><span class="tip-term"${tipAttr("The limits tlpool, the browser pool on the NAS, applies to every account: how many pages it may load a day and what it may load.")}>Budget and browser</span></h2>
     <div id="lim-err" class="error"></div>
-    <div class="field"><label for="budget"${tipAttr('How many 1001tracklists page views one account may make in a day. They are spread around the clock with random gaps. Default 30.')}>Pages per account per day</label><input id="budget" type="number" min="0" max="1000" step="1" /></div>
-    <div class="field"><label${tipAttr('A fresh account starts slowly: this many pages on its first day, then on its second day, then the full budget.')}>Ramp for new accounts</label><div class="row"><span>Day 1</span><input id="ramp1" type="number" min="0" max="1000" step="1" /><span>Day 2</span><input id="ramp2" type="number" min="0" max="1000" step="1" /><span class="muted">then the full budget</span></div><span class="hint">Default 10, then 20.</span></div>
-    <div class="field"><label for="share"${tipAttr('The part of each day\'s page budget kept for the phone now-playing button, so background work cannot use it all up.')}>Reserved for the phone button</label><div class="row"><input id="share" type="number" min="0" max="90" step="1" /><span>% of each day's budget</span></div></div>
+    <div class="field"><label for="budget"${tipAttr("How many 1001tracklists page views one account may make in a day. They are spread around the clock with random gaps. Default 30.")}>Pages per account per day</label><input id="budget" type="number" min="0" max="1000" step="1" /></div>
+    <div class="field"><label${tipAttr("A fresh account starts slowly: this many pages on its first day, then on its second day, then the full budget.")}>Ramp for new accounts</label><div class="row"><span>Day 1</span><input id="ramp1" type="number" min="0" max="1000" step="1" /><span>Day 2</span><input id="ramp2" type="number" min="0" max="1000" step="1" /><span class="muted">then the full budget</span></div><span class="hint">Default 10, then 20.</span></div>
+    <div class="field"><label for="share"${tipAttr("The part of each day's page budget kept for the phone now-playing button, so background work cannot use it all up.")}>Reserved for the phone button</label><div class="row"><input id="share" type="number" min="0" max="90" step="1" /><span>% of each day's budget</span></div></div>
     <div class="field"><label for="xhr"${tipAttr('Lookups made inside an already loaded page (track media links, "older sets" pages) have their own daily budget per account. Default 60.')}>Link lookups per account per day</label><input id="xhr" type="number" min="0" max="2000" step="1" /></div>
-    <div class="field"><label${tipAttr('The most of the daily budget each kind of background work may use, so the less urgent kinds stop first. The phone button can always use everything.')}>Share of the budget each kind of work may use</label><div class="row"><span>New</span><input id="ceil-new" type="number" min="0" max="100" step="1" /><span>Verify</span><input id="ceil-verify" type="number" min="0" max="100" step="1" /><span>Recheck</span><input id="ceil-recheck" type="number" min="0" max="100" step="1" /><span>Backfill</span><input id="ceil-backfill" type="number" min="0" max="100" step="1" /><span class="muted">%</span></div><span class="hint">Defaults 100, 100, 90, 75: backfill stops first.</span></div>
-    <div class="field"><label for="images"${tipAttr('Whether the browsers load 1001tracklists\' own images. Video, ads and ad scripts are always blocked.')}>First-party images</label><select id="images"><option value="block">Block</option><option value="allow">Allow</option></select></div>
-    <div class="row"><span id="lim-msg" class="muted"></span><span class="spacer"></span><button id="lim-save" type="submit" class="btn primary"${tipAttr('Saves these limits to tlpool. They apply from the next page it loads.')}>Save</button></div>
+    <div class="field"><label${tipAttr("The most of the daily budget each kind of background work may use, so the less urgent kinds stop first. The phone button can always use everything.")}>Share of the budget each kind of work may use</label><div class="row"><span>New</span><input id="ceil-new" type="number" min="0" max="100" step="1" /><span>Verify</span><input id="ceil-verify" type="number" min="0" max="100" step="1" /><span>Recheck</span><input id="ceil-recheck" type="number" min="0" max="100" step="1" /><span>Backfill</span><input id="ceil-backfill" type="number" min="0" max="100" step="1" /><span class="muted">%</span></div><span class="hint">Defaults 100, 100, 90, 75: backfill stops first.</span></div>
+    <div class="field"><label for="images"${tipAttr("Whether the browsers load 1001tracklists' own images. Video, ads and ad scripts are always blocked.")}>First-party images</label><select id="images"><option value="block">Block</option><option value="allow">Allow</option></select></div>
+    <div class="row"><span id="lim-msg" class="muted"></span><span class="spacer"></span><button id="lim-save" type="submit" class="btn primary"${tipAttr("Saves these limits to tlpool. They apply from the next page it loads.")}>Save</button></div>
   </form>
 
   <form id="sch" class="tk-card" autocomplete="off">
-    <h2><span class="tip-term"${tipAttr('How often a set page is fetched again to catch a swapped recording, by how old the set is. Newer sets are checked more often.')}>Recheck schedule</span></h2>
+    <h2><span class="tip-term"${tipAttr("How often a set page is fetched again to catch a swapped recording, by how old the set is. Newer sets are checked more often.")}>Recheck schedule</span></h2>
     <div id="sch-err" class="error"></div>
     <table class="sched"><thead><tr><th>Sets up to (days old)</th><th>Every (hours)</th><th></th></tr></thead><tbody id="sch-rows"></tbody></table>
-    <div class="row" style="margin:var(--sp-2) 0 var(--sp-3)"><button id="sch-add" type="button" class="btn small"${tipAttr('Adds an age band: sets up to this many days old are rechecked every so many hours.')}>+ Add row</button></div>
-    <div class="field"><label for="beyond"${tipAttr('How often sets older than the last row are rechecked. Empty means never.')}>Older than the last row: every (hours)</label><input id="beyond" type="number" min="1" step="1" placeholder="never" /><span class="hint">Empty = never (the default).</span></div>
-    <div class="field"><label for="over180"${tipAttr('Old sets that still lack a usable video, or still have unidentified rows, can be worth another look. Default 2160 hours (90 days).')}>Older sets without a good video or with ID rows: every (hours)</label><input id="over180" type="number" min="1" step="1" placeholder="never" /><span class="hint">Default 2160 (90 days).</span></div>
-    <h2 class="next"><span class="tip-term"${tipAttr('When the budget runs short, work earlier in the list goes first.')}>Priority order</span></h2>
+    <div class="row" style="margin:var(--sp-2) 0 var(--sp-3)"><button id="sch-add" type="button" class="btn small"${tipAttr("Adds an age band: sets up to this many days old are rechecked every so many hours.")}>+ Add row</button></div>
+    <div class="field"><label for="beyond"${tipAttr("How often sets older than the last row are rechecked. Empty means never.")}>Older than the last row: every (hours)</label><input id="beyond" type="number" min="1" step="1" placeholder="never" /><span class="hint">Empty = never (the default).</span></div>
+    <div class="field"><label for="over180"${tipAttr("Old sets that still lack a usable video, or still have unidentified rows, can be worth another look. Default 2160 hours (90 days).")}>Older sets without a good video or with ID rows: every (hours)</label><input id="over180" type="number" min="1" step="1" placeholder="never" /><span class="hint">Default 2160 (90 days).</span></div>
+    <h2 class="next"><span class="tip-term"${tipAttr("When the budget runs short, work earlier in the list goes first.")}>Priority order</span></h2>
     <div id="prios"></div>
-    <div class="field" style="margin-top:var(--sp-3)"><label for="feed"${tipAttr('Sets that mkvid is waiting on but that have no verified track list yet are fetched on purpose, oldest request first. Each costs about 2 page views (the second fetch follows). Default 40; 0 turns it off.')}>Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /></div>
-    <div class="field"><label for="mqueue"${tipAttr('How long each page of a Sync / Resync button press may queue while every pool browser is busy. Default 600; 0 = no queueing (fails after 20 s, like the scheduler).')}>Manual sync: wait for a free browser (seconds)</label><input id="mqueue" type="number" min="0" max="900" step="1" /></div>
-    <div class="row" style="margin-top:var(--sp-3)"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit" class="btn primary"${tipAttr('Saves the schedule, the priority order, the render feeder and the manual sync wait.')}>Save</button></div>
+    <div class="field" style="margin-top:var(--sp-3)"><label for="feed"${tipAttr("Sets that mkvid is waiting on but that have no verified track list yet are fetched on purpose, oldest request first. Each costs about 2 page views (the second fetch follows). Default 40; 0 turns it off.")}>Render feeder: first fetches a day</label><input id="feed" type="number" min="0" max="500" step="1" /></div>
+    <div class="field"><label for="mqueue"${tipAttr("How long each page of a Sync / Resync button press may queue while every pool browser is busy. Default 600; 0 = no queueing (fails after 20 s, like the scheduler).")}>Manual sync: wait for a free browser (seconds)</label><input id="mqueue" type="number" min="0" max="900" step="1" /></div>
+    <div class="row" style="margin-top:var(--sp-3)"><span id="sch-msg" class="muted"></span><span class="spacer"></span><button id="sch-save" type="submit" class="btn primary"${tipAttr("Saves the schedule, the priority order, the render feeder and the manual sync wait.")}>Save</button></div>
   </form>
 </div>
 <div id="sf-sched" class="tk-grid two"></div>
 <div id="sf-tlpool" class="tk-grid two"></div>
-`
+`;
 
 const JS = /* js */ `
 (() => {
 ${COMMON_JS}
-  // ── tlpool's own settings, via /api/pool/limits ───────────────────────
+  // -- tlpool's own settings, via /api/pool/limits -----------------------
   let lim = null;
   async function loadLimits() {
     const r = await api('/limits');
@@ -156,7 +408,7 @@ ${COMMON_JS}
     loadLimits();
   });
 
-  // ── recheck schedule and priorities, via /api/pool/settings ──
+  // -- recheck schedule and priorities, via /api/pool/settings --
   // The stored shape is lib/pool-settings.ts PoolSettings; PUT deep-merges a
   // partial document, and arrays (bands, order) replace.
   const PRIO_WORDS = { phone: 'Phone button', new: 'New sets', verify: 'Verification second fetches', recheck: 'Routine rechecks', backfill: 'DJ backfill' };
@@ -228,7 +480,7 @@ ${COMMON_JS}
     await loadSched();
   });
 
-  // ── more knobs: field-table cards (ui/pages/settings-form.ts) ──
+  // -- more knobs: field-table cards (ui/pages/settings-form.ts) --
 ${SETTINGS_FORM_JS}
   const SCHED_GROUPS = ${JSON.stringify(SCHED_GROUPS)};
   const TLPOOL_GROUPS = ${JSON.stringify(TLPOOL_GROUPS)};
@@ -257,13 +509,13 @@ ${SETTINGS_FORM_JS}
   loadSched();
   loadMore();
 })();
-`
+`;
 
 export const SETTINGS_PAGE_HTML = shell({
-  nav: 'pool-settings',
-  title: 'Pool settings',
+  nav: "pool-settings",
+  title: "Pool settings",
   body: BODY,
   css: POOL_CSS + SETTINGS_FORM_CSS,
   js: JS,
   ownNavCount: false,
-})
+});

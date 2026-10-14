@@ -1,38 +1,38 @@
-import type { ParsedTrack, ResponseTrack } from '../types'
+import type { ParsedTrack, ResponseTrack } from "../types";
 
-const TIME_PATTERN = /^(?:(\d+):)?(\d{1,2}):(\d{2})$/
+const TIME_PATTERN = /^(?:(\d+):)?(\d{1,2}):(\d{2})$/;
 
 export function parseTime(s: string): number | null {
-  const m = s.trim().match(TIME_PATTERN)
-  if (!m) return null
-  const h = m[1] ? Number(m[1]) : 0
-  const min = Number(m[2])
-  const sec = Number(m[3])
-  if (Number.isNaN(h) || Number.isNaN(min) || Number.isNaN(sec)) return null
-  if (min >= 60 || sec >= 60) return null
-  return h * 3600 + min * 60 + sec
+  const m = s.trim().match(TIME_PATTERN);
+  if (!m) return null;
+  const h = m[1] ? Number(m[1]) : 0;
+  const min = Number(m[2]);
+  const sec = Number(m[3]);
+  if (Number.isNaN(h) || Number.isNaN(min) || Number.isNaN(sec)) return null;
+  if (min >= 60 || sec >= 60) return null;
+  return h * 3600 + min * 60 + sec;
 }
 
 export function formatTime(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds))
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
 
 export type SelectionResult = {
   /** All tracks to include in response (current + transition-window). */
-  picked: ResponseTrack[]
+  picked: ResponseTrack[];
   /** True if any picked track is unidentified (caller may set status). */
-  anyUnidentified: boolean
+  anyUnidentified: boolean;
   /** True when the current group starts with an anonymous "ID - ID" row. */
-  currentAnonymous: boolean
-}
+  currentAnonymous: boolean;
+};
 
 /** A track, or an anonymous "ID - ID" page row (no name, no id page) when `anonymous` is set. */
-type SelectableTrack = ParsedTrack & { anonymous?: boolean }
+type SelectableTrack = ParsedTrack & { anonymous?: boolean };
 
 /**
  * Return the currently-playing group plus the immediately-previous and
@@ -44,12 +44,12 @@ type SelectableTrack = ParsedTrack & { anonymous?: boolean }
  * `tracks` must be in document order (= chronological by cue time).
  *
  * Edge cases:
- *  - currentSeconds is before any cued track → no current; we return the
+ *  - currentSeconds is before any cued track -> no current; we return the
  *    first cued group as a "next-up" hint (all isCurrent=false).
- *  - first track in the tracklist → no previous, just [current, next].
- *  - last track in the tracklist → no next, just [previous, current].
- *  - single-track tracklist → just [current].
- *  - empty tracklist → [].
+ *  - first track in the tracklist -> no previous, just [current, next].
+ *  - last track in the tracklist -> no next, just [previous, current].
+ *  - single-track tracklist -> just [current].
+ *  - empty tracklist -> [].
  *  - tracks without a cue (startSeconds === null) are skipped for current
  *    selection but stay attached to their parent group via isMashupLinked.
  *  - trailing uncued tracks (those after the last cued group, common when
@@ -67,62 +67,62 @@ export function selectCurrent(
   currentSeconds: number,
   setEndSeconds: number | null = null,
 ): SelectionResult {
-  const groups = groupByMashup(tracks)
-  if (groups.length === 0) return { picked: [], anyUnidentified: false, currentAnonymous: false }
+  const groups = groupByMashup(tracks);
+  if (groups.length === 0) return { picked: [], anyUnidentified: false, currentAnonymous: false };
 
   // Effective starts: real cue when present, evenly-spaced interpolated cue
   // for trailing uncued groups when setEndSeconds is known. Used by both
   // current-group selection and per-track duration computation so they stay
   // consistent.
-  const effectiveStarts = computeEffectiveStarts(groups, setEndSeconds)
-  const durations = computeDurations(groups, effectiveStarts, setEndSeconds)
+  const effectiveStarts = computeEffectiveStarts(groups, setEndSeconds);
+  const durations = computeDurations(groups, effectiveStarts, setEndSeconds);
 
   // Find the group whose [start, nextStart) range contains currentSeconds.
   // Returns -1 if currentSeconds is before any cued group (which means the
   // listener is in an intro / pre-roll / silent section).
-  let currentIdx = -1
+  let currentIdx = -1;
   for (let i = 0; i < groups.length; i++) {
-    const start = effectiveStarts[i]
-    if (start == null) continue
-    const nextStart = nextEffectiveStart(effectiveStarts, i)
+    const start = effectiveStarts[i];
+    if (start == null) continue;
+    const nextStart = nextEffectiveStart(effectiveStarts, i);
     if (start <= currentSeconds && (nextStart === null || currentSeconds < nextStart)) {
-      currentIdx = i
-      break
+      currentIdx = i;
+      break;
     }
   }
 
-  const picked: SelectableTrack[] = []
-  const currentMembers = new Set<ParsedTrack>()
+  const picked: SelectableTrack[] = [];
+  const currentMembers = new Set<ParsedTrack>();
 
   if (currentIdx === -1) {
     // Before the first cued group: offer up the first cued group as next-up.
-    const firstCued = groups.find((g) => groupStartSeconds(g) !== null)
-    if (firstCued) picked.push(...firstCued)
+    const firstCued = groups.find((g) => groupStartSeconds(g) !== null);
+    if (firstCued) picked.push(...firstCued);
   } else {
-    const prev = groups[currentIdx - 1]
-    if (prev) picked.push(...prev)
+    const prev = groups[currentIdx - 1];
+    if (prev) picked.push(...prev);
 
-    const cur = groups[currentIdx]!
+    const cur = groups[currentIdx]!;
     for (const t of cur) {
-      picked.push(t)
-      currentMembers.add(t)
+      picked.push(t);
+      currentMembers.add(t);
     }
 
-    const next = groups[currentIdx + 1]
-    if (next) picked.push(...next)
+    const next = groups[currentIdx + 1];
+    if (next) picked.push(...next);
   }
 
   // An anonymous row gives way to any named row of its group.
-  const shown = picked.filter((t) => !t.anonymous || !groupOf(groups, t).some((m) => !m.anonymous))
+  const shown = picked.filter((t) => !t.anonymous || !groupOf(groups, t).some((m) => !m.anonymous));
   const response: ResponseTrack[] = shown.map((t) => {
-    const dur = durations.get(t) ?? null
+    const dur = durations.get(t) ?? null;
     return {
       title: t.title,
       artist: t.artist,
       startTime: t.startTime,
       startSeconds: t.startSeconds,
       durationSeconds: dur,
-      durationTime: dur !== null ? formatTime(dur) : '',
+      durationTime: dur !== null ? formatTime(dur) : "",
       isCurrent: currentMembers.has(t),
       isUnidentified: t.isUnidentified,
       idStatus: t.idStatus,
@@ -131,18 +131,18 @@ export function selectCurrent(
       trackUrl: t.trackUrl,
       artworkUrl: t.artworkUrl,
       youtubeLiked: null,
-    }
-  })
+    };
+  });
 
   return {
     picked: response,
     anyUnidentified: shown.some((t) => currentMembers.has(t) && t.isUnidentified),
     currentAnonymous: currentIdx >= 0 && groups[currentIdx]!.some((t) => t.anonymous),
-  }
+  };
 }
 
 function groupOf(groups: SelectableTrack[][], t: SelectableTrack): SelectableTrack[] {
-  return groups.find((g) => g.includes(t)) ?? [t]
+  return groups.find((g) => g.includes(t)) ?? [t];
 }
 
 /**
@@ -152,7 +152,7 @@ function groupOf(groups: SelectableTrack[][], t: SelectableTrack): SelectableTra
  * positions are a best-guess instead of `null`.
  *
  * The interpolation slot is `min(medianCuedDuration, evenSlot)` where
- * `evenSlot = (setEndSeconds − lastCuedStart) / (trailingCount + 1)`. Capping
+ * `evenSlot = (setEndSeconds - lastCuedStart) / (trailingCount + 1)`. Capping
  * by the median of observed cued-track gaps keeps the last cued group from
  * being inflated to an unrealistic length when the trailing list is short:
  * a 1:20 opener shouldn't be projected to play for 6+ minutes just because
@@ -160,7 +160,7 @@ function groupOf(groups: SelectableTrack[][], t: SelectableTrack): SelectableTra
  * projected trailing tracks from extending past the end of the video when
  * cued tracks are unusually long.
  *
- * Leading and internal uncued groups (rare) keep `null` — interpolating those
+ * Leading and internal uncued groups (rare) keep `null` - interpolating those
  * would risk pulling a hidden intro into the current selection in cases
  * (live mixes with an untimed opening) where the existing "before-first-cue"
  * fallback already does the right thing.
@@ -169,47 +169,50 @@ function computeEffectiveStarts(
   groups: ParsedTrack[][],
   setEndSeconds: number | null,
 ): (number | null)[] {
-  const out = groups.map(groupStartSeconds)
-  if (setEndSeconds === null) return out
+  const out = groups.map(groupStartSeconds);
+  if (setEndSeconds === null) return out;
 
-  let lastCuedIdx = -1
+  let lastCuedIdx = -1;
   for (let i = out.length - 1; i >= 0; i--) {
-    if (out[i] !== null) { lastCuedIdx = i; break }
+    if (out[i] !== null) {
+      lastCuedIdx = i;
+      break;
+    }
   }
-  if (lastCuedIdx < 0 || lastCuedIdx === out.length - 1) return out
+  if (lastCuedIdx < 0 || lastCuedIdx === out.length - 1) return out;
 
-  const lastCuedStart = out[lastCuedIdx]!
-  if (setEndSeconds <= lastCuedStart) return out
+  const lastCuedStart = out[lastCuedIdx]!;
+  if (setEndSeconds <= lastCuedStart) return out;
 
-  const trailing = out.length - lastCuedIdx - 1
-  const evenSlot = (setEndSeconds - lastCuedStart) / (trailing + 1)
+  const trailing = out.length - lastCuedIdx - 1;
+  const evenSlot = (setEndSeconds - lastCuedStart) / (trailing + 1);
 
   // Median of cued-group gaps (each gap is a track's actual playing window).
-  const gaps: number[] = []
+  const gaps: number[] = [];
   for (let i = 1; i <= lastCuedIdx; i++) {
-    const a = out[i - 1]
-    const b = out[i]
-    if (a != null && b != null && b > a) gaps.push(b - a)
+    const a = out[i - 1];
+    const b = out[i];
+    if (a != null && b != null && b > a) gaps.push(b - a);
   }
-  let slot = evenSlot
+  let slot = evenSlot;
   if (gaps.length > 0) {
-    gaps.sort((a, b) => a - b)
-    const median = gaps[Math.floor(gaps.length / 2)]!
-    slot = Math.min(median, evenSlot)
+    gaps.sort((a, b) => a - b);
+    const median = gaps[Math.floor(gaps.length / 2)]!;
+    slot = Math.min(median, evenSlot);
   }
 
   for (let i = lastCuedIdx + 1; i < out.length; i++) {
-    out[i] = lastCuedStart + slot * (i - lastCuedIdx)
+    out[i] = lastCuedStart + slot * (i - lastCuedIdx);
   }
-  return out
+  return out;
 }
 
 function nextEffectiveStart(starts: (number | null)[], i: number): number | null {
   for (let j = i + 1; j < starts.length; j++) {
-    const s = starts[j]
-    if (s != null) return s
+    const s = starts[j];
+    if (s != null) return s;
   }
-  return null
+  return null;
 }
 
 function computeDurations(
@@ -217,48 +220,47 @@ function computeDurations(
   effectiveStarts: (number | null)[],
   setEndSeconds: number | null,
 ): Map<ParsedTrack, number | null> {
-  const out = new Map<ParsedTrack, number | null>()
+  const out = new Map<ParsedTrack, number | null>();
   for (let i = 0; i < groups.length; i++) {
-    const group = groups[i]!
-    const start = effectiveStarts[i]
-    let dur: number | null = null
+    const group = groups[i]!;
+    const start = effectiveStarts[i];
+    let dur: number | null = null;
     if (start != null) {
-      const next = nextEffectiveStart(effectiveStarts, i)
-      const end = next ?? setEndSeconds
-      if (end !== null && end > start) dur = end - start
+      const next = nextEffectiveStart(effectiveStarts, i);
+      const end = next ?? setEndSeconds;
+      if (end !== null && end > start) dur = end - start;
     }
-    for (const t of group) out.set(t, dur)
+    for (const t of group) out.set(t, dur);
   }
-  return out
+  return out;
 }
 
 function groupByMashup<T extends ParsedTrack>(tracks: T[]): T[][] {
-  const groups: T[][] = []
+  const groups: T[][] = [];
   for (const t of tracks) {
-    const last = groups[groups.length - 1]
+    const last = groups[groups.length - 1];
     // Merge into the previous group when (a) 1001tl marks the row as a
     // mashup-linked sibling via the " con" class, or (b) the row shares a
-    // cue with the previous group — 1001tl encodes that as multiple
+    // cue with the previous group - 1001tl encodes that as multiple
     // `cueValuesEntry.ids[N]` on one entry. Habstrakt-style trRow layouts
     // don't carry " con", so without the cue-equality check the sibling
     // would land in its own group with the same start as the parent,
     // making selectCurrent's range matcher treat the parent's window as
     // zero-length and skip past it.
-    const sharesCue = last != null &&
-      t.startSeconds !== null &&
-      groupStartSeconds(last) === t.startSeconds
+    const sharesCue =
+      last != null && t.startSeconds !== null && groupStartSeconds(last) === t.startSeconds;
     if (last && (t.isMashupLinked || sharesCue)) {
-      last.push(t)
+      last.push(t);
     } else {
-      groups.push([t])
+      groups.push([t]);
     }
   }
-  return groups
+  return groups;
 }
 
 function groupStartSeconds(group: ParsedTrack[]): number | null {
   for (const t of group) {
-    if (t.startSeconds !== null) return t.startSeconds
+    if (t.startSeconds !== null) return t.startSeconds;
   }
-  return null
+  return null;
 }

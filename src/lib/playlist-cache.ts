@@ -4,16 +4,16 @@
  *
  * Both the per-artist sync (lib/sync.ts) and the combined "all tracked
  * artists" playlist (lib/combined-playlist.ts) need identical behaviour here,
- * and the combined backfill reads *every* artist playlist on every run — so
+ * and the combined backfill reads *every* artist playlist on every run - so
  * the cache is what keeps that read cheap.
  */
 
-import type { Env } from '../types'
-import { getJson, putJson, TTL } from './cache'
-import { createPlaylist, findPlaylistByTitle, listPlaylistVideoIds } from './youtube-playlists'
-import type { Logger } from './log'
+import type { Env } from "../types";
+import { getJson, putJson, TTL } from "./cache";
+import { createPlaylist, findPlaylistByTitle, listPlaylistVideoIds } from "./youtube-playlists";
+import type { Logger } from "./log";
 
-const PLAYLIST_VIDEO_IDS_PREFIX = 'yt:plvids:'
+const PLAYLIST_VIDEO_IDS_PREFIX = "yt:plvids:";
 
 /**
  * Cached wrapper around `listPlaylistVideoIds`. The 5-min drain-pending cron
@@ -23,7 +23,7 @@ const PLAYLIST_VIDEO_IDS_PREFIX = 'yt:plvids:'
  * with mid-sized playlists, all of it wasted because nothing changed since the
  * previous tick). The cache is invalidated by writing back the updated set
  * after every insert (see `cachePlaylistVideoIds`), so it only goes stale if
- * the user edits the playlist directly on YouTube — in which case the 6h TTL
+ * the user edits the playlist directly on YouTube - in which case the 6h TTL
  * reconciles eventually.
  */
 export async function getCachedPlaylistVideoIds(
@@ -32,34 +32,44 @@ export async function getCachedPlaylistVideoIds(
   accessToken: string,
   log: Logger,
 ): Promise<Set<string>> {
-  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
-  const cached = await getJson<{ videoIds: string[] }>(env.CACHE, key)
+  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`;
+  const cached = await getJson<{ videoIds: string[] }>(env.CACHE, key);
   if (cached) {
     // Deliberately not logged: this fires for every set (artist + combined
     // playlist) and at ~85 lines per cron tick it alone pushed busy ticks past
     // the 256 KB Workers log cap, truncating the lines that matter. The miss
     // below is the informative event.
-    return new Set(cached.videoIds)
+    return new Set(cached.videoIds);
   }
-  log.info('sync.playlist_video_ids.cache_miss', { playlistId })
-  const ids = await listPlaylistVideoIds(playlistId, accessToken)
-  await cachePlaylistVideoIds(env, playlistId, ids)
-  return ids
+  log.info("sync.playlist_video_ids.cache_miss", { playlistId });
+  const ids = await listPlaylistVideoIds(playlistId, accessToken);
+  await cachePlaylistVideoIds(env, playlistId, ids);
+  return ids;
 }
 
 /** The snapshot if there is one, without ever listing the playlist (no quota, no network). */
-export async function peekCachedPlaylistVideoIds(env: Env, playlistId: string): Promise<Set<string> | null> {
-  const cached = await getJson<{ videoIds: string[] }>(env.CACHE, `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`)
-  return cached ? new Set(cached.videoIds) : null
+export async function peekCachedPlaylistVideoIds(
+  env: Env,
+  playlistId: string,
+): Promise<Set<string> | null> {
+  const cached = await getJson<{ videoIds: string[] }>(
+    env.CACHE,
+    `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`,
+  );
+  return cached ? new Set(cached.videoIds) : null;
 }
 
-export async function cachePlaylistVideoIds(env: Env, playlistId: string, ids: Set<string>): Promise<void> {
-  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`
-  await putJson(env.CACHE, key, { videoIds: [...ids] }, TTL.PLAYLIST_VIDEO_IDS)
+export async function cachePlaylistVideoIds(
+  env: Env,
+  playlistId: string,
+  ids: Set<string>,
+): Promise<void> {
+  const key = `${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`;
+  await putJson(env.CACHE, key, { videoIds: [...ids] }, TTL.PLAYLIST_VIDEO_IDS);
 }
 
 /**
- * Resolve a playlist by title — find an existing one with that exact title on
+ * Resolve a playlist by title - find an existing one with that exact title on
  * the user's channel, or create a fresh public playlist. Used on first sync
  * and as the recovery path when cached state references a deleted playlist.
  *
@@ -68,42 +78,42 @@ export async function cachePlaylistVideoIds(env: Env, playlistId: string, ids: S
  * playlistNotFound even though the id is valid. A new playlist is empty by
  * definition, so known-empty is the right baseline and the list call is skipped.
  *
- * With `create: false` the function never writes — it returns null when no
+ * With `create: false` the function never writes - it returns null when no
  * playlist with that title exists. Read-only status endpoints use that so
  * merely opening the admin panel can't conjure a playlist.
  */
 export async function findOrCreatePlaylist(
   opts: {
-    title: string
-    description: string
-    create?: boolean
+    title: string;
+    description: string;
+    create?: boolean;
     /** Extra fields for the two log lines (e.g. `{ slug }`). */
-    logCtx?: Record<string, unknown>
+    logCtx?: Record<string, unknown>;
   },
   accessToken: string,
   log: Logger,
 ): Promise<{ id: string; justCreated: boolean } | null> {
-  const ctx = opts.logCtx ?? {}
-  const existing = await findPlaylistByTitle(opts.title, accessToken)
+  const ctx = opts.logCtx ?? {};
+  const existing = await findPlaylistByTitle(opts.title, accessToken);
   if (existing) {
-    log.info('sync.playlist_found', { ...ctx, playlistId: existing.id, title: opts.title })
-    return { id: existing.id, justCreated: false }
+    log.info("sync.playlist_found", { ...ctx, playlistId: existing.id, title: opts.title });
+    return { id: existing.id, justCreated: false };
   }
-  if (opts.create === false) return null
+  if (opts.create === false) return null;
   const created = await createPlaylist(
-    { title: opts.title, description: opts.description, privacyStatus: 'public' },
+    { title: opts.title, description: opts.description, privacyStatus: "public" },
     accessToken,
-  )
-  log.info('sync.playlist_created', { ...ctx, playlistId: created.id, title: opts.title })
-  return { id: created.id, justCreated: true }
+  );
+  log.info("sync.playlist_created", { ...ctx, playlistId: created.id, title: opts.title });
+  return { id: created.id, justCreated: true };
 }
 
 /**
  * Drop the cached snapshot so the next read re-lists the playlist from
- * YouTube. Used by "invalidate video cache & resync" — the one place where
+ * YouTube. Used by "invalidate video cache & resync" - the one place where
  * trusting a stale set (say, after the user pruned the playlist by hand) is
  * worse than paying a page of quota.
  */
 export async function invalidatePlaylistVideoIds(env: Env, playlistId: string): Promise<void> {
-  await env.CACHE.delete(`${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`)
+  await env.CACHE.delete(`${PLAYLIST_VIDEO_IDS_PREFIX}${playlistId}`);
 }

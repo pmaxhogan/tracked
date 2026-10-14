@@ -10,41 +10,41 @@
  * private or deleted video is simply absent, which is what "dead" means here.
  */
 
-import type { Env } from '../types'
-import { batchChunked, dbOf } from './db'
-import { authedFetch, expectOk, parseIsoDuration } from './youtube-playlists'
+import type { Env } from "../types";
+import { batchChunked, dbOf } from "./db";
+import { authedFetch, expectOk, parseIsoDuration } from "./youtube-playlists";
 
-const API = 'https://www.googleapis.com/youtube/v3'
+const API = "https://www.googleapis.com/youtube/v3";
 /** Width asked for; only the ratio of the answer matters. */
-const EMBED_MAX_WIDTH = 1280
+const EMBED_MAX_WIDTH = 1280;
 /** Duration and orientation never change; re-read once a month anyway. */
-export const VIDEO_META_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+export const VIDEO_META_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 export type VideoMeta = {
-  videoId: string
-  durationSeconds: number | null
-  embedWidth: number | null
-  embedHeight: number | null
-  privacy: string | null
-  uploadStatus: string | null
-  alive: boolean
-  fetchedAt: number
-}
+  videoId: string;
+  durationSeconds: number | null;
+  embedWidth: number | null;
+  embedHeight: number | null;
+  privacy: string | null;
+  uploadStatus: string | null;
+  alive: boolean;
+  fetchedAt: number;
+};
 
 type ApiItem = {
-  id?: string
-  contentDetails?: { duration?: string }
-  player?: { embedWidth?: string | number; embedHeight?: string | number }
-  status?: { privacyStatus?: string; uploadStatus?: string }
-}
+  id?: string;
+  contentDetails?: { duration?: string };
+  player?: { embedWidth?: string | number; embedHeight?: string | number };
+  status?: { privacyStatus?: string; uploadStatus?: string };
+};
 
 const num = (x: unknown): number | null => {
-  const n = typeof x === 'string' ? Number(x) : typeof x === 'number' ? x : NaN
-  return Number.isFinite(n) ? n : null
-}
+  const n = typeof x === "string" ? Number(x) : typeof x === "number" ? x : NaN;
+  return Number.isFinite(n) ? n : null;
+};
 
 /** Upload states that mean the video will never play. */
-const DEAD_UPLOAD = /^(deleted|failed|rejected)$/
+const DEAD_UPLOAD = /^(deleted|failed|rejected)$/;
 
 /** One or more videos.list calls. Ids the API does not echo back come out as `alive: false`. */
 export async function fetchVideoMeta(
@@ -53,22 +53,22 @@ export async function fetchVideoMeta(
   fetcher: typeof fetch = fetch,
   now = Math.floor(Date.now() / 1000),
 ): Promise<Map<string, VideoMeta>> {
-  const out = new Map<string, VideoMeta>()
-  const ids = [...new Set(videoIds)]
+  const out = new Map<string, VideoMeta>();
+  const ids = [...new Set(videoIds)];
   for (let i = 0; i < ids.length; i += 50) {
-    const chunk = ids.slice(i, i + 50)
+    const chunk = ids.slice(i, i + 50);
     const params = new URLSearchParams({
-      part: 'contentDetails,player,status',
-      id: chunk.join(','),
-      maxResults: '50',
+      part: "contentDetails,player,status",
+      id: chunk.join(","),
+      maxResults: "50",
       maxWidth: String(EMBED_MAX_WIDTH),
-    })
-    const res = await authedFetch(`${API}/videos?${params}`, accessToken, {}, fetcher)
-    await expectOk(res, 'videos.list')
-    const data = (await res.json()) as { items?: ApiItem[] }
+    });
+    const res = await authedFetch(`${API}/videos?${params}`, accessToken, {}, fetcher);
+    await expectOk(res, "videos.list");
+    const data = (await res.json()) as { items?: ApiItem[] };
     for (const it of data.items ?? []) {
-      if (!it.id) continue
-      const uploadStatus = it.status?.uploadStatus ?? null
+      if (!it.id) continue;
+      const uploadStatus = it.status?.uploadStatus ?? null;
       out.set(it.id, {
         videoId: it.id,
         durationSeconds: parseIsoDuration(it.contentDetails?.duration),
@@ -78,27 +78,36 @@ export async function fetchVideoMeta(
         uploadStatus,
         alive: !(uploadStatus && DEAD_UPLOAD.test(uploadStatus)),
         fetchedAt: now,
-      })
+      });
     }
     for (const id of chunk) {
       if (!out.has(id)) {
-        out.set(id, { videoId: id, durationSeconds: null, embedWidth: null, embedHeight: null, privacy: null, uploadStatus: null, alive: false, fetchedAt: now })
+        out.set(id, {
+          videoId: id,
+          durationSeconds: null,
+          embedWidth: null,
+          embedHeight: null,
+          privacy: null,
+          uploadStatus: null,
+          alive: false,
+          fetchedAt: now,
+        });
       }
     }
   }
-  return out
+  return out;
 }
 
 type Row = {
-  video_id: string
-  duration_seconds: number | null
-  embed_width: number | null
-  embed_height: number | null
-  privacy: string | null
-  upload_status: string | null
-  alive: number
-  fetched_at: number
-}
+  video_id: string;
+  duration_seconds: number | null;
+  embed_width: number | null;
+  embed_height: number | null;
+  privacy: string | null;
+  upload_status: string | null;
+  alive: number;
+  fetched_at: number;
+};
 
 const fromRow = (r: Row): VideoMeta => ({
   videoId: r.video_id,
@@ -109,26 +118,29 @@ const fromRow = (r: Row): VideoMeta => ({
   uploadStatus: r.upload_status,
   alive: Number(r.alive) === 1,
   fetchedAt: Number(r.fetched_at),
-})
+});
 
 /** Cached rows for `videoIds` (any age). */
-export async function readCachedVideoMeta(env: Env, videoIds: string[]): Promise<Map<string, VideoMeta>> {
-  const out = new Map<string, VideoMeta>()
-  const ids = [...new Set(videoIds)]
-  const db = dbOf(env)
+export async function readCachedVideoMeta(
+  env: Env,
+  videoIds: string[],
+): Promise<Map<string, VideoMeta>> {
+  const out = new Map<string, VideoMeta>();
+  const ids = [...new Set(videoIds)];
+  const db = dbOf(env);
   for (let i = 0; i < ids.length; i += 90) {
-    const chunk = ids.slice(i, i + 90)
+    const chunk = ids.slice(i, i + 90);
     const res = await db
-      .prepare(`SELECT * FROM video_meta WHERE video_id IN (${chunk.map(() => '?').join(',')})`)
+      .prepare(`SELECT * FROM video_meta WHERE video_id IN (${chunk.map(() => "?").join(",")})`)
       .bind(...chunk)
-      .all<Row>()
-    for (const r of res.results) out.set(r.video_id, fromRow(r))
+      .all<Row>();
+    for (const r of res.results) out.set(r.video_id, fromRow(r));
   }
-  return out
+  return out;
 }
 
 export async function saveVideoMeta(env: Env, metas: Iterable<VideoMeta>): Promise<void> {
-  const db = dbOf(env)
+  const db = dbOf(env);
   const stmts = [...metas].map((m) =>
     db
       .prepare(
@@ -138,15 +150,24 @@ export async function saveVideoMeta(env: Env, metas: Iterable<VideoMeta>): Promi
            embed_height = excluded.embed_height, privacy = excluded.privacy, upload_status = excluded.upload_status,
            alive = excluded.alive, fetched_at = excluded.fetched_at`,
       )
-      .bind(m.videoId, m.durationSeconds, m.embedWidth, m.embedHeight, m.privacy, m.uploadStatus, m.alive ? 1 : 0, m.fetchedAt),
-  )
-  await batchChunked(db, stmts)
+      .bind(
+        m.videoId,
+        m.durationSeconds,
+        m.embedWidth,
+        m.embedHeight,
+        m.privacy,
+        m.uploadStatus,
+        m.alive ? 1 : 0,
+        m.fetchedAt,
+      ),
+  );
+  await batchChunked(db, stmts);
 }
 
 /**
  * Meta for every id: from the cache when younger than `maxAgeSeconds`,
  * otherwise from the API (and written back). `maxAgeSeconds: 0` forces a
- * fresh read — the liveness check wants that. Dead entries are re-read after
+ * fresh read - the liveness check wants that. Dead entries are re-read after
  * a day even under the default age, so a video that was only briefly
  * unavailable is not written off for a month.
  */
@@ -156,22 +177,22 @@ export async function getVideoMeta(
   accessToken: string,
   opts: { maxAgeSeconds?: number; fetcher?: typeof fetch; now?: number } = {},
 ): Promise<Map<string, VideoMeta>> {
-  const now = opts.now ?? Math.floor(Date.now() / 1000)
-  const maxAge = opts.maxAgeSeconds ?? VIDEO_META_MAX_AGE_SECONDS
-  const ids = [...new Set(videoIds.filter(Boolean))]
-  const cached = maxAge > 0 ? await readCachedVideoMeta(env, ids) : new Map<string, VideoMeta>()
-  const out = new Map<string, VideoMeta>()
-  const stale: string[] = []
+  const now = opts.now ?? Math.floor(Date.now() / 1000);
+  const maxAge = opts.maxAgeSeconds ?? VIDEO_META_MAX_AGE_SECONDS;
+  const ids = [...new Set(videoIds.filter(Boolean))];
+  const cached = maxAge > 0 ? await readCachedVideoMeta(env, ids) : new Map<string, VideoMeta>();
+  const out = new Map<string, VideoMeta>();
+  const stale: string[] = [];
   for (const id of ids) {
-    const c = cached.get(id)
-    const age = c ? now - c.fetchedAt : Infinity
-    if (c && age < maxAge && (c.alive || age < 24 * 60 * 60)) out.set(id, c)
-    else stale.push(id)
+    const c = cached.get(id);
+    const age = c ? now - c.fetchedAt : Infinity;
+    if (c && age < maxAge && (c.alive || age < 24 * 60 * 60)) out.set(id, c);
+    else stale.push(id);
   }
   if (stale.length > 0) {
-    const fetched = await fetchVideoMeta(stale, accessToken, opts.fetcher, now)
-    await saveVideoMeta(env, fetched.values())
-    for (const [id, m] of fetched) out.set(id, m)
+    const fetched = await fetchVideoMeta(stale, accessToken, opts.fetcher, now);
+    await saveVideoMeta(env, fetched.values());
+    for (const [id, m] of fetched) out.set(id, m);
   }
-  return out
+  return out;
 }

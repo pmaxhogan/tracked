@@ -1,6 +1,6 @@
-import type { Env } from '../types'
-import { dbOf } from './db'
-import type { TableDef } from './table-query'
+import type { Env } from "../types";
+import { dbOf } from "./db";
+import type { TableDef } from "./table-query";
 
 /**
  * The DJs and Playlists pages' table (GET /ui/api/djs): one row per
@@ -23,72 +23,72 @@ import type { TableDef } from './table-query'
  */
 
 type DjDbRow = {
-  slug: string
-  source_url: string
-  added_at: number
-  position: number
-  artist_name: string | null
-  playlist_id: string | null
-  last_run_at: number | null
-  last_error: string | null
-  last_added: number | null
-  stop_reason: string | null
-  stop_runs: number | null
-  stop_since: number | null
-  sets: number
-  processed: number
-  pending: number
-  abandoned: number
-  videos: number
-  mkvid: number
-  last_discovered_at: number | null
-}
+  slug: string;
+  source_url: string;
+  added_at: number;
+  position: number;
+  artist_name: string | null;
+  playlist_id: string | null;
+  last_run_at: number | null;
+  last_error: string | null;
+  last_added: number | null;
+  stop_reason: string | null;
+  stop_runs: number | null;
+  stop_since: number | null;
+  sets: number;
+  processed: number;
+  pending: number;
+  abandoned: number;
+  videos: number;
+  mkvid: number;
+  last_discovered_at: number | null;
+};
 
 export type DjTableRow = {
-  slug: string
-  name: string
-  artistName: string | null
-  sourceUrl: string
+  slug: string;
+  name: string;
+  artistName: string | null;
+  sourceUrl: string;
   /** Unix ms. */
-  addedAt: number
-  sets: number
-  processed: number
-  pending: number
-  abandoned: number
-  videos: number
-  mkvid: number
-  playlistId: string | null
-  playlistUrl: string | null
+  addedAt: number;
+  sets: number;
+  processed: number;
+  pending: number;
+  abandoned: number;
+  videos: number;
+  mkvid: number;
+  playlistId: string | null;
+  playlistUrl: string | null;
   /** Unix ms, null when the DJ was never synced. */
-  lastRunAt: number | null
-  lastError: string | null
-  hasError: boolean
+  lastRunAt: number | null;
+  lastError: string | null;
+  hasError: boolean;
   /**
    * The last run was stopped early by the pool or a pause and is not an error
    * (lib/sync.ts StopLevel): the scheduler tries again by itself.
    */
-  waiting: boolean
+  waiting: boolean;
   /** Why the last run stopped early, null when it did not. */
-  stopReason: string | null
+  stopReason: string | null;
   /** How many runs in a row were stopped, and since when (unix ms). */
-  stopRuns: number
-  stopSince: number | null
+  stopRuns: number;
+  stopSince: number | null;
   /** Videos the last run added (lastRunStats.videoIdsAdded). */
-  lastAdded: number | null
+  lastAdded: number | null;
   /** Unix ms of the newest set discovery. */
-  lastDiscoveredAt: number | null
-}
+  lastDiscoveredAt: number | null;
+};
 
 const AGG = `(SELECT slug, COUNT(*) AS sets, SUM(processed) AS processed,
     SUM(CASE WHEN processed = 0 THEN 1 ELSE 0 END) AS pending, SUM(abandoned) AS abandoned,
     SUM(CASE WHEN processed = 1 AND video_id IS NOT NULL THEN 1 ELSE 0 END) AS videos,
     SUM(CASE WHEN processed = 1 AND video_id IS NOT NULL AND video_source = 'mkvid' THEN 1 ELSE 0 END) AS mkvid,
     MAX(discovered_at) AS last_discovered_at
-  FROM tracklists GROUP BY slug)`
+  FROM tracklists GROUP BY slug)`;
 
-const HAS_ERROR = `(y.last_error IS NOT NULL AND y.last_error != '')`
-const STOP_REASON = `json_extract(y.last_run_stats, '$.stop.reason')`
-const WAITING = `(${STOP_REASON} IS NOT NULL AND NOT ${HAS_ERROR})`
+const HAS_ERROR = `(y.last_error IS NOT NULL AND y.last_error != '')`;
+const STOP_REASON = `json_extract(y.last_run_stats, '$.stop.reason')`;
+const WAITING = `(${STOP_REASON} IS NOT NULL AND NOT ${HAS_ERROR})`;
 
 export const DJS_TABLE: TableDef<DjDbRow, DjTableRow> = {
   from: `subscriptions s LEFT JOIN sub_sync y ON y.slug = s.slug LEFT JOIN ${AGG} t ON t.slug = s.slug`,
@@ -100,34 +100,34 @@ export const DJS_TABLE: TableDef<DjDbRow, DjTableRow> = {
     COALESCE(t.sets, 0) AS sets, COALESCE(t.processed, 0) AS processed, COALESCE(t.pending, 0) AS pending,
     COALESCE(t.abandoned, 0) AS abandoned, COALESCE(t.videos, 0) AS videos, COALESCE(t.mkvid, 0) AS mkvid,
     t.last_discovered_at AS last_discovered_at`,
-  primaryKey: 'slug',
-  defaultSort: 'name',
+  primaryKey: "slug",
+  defaultSort: "name",
   columns: {
-    slug: { sql: 's.slug', type: 'text', searchable: true },
-    name: { sql: 'COALESCE(y.artist_name, s.slug)', type: 'text', searchable: true },
-    position: { sql: 's.position', type: 'number' },
-    addedAt: { sql: 's.added_at', type: 'datetime', storage: 's' },
-    sets: { sql: 'COALESCE(t.sets, 0)', type: 'number' },
-    processed: { sql: 'COALESCE(t.processed, 0)', type: 'number' },
-    pending: { sql: 'COALESCE(t.pending, 0)', type: 'number' },
-    abandoned: { sql: 'COALESCE(t.abandoned, 0)', type: 'number' },
-    videos: { sql: 'COALESCE(t.videos, 0)', type: 'number' },
-    mkvid: { sql: 'COALESCE(t.mkvid, 0)', type: 'number' },
-    lastRunAt: { sql: 'y.last_run_at', type: 'datetime', storage: 's' },
-    lastDiscoveredAt: { sql: 't.last_discovered_at', type: 'datetime', storage: 's' },
-    hasError: { sql: HAS_ERROR, type: 'bool' },
-    waiting: { sql: WAITING, type: 'bool' },
-    stopReason: { sql: STOP_REASON, type: 'text', searchable: true },
-    lastError: { sql: 'y.last_error', type: 'text', searchable: true },
-    hasPlaylist: { sql: '(y.playlist_id IS NOT NULL)', type: 'bool' },
-    playlistId: { sql: 'y.playlist_id', type: 'text' },
-    lastAdded: { sql: "json_extract(y.last_run_stats, '$.videoIdsAdded')", type: 'number' },
+    slug: { sql: "s.slug", type: "text", searchable: true },
+    name: { sql: "COALESCE(y.artist_name, s.slug)", type: "text", searchable: true },
+    position: { sql: "s.position", type: "number" },
+    addedAt: { sql: "s.added_at", type: "datetime", storage: "s" },
+    sets: { sql: "COALESCE(t.sets, 0)", type: "number" },
+    processed: { sql: "COALESCE(t.processed, 0)", type: "number" },
+    pending: { sql: "COALESCE(t.pending, 0)", type: "number" },
+    abandoned: { sql: "COALESCE(t.abandoned, 0)", type: "number" },
+    videos: { sql: "COALESCE(t.videos, 0)", type: "number" },
+    mkvid: { sql: "COALESCE(t.mkvid, 0)", type: "number" },
+    lastRunAt: { sql: "y.last_run_at", type: "datetime", storage: "s" },
+    lastDiscoveredAt: { sql: "t.last_discovered_at", type: "datetime", storage: "s" },
+    hasError: { sql: HAS_ERROR, type: "bool" },
+    waiting: { sql: WAITING, type: "bool" },
+    stopReason: { sql: STOP_REASON, type: "text", searchable: true },
+    lastError: { sql: "y.last_error", type: "text", searchable: true },
+    hasPlaylist: { sql: "(y.playlist_id IS NOT NULL)", type: "bool" },
+    playlistId: { sql: "y.playlist_id", type: "text" },
+    lastAdded: { sql: "json_extract(y.last_run_stats, '$.videoIdsAdded')", type: "number" },
   },
   mapRow: (r) => djTableRow(r),
-}
+};
 
 export function djTableRow(r: DjDbRow): DjTableRow {
-  const lastRun = r.last_run_at == null ? null : Number(r.last_run_at)
+  const lastRun = r.last_run_at == null ? null : Number(r.last_run_at);
   return {
     slug: r.slug,
     name: r.artist_name || r.slug,
@@ -141,7 +141,9 @@ export function djTableRow(r: DjDbRow): DjTableRow {
     videos: Number(r.videos) || 0,
     mkvid: Number(r.mkvid) || 0,
     playlistId: r.playlist_id,
-    playlistUrl: r.playlist_id ? `https://www.youtube.com/playlist?list=${encodeURIComponent(r.playlist_id)}` : null,
+    playlistUrl: r.playlist_id
+      ? `https://www.youtube.com/playlist?list=${encodeURIComponent(r.playlist_id)}`
+      : null,
     lastRunAt: lastRun == null ? null : lastRun * 1000,
     lastError: r.last_error || null,
     hasError: !!r.last_error,
@@ -151,10 +153,18 @@ export function djTableRow(r: DjDbRow): DjTableRow {
     stopSince: r.stop_since == null ? null : Number(r.stop_since) * 1000,
     lastAdded: r.last_added == null ? null : Number(r.last_added),
     lastDiscoveredAt: r.last_discovered_at == null ? null : Number(r.last_discovered_at) * 1000,
-  }
+  };
 }
 
-export type DjCounts = { total: number; errors: number; waiting: number; pending: number; neverSynced: number; noPlaylist: number; mkvid: number }
+export type DjCounts = {
+  total: number;
+  errors: number;
+  waiting: number;
+  pending: number;
+  neverSynced: number;
+  noPlaylist: number;
+  mkvid: number;
+};
 
 /** Totals for the DJs / Playlists chips (over every subscription, not the filtered page). */
 export async function djCounts(env: Env): Promise<DjCounts> {
@@ -169,7 +179,15 @@ export async function djCounts(env: Env): Promise<DjCounts> {
          SUM(CASE WHEN COALESCE(t.mkvid, 0) > 0 THEN 1 ELSE 0 END) AS mkvid
        FROM subscriptions s LEFT JOIN sub_sync y ON y.slug = s.slug LEFT JOIN ${AGG} t ON t.slug = s.slug`,
     )
-    .first<{ total: number; errors: number | null; waiting: number | null; pending: number | null; never_synced: number | null; no_playlist: number | null; mkvid: number | null }>()
+    .first<{
+      total: number;
+      errors: number | null;
+      waiting: number | null;
+      pending: number | null;
+      never_synced: number | null;
+      no_playlist: number | null;
+      mkvid: number | null;
+    }>();
   return {
     total: Number(r?.total ?? 0),
     errors: Number(r?.errors ?? 0),
@@ -178,7 +196,7 @@ export async function djCounts(env: Env): Promise<DjCounts> {
     neverSynced: Number(r?.never_synced ?? 0),
     noPlaylist: Number(r?.no_playlist ?? 0),
     mkvid: Number(r?.mkvid ?? 0),
-  }
+  };
 }
 
 /**
@@ -190,34 +208,34 @@ export async function djCounts(env: Env): Promise<DjCounts> {
  */
 export type DjSetFacts = {
   /** The sync has a tracklists row for it (false: only a page fetch recorded it). */
-  tracked: boolean
-  processed: boolean
-  abandoned: boolean
-  video: 'page' | 'mkvid' | 'none' | null
-  videoId: string | null
-  trackCount: number | null
-  idedCount: number | null
+  tracked: boolean;
+  processed: boolean;
+  abandoned: boolean;
+  video: "page" | "mkvid" | "none" | null;
+  videoId: string | null;
+  trackCount: number | null;
+  idedCount: number | null;
   /** Unix ms of the page fetch the counts come from. */
-  factsAt: number | null
-}
+  factsAt: number | null;
+};
 
 type FactsRow = {
-  url: string
-  processed: number | null
-  abandoned: number | null
-  video_known: number | null
-  video_id: string | null
-  video_source: string | null
-  page_video: string | null
-  track_count: number | null
-  ided_count: number | null
-  fetched_at: number | null
-  has_facts: number
-}
+  url: string;
+  processed: number | null;
+  abandoned: number | null;
+  video_known: number | null;
+  video_id: string | null;
+  video_source: string | null;
+  page_video: string | null;
+  track_count: number | null;
+  ided_count: number | null;
+  fetched_at: number | null;
+  has_facts: number;
+};
 
 /** Facts for every set of `slug` D1 has a tracklist row or a page-facts row for, by set URL. */
 export async function djSetFacts(env: Env, slug: string): Promise<Map<string, DjSetFacts>> {
-  const db = dbOf(env)
+  const db = dbOf(env);
   const [a, b] = await db.batch<FactsRow>([
     db
       .prepare(
@@ -236,20 +254,20 @@ export async function djSetFacts(env: Env, slug: string): Promise<Map<string, Dj
          FROM set_media_facts f WHERE f.slug = ?`,
       )
       .bind(slug),
-  ])
-  const out = new Map<string, DjSetFacts>()
+  ]);
+  const out = new Map<string, DjSetFacts>();
   for (const r of [...(a?.results ?? []), ...(b?.results ?? [])]) {
-    if (out.has(r.url)) continue
-    let video: DjSetFacts['video'] = null
-    let videoId: string | null = null
+    if (out.has(r.url)) continue;
+    let video: DjSetFacts["video"] = null;
+    let videoId: string | null = null;
     if (r.video_id) {
-      video = r.video_source === 'mkvid' ? 'mkvid' : 'page'
-      videoId = r.video_id
+      video = r.video_source === "mkvid" ? "mkvid" : "page";
+      videoId = r.video_id;
     } else if (r.page_video) {
-      video = 'page'
-      videoId = r.page_video
+      video = "page";
+      videoId = r.page_video;
     } else if (r.video_known || r.has_facts) {
-      video = 'none'
+      video = "none";
     }
     out.set(r.url, {
       tracked: r.processed != null,
@@ -260,7 +278,7 @@ export async function djSetFacts(env: Env, slug: string): Promise<Map<string, Dj
       trackCount: r.track_count == null ? null : Number(r.track_count),
       idedCount: r.ided_count == null ? null : Number(r.ided_count),
       factsAt: r.has_facts && r.fetched_at != null ? Number(r.fetched_at) * 1000 : null,
-    })
+    });
   }
-  return out
+  return out;
 }

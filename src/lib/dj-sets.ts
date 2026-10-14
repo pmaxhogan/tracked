@@ -1,10 +1,10 @@
-import type { Env } from '../types'
-import { crawlDjIndex } from './dj-index'
-import { fetchOptsFromEnv } from './upstream1001'
-import { loadSubState } from './sync'
-import { loadDjBackfill } from './sync-store'
-import { TTL, getJson, putJson } from './cache'
-import { errorFields, type Logger } from './log'
+import type { Env } from "../types";
+import { crawlDjIndex } from "./dj-index";
+import { fetchOptsFromEnv } from "./upstream1001";
+import { loadSubState } from "./sync";
+import { loadDjBackfill } from "./sync-store";
+import { TTL, getJson, putJson } from "./cache";
+import { errorFields, type Logger } from "./log";
 
 /**
  * The set list behind the DJ profile page (`/ui/dj/<slug>`): every
@@ -12,83 +12,83 @@ import { errorFields, type Logger } from './log'
  * derived without opening each set page (title + date live in the URL slug).
  *
  * Per-set detail (tracks, Apple/YouTube/SoundCloud links, ID'd fraction) is
- * deliberately NOT resolved here — that would mean scraping every set page on
+ * deliberately NOT resolved here - that would mean scraping every set page on
  * a profile view, which is exactly the high-volume pattern the README warns
  * against. The page fetches one set on card-expand via /api/tracklist instead,
  * sharing the 2 h tracklist cache with every other consumer.
  */
 
-/** Cache-key version — bump when DjSets' shape or derivation changes. */
-const CV = 2
-const cacheKey = (slug: string) => `djsets:v${CV}:${slug}`
+/** Cache-key version - bump when DjSets' shape or derivation changes. */
+const CV = 2;
+const cacheKey = (slug: string) => `djsets:v${CV}:${slug}`;
 
 export type DjSetSummary = {
   /** Absolute 1001tracklists tracklist URL. */
-  url: string
-  /** 1001tracklists' short id for the tracklist (`/tracklist/<id>/…`). */
-  tlSlug: string | null
-  /** Prettified from the URL slug: "lilly-palmer-tomorrowland-2024-07-21" → "Lilly Palmer Tomorrowland". */
-  title: string
+  url: string;
+  /** 1001tracklists' short id for the tracklist (`/tracklist/<id>/...`). */
+  tlSlug: string | null;
+  /** Prettified from the URL slug: "lilly-palmer-tomorrowland-2024-07-21" -> "Lilly Palmer Tomorrowland". */
+  title: string;
   /** ISO date (YYYY-MM-DD) when the URL slug carries one, else null. */
-  date: string | null
-}
+  date: string | null;
+};
 
 export type DjSets = {
-  slug: string
-  artistName: string | null
-  sets: DjSetSummary[]
+  slug: string;
+  artistName: string | null;
+  sets: DjSetSummary[];
   /** Where the list came from: a fresh crawl, or sync state after a failed crawl. */
-  source: 'crawl' | 'state'
-  crawledAt: number
-  pagesWalked: number
-  stopReason: string
+  source: "crawl" | "state";
+  crawledAt: number;
+  pagesWalked: number;
+  stopReason: string;
   /**
    * False while older sets may still be missing: the daily cron's backfill
    * has not yet reached the end of this DJ's 1001tracklists list. The page
    * says so instead of presenting `sets.length` as the DJ's total.
    */
-  listingComplete: boolean
-}
+  listingComplete: boolean;
+};
 
 /**
  * Derive display metadata from a tracklist URL. 1001tl slugs are
- * `<artist-and-event-words>-<YYYY-MM-DD>.html` (date optional — festival sets
+ * `<artist-and-event-words>-<YYYY-MM-DD>.html` (date optional - festival sets
  * occasionally omit it). Pure; exported for tests.
  */
 export function setMetaFromUrl(url: string): DjSetSummary {
-  const m = url.match(/\/tracklist\/([^/]+)\/([^/]+?)\.html?$/i)
-  const tlSlug = m?.[1] ?? null
-  let words = (m?.[2] ?? '').replace(/[-_]+/g, ' ').trim()
-  let date: string | null = null
-  const dm = words.match(/^(.*?)[\s]*(\d{4}) (\d{2}) (\d{2})$/)
+  const m = url.match(/\/tracklist\/([^/]+)\/([^/]+?)\.html?$/i);
+  const tlSlug = m?.[1] ?? null;
+  let words = (m?.[2] ?? "").replace(/[-_]+/g, " ").trim();
+  let date: string | null = null;
+  const dm = words.match(/^(.*?)[\s]*(\d{4}) (\d{2}) (\d{2})$/);
   if (dm) {
-    const [, rest, y, mo, d] = dm
+    const [, rest, y, mo, d] = dm;
     // Sanity-bound the month/day so "essential mix 2001 40 12" doesn't parse.
     if (Number(mo) >= 1 && Number(mo) <= 12 && Number(d) >= 1 && Number(d) <= 31) {
-      date = `${y}-${mo}-${d}`
-      words = (rest ?? '').trim()
+      date = `${y}-${mo}-${d}`;
+      words = (rest ?? "").trim();
     }
   }
   const title = words
-    .split(' ')
+    .split(" ")
     .filter(Boolean)
     .map((w) => (w.length > 2 ? w[0]!.toUpperCase() + w.slice(1) : w.toUpperCase()))
-    .join(' ')
-  return { url, tlSlug, title: title || url, date }
+    .join(" ");
+  return { url, tlSlug, title: title || url, date };
 }
 
 /** A cached list younger than this is served as is. */
-const FRESH_SECONDS = TTL.DJ_SETS
+const FRESH_SECONDS = TTL.DJ_SETS;
 /** How long KV keeps a list at all: past FRESH_SECONDS it is served stale while a background crawl replaces it. */
-const KEEP_SECONDS = 30 * 24 * 3600
+const KEEP_SECONDS = 30 * 24 * 3600;
 /** One background refresh per DJ at a time (KV's minimum TTL). */
-const REFRESH_LOCK_SECONDS = 60
-const lockKey = (slug: string) => `djsets:refreshing:${slug}`
+const REFRESH_LOCK_SECONDS = 60;
+const lockKey = (slug: string) => `djsets:refreshing:${slug}`;
 
 /**
  * Full set list for one DJ, served from KV when fresh. On miss (or
- * `refresh: true`) we walk the DJ's 1001tracklists index — same crawl the
- * sync uses — and merge in `state.discoveredTracklistUrls` from the sync
+ * `refresh: true`) we walk the DJ's 1001tracklists index - same crawl the
+ * sync uses - and merge in `state.discoveredTracklistUrls` from the sync
  * state, which can hold sets the index no longer surfaces (or that a deeper
  * past crawl found). If the crawl comes back empty (IP block, CF shell),
  * the sync state alone still renders a useful page.
@@ -108,29 +108,29 @@ export async function getDjSets(
   slug: string,
   opts: { refresh?: boolean; log: Logger; defer?: (p: Promise<unknown>) => void; nowSec?: number },
 ): Promise<DjSets> {
-  const { log } = opts
-  const key = cacheKey(slug)
-  const nowSec = opts.nowSec ?? Math.floor(Date.now() / 1000)
-  let stale: DjSets | undefined
+  const { log } = opts;
+  const key = cacheKey(slug);
+  const nowSec = opts.nowSec ?? Math.floor(Date.now() / 1000);
+  let stale: DjSets | undefined;
   if (!opts.refresh) {
-    const cached = await getJson<DjSets>(env.CACHE, key)
+    const cached = await getJson<DjSets>(env.CACHE, key);
     if (cached && nowSec - cached.crawledAt < FRESH_SECONDS) {
-      log.counters.cacheHits++
-      log.info('cache.hit', { key, setCount: cached.sets.length })
-      return cached
+      log.counters.cacheHits++;
+      log.info("cache.hit", { key, setCount: cached.sets.length });
+      return cached;
     }
-    log.counters.cacheMisses++
-    log.info('cache.miss', { key, stale: !!cached })
-    stale = cached
+    log.counters.cacheMisses++;
+    log.info("cache.miss", { key, stale: !!cached });
+    stale = cached;
   }
 
   // Known sets first, so the crawl only walks down to them: a profile view
   // for a DJ already in the database costs page 1 and no scroll request.
   // Deeper history is the scheduler's paced backfill, never a page view's.
-  const [state, backfill] = await Promise.all([loadSubState(env, slug), loadDjBackfill(env, slug)])
+  const [state, backfill] = await Promise.all([loadSubState(env, slug), loadDjBackfill(env, slug)]);
 
   if (!opts.refresh && opts.defer) {
-    const known = state?.discoveredTracklistUrls ?? []
+    const known = state?.discoveredTracklistUrls ?? [];
     const now: DjSets | null = stale
       ? stale
       : known.length > 0
@@ -138,27 +138,31 @@ export async function getDjSets(
             slug,
             artistName: state?.artistName ?? null,
             sets: known.map(setMetaFromUrl),
-            source: 'state',
+            source: "state",
             crawledAt: nowSec,
             pagesWalked: 0,
-            stopReason: 'refreshing',
+            stopReason: "refreshing",
             listingComplete: backfill?.done === true,
           }
-        : null
+        : null;
     if (now) {
       if (!(await env.CACHE.get(lockKey(slug)))) {
-        await env.CACHE.put(lockKey(slug), '1', { expirationTtl: REFRESH_LOCK_SECONDS })
+        await env.CACHE.put(lockKey(slug), "1", { expirationTtl: REFRESH_LOCK_SECONDS });
         opts.defer(
           crawlAndStore(env, slug, log, state, backfill).catch((e) =>
-            log.warn('djsets.background_refresh_failed', { slug, ...errorFields(e) }),
+            log.warn("djsets.background_refresh_failed", { slug, ...errorFields(e) }),
           ),
-        )
-        log.info('djsets.served_stale', { slug, from: stale ? 'cache' : 'state', setCount: now.sets.length })
+        );
+        log.info("djsets.served_stale", {
+          slug,
+          from: stale ? "cache" : "state",
+          setCount: now.sets.length,
+        });
       }
-      return now
+      return now;
     }
   }
-  return crawlAndStore(env, slug, log, state, backfill)
+  return crawlAndStore(env, slug, log, state, backfill);
 }
 
 async function crawlAndStore(
@@ -168,22 +172,22 @@ async function crawlAndStore(
   state: Awaited<ReturnType<typeof loadSubState>>,
   backfill: Awaited<ReturnType<typeof loadDjBackfill>>,
 ): Promise<DjSets> {
-  const key = cacheKey(slug)
+  const key = cacheKey(slug);
   const crawl = await crawlDjIndex(slug, {
     // The owner is waiting on the page, but it is not the phone button: `new`,
     // so it never eats the phone's reserved share in tlpool.
-    ...fetchOptsFromEnv(env, log, { priority: 'new' }),
+    ...fetchOptsFromEnv(env, log, { priority: "new" }),
     deadlineMs: Date.now() + 20_000,
     maxPages: 2,
     knownUrls: new Set(state?.discoveredTracklistUrls ?? []),
-  })
+  });
 
-  const seen = new Set(crawl.tracklistUrls)
-  const urls = [...crawl.tracklistUrls]
+  const seen = new Set(crawl.tracklistUrls);
+  const urls = [...crawl.tracklistUrls];
   for (const u of state?.discoveredTracklistUrls ?? []) {
     if (!seen.has(u)) {
-      seen.add(u)
-      urls.push(u)
+      seen.add(u);
+      urls.push(u);
     }
   }
 
@@ -191,20 +195,25 @@ async function crawlAndStore(
     slug,
     artistName: crawl.artistName ?? state?.artistName ?? null,
     sets: urls.map(setMetaFromUrl),
-    source: crawl.tracklistUrls.length > 0 ? 'crawl' : 'state',
+    source: crawl.tracklistUrls.length > 0 ? "crawl" : "state",
     crawledAt: Math.floor(Date.now() / 1000),
     pagesWalked: crawl.pagesWalked,
     stopReason: crawl.stopReason,
-    listingComplete: crawl.stopReason === 'end' || backfill?.done === true,
-  }
+    listingComplete: crawl.stopReason === "end" || backfill?.done === true,
+  };
 
-  // Don't cache a failed crawl that the sync state couldn't cover either —
+  // Don't cache a failed crawl that the sync state couldn't cover either -
   // the next view should retry instead of pinning an empty page for the TTL.
   if (result.sets.length > 0) {
-    await putJson(env.CACHE, key, result, KEEP_SECONDS)
-    log.info('cache.put', { key, setCount: result.sets.length, ttlSeconds: KEEP_SECONDS, freshSeconds: FRESH_SECONDS })
+    await putJson(env.CACHE, key, result, KEEP_SECONDS);
+    log.info("cache.put", {
+      key,
+      setCount: result.sets.length,
+      ttlSeconds: KEEP_SECONDS,
+      freshSeconds: FRESH_SECONDS,
+    });
   } else {
-    log.warn('djsets.empty_not_cached', { slug, stopReason: crawl.stopReason })
+    log.warn("djsets.empty_not_cached", { slug, stopReason: crawl.stopReason });
   }
-  return result
+  return result;
 }

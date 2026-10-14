@@ -5,9 +5,9 @@
 // sorted, filtered, searched and paged on the server; the source chips and the
 // DJ select are table filters over all rows. The same answer carries the
 // status counts, settings, deletes today, held playlists and the DJ list.
-import { shell } from '../shell'
-import { tipAttr, tipTerm } from '../tip'
-import { REASON_LABELS } from '../../lib/playlist-hygiene'
+import { shell } from "../shell";
+import { tipAttr, tipTerm } from "../tip";
+import { REASON_LABELS } from "../../lib/playlist-hygiene";
 
 const BODY = /* html */ `
   <div id="bar" class="tk-row rm-bar"></div>
@@ -18,7 +18,7 @@ const BODY = /* html */ `
     <div class="field rm-dj"><label for="dj">DJ</label><select id="dj"><option value="">All DJs</option></select></div>
   </div>
   <div id="rm-table"></div>
-`
+`;
 
 const CSS = /* css */ `
   .rm-bar { flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
@@ -31,7 +31,7 @@ const CSS = /* css */ `
   @media (max-width: 699px) { .rm-stack { align-items: flex-end; text-align: right; } }
   .rm-detail { display: block; color: var(--muted); font-size: var(--fs-xs); }
   #error:empty { display: none; }
-`
+`;
 
 // The reason labels (the Why column) are known when the page is built, so the
 // first paint already has them; the API sends the same map as reasonLabels.
@@ -39,7 +39,7 @@ const JS = (labels: Record<string, string>) => /* js */ `
 (() => {
   const $ = TK.$, esc = TK.esc;
   const $bar = $('bar'), $holds = $('holds'), $deadHolds = $('dead-holds'), $err = $('error'), $dj = $('dj');
-  const LABELS = ${JSON.stringify(labels).replace(/</g, '\\u003c')};
+  const LABELS = ${JSON.stringify(labels).replace(/</g, "\\u003c")};
 
   const STATUS_TIPS = {
     would_remove: 'Not removed (yet): a video the sweep would remove in a dry run, or a deleted or private video waiting out its days. Nothing was deleted.',
@@ -70,7 +70,7 @@ const JS = (labels: Record<string, string>) => /* js */ `
   const isoOf = (s) => { try { return new Date(s * 1000).toISOString(); } catch (e) { return ''; } };
   const ext = (href, text, tip) => { const h = TK.safeHref(href); return h ? '<a href="' + esc(h) + '" target="_blank" rel="noreferrer noopener"' + TK.tip(tip) + '>' + esc(text) + '</a>' : esc(text); };
   const badge = (cls, text, tip) => '<span class="badge ' + cls + '"' + TK.tip(tip) + '>' + esc(text) + '</span>';
-  const nil = '<span class="tkt-nil">–</span>';
+  const nil = '<span class="tkt-nil">-</span>';
   function fail(res, fallback) { $err.textContent = TK.errText(res, fallback); }
 
   // Old links (?source=sweep&dj=x) become the table's chip and DJ filter.
@@ -203,14 +203,14 @@ const JS = (labels: Record<string, string>) => /* js */ `
     }));
   }
 })();
-`
+`;
 
 export const REMOVED_PAGE_HTML = shell({
-  nav: 'removed',
-  title: 'Removed videos',
-  description: `Videos taken out of the playlists, and ${tipTerm('videos found missing', 'Videos you removed from a playlist by hand, or that died on YouTube. The sync notes them and never adds them back.')} that the sync will not re-add.`,
-  actions: `<button type="button" id="btn-compare" class="btn"${tipAttr('Lists every playlist on YouTube now and compares it with what tracked added, to notice videos removed by hand. A playlist that lost too many videos is held for your approval.')}>Compare playlists now</button><button type="button" id="btn-sweep" class="btn"${tipAttr('Judges every video the sync added against the full-recording rule now. In a dry run it only reports; when live it removes the failures, within the daily limit.')}>Run sweep now</button>`,
+  nav: "removed",
+  title: "Removed videos",
+  description: `Videos taken out of the playlists, and ${tipTerm("videos found missing", "Videos you removed from a playlist by hand, or that died on YouTube. The sync notes them and never adds them back.")} that the sync will not re-add.`,
+  actions: `<button type="button" id="btn-compare" class="btn"${tipAttr("Lists every playlist on YouTube now and compares it with what tracked added, to notice videos removed by hand. A playlist that lost too many videos is held for your approval.")}>Compare playlists now</button><button type="button" id="btn-sweep" class="btn"${tipAttr("Judges every video the sync added against the full-recording rule now. In a dry run it only reports; when live it removes the failures, within the daily limit.")}>Run sweep now</button>`,
   body: BODY,
   css: CSS,
   js: JS(REASON_LABELS),
-})
+});
