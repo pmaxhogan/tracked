@@ -57,6 +57,7 @@ const CSS = /* css */ `
   .mk-cell-sub { display: block; color: var(--muted); font-size: var(--fs-xs); }
   .mk-cell-sub .why, .mk-cell-sub .flag { white-space: normal; }
   .mk-cell-sub .flag, .mk-err { color: var(--danger); }
+  .mk-cell-sub .retry, .mk-meta .retry { color: var(--warn); white-space: normal; }
   .mk-err { font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .tkt-table tr.mk-failed > td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
   .tk-tabbar .n { color: var(--subtle); font-weight: 500; margin-left: 4px; font-variant-numeric: tabular-nums; }
@@ -343,9 +344,11 @@ ${MKVID_STATE_JS}
     recording_removed: 'The recording is gone from its source, so no video can be made. Nothing to do.', recording_short: 'The recording ends before the tracklist does, so no video is made. Nothing to do.',
     has_recording: 'The set gained a real recording on 1001tracklists, so no render is needed.', duplicate: 'The same tracklist is listed under another URL, and that one has the video.',
     superseded: 'The set gained a real recording, or the video was replaced, so no render is needed.', banned: 'Never rendered. Unban it from its details.' };
-  // A waiting or running request keeps the error its last attempt ended with: say so, or it reads as the current state.
+  // A waiting or running request keeps the error its last attempt ended with: say so and when, or it
+  // reads as the current state (a 401 from a token incident days ago looked like uploads were broken).
+  function retrying(r) { return r.status === 'pending' || r.status === 'claimed'; }
   function errorLabel(r) {
-    return r.status === 'pending' || r.status === 'claimed' ? 'last attempt: ' + r.error : r.error;
+    return retrying(r) ? 'last attempt' + (r.updatedAt ? ' (' + rel(r.updatedAt) + ')' : '') + ': ' + r.error : r.error;
   }
   // A no-recording outcome comes with its own explanation (the durations, what the source answered).
   function statusTip(r) {
@@ -362,6 +365,8 @@ ${MKVID_STATE_JS}
     if (unconfirmed(r)) return '<span class="flag"' + TK.tip('mkvid said: ' + r.error) + '>' + esc(r.outcomeLine || r.error) + '</span>';
     if (noRecording(r)) return '<span' + TK.tip('mkvid said: ' + r.error) + '>' + esc(r.outcomeLine || r.error) + '</span>';
     if (r.status === 'superseded' || r.status === 'banned') return esc(r.error);
+    // Amber, not red: it is tried again by itself, nothing for the owner to do.
+    if (retrying(r)) return '<span class="retry">' + esc(errorLabel(r)) + '</span>';
     return '<span class="flag">' + esc(errorLabel(r)) + '</span>';
   }
   // The moves act on whole-queue positions, so they are offered only while the

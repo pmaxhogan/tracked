@@ -328,7 +328,9 @@ describe('mkvid page tables', () => {
     const q = get('q-body').innerHTML as string
     expect(q).toContain('waiting for IDs until')
     expect(q).toContain('>not verified</span>')
-    expect(q).toContain('<span class="flag">last attempt: yt-dlp exit 1</span>')
+    // Amber with its age: a waiting request's last error is retried by itself, not something to act on.
+    expect(q).toMatch(/<span class="retry">last attempt( \([^)]*\))?: yt-dlp exit 1<\/span>/)
+    expect(q).not.toContain('<span class="flag">last attempt')
     const chips = get('q-chips').innerHTML as string
     expect(chips).toMatch(/data-chip="all"[^>]*>All<span class="tkt-count">10</)
     expect(chips).toMatch(/data-chip="unverified"[^>]*>Not verified<span class="tkt-count">4</)
