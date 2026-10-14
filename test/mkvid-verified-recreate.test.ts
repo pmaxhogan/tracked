@@ -287,6 +287,27 @@ describe('claim: verified lists only, IDs wait 7 days', () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM mkvid_requests WHERE status IN ('claimed','done')").first()).toEqual({ n: 0 })
   })
 
+  it('mkvid refusing because a source budget is spent puts it back without an attempt, for the time it names', async () => {
+    const env = makeEnv()
+    const a = await queue(env, 'a')
+    for (let i = 0; i < MKVID_MAX_ATTEMPTS + 2; i++) {
+      expect((await claimMkvidRequest(env, log, ['primary'], 'scene'))!.id).toBe(a.id)
+      const r = await failMkvidRequest(env, { id: a.id, error: 'source_busy: hearthis downloads: 3 in the last hour; retry in 1200 s' }, log)
+      expect(r).toEqual({ status: 'pending', attempts: 0 })
+      const row = (await getMkvidRequest(env, a.id))!
+      expect(row).toMatchObject({ status: 'pending', attempts: 0, claimedAt: null })
+      expect(row.notBefore! - Math.floor(Date.now() / 1000)).toBeGreaterThanOrEqual(1190)
+      expect(row.notBefore! - Math.floor(Date.now() / 1000)).toBeLessThanOrEqual(1210)
+      await env.DB.prepare('UPDATE mkvid_requests SET not_before = NULL').run()
+    }
+    // Without a time it waits an hour.
+    await claimMkvidRequest(env, log, ['primary'], 'scene')
+    await failMkvidRequest(env, { id: a.id, error: 'source_busy: hearthis page fetches' }, log)
+    const row = (await getMkvidRequest(env, a.id))!
+    expect(row.notBefore! - Math.floor(Date.now() / 1000)).toBeGreaterThanOrEqual(3590)
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM mkvid_requests WHERE status IN ('claimed','done')").first()).toEqual({ n: 0 })
+  })
+
   it('the panel says why each waiting set waits', async () => {
     const env = makeEnv()
     await queue(env, 'unverified', { setDate: '2026-03-01', verified: false })

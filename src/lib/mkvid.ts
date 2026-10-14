@@ -1408,6 +1408,23 @@ export async function failMkvidRequest(env: Env, input: FailInput, log: Logger):
     log.warn('mkvid.refused_unverified', { id: req.id, slug: req.slug, setUrl: req.setUrl, error: input.error.slice(0, 200) })
     return { status: 'pending', attempts: Math.max(0, req.attempts - 1) }
   }
+  // mkvid refused before touching the source because its own budget for that
+  // source is spent (hearthis: page fetches and downloads per hour): back to
+  // pending without using an attempt, until the budget frees up. The error
+  // ends with "retry in <N> s" when mkvid knows when (default: an hour).
+  if (/^source_busy\b/.test(input.error)) {
+    const n = Number(input.error.match(/retry in (\d+) s\b/)?.[1])
+    const wait = Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 60), 6 * 3600) : 3600
+    await dbOf(env)
+      .prepare(
+        "UPDATE mkvid_requests SET status = 'pending', attempts = MAX(0, attempts - 1), claimed_at = NULL, not_before = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?",
+      )
+      .bind(now + wait, input.error.slice(0, 500), v(input.jobId), now, req.id)
+      .run()
+    await refundLatestClaim(env, req.id, now)
+    log.info('mkvid.refused_source_busy', { id: req.id, slug: req.slug, setUrl: req.setUrl, waitSeconds: wait, error: input.error.slice(0, 200) })
+    return { status: 'pending', attempts: Math.max(0, req.attempts - 1) }
+  }
   // Nothing was uploaded: the claim stops counting against today's cap.
   await refundLatestClaim(env, req.id, now)
   // A failure that would park the request (permanent, or out of attempts) for
