@@ -291,11 +291,11 @@ describe('POST /now-playing — an anonymous "ID - ID" row is playing', () => {
 describe('POST /now-playing — the phone time budget for link lookups', () => {
   const withIds = () => ({
     tracks: [
-      { ...track(0, 'Mau P', 'Drugs From Amsterdam'), trackId: '101', mediaId: '101' },
-      { ...track(300, 'Chris Lake', 'Turn Off The Lights'), trackId: '102', mediaId: '102' },
-      { ...track(600, 'Odd Mob', 'Left To Right'), trackId: '103', mediaId: '103' },
-      { ...track(900, 'Fisher', 'Losing It'), trackId: '104', mediaId: '104' },
-      { ...track(1200, 'John Summit', 'Where You Are'), trackId: '105', mediaId: '105' },
+      { ...track(0, 'Mau P', 'Drugs From Amsterdam'), trackId: '101', mediaId: '101' as string | null },
+      { ...track(300, 'Chris Lake', 'Turn Off The Lights'), trackId: '102', mediaId: '102' as string | null },
+      { ...track(600, 'Odd Mob', 'Left To Right'), trackId: '103', mediaId: '103' as string | null },
+      { ...track(900, 'Fisher', 'Losing It'), trackId: '104', mediaId: '104' as string | null },
+      { ...track(1200, 'John Summit', 'Where You Are'), trackId: '105', mediaId: '105' as string | null },
     ],
     setAppleLink: null,
     setYoutubeLink: null,
