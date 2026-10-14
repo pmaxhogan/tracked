@@ -1,5 +1,5 @@
 /**
- * Pre-save matches (migration 0022; design docs/superpowers/specs/
+ * Pre-save matches (migration 0024; design docs/superpowers/specs/
  * 2026-10-14-presave-candidates-design.md): a pre-saved track still waiting
  * for a YouTube link (stage `links`) is searched for by mkvid - YouTube Music
  * through its innertube search (no Data API quota) and, when enabled, Soulseek

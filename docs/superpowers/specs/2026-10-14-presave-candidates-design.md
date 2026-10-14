@@ -114,7 +114,7 @@ Topic upload (`snippet.channelTitle` ends with " - Topic", or innertube said
 `source_name = 'youtube'`. Approved Soulseek / Spotify -> always a track
 upload.
 
-## 5. Data (migration `0022_presave_matches.sql`)
+## 5. Data (migration `0024_presave_matches.sql`)
 
 - `presave_match_searches`: one row per presave and kind (`ytm`, `slsk`):
   status (`claimed`, `done`, `failed`), attempts, claimed_at, next_at,

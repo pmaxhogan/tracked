@@ -152,7 +152,7 @@ export type TrackUploadRow = {
   updated_at: number;
   completed_at: number | null;
   notified_at: number | null;
-  /** The approved pre-save match this rips (migration 0022), null for a 1001tracklists link. */
+  /** The approved pre-save match this rips (migration 0024), null for a 1001tracklists link. */
   match_id?: number | null;
 };
 
