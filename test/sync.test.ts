@@ -80,7 +80,12 @@ vi.mock("../src/lib/video-meta", async () => {
   return { ...actual, getVideoMeta: vi.fn(async () => new Map()) };
 });
 
-import { crawlDjIndex, fetch1001Html, parseSetYouTubeId } from "../src/lib/dj-index";
+import {
+  crawlDjIndex,
+  fetch1001Html,
+  parseSetYouTubeId,
+  parseSetYouTubeIds,
+} from "../src/lib/dj-index";
 import { getVideoMeta } from "../src/lib/video-meta";
 import { confirmedMembership, recordRemoved } from "../src/lib/playlist-blocklist";
 import {
@@ -2364,6 +2369,105 @@ describe("full-recording gate inside a sync (lib/playlist-hygiene.ts)", () => {
     });
     (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("clip0000001");
     (getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(clipMeta("clip0000001"));
+
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
+
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect((await loadSubState(env, sub.slug))!.tracklistVideos![setUrl]!.videoId).toBe(
+      "mkvidRender",
+    );
+  });
+
+  /** videos.list answers: every id a full-length 16:9 recording, uploaded by the channel given. */
+  const fullMeta = (channels: Record<string, string>) =>
+    new Map(
+      Object.entries(channels).map(([id, channelId]) => [
+        id,
+        {
+          videoId: id,
+          durationSeconds: 4600,
+          embedWidth: 1280,
+          embedHeight: 720,
+          privacy: "public",
+          uploadStatus: "processed",
+          alive: true,
+          fetchedAt: 0,
+          channelId,
+          channelTitle: channelId,
+        },
+      ]),
+    );
+
+  it("a recheck swaps a struck channel's video for the page's other recording: old out, new in", async () => {
+    const env = withMkvid();
+    await saveSubState(env, sub.slug, {
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: [setUrl],
+      processedTracklistUrls: [setUrl],
+      tracklistVideos: { [setUrl]: stale("fanVid00001") },
+    });
+    // The owner removed another video of the same fan channel before: a strike.
+    await recordRemoved(env, {
+      playlistId: "PLother",
+      videoId: "fanVid00000",
+      slug: "other",
+      setUrl: null,
+      reason: "owner",
+      channelId: "UCfan",
+      channelTitle: "Fan",
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "direct",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("fanVid00001");
+    (parseSetYouTubeIds as ReturnType<typeof vi.fn>).mockReturnValue([
+      "fanVid00001",
+      "official001",
+    ]);
+    (getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(
+      fullMeta({ fanVid00001: "UCfan", official001: "UClabel" }),
+    );
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockResolvedValue(new Set(["fanVid00001"]));
+
+    await syncOne(env, sub, "tok", { skipDjCrawl: true });
+
+    expect(
+      (removeVideoFromPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toContainEqual(["PL", "fanVid00001"]);
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toContainEqual(["PL", "official001"]);
+    expect((await loadSubState(env, sub.slug))!.tracklistVideos![setUrl]!.videoId).toBe(
+      "official001",
+    );
+  });
+
+  it("a recheck keeps an mkvid render even when the page's second recording passes", async () => {
+    const env = withMkvid();
+    await saveSubState(env, sub.slug, {
+      playlistId: "PL",
+      artistName: "X",
+      discoveredTracklistUrls: [setUrl],
+      processedTracklistUrls: [setUrl],
+      tracklistVideos: { [setUrl]: { ...stale("mkvidRender"), source: "mkvid" } },
+    });
+    (fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({
+      html: soundcloudPage,
+      via: "direct",
+      state: { cookie: "" },
+    });
+    (parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue("clip0000001");
+    (parseSetYouTubeIds as ReturnType<typeof vi.fn>).mockReturnValue([
+      "clip0000001",
+      "official001",
+    ]);
+    (getVideoMeta as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([...clipMeta("clip0000001"), ...fullMeta({ official001: "UClabel" })]),
+    );
 
     await syncOne(env, sub, "tok", { skipDjCrawl: true });
 
