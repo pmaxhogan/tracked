@@ -77,6 +77,7 @@ import {
 } from "./verification";
 import { syncOne, type SyncOneResult } from "./sync";
 import { INDEX_FORMAT_SINCE, queueSearchIndex } from "./search/index";
+import { GRAPH_FORMAT_SINCE, pagesGraphUrls } from "./graph/store";
 import { updatePresaveCandidates } from "./presave-candidates";
 import { getAppSettings } from "./app-settings";
 import { DISCOVERED_SQL, ID_WAIT_SECONDS } from "./mkvid-readiness";
@@ -875,6 +876,11 @@ async function settleRenderFeed(
  * holds the set off for the cooldown through `retry_at`). A fetch that
  * starts a verification takes the set out (the verify class finishes it, and
  * the verified list is indexed then).
+ *
+ * While the app setting `graph.backfill` is on, a set last fetched before
+ * GRAPH_FORMAT_SINCE (the Graph tab's sources and credits) is a candidate
+ * too, unless the stored-pages pass (lib/graph/backfill.ts) already gave its
+ * graph.
  */
 export async function indexCatchUpCandidates(
   env: Env,
@@ -882,12 +888,16 @@ export async function indexCatchUpCandidates(
   nowSec: number,
   limit: number,
 ): Promise<Array<{ url: string; slug: string }>> {
+  const graphOn = !!env.SEARCH_DB && (await getAppSettings(env)).graph.backfill;
+  const since = graphOn ? Math.max(GRAPH_FORMAT_SINCE, INDEX_FORMAT_SINCE) : INDEX_FORMAT_SINCE;
+  const fromPages = graphOn ? await pagesGraphUrls(env) : [];
   const res = await dbOf(env)
     .prepare(
       `SELECT t.url AS url, MIN(t.slug) AS slug, MAX(s.set_date) AS set_date
          FROM tracklists t JOIN set_schedule s ON s.url = t.url LEFT JOIN set_verification v ON v.url = t.url
         WHERE t.processed = 1 AND t.abandoned = 0 AND COALESCE(t.checked_at, 1) <> 0 AND t.slug IN (SELECT slug FROM subscriptions)
-          AND (v.url IS NULL OR s.last_fetched_at IS NULL OR s.last_fetched_at < ?)
+          AND (v.url IS NULL OR s.last_fetched_at IS NULL OR s.last_fetched_at < ?
+               OR (s.last_fetched_at < ? AND t.url NOT IN (SELECT value FROM json_each(?))))
           AND (s.last_fetched_at IS NULL OR s.last_fetched_at <= ?)
           AND (s.next_due_at IS NULL OR s.next_due_at > ?)
           AND NOT EXISTS (SELECT 1 FROM render_feed rf WHERE rf.url = t.url AND (rf.gave_up = 1 OR rf.next_feed_at > ?))
@@ -896,6 +906,8 @@ export async function indexCatchUpCandidates(
     )
     .bind(
       INDEX_FORMAT_SINCE,
+      since,
+      JSON.stringify(fromPages),
       nowSec - settings.indexCatchUp.cooldownHours * HOUR,
       nowSec,
       nowSec,

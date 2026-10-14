@@ -19,6 +19,8 @@ import {
 } from "../src/lib/fetch-scheduler";
 import { PoolPausedError } from "../src/lib/pool";
 import { INDEX_FORMAT_SINCE } from "../src/lib/search/index";
+import { GRAPH_FORMAT, GRAPH_FORMAT_SINCE } from "../src/lib/graph/store";
+import { updateAppSettings } from "../src/lib/app-settings";
 import { saveSubState, loadSubState } from "../src/lib/sync-store";
 import { getVerification } from "../src/lib/verification";
 import { _resetTallyForTests } from "../src/lib/ban-state";
@@ -339,5 +341,43 @@ describe("a spent low-priority budget, and spreading a tick", () => {
     expect(waits[0]).toBeLessThanOrEqual(75_000);
     expect(seenDuringWait).not.toContain(later);
     expect(await env.CACHE.get(INFLIGHT_KEY)).toBeNull();
+  });
+});
+
+describe("search index catch-up: the Graph tab's backfill (app setting graph.backfill)", () => {
+  const LATER = GRAPH_FORMAT_SINCE + 10 * D;
+  async function graphEnv() {
+    const env = { ...makeEnv(), SEARCH_DB: fakeD1({ migrations: "search" }) } as Env;
+    await subscribe(env, "dj");
+    // Verified and fetched after the index format date, before the graph existed.
+    const before = await syncedSet(env, "before", {
+      daysAgo: 30,
+      fetchedAt: INDEX_FORMAT_SINCE + D,
+    });
+    await verified(env, before);
+    // Its graph came from a stored page: no refetch needed.
+    const paged = await syncedSet(env, "paged", { daysAgo: 31, fetchedAt: INDEX_FORMAT_SINCE + D });
+    await verified(env, paged);
+    await env
+      .SEARCH_DB!.prepare(
+        "INSERT INTO search_graph_sets (set_url, format, parsed_at, origin) VALUES (?, ?, 0, 'pages')",
+      )
+      .bind(paged, GRAPH_FORMAT)
+      .run();
+    // Fetched since the graph existed.
+    const after = await syncedSet(env, "after", { daysAgo: 32, fetchedAt: GRAPH_FORMAT_SINCE + H });
+    await verified(env, after);
+    return { env, before };
+  }
+
+  it("on (the default): a set fetched before the graph existed is fetched again, unless stored pages gave its graph", async () => {
+    const { env, before } = await graphEnv();
+    expect(await cands(env, LATER)).toEqual([before]);
+  });
+
+  it("off: only the index's own rule", async () => {
+    const { env } = await graphEnv();
+    await updateAppSettings(env, { graph: { backfill: false } });
+    expect(await cands(env, LATER)).toEqual([]);
   });
 });

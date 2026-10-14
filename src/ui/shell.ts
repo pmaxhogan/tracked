@@ -25,6 +25,7 @@ export type NavKey =
   | "playlists"
   | "removed"
   | "bans"
+  | "graph"
   | "mkvid"
   | "track-uploads"
   | "activity"
@@ -79,6 +80,7 @@ export const NAV: NavItem[] = [
     group: "Library",
   },
   { key: "bans", label: "Bans", href: "/ui/bans", icon: "ban", group: "Library" },
+  { key: "graph", label: "Graph", href: "/ui/graph", icon: "graph", group: "Library" },
   {
     key: "mkvid",
     label: "mkvid",

@@ -37,6 +37,7 @@ export const ICON_NAMES = [
   "bookmark",
   "upload",
   "chart",
+  "graph",
 ] as const;
 
 export type IconName = (typeof ICON_NAMES)[number];
@@ -86,6 +87,8 @@ const BODY: Record<IconName, string> = {
   chart:
     '<path d="M3 3v17a1 1 0 0 0 1 1h17"/><path d="M7 16v-4"/><path d="M11 16V8"/><path d="M15 16v-6"/><path d="M19 16V5"/>',
   bookmark: '<path d="M6.5 3h11a1 1 0 0 1 1 1v17l-6.5-4.5L5.5 21V4a1 1 0 0 1 1-1z"/>',
+  graph:
+    '<circle cx="5.5" cy="6" r="2.5"/><circle cx="18.5" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 6h8"/><path d="m7 8.2 3.7 7.6"/><path d="m17 8.2-3.7 7.6"/>',
   upload:
     '<path d="M12 15V3.5"/><path d="m7 8.5 5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
 };

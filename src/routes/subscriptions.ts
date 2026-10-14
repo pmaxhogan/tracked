@@ -110,6 +110,7 @@ import { SW_JS } from "./ban-ui";
 import { hygieneApp } from "./playlist-hygiene";
 import { activityApp } from "./activity";
 import { searchApp } from "./search";
+import { graphApp } from "./graph";
 import { schedulerUiApp } from "./scheduler-ui";
 import { trackUploadsUiApp } from "./track-uploads-ui";
 import { mkvidUiApp } from "./mkvid-ui";
@@ -147,6 +148,9 @@ subscriptionsApp.route("/", activityApp);
 
 // Search over the SEARCH_DB index (routes/search.ts). Behind cfAccess above.
 subscriptionsApp.route("/", searchApp);
+
+// The Graph tab over cached data (routes/graph.ts). Behind cfAccess above.
+subscriptionsApp.route("/", graphApp);
 
 // Scheduler tick history and DJ due times, and the POST that clears the YouTube quota hold (routes/scheduler-ui.ts). Behind cfAccess above.
 subscriptionsApp.route("/", schedulerUiApp);

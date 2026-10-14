@@ -173,6 +173,17 @@ export const AppSettingsSchema = z.object({
     lengthTolerancePct: z.number().min(0).max(50),
     lengthToleranceMinutes: z.number().min(0).max(60),
   }),
+  /** The Graph tab (lib/graph/*): view limits and the backfill of sources and credits. */
+  graph: z.object({
+    /** Most nodes one graph answer or the whole-library view holds (default 5,000). */
+    nodeCap: z.number().int().min(100).max(1_000_000),
+    /** An expansion adding more new nodes than this asks first (default 300). */
+    confirmOver: z.number().int().min(10).max(1_000_000),
+    /** Refetch sets read before the graph existed, once each, through the search index catch-up (pool priority backfill, its perTick / perDay caps). */
+    backfill: z.boolean(),
+    /** Stored set pages (R2) the 5-minute cron reads for the graph a tick; no pool fetch (default 10). 0 = none. */
+    pagesPerTick: z.number().int().min(0).max(100),
+  }),
   retention: z.object({
     /** Now-playing and playlist-addition audit rows are kept this many days (default 90). */
     auditDays: z.number().int().min(1).max(3650),
@@ -241,6 +252,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     lengthTolerancePct: 3,
     lengthToleranceMinutes: 2,
   },
+  graph: { nodeCap: 5000, confirmOver: 300, backfill: true, pagesPerTick: 10 },
   retention: { auditDays: 90, tickHistoryDays: 14 },
 };
 

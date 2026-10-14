@@ -47,6 +47,8 @@ import { youtubeTokenRefresher } from "./lib/google-oauth";
 import { maybeSnapshotStats } from "./lib/stats";
 import { setAccessTokenRefresher } from "./lib/youtube-playlists";
 import { drainLinkPrewarm } from "./lib/link-prewarm";
+import { graphPagesStep } from "./lib/graph/backfill";
+import { getAppSettings } from "./lib/app-settings";
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
 // which is not the `{ error, message }` shape every route documents. Normalise
@@ -288,6 +290,12 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           // Per-track links of the sets the sync read, a few a tick at pool priority backfill, after the tick's own fetches (lib/link-prewarm.ts; never throws).
           const w = await drainLinkPrewarm(env, log);
           if (w.read > 0 || w.stoppedBy) log.info("cron.link_prewarm", w);
+          // The Graph tab's sources and credits from stored set pages, a few a tick; no pool fetch (lib/graph/backfill.ts; never throws).
+          const gs = (await getAppSettings(env)).graph;
+          if (gs.pagesPerTick > 0) {
+            const g = await graphPagesStep(env, { limit: gs.pagesPerTick, log });
+            if (g.read > 0) log.info("cron.graph_pages", g);
+          }
         }
         // The Stats page's hourly snapshot (lib/stats.ts; never throws, at most once an hour).
         if (!isDaily && (await maybeSnapshotStats(env, log))) log.info("cron.stats_snapshot");

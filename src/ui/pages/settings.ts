@@ -441,6 +441,45 @@ const APP_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: "sf-graph",
+    title: "Graph",
+    intro:
+      "The Graph page draws the library from cached data. Sources and track credits of sets read before it existed are filled in from stored pages and, once each, by a low-priority refetch.",
+    fields: [
+      {
+        path: "graph.nodeCap",
+        label: "Most nodes on the graph",
+        help: "One answer and the whole-library view hold at most this many. Large graphs get slow to draw. Default 5,000.",
+        min: 100,
+        max: 1000000,
+        step: 100,
+      },
+      {
+        path: "graph.confirmOver",
+        label: "Ask before adding more than",
+        help: "An expansion that adds more new nodes than this asks first. Default 300.",
+        unit: "nodes",
+        min: 10,
+        max: 1000000,
+        step: 10,
+      },
+      {
+        path: "graph.backfill",
+        label: "Refetch old sets for the graph",
+        help: "Through the search index catch-up: pool priority backfill, its per-tick and per-day caps (Pool settings). Off stops it.",
+        kind: "bool",
+      },
+      {
+        path: "graph.pagesPerTick",
+        label: "Stored pages read a cron tick",
+        help: "Set pages kept in R2, read for their sources and credits; no pool fetch. Default 10. 0 = none.",
+        min: 0,
+        max: 100,
+        step: 1,
+      },
+    ],
+  },
+  {
     id: "sf-retention",
     title: "Retention",
     fields: [

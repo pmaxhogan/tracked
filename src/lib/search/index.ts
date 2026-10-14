@@ -32,6 +32,10 @@
  *   - INDEX_FORMAT_SINCE: a set indexed before the index format last changed
  *     is re-indexed by its next verified fetch or Rebuild even when the skip
  *     rule would hold, so older rows pick up new columns.
+ *   - The Graph tab's data (sources, heading artists, credits, remix bases;
+ *     src/lib/graph/store.ts) is written from the same verified page right
+ *     after the set is indexed, or, when the skip rule holds, once for a set
+ *     that has no graph at the current format yet.
  *   - Fire-and-forget from the sync path (`queueSearchIndex`), drained via
  *     ctx.waitUntil (`drainSearchIndex`). Errors never reach the caller: they
  *     are logged at warn as `search.index_failed`.
@@ -51,6 +55,8 @@ import {
   verifiedFingerprint,
   type VerificationOutcome,
 } from "../verification";
+import { hasCurrentGraph, writeSetGraph } from "../graph/store";
+import { parseSetGraph, trackIdOf } from "../tracklist-credits";
 import { searchDbOf } from "./db";
 import { extractPageImage, imageKey, usableImageUrl } from "./images";
 import { normalizedJoin, normalizeText, slugWords, trackKey } from "./normalize";
@@ -204,13 +210,21 @@ export async function indexSet(
     ]);
 
   // JSON array binds, rows as positional arrays to keep them small:
-  //   trackRows  [key, track_url, artist, title, label, artwork_url]
+  //   trackRows  [key, track_url, artist, title, label, artwork_url, page_id]
   //   linkRows   [key, pos, cue_seconds, layered]
   //   ftsRows    [key, artist, title, label] (normalized), one per touched key
   //   terms      [term, ...]
   //   images     [key, src] for the set image and each track's artwork
   const trackRows = JSON.stringify(
-    tracks.map((t) => [t.key, t.trackUrl, t.artist, t.title, t.label, t.artworkUrl]),
+    tracks.map((t) => [
+      t.key,
+      t.trackUrl,
+      t.artist,
+      t.title,
+      t.label,
+      t.artworkUrl,
+      t.trackUrl ? trackIdOf(t.trackUrl) : null,
+    ]),
   );
   const linkRows = JSON.stringify(
     tracks.map((t) => [t.key, t.pos, t.cueSeconds, t.layered ? 1 : 0]),
@@ -271,16 +285,17 @@ export async function indexSet(
     //    written here. `WHERE true` keeps ON CONFLICT from parsing as a join constraint.
     sdb
       .prepare(
-        `INSERT INTO search_tracks (track_key, track_id, track_url, artist, title, label, artwork_url, sets_count, updated_at)
+        `INSERT INTO search_tracks (track_key, track_id, track_url, artist, title, label, artwork_url, page_id, sets_count, updated_at)
          SELECT json_extract(j.value, '$[0]'),
                 CASE WHEN json_extract(j.value, '$[0]') LIKE 't:%' THEN substr(json_extract(j.value, '$[0]'), 3) END,
                 json_extract(j.value, '$[1]'), json_extract(j.value, '$[2]'), json_extract(j.value, '$[3]'), json_extract(j.value, '$[4]'),
-                json_extract(j.value, '$[5]'), 0, ?1
+                json_extract(j.value, '$[5]'), json_extract(j.value, '$[6]'), 0, ?1
            FROM json_each(?2) j WHERE true
          ON CONFLICT(track_key) DO UPDATE SET
            artist = excluded.artist, title = excluded.title,
            track_url = COALESCE(excluded.track_url, track_url), label = COALESCE(excluded.label, label),
-           artwork_url = COALESCE(excluded.artwork_url, artwork_url), updated_at = excluded.updated_at`,
+           artwork_url = COALESCE(excluded.artwork_url, artwork_url), page_id = COALESCE(excluded.page_id, page_id),
+           updated_at = excluded.updated_at`,
       )
       .bind(nowSec, trackRows),
     // 6. New links in.
@@ -385,8 +400,12 @@ export async function indexVerifiedFetch(
     set.verified_at != null &&
     cur.indexed_at >= Math.max(set.verified_at, INDEX_FORMAT_SINCE) &&
     (cur.video_id ?? null) === videoId
-  )
+  ) {
+    // The graph (sources, credits) of a set indexed before it existed comes from this fetch.
+    if (!(await hasCurrentGraph(env, setUrl)))
+      await writeSetGraph(env, setUrl, parseSetGraph(html), nowSec, "fetch");
     return "skipped";
+  }
 
   await indexSet(
     env,
@@ -406,6 +425,7 @@ export async function indexVerifiedFetch(
     },
     nowSec,
   );
+  await writeSetGraph(env, setUrl, parseSetGraph(html), nowSec, "fetch");
   return "indexed";
 }
 

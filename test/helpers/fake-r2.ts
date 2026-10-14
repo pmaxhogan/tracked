@@ -1,4 +1,4 @@
-/** In-memory R2 bucket for tests: put / get / list (prefix, cursor, limit, customMetadata). */
+/** In-memory R2 bucket for tests: put / get / list (prefix, cursor, startAfter, limit, customMetadata). */
 type Obj = {
   body: Uint8Array;
   httpMetadata?: { contentEncoding?: string; contentType?: string };
@@ -41,10 +41,14 @@ export function fakeR2(): R2Bucket & { _store: Map<string, Obj>; failPuts: boole
     async list({
       prefix = "",
       cursor,
+      startAfter,
       limit = 1000,
-    }: { prefix?: string; cursor?: string; limit?: number } = {}) {
+    }: { prefix?: string; cursor?: string; startAfter?: string; limit?: number } = {}) {
       const all = [...store.entries()]
-        .filter(([k]) => k.startsWith(prefix) && (!cursor || k > cursor))
+        .filter(
+          ([k]) =>
+            k.startsWith(prefix) && (!cursor || k > cursor) && (!startAfter || k > startAfter),
+        )
         .sort(([a], [b]) => (a < b ? -1 : 1));
       const page = all.slice(0, limit);
       const truncated = all.length > limit;

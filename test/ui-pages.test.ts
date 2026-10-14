@@ -50,6 +50,7 @@ export const PAGES: Array<[string, string]> = [
   ["/ui/presaves", "Pre-saves"],
   ["/ui/presave?id=1", "Pre-saved track"],
   ["/ui/track-uploads", "Track uploads"],
+  ["/ui/graph", "Graph"],
 ];
 
 /** The pool tests' stub: no body, window, navigator, storage, location or history. */
