@@ -2,7 +2,13 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { vi, beforeEach } from "vitest";
-import { crawlDjIndex, djScrollStep, parseDjIndex, parseSetYouTubeId } from "../src/lib/dj-index";
+import {
+  crawlDjIndex,
+  djScrollStep,
+  parseDjIndex,
+  parseSetYouTubeId,
+  parseSetYouTubeIds,
+} from "../src/lib/dj-index";
 
 // crawlDjIndex fetches page 1 and every /ajax/get_data.php scroll step
 // through the pool (lib/upstream1001.ts -> lib/pool.ts). A fake pool
@@ -166,6 +172,28 @@ describe("parseSetYouTubeId", () => {
     expect(parseSetYouTubeId('<script>var videoId = "tf42CVmF6V0"; setupPlayer();</script>')).toBe(
       "tf42CVmF6V0",
     );
+  });
+});
+
+describe("parseSetYouTubeIds", () => {
+  it("lists the primary video first, then every other player on the page in page order, once each", () => {
+    const html = `<meta itemprop="embedUrl" content="https://www.youtube.com/embed/AqwlpVvbjko">
+      <div id="ytWidget_AqwlpVvbjko" class="ytWidget1 mediaPlayer"></div>
+      <div id="ytWidget_rKQ0itQJTsE" class="ytWidget1 mediaPlayer"></div>
+      <div id="ytWidget_AqwlpVvbjko" class="ytWidget1 mediaPlayer"></div>`;
+    expect(parseSetYouTubeIds(html)).toEqual(["AqwlpVvbjko", "rKQ0itQJTsE"]);
+  });
+
+  it("is the single primary id on a one-player page, and empty on a page with none", () => {
+    const html = readFileSync(resolve(__dirname, "fixtures/tracklist-matroda.html"), "utf-8");
+    expect(parseSetYouTubeIds(html)).toEqual(["79n8BaQAL2Q"]);
+    expect(parseSetYouTubeIds("<p>no video</p>")).toEqual([]);
+  });
+
+  it("does not take a watch link elsewhere on the page for a player", () => {
+    const html = `<meta itemprop="embedUrl" content="https://www.youtube.com/embed/firstSetVid">
+      <div id="ytWidget_firstSetVid"></div><a href="https://youtu.be/trackVideo1">a track</a>`;
+    expect(parseSetYouTubeIds(html)).toEqual(["firstSetVid"]);
   });
 });
 

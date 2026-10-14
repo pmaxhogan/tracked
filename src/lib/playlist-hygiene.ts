@@ -42,7 +42,21 @@ import {
   type RejectReason,
 } from "./full-recording";
 import type { TableDef } from "./table-query";
-import { getVideoMeta, readCachedVideoMeta, type VideoMeta } from "./video-meta";
+import {
+  channelsOf,
+  getVideoMeta,
+  readCachedVideoMeta,
+  saveVideoChannels,
+  type VideoChannel,
+  type VideoMeta,
+} from "./video-meta";
+import {
+  bannedChannelIds,
+  channelStrikes,
+  processBanQueue,
+  type BanNotifier,
+  type BanQueueResult,
+} from "./channel-bans";
 import {
   blockedIds,
   isBlocked,
@@ -312,39 +326,44 @@ export async function loadSetFacts(env: Env, setUrls: string[]): Promise<Map<str
 // --- the rule, applied ------------------------------------------------------
 
 export type VideoVerdict =
-  { ok: true } | { ok: false; reason: RejectReason | "dead"; detail: string };
+  { ok: true } | { ok: false; reason: RejectReason | "dead" | "banned_channel"; detail: string };
 
-/** The rule for one video, from whatever is known: facts may be missing, meta may be missing. */
 /**
- * `REJECT_VERTICAL` (default OFF): the vertical rule (d) reads videos.list
- * embed sizes, which have not been verified live to follow a Short's aspect
- * ratio. Until the orchestrator checks a known Short and a known 16:9 video
- * with read-only calls, a vertical-looking video is NOT rejected.
+ * `REJECT_VERTICAL` (default ON since 2026-10-14): the vertical rule (d) reads
+ * videos.list embed sizes. Verified live that day: Shorts come back
+ * 1280x2276 (9:16), 16:9 videos 1280x720, and portrait phone recordings of
+ * whole sets 1280x2276 too; oEmbed answers 200x113 for all of them, so it is
+ * no signal. Only an explicit 0/false/no/off turns the rule off; the app
+ * setting `playlists.rejectVertical`, when not null, wins over the env.
  */
 export function rejectVerticalEnabled(
   env: Pick<Env, "REJECT_VERTICAL">,
   app?: AppSettings,
 ): boolean {
   if (app && app.playlists.rejectVertical !== null) return app.playlists.rejectVertical;
-  return /^\s*(1|true|yes|on)\s*$/i.test(env.REJECT_VERTICAL ?? "");
+  return !/^\s*(0|false|no|off)\s*$/i.test(env.REJECT_VERTICAL ?? "");
 }
 
 export type JudgeOptions = {
   rejectVertical?: boolean;
   shortToleranceSeconds?: number;
   audioToleranceSeconds?: number;
+  /** Channels the owner banned (lib/channel-bans.ts): their videos are never kept. */
+  bannedChannels?: ReadonlySet<string>;
 };
 
-/** judgeVideo's options from the app settings (playlists.rejectVertical, the two tolerances) and REJECT_VERTICAL. */
+/** judgeVideo's options from the app settings (playlists.rejectVertical, the two tolerances), REJECT_VERTICAL and the banned channels. */
 export async function judgeOptions(env: Env): Promise<JudgeOptions> {
   const app = await getAppSettings(env);
   return {
     rejectVertical: rejectVerticalEnabled(env, app),
     shortToleranceSeconds: app.playlists.shortToleranceMinutes * 60,
     audioToleranceSeconds: app.playlists.audioToleranceMinutes * 60,
+    bannedChannels: await bannedChannelIds(env),
   };
 }
 
+/** The rule for one video, from whatever is known: facts may be missing, meta may be missing. */
 export function judgeVideo(
   facts: SetFacts | null | undefined,
   meta: VideoMeta | null | undefined,
@@ -352,6 +371,12 @@ export function judgeVideo(
 ): VideoVerdict {
   if (meta && !meta.alive)
     return { ok: false, reason: "dead", detail: "videos.list: deleted or private" };
+  if (meta?.channelId && opts.bannedChannels?.has(meta.channelId))
+    return {
+      ok: false,
+      reason: "banned_channel",
+      detail: `uploaded by ${meta.channelTitle ?? meta.channelId}, a channel you banned`,
+    };
   const d = decideFullRecording({
     notice: facts ? facts.noFullNotice : null,
     lastCueSeconds: facts?.lastCueSeconds ?? null,
@@ -372,20 +397,55 @@ export const REASON_LABELS: Record<string, string> = {
   blocked: "removed from this playlist before",
   owner: "removed from the playlist by the owner",
   button: '"remove and replace" on the set',
+  banned_channel: "uploaded by a channel you banned",
+  struck_channel: "uploaded by a channel you removed videos of before",
 };
+
+export type PickRejectReason =
+  RejectReason | "dead" | "blocked" | "banned_channel" | "struck_channel";
 
 export type SetVideoPick = {
   /** The video the sync may use for this set; null = treat the set as having none. */
   videoId: string | null;
-  /** Set when the page had a video that was turned down. */
-  rejected: { videoId: string; reason: RejectReason | "dead" | "blocked"; detail: string } | null;
+  /** Set when the page's primary video was turned down (or passed over for another of its players). */
+  rejected: { videoId: string; reason: PickRejectReason; detail: string } | null;
+};
+
+type Candidate = {
+  videoId: string;
+  /** Position on the page (0 = the primary video). */
+  index: number;
+  verdict: { ok: true } | { ok: false; reason: PickRejectReason; detail: string };
+  /** The owner's "keep it" (video_overrides): passes every rule and every strike. */
+  kept: boolean;
+  channelId: string | null;
+  channelTitle: string | null;
+  strikes: number;
 };
 
 /**
+ * Pure: which candidate a set gets. Passing candidates of channels without
+ * strikes come first, in page order; when only struck channels pass, the one
+ * with the fewest strikes wins, then page order. A video the owner kept counts
+ * as passing with no strikes.
+ */
+export function chooseCandidate(candidates: Candidate[]): Candidate | null {
+  const passing = candidates.filter((c) => c.verdict.ok);
+  if (passing.length === 0) return null;
+  const strikesOf = (c: Candidate) => (c.kept ? 0 : c.strikes);
+  return [...passing].sort((a, b) => strikesOf(a) - strikesOf(b) || a.index - b.index)[0]!;
+}
+
+/**
  * The sync's gate, called right after it parses a set page. Stores the page's
- * facts, then vets the page's video. Never throws: a failure to look the
- * video up means the rules needing its duration/orientation are skipped (the
- * sweep re-judges it later with the meta it gets then).
+ * facts, then vets the page's videos: the primary one and, when the page has
+ * more than one player (`candidates`, lib/dj-index.ts parseSetYouTubeIds),
+ * the others, all with one videos.list call. The set gets the first one that
+ * passes every rule from a channel the owner never removed a video of; a
+ * channel with strikes is used only when nothing else passes
+ * (`chooseCandidate`). Never throws: a failure to look the videos up means
+ * the rules needing duration/orientation/channel are skipped (the sweep
+ * re-judges later with the meta it gets then).
  */
 export async function pickSetVideo(
   env: Env,
@@ -401,6 +461,8 @@ export async function pickSetVideo(
     fetcher?: typeof fetch;
     /** YouTube is not asked (its quota is out): the video's cached record is used, if there is one. */
     noLookup?: boolean;
+    /** Every player on the page (parseSetYouTubeIds), primary first; absent = only `rawVideoId`. */
+    candidates?: string[];
   },
 ): Promise<SetVideoPick> {
   const { log } = ctx;
@@ -414,68 +476,115 @@ export async function pickSetVideo(
   } catch (e) {
     log.warn("hygiene.facts_failed", { slug: ctx.slug, setUrl: ctx.setUrl, ...errorFields(e) });
   }
-  const videoId = ctx.rawVideoId;
-  if (!videoId) return { videoId: null, rejected: null };
+  const ids = [
+    ...new Set([ctx.rawVideoId, ...(ctx.candidates ?? [])].filter((x): x is string => !!x)),
+  ];
+  if (ids.length === 0) return { videoId: null, rejected: null };
+  const where = { slug: ctx.slug, setUrl: ctx.setUrl };
+  const cands: Candidate[] = ids.map((videoId, index) => ({
+    videoId,
+    index,
+    verdict: { ok: true },
+    kept: false,
+    channelId: null,
+    channelTitle: null,
+    strikes: 0,
+  }));
+  const reject = (c: Candidate, reason: PickRejectReason, detail: string) => {
+    c.verdict = { ok: false, reason, detail };
+  };
   try {
-    if (ctx.playlistId && (await isBlocked(env, ctx.playlistId, videoId))) {
-      log.info("hygiene.video_blocked", { slug: ctx.slug, setUrl: ctx.setUrl, videoId });
-      return {
-        videoId: null,
-        rejected: { videoId, reason: "blocked", detail: REASON_LABELS.blocked! },
-      };
+    const blocked = ctx.playlistId ? await blockedIds(env, ctx.playlistId) : new Set<string>();
+    const kept = await overriddenIds(env);
+    for (const c of cands) {
+      if (blocked.has(c.videoId)) {
+        log.info("hygiene.video_blocked", { ...where, videoId: c.videoId });
+        reject(c, "blocked", REASON_LABELS.blocked!);
+      } else if (kept.has(c.videoId)) c.kept = true;
     }
-    if (await isOverridden(env, videoId)) return { videoId, rejected: null };
   } catch (e) {
-    log.warn("hygiene.blocklist_failed", {
-      slug: ctx.slug,
-      setUrl: ctx.setUrl,
-      videoId,
-      ...errorFields(e),
-    });
+    log.warn("hygiene.blocklist_failed", { ...where, videoId: ids[0], ...errorFields(e) });
   }
-  let meta: VideoMeta | null = null;
+  // The primary video the owner kept is used as it is, as before (no lookup).
+  if (cands[0]!.kept) return { videoId: cands[0]!.videoId, rejected: null };
+  const toJudge = cands.filter((c) => c.verdict.ok && !c.kept);
+  let metas = new Map<string, VideoMeta>();
+  let lookupFailed = false;
   try {
-    meta = ctx.noLookup
-      ? ((await readCachedVideoMeta(env, [videoId])).get(videoId) ?? null)
-      : ((await getVideoMeta(env, [videoId], ctx.accessToken, { fetcher: ctx.fetcher })).get(
-          videoId,
-        ) ?? null);
+    const want = toJudge.map((c) => c.videoId);
+    if (want.length > 0)
+      metas =
+        (ctx.noLookup
+          ? await readCachedVideoMeta(env, want)
+          : await getVideoMeta(env, want, ctx.accessToken, { fetcher: ctx.fetcher })) ??
+        new Map<string, VideoMeta>();
   } catch (e) {
-    log.warn("hygiene.video_meta_failed", {
-      slug: ctx.slug,
-      setUrl: ctx.setUrl,
-      videoId,
-      ...errorFields(e),
-    });
+    lookupFailed = true;
+    log.warn("hygiene.video_meta_failed", { ...where, videoId: ids[0], ...errorFields(e) });
+  }
+  if (lookupFailed) {
     // m6: without a lookup the duration rules cannot run. A video the sweep
     // already took out is not put back on that basis (it would come out again).
-    const swept = await dbOf(env)
-      .prepare(
-        "SELECT 1 AS x FROM playlist_removals WHERE video_id = ? AND source = 'sweep' AND status = 'removed' LIMIT 1",
-      )
-      .bind(videoId)
-      .first<{ x: number }>()
-      .catch(() => null);
-    if (swept)
-      return {
-        videoId: null,
-        rejected: {
-          videoId,
-          reason: "blocked",
-          detail: "the sweep removed it before; video lookup failed",
-        },
-      };
+    for (const c of toJudge) {
+      const swept = await dbOf(env)
+        .prepare(
+          "SELECT 1 AS x FROM playlist_removals WHERE video_id = ? AND source = 'sweep' AND status = 'removed' LIMIT 1",
+        )
+        .bind(c.videoId)
+        .first<{ x: number }>()
+        .catch(() => null);
+      if (swept) reject(c, "blocked", "the sweep removed it before; video lookup failed");
+    }
   }
-  const verdict = judgeVideo(facts, meta, await judgeOptions(env));
-  if (verdict.ok) return { videoId, rejected: null };
-  log.info("hygiene.video_rejected", {
-    slug: ctx.slug,
-    setUrl: ctx.setUrl,
-    videoId,
-    reason: verdict.reason,
-    detail: verdict.detail,
-  });
-  return { videoId: null, rejected: { videoId, reason: verdict.reason, detail: verdict.detail } };
+  const opts = await judgeOptions(env);
+  for (const c of toJudge) {
+    if (!c.verdict.ok) continue;
+    const meta = metas.get(c.videoId) ?? null;
+    c.channelId = meta?.channelId ?? null;
+    c.channelTitle = meta?.channelTitle ?? null;
+    const v = judgeVideo(facts, meta, opts);
+    if (!v.ok) {
+      log.info("hygiene.video_rejected", {
+        ...where,
+        videoId: c.videoId,
+        reason: v.reason,
+        detail: v.detail,
+      });
+      reject(c, v.reason, v.detail);
+    }
+  }
+  const strikes = await channelStrikes(
+    env,
+    cands.filter((c) => c.verdict.ok && c.channelId).map((c) => c.channelId!),
+  );
+  for (const c of cands) if (c.channelId) c.strikes = strikes.get(c.channelId) ?? 0;
+  const pick = chooseCandidate(cands);
+  const primary = cands[0]!;
+  if (pick && pick.strikes > 0 && !pick.kept)
+    log.info("hygiene.video_struck_used", {
+      ...where,
+      videoId: pick.videoId,
+      channelId: pick.channelId,
+      strikes: pick.strikes,
+    });
+  if (pick === primary) return { videoId: primary.videoId, rejected: null };
+  // The primary was turned down, or passed over for a player from a channel with fewer strikes.
+  const pv = primary.verdict;
+  const rejected: NonNullable<SetVideoPick["rejected"]> = pv.ok
+    ? {
+        videoId: primary.videoId,
+        reason: "struck_channel",
+        detail: `${primary.channelTitle ?? primary.channelId}: ${primary.strikes} video(s) removed before`,
+      }
+    : { videoId: primary.videoId, reason: pv.reason, detail: pv.detail };
+  if (pick)
+    log.info("hygiene.video_alternate", {
+      ...where,
+      videoId: pick.videoId,
+      instead: primary.videoId,
+      reason: rejected.reason,
+    });
+  return { videoId: pick?.videoId ?? null, rejected };
 }
 
 /** Audit-row note for a rejected page video. */
@@ -969,6 +1078,8 @@ type Listing = {
   deadItems: Map<string, string[]>;
   /** Items in the playlist. */
   items: number;
+  /** Each item's uploader channel (snippet.videoOwnerChannelId/Title), where the listing names one. */
+  channels: VideoChannel[];
 };
 
 /** A playlist's contents, or null when the listing was not complete and successful. */
@@ -992,6 +1103,7 @@ async function completeListing(
     const present = new Set<string>();
     const deadPresent = new Set<string>();
     const deadItems = new Map<string, string[]>();
+    const channels: VideoChannel[] = [];
     for (const it of r.items) {
       const id = itemVideoId(it);
       if (!id) {
@@ -1000,15 +1112,33 @@ async function completeListing(
         return null;
       }
       present.add(id);
+      const sn = it.snippet as
+        { videoOwnerChannelId?: unknown; videoOwnerChannelTitle?: unknown } | undefined;
+      if (typeof sn?.videoOwnerChannelId === "string" && sn.videoOwnerChannelId)
+        channels.push({
+          videoId: id,
+          channelId: sn.videoOwnerChannelId,
+          channelTitle:
+            typeof sn.videoOwnerChannelTitle === "string" ? sn.videoOwnerChannelTitle : null,
+        });
       if (isUnavailableItem(it)) {
         deadPresent.add(id);
         if (it.id) deadItems.set(id, [...(deadItems.get(id) ?? []), it.id]);
       }
     }
-    return { present, deadPresent, deadItems, items: r.items.length };
+    return { present, deadPresent, deadItems, items: r.items.length, channels };
   } catch (e) {
     log.warn("hygiene.compare.listing_failed", { playlistId, ...errorFields(e) });
     return null;
+  }
+}
+
+/** The listing's uploader channels into `video_meta` (no extra call). Best effort: never fails the comparison. */
+async function rememberChannels(env: Env, listing: Listing, log: Logger): Promise<void> {
+  try {
+    await saveVideoChannels(env, listing.channels);
+  } catch (e) {
+    log.warn("hygiene.compare.channels_failed", errorFields(e));
   }
 }
 
@@ -1180,14 +1310,22 @@ async function applyFindings(
 ): Promise<void> {
   const db = dbOf(env);
   const stmts: D1PreparedStatement[] = [];
+  // The uploader, from an earlier listing or the liveness lookup just made: what a ban question is about.
+  const channels = await channelsOf(
+    env,
+    findings.map((f) => f.videoId),
+  ).catch(() => new Map<string, { channelId: string; channelTitle: string | null }>());
   for (const f of findings) {
     const setUrl = f.setUrls[0] ?? null;
+    const ch = channels.get(f.videoId);
     await recordRemoved(env, {
       playlistId: ctx.playlistId,
       videoId: f.videoId,
       slug: ctx.slug,
       setUrl,
       reason: f.reason,
+      channelId: ch?.channelId ?? null,
+      channelTitle: ch?.channelTitle ?? null,
     });
     await logRemoval(env, {
       source: f.reason,
@@ -1888,6 +2026,7 @@ export async function comparePlaylists(
       continue;
     }
     await cachePlaylistVideoIds(env, s.playlist_id, listing.present);
+    await rememberChannels(env, listing, log);
     const blocked = await blockedIds(env, s.playlist_id);
     const membership = await confirmedMembership(env, s.playlist_id);
     const audited = await auditedInserts(env, s.slug);
@@ -1922,6 +2061,7 @@ export async function comparePlaylists(
       results.push({ ...ctx, status: "incomplete", expected: 0, missing: 0, owner: 0, dead: 0 });
     } else {
       await cachePlaylistVideoIds(env, combinedId, listing.present);
+      await rememberChannels(env, listing, log);
       const members = await playlistMembers(env, combinedId);
       if (members.size === 0) {
         await savePlaylistMembers(env, combinedId, listing.present, now);
@@ -2185,6 +2325,7 @@ export async function removeAndReplace(
   const combinedId = (await loadCombinedState(env)).playlistId ?? null;
   const removedFrom: Array<{ playlistId: string; kind: "artist" | "combined"; deleted: number }> =
     [];
+  const channel = await removedVideoChannel(env, videoId, accessToken, log, input.fetcher);
   for (const [pl, kind] of targets(artist, combinedId)) {
     const deleted = await removeVideoFromPlaylist(pl, videoId, accessToken, input.fetcher);
     removedFrom.push({ playlistId: pl, kind, deleted });
@@ -2195,6 +2336,8 @@ export async function removeAndReplace(
       slug: input.slug,
       setUrl: input.setUrl,
       reason: "button",
+      channelId: channel?.channelId ?? null,
+      channelTitle: channel?.channelTitle ?? null,
     });
     await logRemoval(env, {
       source: "button",
@@ -2219,6 +2362,25 @@ export async function removeAndReplace(
     mkvid,
   });
   return { ok: true, videoId, removedFrom, mkvid };
+}
+
+/** The uploader of a video the owner is removing: from the cache, else one videos.list call (1 unit). Never throws. */
+async function removedVideoChannel(
+  env: Env,
+  videoId: string,
+  accessToken: string,
+  log: Logger,
+  fetcher?: typeof fetch,
+): Promise<{ channelId: string; channelTitle: string | null } | null> {
+  try {
+    const known = (await channelsOf(env, [videoId])).get(videoId);
+    if (known) return known;
+    const m = (await getVideoMeta(env, [videoId], accessToken, { fetcher })).get(videoId);
+    return m?.channelId ? { channelId: m.channelId, channelTitle: m.channelTitle ?? null } : null;
+  } catch (e) {
+    log.warn("hygiene.remove_replace.channel_failed", { videoId, ...errorFields(e) });
+    return null;
+  }
 }
 
 /** Queue a set for mkvid from its stored page facts (no 1001tracklists fetch). */
@@ -2385,6 +2547,11 @@ export async function undoRemoval(
 const LAST_COMPARE_KEY = "hygiene:last_compare";
 const LAST_SWEEP_KEY = "hygiene:last_sweep";
 
+/** Make the sweep due at the next cron tick (a channel was just banned: its videos should not wait up to 6 hours). */
+export async function requestSweepSoon(env: Env): Promise<void> {
+  await env.SUBS.delete(LAST_SWEEP_KEY);
+}
+
 async function due(env: Env, key: string, interval: number, now: number): Promise<boolean> {
   const raw = await env.SUBS.get(key);
   const last = raw ? Number(raw) : 0;
@@ -2402,11 +2569,18 @@ export async function runPlaylistHygiene(
   opts: {
     accessToken?: string;
     notify?: Notifier;
+    /** Pushes new channel-ban questions (lib/channel-bans.ts); absent = asked, not pushed (the next comparison pushes). */
+    banNotify?: BanNotifier;
     force?: "compare" | "sweep";
     fetcher?: typeof fetch;
     nowMs?: number;
   } = {},
-): Promise<{ compare?: ComparePlaylistResult[]; sweep?: SweepResult; skipped?: string }> {
+): Promise<{
+  compare?: ComparePlaylistResult[];
+  sweep?: SweepResult;
+  bans?: BanQueueResult;
+  skipped?: string;
+}> {
   const nowMs = opts.nowMs ?? Date.now();
   const now = Math.floor(nowMs / 1000);
   try {
@@ -2419,7 +2593,8 @@ export async function runPlaylistHygiene(
     if (!wantCompare && !wantSweep) return { skipped: "not_due" };
     const token = opts.accessToken ?? (await getAccessToken(env))?.accessToken;
     if (!token) return { skipped: "youtube_not_connected" };
-    const out: { compare?: ComparePlaylistResult[]; sweep?: SweepResult } = {};
+    const out: { compare?: ComparePlaylistResult[]; sweep?: SweepResult; bans?: BanQueueResult } =
+      {};
     // The comparison's dead-video deletes and the sweep draw on one daily budget, seconds apart: the count is handed
     // over in memory, since a KV read that soon after the write may not show it.
     const spend: { used: number | null } = { used: null };
@@ -2432,6 +2607,18 @@ export async function runPlaylistHygiene(
         now,
         spend,
       });
+      // The owner's removals it just found become ban questions (and past ones whose channel is now known).
+      try {
+        out.bans = await processBanQueue(env, {
+          log,
+          accessToken: token,
+          fetcher: opts.fetcher,
+          notify: opts.banNotify,
+          now,
+        });
+      } catch (e) {
+        log.error("bans.queue_threw", errorFields(e));
+      }
     }
     if (wantSweep) {
       await env.SUBS.put(LAST_SWEEP_KEY, String(now));

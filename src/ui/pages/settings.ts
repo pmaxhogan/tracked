@@ -121,7 +121,7 @@ const APP_GROUPS: FormGroup[] = [
       {
         path: "playlists.rejectVertical",
         label: "Turn down vertical videos",
-        help: "Shorts. Blank = REJECT_VERTICAL (unset = off).",
+        help: "Shorts and portrait phone recordings. Blank = REJECT_VERTICAL (unset = on).",
         kind: "bool",
         nullable: true,
       },

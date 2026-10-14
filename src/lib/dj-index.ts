@@ -109,6 +109,27 @@ export function parseSetYouTubeId(html: string): string | null {
   return null;
 }
 
+/** A media player 1001tracklists builds for one of the set's YouTube recordings. */
+const PLAYER_WIDGET_RE = /id="ytWidget_([A-Za-z0-9_-]{11})"/g;
+
+/**
+ * Every YouTube recording a set page offers, as candidates for the set's
+ * video: the primary one (`parseSetYouTubeId`) first, then the page's other
+ * players (`<div id="ytWidget_<id>">`) in page order, each once. About one
+ * set page in ten with a video has two players (often the label's own upload
+ * and a fan's); only players count, never a watch link elsewhere on the page.
+ */
+export function parseSetYouTubeIds(html: string): string[] {
+  const out: string[] = [];
+  if (typeof html !== "string") return out;
+  const primary = parseSetYouTubeId(html);
+  if (primary) out.push(primary);
+  PLAYER_WIDGET_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PLAYER_WIDGET_RE.exec(html))) if (!out.includes(m[1]!)) out.push(m[1]!);
+  return out;
+}
+
 /**
  * Rough fingerprint of how YouTube-y a set page is, used in the
  * `sync.no_youtube_on_set` diagnostic to tell at a glance whether the parser

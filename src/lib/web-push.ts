@@ -44,7 +44,8 @@ export type PushKind =
   | "playlist_hold"
   | "presave_found"
   | "track_uploaded"
-  | "playlist_add";
+  | "playlist_add"
+  | "channel_ban";
 
 /** What the service worker receives (as JSON) and turns into a Notification. */
 export type PushPayload = {

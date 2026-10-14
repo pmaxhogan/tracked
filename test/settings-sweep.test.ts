@@ -253,6 +253,9 @@ describe("app settings", () => {
         .dryRun,
     ).toBe(true);
     expect(rejectVerticalEnabled({ REJECT_VERTICAL: "1" }, DEFAULT_APP_SETTINGS)).toBe(true);
+    // On by default since the embed-size signal was verified live (2026-10-14); only an explicit off turns it off.
+    expect(rejectVerticalEnabled({}, DEFAULT_APP_SETTINGS)).toBe(true);
+    expect(rejectVerticalEnabled({ REJECT_VERTICAL: "off" }, DEFAULT_APP_SETTINGS)).toBe(false);
     expect(
       rejectVerticalEnabled(
         { REJECT_VERTICAL: "1" },
@@ -264,7 +267,7 @@ describe("app settings", () => {
     expect(eff.playlists).toEqual({
       sweepDryRun: true,
       sweepDailyRemovals: 40,
-      rejectVertical: false,
+      rejectVertical: true,
     });
   });
 

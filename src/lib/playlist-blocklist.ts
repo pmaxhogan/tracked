@@ -48,14 +48,27 @@ export async function recordRemoved(
     setUrl: string | null;
     reason: RemovedReason;
     at?: number;
+    /** The video's uploader channel, when known (lib/channel-bans.ts fills it in later otherwise). */
+    channelId?: string | null;
+    channelTitle?: string | null;
   },
 ): Promise<void> {
   await dbOf(env)
     .prepare(
-      `INSERT INTO removed_videos (playlist_id, video_id, slug, set_url, reason, at) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO removed_videos (playlist_id, video_id, slug, set_url, reason, at, channel_id, channel_title)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(playlist_id, video_id) DO NOTHING`,
     )
-    .bind(r.playlistId, r.videoId, r.slug, r.setUrl, r.reason, r.at ?? nowSeconds())
+    .bind(
+      r.playlistId,
+      r.videoId,
+      r.slug,
+      r.setUrl,
+      r.reason,
+      r.at ?? nowSeconds(),
+      r.channelId ?? null,
+      r.channelTitle ?? null,
+    )
     .run();
 }
 

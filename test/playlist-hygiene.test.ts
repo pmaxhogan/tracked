@@ -55,6 +55,7 @@ import {
   approveHold,
   pickSetVideo,
   removeAndReplace,
+  requestSweepSoon,
   runPlaylistHygiene,
   runRemovalSweep,
   saveSetFacts,
@@ -78,6 +79,8 @@ import {
   setOverride,
 } from "../src/lib/playlist-blocklist";
 import { getMkvidRequestForSet } from "../src/lib/mkvid";
+import { saveVideoChannels } from "../src/lib/video-meta";
+import { channelStrikes, decideBan, processBanQueue } from "../src/lib/channel-bans";
 
 const log = makeLogger({ task: "test" });
 const fixture = (name: string) =>
@@ -363,8 +366,8 @@ describe("pickSetVideo (the sync gate)", () => {
     expect(r.rejected).toMatchObject({ videoId: "79n8BaQAL2Q", reason: "notice" });
   });
 
-  it("leaves a vertical-looking video alone while REJECT_VERTICAL is off (the default)", async () => {
-    const env = makeEnv();
+  it("leaves a vertical-looking video alone when REJECT_VERTICAL is turned off (it is on by default)", async () => {
+    const env = makeEnv({ REJECT_VERTICAL: "0" });
     metaAnswer({ vert0000001: { embedWidth: 720, embedHeight: 1280 } });
     expect(
       (
@@ -2668,5 +2671,213 @@ describe("review minors", () => {
     });
     expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
     expect((await row(env, setUrl(1)))!.video_id).toBe("mkUp0000001");
+  });
+});
+
+describe("channel bans and strikes (lib/channel-bans.ts)", () => {
+  const html = "<html>plain page</html>";
+  const pick = (env: Env, ids: string[]) =>
+    pickSetVideo(env, {
+      slug: SLUG,
+      setUrl: setUrl(1),
+      html,
+      rawVideoId: ids[0] ?? null,
+      candidates: ids,
+      playlistId: PL,
+      accessToken: "tok",
+      log,
+    });
+  /** `n` owner removals of videos by `channel` (a strike each). */
+  async function strikes(env: Env, channel: string, n: number) {
+    for (let i = 0; i < n; i++)
+      await recordRemoved(env, {
+        playlistId: "PLelse",
+        videoId: `${channel.slice(2, 6)}${String(i).padStart(7, "0")}`,
+        slug: "other",
+        setUrl: null,
+        reason: "owner",
+        channelId: channel,
+        channelTitle: channel,
+      });
+  }
+
+  it("the sync takes the page's second player when the first is turned down", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    metaAnswer({ clip0000001: { durationSeconds: 600 }, full0000001: {} });
+    await saveSetFacts(env, facts(setUrl(1), { lastCueSeconds: 3600 }));
+    const r = await pickSetVideo(env, {
+      slug: SLUG,
+      setUrl: setUrl(1),
+      html: null,
+      rawVideoId: "clip0000001",
+      candidates: ["clip0000001", "full0000001"],
+      playlistId: PL,
+      accessToken: "tok",
+      log,
+    });
+    expect(r.videoId).toBe("full0000001");
+    expect(r.rejected).toMatchObject({ videoId: "clip0000001", reason: "short" });
+    // One videos.list call for both players.
+    expect(vi.mocked(getVideoMeta)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(getVideoMeta).mock.calls[0]![1]).toEqual(["clip0000001", "full0000001"]);
+  });
+
+  it("skips a channel the owner removed videos of when another player passes; uses it when it is the only one", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    await strikes(env, "UCfanA", 1);
+    metaAnswer({
+      fanA0000001: { channelId: "UCfanA" },
+      labl0000001: { channelId: "UClabel" },
+    });
+    expect(await pick(env, ["fanA0000001", "labl0000001"])).toMatchObject({
+      videoId: "labl0000001",
+      rejected: { videoId: "fanA0000001", reason: "struck_channel" },
+    });
+    expect((await pick(env, ["fanA0000001"])).videoId).toBe("fanA0000001");
+  });
+
+  it("when only struck channels pass, the one with the fewest strikes wins, then page order", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    await strikes(env, "UCfanA", 3);
+    await strikes(env, "UCfanB", 1);
+    await strikes(env, "UCfanC", 1);
+    metaAnswer({
+      fanA0000001: { channelId: "UCfanA" },
+      fanB0000001: { channelId: "UCfanB" },
+      fanC0000001: { channelId: "UCfanC" },
+    });
+    expect((await pick(env, ["fanA0000001", "fanC0000001", "fanB0000001"])).videoId).toBe(
+      "fanC0000001",
+    );
+  });
+
+  it("a banned channel's video is never picked, and hasGoodVideo says no for it", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    await strikes(env, "UCfanA", 1);
+    await processBanQueue(env, { log });
+    await decideBan(env, "UCfanA", "ban");
+    metaAnswer({ fanA0000001: { channelId: "UCfanA", channelTitle: "Fan A" } });
+    expect(await pick(env, ["fanA0000001"])).toEqual({
+      videoId: null,
+      rejected: {
+        videoId: "fanA0000001",
+        reason: "banned_channel",
+        detail: "uploaded by Fan A, a channel you banned",
+      },
+    });
+    await seedSet(env, setUrl(2), "fanA0000001");
+    await saveVideoChannels(env, [
+      { videoId: "fanA0000001", channelId: "UCfanA", channelTitle: "Fan A" },
+    ]);
+    expect(await hasGoodVideo(env, { slug: SLUG, setUrl: setUrl(2), videoId: "fanA0000001" })).toBe(
+      false,
+    );
+  });
+
+  it("the owner's kept video passes over strikes", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    await strikes(env, "UCfanA", 2);
+    await setOverride(env, "fanA0000002");
+    metaAnswer({
+      fanA0000002: { channelId: "UCfanA" },
+      labl0000001: { channelId: "UClabel" },
+    });
+    expect((await pick(env, ["labl0000001", "fanA0000002"])).videoId).toBe("labl0000001");
+    expect((await pick(env, ["fanA0000002", "labl0000001"])).videoId).toBe("fanA0000002");
+  });
+
+  it("the comparison stores each item's channel from its listing and records it on an owner removal, which opens a question and pushes", async () => {
+    const env = makeEnv();
+    await seedFive(env);
+    listing({ [PL]: ids([1, 2, 3, 4, 5, 6, 7, 8, 9]) }, { as: { vid00000001: "public" } });
+    // vid00000010 was seen in an earlier listing with its channel.
+    await saveVideoChannels(env, [
+      { videoId: "vid00000010", channelId: "UCfan", channelTitle: "Fan Cam" },
+    ]);
+    const sent: unknown[] = [];
+    const r = await runPlaylistHygiene(env, log, {
+      force: "compare",
+      banNotify: async (p) => {
+        sent.push(p);
+        return true;
+      },
+    });
+    expect(r.compare![0]).toMatchObject({ owner: 1 });
+    expect(r.bans).toMatchObject({ asked: 1, notified: true });
+    const rem = await env.DB.prepare(
+      "SELECT channel_id, channel_title, ban_noted FROM removed_videos WHERE video_id = 'vid00000010'",
+    ).first();
+    expect(rem).toEqual({ channel_id: "UCfan", channel_title: "Fan Cam", ban_noted: 1 });
+    const fromListing = await env.DB.prepare(
+      "SELECT channel_id, fetched_at FROM video_meta WHERE video_id = 'vid00000001'",
+    ).first();
+    expect(fromListing).toEqual({ channel_id: "UCdj", fetched_at: 0 });
+    expect(sent).toMatchObject([{ kind: "channel_ban", title: "Ban Fan Cam?" }]);
+  });
+
+  it("Remove & replace records the uploader, looking the video up when its channel is not known", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    await seedCombined(env);
+    await seedSet(env, setUrl(1), "bad00000001");
+    metaAnswer({ bad00000001: { channelId: "UCbad", channelTitle: "Bad" } });
+    const r = await removeAndReplace(env, "tok", { slug: SLUG, setUrl: setUrl(1), log });
+    expect(r.ok).toBe(true);
+    const rows = (
+      await env.DB.prepare(
+        "SELECT playlist_id, reason, channel_id FROM removed_videos ORDER BY playlist_id",
+      ).all()
+    ).results;
+    expect(rows).toEqual([
+      { playlist_id: PL, reason: "button", channel_id: "UCbad" },
+      { playlist_id: PLC, reason: "button", channel_id: "UCbad" },
+    ]);
+    expect((await processBanQueue(env, { log })).asked).toBe(1);
+    expect((await channelStrikes(env, ["UCbad"])).get("UCbad")).toBe(1);
+  });
+
+  it("the live sweep takes a banned channel's videos out of the artist and combined playlists", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    await seedCombined(env);
+    await seedSet(env, setUrl(1), "fanA0000001", { pos: 0 });
+    await seedSet(env, setUrl(2), "good0000001", { pos: 1 });
+    await strikes(env, "UCfanA", 1);
+    await processBanQueue(env, { log });
+    await decideBan(env, "UCfanA", "ban");
+    metaAnswer({ fanA0000001: { channelId: "UCfanA" }, good0000001: { channelId: "UClabel" } });
+    const r = await runRemovalSweep(env, "tok", {
+      log,
+      settings: { dryRun: false, dailyRemovals: 40 },
+    });
+    expect(r).toMatchObject({ rejected: 1, removedVideos: 1 });
+    expect(vi.mocked(removeVideoFromPlaylist).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      [PL, "fanA0000001"],
+      [PLC, "fanA0000001"],
+    ]);
+    expect((await removals(env)).map((x) => [x.playlist_kind, x.reason, x.status])).toEqual([
+      ["artist", "banned_channel", "removed"],
+      ["combined", "banned_channel", "removed"],
+    ]);
+    // The set is due again: its recheck picks the next player on the page, or none (mkvid).
+    expect(await row(env, setUrl(1))).toMatchObject({ video_id: null, checked_at: 0 });
+  });
+
+  it("requestSweepSoon makes the sweep due at the next tick", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    listing({ [PL]: [] });
+    const t0 = Date.parse("2026-10-01T00:00:00Z");
+    await runPlaylistHygiene(env, log, { nowMs: t0 });
+    expect((await runPlaylistHygiene(env, log, { nowMs: t0 + 300_000 })).skipped).toBe("not_due");
+    await requestSweepSoon(env);
+    const r = await runPlaylistHygiene(env, log, { nowMs: t0 + 600_000 });
+    expect(r.sweep).toBeDefined();
+    expect(r.compare).toBeUndefined();
   });
 });

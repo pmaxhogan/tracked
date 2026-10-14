@@ -43,7 +43,7 @@ export type FullRecordingInput = {
   /** videos.list player.embedWidth / embedHeight (requested with maxWidth). */
   embedWidth: number | null;
   embedHeight: number | null;
-  /** Apply rule (d). Off unless `REJECT_VERTICAL` is set (lib/playlist-hygiene.ts rejectVerticalEnabled). */
+  /** Apply rule (d). The caller decides (lib/playlist-hygiene.ts rejectVerticalEnabled: on unless turned off). */
   rejectVertical?: boolean;
   /** Rules (b) and (c) tolerances (app settings playlists.*ToleranceMinutes); default the constants above. */
   shortToleranceSeconds?: number;
@@ -57,11 +57,13 @@ const known = (n: number | null | undefined): n is number =>
   typeof n === "number" && Number.isFinite(n);
 
 /**
- * Orientation from the embed size YouTube scales to the video's aspect ratio.
- * TODO(live check): the embed dimensions for a Short have not been observed
- * from this codebase yet (no network while it was written). If a known Short
- * comes back with embedHeight <= embedWidth, switch this to oEmbed
- * (youtube.com/oembed width/height) - the rule stays in this one function.
+ * Orientation from the embed size YouTube scales to the video's aspect ratio
+ * (videos.list part=player with maxWidth=1280). Checked live on 2026-10-14:
+ * five known Shorts (-9awB-2qX8o, 1yfCBYdjLHU, 2JQuQ0-92EI, 5mU6SRS2Bxo,
+ * 6W_841xoprg) answer 1280x2276, three 16:9 videos (dQw4w9WgXcQ,
+ * 79n8BaQAL2Q, N40pkDgwNfg) 1280x720, and portrait phone recordings of whole
+ * sets (e.g. e4NeLoMm7wo, 37 min) 1280x2276 too. oEmbed answers 200x113 for
+ * every one of them, Shorts included, so it is not a signal.
  */
 export function isVertical(embedWidth: number | null, embedHeight: number | null): boolean | null {
   if (!known(embedWidth) || !known(embedHeight) || embedWidth <= 0 || embedHeight <= 0) return null;

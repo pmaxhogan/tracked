@@ -354,7 +354,7 @@ export const BAN_JS = /* js */ `
 
 /** Served at /ui/sw.js. Turns a push into a Notification; tap opens the payload URL. */
 export const SW_JS = /* js */ `
-const STICKY_KINDS = ['ban_start', 'pool_challenge', 'pool_account', 'playlist_hold'];
+const STICKY_KINDS = ['ban_start', 'pool_challenge', 'pool_account', 'playlist_hold', 'channel_ban'];
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 self.addEventListener('push', (event) => {

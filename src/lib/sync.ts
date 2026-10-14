@@ -49,7 +49,13 @@
 import { notifyPlaylistAdd } from "./playlist-add-push";
 import type { Env } from "../types";
 import { listSubscriptions, type Subscription } from "./subscriptions";
-import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from "./dj-index";
+import {
+  crawlDjIndex,
+  fetch1001Html,
+  parseSetYouTubeId,
+  parseSetYouTubeIds,
+  youtubeFingerprint,
+} from "./dj-index";
 import {
   fetchOptsFromEnv,
   isStopTheBatchError,
@@ -1264,6 +1270,8 @@ export async function syncOne(
           setUrl,
           html: setFetched.html,
           rawVideoId: parseSetYouTubeId(setFetched.html),
+          // Every player on the page: a second recording is used when the first is turned down.
+          candidates: parseSetYouTubeIds(setFetched.html),
           playlistId,
           accessToken,
           log,
@@ -1541,6 +1549,8 @@ export async function syncOne(
         setUrl,
         html: setFetched.html,
         rawVideoId: parseSetYouTubeId(setFetched.html),
+        // A set that has an mkvid render (clean audio) keeps it rather than trade it for a second player on the page.
+        candidates: prev?.source === "mkvid" ? undefined : parseSetYouTubeIds(setFetched.html),
         playlistId,
         accessToken,
         log,

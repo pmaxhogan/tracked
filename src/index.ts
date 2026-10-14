@@ -41,6 +41,7 @@ import { prunePoolEvents, retryFailedPoolPushes } from "./lib/pool-events";
 import { continueAppleBackstop } from "./lib/apple-backstop";
 import { pruneSchedulerTicks, recordSchedulerTick } from "./lib/tick-history";
 import { playlistHoldNotifier, runPlaylistHygiene } from "./lib/playlist-hygiene";
+import { channelBanNotifier } from "./lib/channel-bans";
 import { checkDeletedMkvidVideos, retryDueOldVideoDeletions } from "./lib/mkvid-recreate";
 import { youtubeTokenRefresher } from "./lib/google-oauth";
 import { maybeSnapshotStats } from "./lib/stats";
@@ -325,7 +326,10 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           log.warn("cron.playlist_order_threw", errorFields(e));
         }
         // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
-        await runPlaylistHygiene(env, log, { notify: playlistHoldNotifier(env, log) });
+        await runPlaylistHygiene(env, log, {
+          notify: playlistHoldNotifier(env, log),
+          banNotify: channelBanNotifier(env, log),
+        });
       } finally {
         // Stored pages finish even when the tick threw.
         await drainPageCaptures();

@@ -70,7 +70,7 @@ export const AppSettingsSchema = z.object({
     sweepDryRun: z.boolean().nullable(),
     /** Removals a sweep may make per UTC day; null = PLAYLIST_SWEEP_DAILY_REMOVALS, else 40. */
     sweepDailyRemovals: z.number().int().min(0).max(500).nullable(),
-    /** Turn down vertical videos (Shorts); null = REJECT_VERTICAL (unset = off). */
+    /** Turn down vertical videos (Shorts, portrait phone recordings); null = REJECT_VERTICAL (unset = on). */
     rejectVertical: z.boolean().nullable(),
     /** A video this much shorter than the last cue is not the full set (default 5 min). */
     shortToleranceMinutes: z.number().min(0).max(60),

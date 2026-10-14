@@ -53,6 +53,8 @@ vi.mock("../src/lib/dj-index", async () => {
     fetch1001Html: vi.fn(),
     crawlDjIndex: vi.fn(),
     parseSetYouTubeId: vi.fn(),
+    // The page's other players: none unless a test says so (the primary comes from parseSetYouTubeId above).
+    parseSetYouTubeIds: vi.fn(() => []),
   };
 });
 vi.mock("../src/lib/youtube-playlists", async () => {
