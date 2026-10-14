@@ -396,7 +396,7 @@ describe("completeSearchJob", () => {
     expect(r.decisions.map((d) => [d.externalId, d.decision, d.outcome])).toEqual([
       ["Lnpw0PbJYWM", "auto_approved", "found"],
       ["U7SsWFFYcwk", "superseded", null],
-      ["eTmdmS_BQMw", "superseded", null],
+      ["eTmdmS_BQMw", "auto_rejected", null],
       ["9rvikRTSe-Q", "auto_rejected", null],
     ]);
     const p = await env.DB.prepare("SELECT stage, youtube_video_id FROM presaves WHERE id = ?")

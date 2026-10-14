@@ -36,6 +36,7 @@ import { parseIsoDuration } from "./youtube-playlists";
 import { presaveMatchReviewPayload, sendPushToAll } from "./web-push";
 import { markPresaveFoundFromMatch } from "./presave";
 import { queueMatchUpload, soulseekSourceUrl } from "./track-uploads";
+import { compareVersions } from "./presave-version";
 
 export const SEARCH_KINDS = ["ytm", "slsk"] as const;
 export type SearchKind = (typeof SEARCH_KINDS)[number];
@@ -57,6 +58,14 @@ const STABLE_PREVIEWS = new Set(["apple", "spotify"]);
 /** A claim mkvid has not completed or failed is handed out again after this. */
 export const SEARCH_CLAIM_TTL_MS = 30 * 60_000;
 const HOUR_MS = 3600_000;
+/** Candidates one search may put in review at most (best first); the rest wait as "not shown". */
+export const MAX_REVIEW_PER_PRESAVE = 3;
+/** Without a scored preview, only a candidate whose names (version credit included) match this well is worth the owner's ear. */
+export const STRONG_NAME_SCORE = 0.8;
+/** decision `superseded` with this reason prefix: held back by the review cap, shown when a slot frees up. */
+export const NOT_SHOWN = "not shown";
+/** searchNow's next_at: due, and ahead of every scheduled search. */
+const SEARCH_NOW_AT = 1;
 const DAY_MS = 24 * HOUR_MS;
 export const CLIP_PREFIX = "presave-clips/";
 
@@ -199,11 +208,41 @@ export function decideMatch(
     MatchSettings,
     "autoApproveScore" | "autoRejectScore" | "durationToleranceSeconds" | "minNameScore"
   >,
+  /** The titles: with them, the version credit is checked too (lib/presave-version.ts). */
+  names?: { presave: { title: string | null }; cand: { title: string | null } },
 ): MatchVerdict {
   const scored = c.scores
     .map((x) => x.score)
     .filter((x): x is number => typeof x === "number" && Number.isFinite(x));
   const audioScore = scored.length ? Math.max(...scored) : null;
+  if (names) {
+    // Another remix, an alteration, a mashup: not this track, whatever the audio could say (all sources).
+    const v = compareVersions(names.presave.title, names.cand.title);
+    if (!v.ok && v.kind !== "original")
+      return { decision: "auto_rejected", audioScore, reason: v.reason };
+    if (presaveDuration && c.durationSeconds && c.durationSeconds > 2 * presaveDuration)
+      return {
+        decision: "auto_rejected",
+        audioScore,
+        reason: `a megamix or a set: ${Math.round(c.durationSeconds)} s, the track is ${Math.round(presaveDuration)} s`,
+      };
+    // No credit for a remix pre-save: the original, unless the audio says it is the remix.
+    if (!v.ok) {
+      if (audioScore !== null && audioScore >= s.autoApproveScore)
+        return {
+          decision: "review",
+          audioScore,
+          reason: `${v.reason}; but the audio matches a preview (${fmt(audioScore)})`,
+        };
+      return { decision: "auto_rejected", audioScore, reason: v.reason };
+    }
+    if (audioScore === null && c.nameScore < STRONG_NAME_SCORE)
+      return {
+        decision: "auto_rejected",
+        audioScore,
+        reason: `no preview could be compared and the names match only ${fmt(c.nameScore)}`,
+      };
+  }
   if (c.source !== "ytm")
     return {
       decision: "review",
@@ -418,7 +457,9 @@ export async function claimSearchJob(
             AND (s.presave_id IS NULL
                  OR (s.status != 'claimed' AND s.next_at IS NOT NULL AND s.next_at <= ?)
                  OR (s.status = 'claimed' AND s.claimed_at < ?))
-          ORDER BY COALESCE(s.next_at, p.created_at) ASC, p.id ASC LIMIT 10`,
+          -- Asked for by the owner (Search now) first, then the longest due.
+          ORDER BY CASE WHEN s.next_at = ${SEARCH_NOW_AT} OR (s.status = 'done' AND s.last_at IS NULL) THEN 0 ELSE 1 END,
+                   COALESCE(s.next_at, p.created_at) ASC, p.id ASC LIMIT 10`,
       )
       .bind(kind, watchedBefore, now, stale)
       .all<{ id: number; has_row: number | null; attempts: number | null }>();
@@ -638,6 +679,7 @@ export async function completeSearchJob(
   const decisions: CandidateOutcome[] = [];
   const approvedIds: Array<{ id: number; audio: number; video: boolean }> = [];
   const reviewIds: number[] = [];
+  const reviewRank = new Map<number, [number, number]>();
   for (const c of body.candidates) {
     const externalId = str(c.externalId, 1500);
     if (!externalId || !MATCH_SOURCES.includes(c.source)) continue;
@@ -661,6 +703,7 @@ export async function completeSearchJob(
       { source: c.source, durationSeconds: duration, nameScore: ns, scores },
       p.duration_seconds,
       settings,
+      { presave: { title: p.title }, cand: { title: str(c.title) } },
     );
     const yt = c.source === "ytm" ? youtubeVerdict(f, str(c.videoType, 60)) : null;
     const decision: MatchDecision = waiting ? verdict.decision : "superseded";
@@ -709,7 +752,34 @@ export async function completeSearchJob(
         audio: verdict.audioScore ?? 0,
         video: !!yt && (yt.isTopic === true || yt.commentsOff === true),
       });
-    if (decision === "review") reviewIds.push(rowId);
+    if (decision === "review") {
+      reviewIds.push(rowId);
+      reviewRank.set(rowId, [verdict.audioScore ?? -1, ns]);
+    }
+  }
+
+  // At most MAX_REVIEW_PER_PRESAVE reach the owner, best audio then names first; the rest wait unseen.
+  if (reviewIds.length) {
+    const waitingNow = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM presave_matches WHERE presave_id = ? AND decision = 'review' AND id NOT IN (" +
+          reviewIds.map(() => "?").join(",") +
+          ")",
+      )
+      .bind(p.id, ...reviewIds)
+      .first<{ n: number }>();
+    const room = Math.max(0, MAX_REVIEW_PER_PRESAVE - Number(waitingNow?.n ?? 0));
+    const ranked = [...reviewIds].sort((a, b) => {
+      const ra = reviewRank.get(a)!,
+        rb = reviewRank.get(b)!;
+      return rb[0] - ra[0] || rb[1] - ra[1];
+    });
+    for (const hid of ranked.slice(room)) {
+      await holdBack(env, hid, now);
+      const d = decisions.find((x) => x.id === hid);
+      if (d) d.decision = "superseded";
+    }
+    reviewIds.splice(0, reviewIds.length, ...ranked.slice(0, room));
   }
 
   // The best auto-approved candidate is applied; it supersedes the rest of the queue for this track.
@@ -1048,9 +1118,122 @@ export async function rejectMatch(
       )
       .bind(now, now, id)
       .run();
+    await refillReview(env, m.presave_id, now);
     await releaseClipsIfDone(env, m.presave_id);
   }
   return getMatchRow(env, id);
+}
+
+async function holdBack(env: Env, id: number, now: number): Promise<void> {
+  await dbOf(env)
+    .prepare(
+      `UPDATE presave_matches SET decision = 'superseded', decided_by = 'auto', decided_at = ?, updated_at = ?,
+         reason = '${NOT_SHOWN}: ${MAX_REVIEW_PER_PRESAVE} better candidates wait for review' WHERE id = ?`,
+    )
+    .bind(now, now, id)
+    .run();
+}
+
+/** A review slot freed up (a rejection): the best candidate held back by the cap is shown. */
+async function refillReview(env: Env, presaveId: number, now: number): Promise<void> {
+  const db = dbOf(env);
+  const n = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM presave_matches WHERE presave_id = ? AND decision = 'review'",
+    )
+    .bind(presaveId)
+    .first<{ n: number }>();
+  const room = MAX_REVIEW_PER_PRESAVE - Number(n?.n ?? 0);
+  if (room <= 0) return;
+  const held = await db
+    .prepare(
+      `SELECT id FROM presave_matches WHERE presave_id = ? AND decision = 'superseded' AND reason LIKE '${NOT_SHOWN}:%'
+        ORDER BY COALESCE(audio_score, -1) DESC, COALESCE(name_score, 0) DESC, id ASC LIMIT ?`,
+    )
+    .bind(presaveId, room)
+    .all<{ id: number }>();
+  for (const r of held.results)
+    await db
+      .prepare(
+        "UPDATE presave_matches SET decision = 'review', decided_by = NULL, decided_at = NULL, reason = 'shown after another candidate was rejected', updated_at = ? WHERE id = ?",
+      )
+      .bind(now, r.id)
+      .run();
+}
+
+/**
+ * Decide every candidate waiting for review again with the current rules (the
+ * version credits, the review cap): the ones the rules now reject are
+ * auto-rejected (never offered again), at most MAX_REVIEW_PER_PRESAVE stay per
+ * track, the rest wait unseen. Nothing is auto-approved here. Idempotent:
+ * a second run changes nothing. POST /ops/presave-matches/redecide.
+ */
+export async function redecideReviews(
+  env: Env,
+  log: Logger,
+  now = Date.now(),
+): Promise<{
+  checked: number;
+  rejected: number;
+  heldBack: number;
+  kept: number;
+  presaves: number[];
+}> {
+  const db = dbOf(env);
+  const settings = (await getAppSettings(env)).presaveMatch;
+  const rows = await db
+    .prepare(
+      `SELECT m.*, p.artist AS p_artist, p.title AS p_title, p.duration_seconds AS p_duration
+         FROM presave_matches m JOIN presaves p ON p.id = m.presave_id WHERE m.decision = 'review' ORDER BY m.presave_id, m.id`,
+    )
+    .all<
+      MatchRow & { p_artist: string | null; p_title: string | null; p_duration: number | null }
+    >();
+  let rejected = 0;
+  let heldBack = 0;
+  const left = new Map<number, Array<{ id: number; audio: number; name: number }>>();
+  for (const m of rows.results) {
+    const ns = nameScore(
+      { artist: m.p_artist, title: m.p_title },
+      { artist: m.artist ?? m.channel_title, title: m.title },
+    );
+    const v = decideMatch(
+      {
+        source: m.source,
+        durationSeconds: m.duration_seconds,
+        nameScore: ns,
+        scores: parseJson<ReferenceScore[]>(m.scores, []),
+      },
+      m.p_duration,
+      settings,
+      { presave: { title: m.p_title }, cand: { title: m.title } },
+    );
+    if (v.decision === "auto_rejected") {
+      await db
+        .prepare(
+          "UPDATE presave_matches SET decision = 'auto_rejected', decided_by = 'auto', decided_at = ?, reason = ?, name_score = ?, updated_at = ? WHERE id = ? AND decision = 'review'",
+        )
+        .bind(now, v.reason, ns, now, m.id)
+        .run();
+      rejected++;
+      continue;
+    }
+    const list = left.get(Number(m.presave_id)) ?? [];
+    list.push({ id: Number(m.id), audio: m.audio_score ?? -1, name: ns });
+    left.set(Number(m.presave_id), list);
+  }
+  for (const list of left.values()) {
+    list.sort((a, b) => b.audio - a.audio || b.name - a.name);
+    for (const x of list.slice(MAX_REVIEW_PER_PRESAVE)) {
+      await holdBack(env, x.id, now);
+      heldBack++;
+    }
+  }
+  const presaves = [...new Set(rows.results.map((r) => Number(r.presave_id)))];
+  for (const pid of presaves) await releaseClipsIfDone(env, pid);
+  const kept = rows.results.length - rejected - heldBack;
+  log.info("presave_match.redecided", { checked: rows.results.length, rejected, heldBack, kept });
+  return { checked: rows.results.length, rejected, heldBack, kept, presaves };
 }
 
 /** Search a pre-save (both kinds when Soulseek is on) at the next claim, even past maxSearches. */
@@ -1066,7 +1249,7 @@ export async function searchNow(env: Env, presaveId: number, now = Date.now()): 
         `INSERT INTO presave_match_searches (presave_id, kind, status, next_at, created_at, updated_at) VALUES (?, ?, 'done', ?, ?, ?)
          ON CONFLICT (presave_id, kind) DO UPDATE SET next_at = excluded.next_at, status = CASE WHEN status = 'claimed' THEN status ELSE 'done' END, updated_at = excluded.updated_at`,
       )
-      .bind(presaveId, kind, now - 1, now, now)
+      .bind(presaveId, kind, SEARCH_NOW_AT, now, now)
       .run();
   return true;
 }

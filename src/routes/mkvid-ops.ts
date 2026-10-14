@@ -4,6 +4,7 @@
  *   POST /ops/mkvid/unpublish/<request id>   take a delivered video down and requeue the set
  *   GET  /ops/scheduler/ticks?limit=&before=  scheduler tick history, newest first (lib/tick-history.ts)
  *   POST /ops/mkvid/apple-backstop?limit=&restart=1  Apple Music cues for every held set, one batch a call
+ *   POST /ops/presave-matches/redecide       decide the pending pre-save match reviews again with the current rules (idempotent)
  */
 
 import { Hono, type Context } from "hono";
@@ -14,6 +15,7 @@ import { makeLogger, type Logger } from "../lib/log";
 import { deleteOldVideo, unpublishMkvidRequest } from "../lib/mkvid-recreate";
 import { listSchedulerTicks } from "../lib/tick-history";
 import { appleBackstopBatch } from "../lib/apple-backstop";
+import { redecideReviews } from "../lib/presave-match";
 
 export const mkvidOpsApp = new Hono<{ Bindings: Env }>();
 mkvidOpsApp.use("*", bearerAuthFor("API_TOKEN"));
@@ -63,6 +65,14 @@ mkvidOpsApp.post("/mkvid/apple-backstop", async (c) => {
     log,
   });
   return c.json({ ...r, done: r.totals.done });
+});
+
+mkvidOpsApp.post("/presave-matches/redecide", async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get("cf-ray") ?? "local",
+    route: "ops.presave_matches_redecide",
+  });
+  return c.json(await redecideReviews(c.env, log));
 });
 
 mkvidOpsApp.get("/scheduler/ticks", async (c) => {
