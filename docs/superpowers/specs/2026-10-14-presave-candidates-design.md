@@ -228,9 +228,28 @@ only when those are set; otherwise the rip fails permanently with
 
 enabled (true), searchDelayHours (48), researchDays (7), maxSearches (4),
 dailySearchCap (40; claims are also paced by mkvid: one at a time, at most
-one per `PRESAVE_SEARCH_SECONDS`), maxCandidates (6), autoApproveScore (tuned),
-autoRejectScore (tuned), durationToleranceSeconds (5), minNameScore (0.6),
+one per `PRESAVE_SEARCH_SECONDS`), maxCandidates (6), autoApproveScore (0.7),
+autoRejectScore (0.2), durationToleranceSeconds (5), minNameScore (0.6),
 notifyReview (true), soulseek (false), spotifyRip (false).
+
+### Tuning results (mkvid scripts/tune-matcher.ts, 2026-10-14)
+
+31 labelled pairs, Apple previews against YouTube Music uploads:
+
+| label                                 | n   | score range                                                                                |
+| ------------------------------------- | --- | ------------------------------------------------------------------------------------------ |
+| same recording (Topic / label upload) | 12  | 0.79 - 0.93                                                                                |
+| unrelated track                       | 12  | 0.03 - 0.05                                                                                |
+| other version of the same title       | 7   | 0.04 - 0.36 (remixes); 0.80 - 0.92 (radio edit, bass-boosted re-upload of the same master) |
+
+So 0.7 / 0.2 separate same vs unrelated with a wide margin; the versions that
+score like a match are kept out of auto-approval by the length rule (a radio
+edit is minutes shorter) and the name rule ("Bass Boosted" caps the name
+score at 0.5). Acceptance example: JAWNS - Damager's Apple preview vs the Topic
+upload Lnpw0PbJYWM scores 0.889 at 45 s, length 170 s vs 170 s, names 1.0:
+auto-approved, and a Topic upload, so it becomes the presave's video. When
+several candidates auto-approve, one that can be the video as it is (Topic or
+comments off) wins over a re-upload that would be ripped, then the higher score.
 
 ## 12. Errors and testing
 
