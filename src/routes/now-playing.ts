@@ -497,7 +497,9 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     }),
   )
   // The tracks just after the picked ones, warmed once the picked lookups are
-  // through (never competing with them for the pool's browsers).
+  // through (never competing with them for the pool's browsers), at recheck
+  // priority: nobody is waiting on them, so they must not hold the phone's
+  // reserved share against the next tap; a busy pool just turns them down.
   const lastPicked = sel.picked[sel.picked.length - 1]
   const lastIdx = lastPicked ? selectable.findIndex((p) => p.title === lastPicked.title && p.startSeconds === lastPicked.startSeconds) : -1
   const ahead = [
@@ -510,7 +512,7 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
   ].slice(0, LINKS_PREFETCH_AHEAD)
   background(
     lookups.then(() =>
-      Promise.all(ahead.map((id) => resolveTrackMediaLinks(env, id, log).catch((e) => log.warn('links.prefetch_failed', { trackId: id, ...errorFields(e) })))),
+      Promise.all(ahead.map((id) => resolveTrackMediaLinks(env, id, log, 'recheck').catch((e) => log.warn('links.prefetch_failed', { trackId: id, ...errorFields(e) })))),
     ),
   )
   const waitMs = Math.max(LINKS_MIN_WAIT_MS, PHONE_ANSWER_BUDGET_MS - (Date.now() - tStart))

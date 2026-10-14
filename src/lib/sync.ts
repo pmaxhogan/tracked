@@ -981,6 +981,9 @@ export async function syncOne(
    * The video goes in at the place its set's date gives it (lib/playlist-order.ts).
    */
   const orderKeys: OrderKeyCache = {}
+  // Addition pushes (lib/playlist-add-push.ts) go out while the run carries on
+  // and are waited for at its end, so they never eat into the run's deadline.
+  const additionPushes: Array<Promise<void>> = []
   const insertOrdered = (videoId: string, setUrl: string) =>
     insertInOrder(env, { playlistId, videoId, existing: existingVideoIds, accessToken, log, setUrl, cache: orderKeys })
   const addToArtistPlaylist = async (videoId: string, setUrl: string): Promise<void> => {
@@ -1003,7 +1006,7 @@ export async function syncOne(
     existingVideoIds.add(videoId)
     // Confirmed insert: from now on the comparison expects it in this playlist.
     await markInPlaylist(env, playlistId, videoId, 'sync')
-    await notifyPlaylistAdd(env, { setUrl, videoId, playlistTitle, via: 'sync' }, log)
+    additionPushes.push(notifyPlaylistAdd(env, { setUrl, videoId, playlistTitle, via: 'sync' }, log))
     videoIdsAdded += 1
     playlistChanged = true
   }
@@ -1484,6 +1487,7 @@ export async function syncOne(
   }
   if (combined.handle) await flushCombined(env, combined.handle, log)
   await flushPlaylistAdditions(env, additions, log)
+  await Promise.all(additionPushes)
 
   return {
     slug: sub.slug,

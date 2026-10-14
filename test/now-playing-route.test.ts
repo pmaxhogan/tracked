@@ -346,5 +346,7 @@ describe('POST /now-playing — the phone time budget for link lookups', () => {
     const asked = (resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])
     // Picked: 0, 300, 600 (previous / current / next); then the next ones ahead.
     expect(asked).toEqual(['101', '102', '103', '104', '105'])
+    const priorities = (resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[3] ?? 'phone')
+    expect(priorities).toEqual(['phone', 'phone', 'phone', 'recheck', 'recheck'])
   })
 })
