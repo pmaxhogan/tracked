@@ -15,7 +15,14 @@ import { fakeD1 } from "./helpers/fake-d1";
 
 vi.mock("../src/lib/dj-index", async () => {
   const actual = await vi.importActual<typeof import("../src/lib/dj-index")>("../src/lib/dj-index");
-  return { ...actual, fetch1001Html: vi.fn(), crawlDjIndex: vi.fn(), parseSetYouTubeId: vi.fn() };
+  return {
+    ...actual,
+    fetch1001Html: vi.fn(),
+    crawlDjIndex: vi.fn(),
+    parseSetYouTubeId: vi.fn(),
+    // The page's other players: none (the primary comes from parseSetYouTubeId).
+    parseSetYouTubeIds: vi.fn(() => []),
+  };
 });
 vi.mock("../src/lib/youtube-playlists", async () => {
   const actual = await vi.importActual<typeof import("../src/lib/youtube-playlists")>(

@@ -62,10 +62,10 @@ same channel, duration rules, orientation.
 - `video_meta` + `channel_id`, `channel_title` (videos.list adds `snippet`; the
   call stays 1 unit per 50 ids).
 - `removed_videos` + `channel_id`, `channel_title`, `ban_noted INTEGER NOT NULL
-  DEFAULT 0` (0 = an owner/button removal the ban queue has not looked at).
+DEFAULT 0` (0 = an owner/button removal the ban queue has not looked at).
 - `channel_bans (channel_id PK, channel_title, state, strikes, last_video_id,
-  last_playlist_id, last_slug, last_set_url, last_removal_at, asked_at,
-  decided_at, notified)`; `state` is `pending | banned | declined | lifted`.
+last_playlist_id, last_slug, last_set_url, last_removal_at, asked_at,
+decided_at, notified)`; `state` is `pending | banned | declined | lifted`.
   The "other videos" list is computed when read, never stored.
 
 Strikes of a channel = `COUNT(DISTINCT video_id)` of `removed_videos` rows with
@@ -139,9 +139,9 @@ next removal, like `declined`).
   1. passing candidates whose channel has no strikes, in page order;
   2. else passing candidates with strikes, fewest strikes first, then page
      order (tie-break: the channel Max has objected to least).
-  A rejected primary with a passing second player now yields the second one
-  instead of no video. When the page is not at hand (an insert that waited for
-  quota), only the stored id is judged, as today.
+     A rejected primary with a passing second player now yields the second one
+     instead of no video. When the page is not at hand (an insert that waited for
+     quota), only the stored id is judged, as today.
 - The recheck's existing swap branch ("swapped recording: out with the old, in
   with the new") already replaces a set's video when the pick changes, so a
   struck primary with a clean second player is swapped at the set's next

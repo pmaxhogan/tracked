@@ -4,7 +4,8 @@
 // hygiene compare). Every source loads in parallel and fails on its own.
 // Data: GET /ui/api/ban/status, /ui/api/pool/status, /ui/api/pool/challenges,
 // /ui/api/youtube/status, /ui/api/combined, /ui/api/mkvid?limit=1,
-// /ui/api/removals?limit=1, /ui/api/list + /ui/api/state/:slug (four at a
+// /ui/api/removals?limit=1, /ui/api/bans (the channel-ban card, shown only
+// while a question waits), /ui/api/list + /ui/api/state/:slug (four at a
 // time) and the Activity table endpoint (/ui/api/activity, the newest twelve
 // rows of the last 7 days, as a compact TKTable); the detail drawers (shared with the
 // Activity page) use /ui/api/audit-detail and /ui/api/playlist-addition-detail.
@@ -35,6 +36,7 @@ const BODY = /* html */ `
   ${tile("t-mk", "/ui/mkvid", "mkvid", "The mkvid renderer, which makes videos for sets that have no recording, and how much of each Google project's daily upload cap is used.")}
   ${tile("t-chal", "/ui/captcha", "Challenges", "Captchas that a pool account ran into and that need a person to solve them. Unsolved ones expire.")}
 </div>
+<div id="h-bans" class="tk-card h-bans" hidden></div>
 <div class="tk-card h-attn-card">
   <h2><span class="tip-term"${tipAttr('Problems found by the checks below. A red "fix" is broken or blocking something; an amber "check" is worth a look but nothing is blocked.')}>Needs attention</span></h2>
   <ul id="attn" class="h-attn"></ul>
@@ -59,6 +61,13 @@ const CSS = /* css */ `
   .h-tile .v.wait { color: var(--warn); }
   .skel.w { width: 5rem; display: inline-block; }
   .h-attn-card { margin-bottom: var(--sp-4); }
+  .h-bans { margin-bottom: var(--sp-4); }
+  .h-bans ul { list-style: none; margin: var(--sp-2) 0 0; padding: 0; }
+  .h-bans li + li { border-top: 1px solid var(--line); }
+  .h-bans a.q { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--sp-2); padding: 8px 4px; color: var(--fg); text-decoration: none; }
+  .h-bans a.q:hover { background: var(--elev); }
+  .h-bans .txt { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+  .h-bans .go { margin-left: auto; color: var(--accent); font-size: var(--fs-sm); white-space: nowrap; }
   .h-attn { list-style: none; margin: 0; padding: 0; }
   .h-attn li + li { border-top: 1px solid var(--line); }
   .h-attn a { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--sp-2); padding: 8px 4px; color: var(--fg); text-decoration: none; }
@@ -249,6 +258,22 @@ ${ACTIVITY_DRAWER_JS}
     });
   }
 
+  // -- channel-ban questions (lib/channel-bans.ts): shown only while one waits for an answer --
+  // Amber, not red: a decision to make, nothing is broken.
+  async function loadBans() {
+    const $b = $('h-bans');
+    if (!$b) return;
+    const res = await TK.api.get('/ui/api/bans');
+    const list = res.ok && res.data && Array.isArray(res.data.pending) ? res.data.pending : [];
+    if (!list.length) { $b.hidden = true; $b.innerHTML = ''; return; }
+    $b.hidden = false;
+    $b.innerHTML = '<h2><span class="tip-term"' + TK.tip('You removed a video from a playlist. Ban its channel so its videos are never added again, or keep it.') + '>Ban ' + (list.length === 1 ? 'this channel' : 'these channels') + '?</span></h2><ul>' +
+      list.slice(0, 5).map((q) => '<li><a class="q" href="/ui/bans"><span class="badge warn"' + TK.tip('Videos of this channel you removed from a playlist.') + '>' + esc(String(q.strikes)) + ' removed</span>' +
+        '<span class="txt">' + esc(q.channelTitle || q.channelId) + '</span>' +
+        '<span class="go">Decide -></span></a></li>').join('') +
+      (list.length > 5 ? '<li><a class="q" href="/ui/bans"><span class="txt">and ' + (list.length - 5) + ' more</span><span class="go">Bans -></span></a></li>' : '') + '</ul>';
+  }
+
   // -- DJs whose last sync errored --
   let djSlugs = null;
   async function loadDjs() {
@@ -339,6 +364,7 @@ ${ACTIVITY_DRAWER_JS}
   loadCombined();
   loadMkvid();
   loadHolds();
+  loadBans();
   loadDjs();
 })();
 `;

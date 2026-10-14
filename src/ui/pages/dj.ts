@@ -235,7 +235,7 @@ ${DJ_ACTIONS_JS}
       const res = await TK.api.post('/ui/api/set/remove-replace', { slug, url: r.url });
       if (!res.ok) { rr.textContent = 'Remove failed: ' + TK.errText(res, 'failed (' + res.status + ')'); rr.disabled = false; return; }
       const dd = res.data || {};
-      rr.textContent = 'Removed ' + dd.videoId + ' · ' + dd.mkvid;
+      rr.textContent = 'Removed ' + dd.videoId + ' · ' + dd.mkvid + (dd.banQuestion ? ' · ban its channel? see Bans' : '');
     });
     links.appendChild(rr);
     const ll = document.createElement('button');

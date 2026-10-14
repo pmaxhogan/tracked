@@ -24,6 +24,7 @@ export type NavKey =
   | "presaves"
   | "playlists"
   | "removed"
+  | "bans"
   | "mkvid"
   | "track-uploads"
   | "activity"
@@ -77,6 +78,7 @@ export const NAV: NavItem[] = [
     icon: "removed",
     group: "Library",
   },
+  { key: "bans", label: "Bans", href: "/ui/bans", icon: "ban", group: "Library" },
   {
     key: "mkvid",
     label: "mkvid",

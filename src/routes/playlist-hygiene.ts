@@ -10,13 +10,16 @@
  *   POST /ui/api/removals/dead-holds/:playlistId/approve   let a playlist's many dead videos be taken out
  *   POST /ui/api/hygiene/run?what=compare|sweep       run one step now
  *   POST /ui/api/set/remove-replace      the set card's "remove and replace" button
+ *   GET  /ui/bans                        the channel-ban questions and answered channels
+ *   GET  /ui/api/bans                    the rows behind it (lib/channel-bans.ts listBanQueue) + the sweep's dry-run flag
+ *   POST /ui/api/bans/:channelId/ban|decline|lift   the owner's answer
  */
 
 import { getAppSettings } from "../lib/app-settings";
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { getAccessToken } from "../lib/google-oauth";
-import { makeLogger } from "../lib/log";
+import { errorFields, makeLogger } from "../lib/log";
 import {
   approveDeadHold,
   approveHold,
@@ -28,11 +31,14 @@ import {
   removalCounts,
   REASON_LABELS,
   removeAndReplace,
+  requestSweepSoon,
   runPlaylistHygiene,
   sweepDeletesUsed,
   sweepSettings,
   undoRemoval,
 } from "../lib/playlist-hygiene";
+import { channelBanNotifier, decideBan, listBanQueue, processBanQueue } from "../lib/channel-bans";
+import { BANS_PAGE_HTML } from "../ui/pages/bans";
 import { parseDjSlug } from "../lib/subscriptions";
 import { tableResponse } from "../lib/table-query";
 import { normalizeTracklistUrl } from "../lib/tracklists1001";
@@ -106,6 +112,33 @@ hygieneApp.post("/api/hygiene/run", async (c) => {
   return c.json(await runPlaylistHygiene(c.env, log, { force: what }));
 });
 
+// --- channel bans (lib/channel-bans.ts) ---------------------------------------
+
+hygieneApp.get("/bans", (c) => servePage(c, BANS_PAGE_HTML));
+
+hygieneApp.get("/api/bans", async (c) => {
+  const [queue, settings] = await Promise.all([
+    listBanQueue(c.env),
+    getAppSettings(c.env).then((app) => sweepSettings(c.env, app)),
+  ]);
+  c.header("Cache-Control", "no-store");
+  return c.json({ ...queue, dryRun: settings.dryRun });
+});
+
+hygieneApp.post("/api/bans/:channelId/:action", async (c) => {
+  const action = c.req.param("action");
+  if (action !== "ban" && action !== "decline" && action !== "lift")
+    return c.json({ error: "invalid_request", message: "action is ban, decline or lift" }, 400);
+  const channelId = c.req.param("channelId");
+  const r = await decideBan(c.env, channelId, action);
+  if (!r.ok) return c.json({ error: r.error }, r.error === "not_found" ? 404 : 409);
+  // Its videos in the playlists should not wait up to 6 hours for the sweep.
+  if (action === "ban") await requestSweepSoon(c.env);
+  reqLog(c, "subs.bans.decide").info("bans.decided", { channelId, action, state: r.state });
+  const settings = sweepSettings(c.env, await getAppSettings(c.env));
+  return c.json({ ok: true, state: r.state, dryRun: settings.dryRun });
+});
+
 hygieneApp.post("/api/set/remove-replace", async (c) => {
   const log = reqLog(c, "subs.hygiene.remove_replace");
   const body = (await c.req.json().catch(() => null)) as { slug?: unknown; url?: unknown } | null;
@@ -128,5 +161,17 @@ hygieneApp.post("/api/set/remove-replace", async (c) => {
           : "set not known to the sync";
     return c.json({ error: r.error, message }, r.error === "not_found" ? 404 : 409);
   }
-  return c.json(r);
+  // The owner just judged this video: its channel gets a ban question (and a push) now, not at the next comparison.
+  let banQuestion = false;
+  try {
+    const q = await processBanQueue(c.env, {
+      log,
+      accessToken: token.accessToken,
+      notify: channelBanNotifier(c.env, log),
+    });
+    banQuestion = q.asked + q.updated > 0;
+  } catch (e) {
+    log.warn("bans.queue_failed", errorFields(e));
+  }
+  return c.json({ ...r, banQuestion });
 });

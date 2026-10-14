@@ -41,6 +41,7 @@ export const PAGES: Array<[string, string]> = [
   ["/ui/set", "Set"],
   ["/ui/dj/some-dj", ""],
   ["/ui/removed", "Removed videos"],
+  ["/ui/bans", "Bans"],
   ["/ui/mkvid", "mkvid"],
   ["/ui/activity", "Activity"],
   ["/ui/search", "Search"],
@@ -2664,6 +2665,158 @@ describe("Settings and Tools pages", () => {
 });
 
 /** Every route with one of these methods under /ui, with sample values for its parameters. */
+describe("Bans page", () => {
+  const SET = "https://www.1001tracklists.com/tracklist/abc12/dj-1-club-2026-08-15.html";
+  const bans = (over: Record<string, unknown> = {}) => ({
+    pending: [
+      {
+        channelId: "UCfan",
+        channelTitle: "Fan <Cam>",
+        state: "pending",
+        strikes: 2,
+        askedAt: 1_800_000_000,
+        decidedAt: null,
+        lastRemovalAt: 1_800_000_000,
+        removed: [{ videoId: "fan00000001", slug: "dj-1", setUrl: SET, at: 1_800_000_000 }],
+        inPlaylists: [{ videoId: "fan00000009", slug: "dj-1", setUrl: SET, playlistId: "PL1" }],
+      },
+    ],
+    decided: [
+      {
+        channelId: "UCold",
+        channelTitle: "Old Channel",
+        state: "banned",
+        strikes: 1,
+        decidedAt: 1_800_000_100,
+        removed: [],
+        inPlaylists: [],
+      },
+      {
+        channelId: "UCkept",
+        channelTitle: "Kept",
+        state: "declined",
+        strikes: 1,
+        decidedAt: 1_800_000_050,
+        removed: [],
+        inPlaylists: [],
+      },
+    ],
+    dryRun: false,
+    ...over,
+  });
+
+  async function run(answer: () => unknown) {
+    const calls: Array<{ u: string; method: string }> = [];
+    const { ctx, els } = richStub(async (u: string, init?: { method?: string }) => {
+      calls.push({ u, method: init?.method ?? "GET" });
+      if (u === "/ui/api/bans") return Response.json(answer());
+      if (u.startsWith("/ui/api/bans/")) return Response.json({ ok: true, state: "banned" });
+      return new Response("{}", { status: 404 });
+    }, "/ui/bans");
+    (ctx as any).URL = URL;
+    const clicks: Record<string, (ev: unknown) => unknown> = {};
+    for (const id of ["pending", "decided"])
+      (ctx as any).document.getElementById(id).addEventListener = (
+        t: string,
+        fn: (ev: unknown) => unknown,
+      ) => {
+        if (t === "click") clicks[id] = fn;
+      };
+    const html = await (await app.request("https://tracked.example/ui/bans", {}, env())).text();
+    for (const s of scriptsOf(html)) vm.runInContext(s, ctx);
+    for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0));
+    return { calls, els, clicks, html };
+  }
+  const button = (attrs: Record<string, string>) => {
+    const b: any = {
+      disabled: false,
+      textContent: "",
+      dataset: {},
+      setAttribute() {},
+      removeAttribute() {},
+      getAttribute: (k: string) => attrs[k] ?? null,
+    };
+    return { target: { closest: () => b } };
+  };
+
+  it("is in the sidebar under Library, after Removed videos", async () => {
+    const html = await (await app.request("https://tracked.example/ui/bans", {}, env())).text();
+    expect(html).toMatch(/Removed videos<\/span><\/a><a href="\/ui\/bans"[^>]*aria-current="page"/);
+    expect(html).not.toMatch(/\stitle="/);
+  });
+
+  it("lists each open question with what was removed and the channel's other videos, then the answered channels", async () => {
+    const { els } = await run(() => bans());
+    const pending = els.get("pending").innerHTML as string;
+    expect(pending).toContain("Fan &lt;Cam&gt;");
+    expect(pending).not.toContain("Fan <Cam>");
+    expect(pending).toContain("2 videos removed");
+    expect(pending).toContain("https://www.youtube.com/channel/UCfan");
+    expect(pending).toContain("fan00000001");
+    expect(pending).toContain("Its other videos in your playlists (1):");
+    expect(pending).toContain("fan00000009");
+    expect(pending).toContain('href="/ui/dj/dj-1"');
+    expect(pending).toContain(">Ban channel</button>");
+    expect(pending).toContain(">Not banned</button>");
+    // Amber: a decision to make, nothing broken.
+    expect(pending).toContain('class="badge warn"');
+    expect(pending).not.toContain('class="badge bad"');
+    const decided = els.get("decided").innerHTML as string;
+    expect(decided).toContain("Old Channel");
+    expect(decided).toContain(">Lift ban</button>");
+    expect(decided).toContain("not banned");
+    expect(decided).toContain(">Ban</button>");
+    for (const h of [pending, decided]) {
+      expect(h).not.toMatch(/\stitle="/);
+      expect(h).not.toContain(String.fromCharCode(0x2014)); // no em dash
+    }
+  });
+
+  it("says when there is nothing to decide", async () => {
+    const { els } = await run(() => bans({ pending: [], decided: [] }));
+    expect(els.get("pending").innerHTML).toContain("Nothing to decide.");
+    expect(els.get("decided").innerHTML).toContain("No channel answered yet.");
+  });
+
+  it("Ban channel and Lift ban post the answer and reload", async () => {
+    const { calls, clicks, els } = await run(() => bans());
+    await clicks.pending!(button({ "data-act": "ban", "data-i": "0" }));
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0));
+    expect(calls).toContainEqual({ u: "/ui/api/bans/UCfan/ban", method: "POST" });
+    expect(calls.filter((c) => c.u === "/ui/api/bans")).toHaveLength(2);
+    expect(els.get("bn-status").textContent).toContain("Fan <Cam> is banned.");
+    await clicks.decided!(button({ "data-act": "lift", "data-j": "0" }));
+    for (let i = 0; i < 10; i++) await new Promise((res) => setTimeout(res, 0));
+    expect(calls).toContainEqual({ u: "/ui/api/bans/UCold/lift", method: "POST" });
+  });
+
+  it("Home shows a card while a question waits, and none otherwise", async () => {
+    const home = async (pending: unknown[]) => {
+      const { ctx, els } = richStub(
+        async (u: string) =>
+          u === "/ui/api/bans"
+            ? Response.json(bans({ pending }))
+            : new Response("{}", { status: 404 }),
+        "/ui",
+      );
+      (ctx as any).URL = URL;
+      const html = await (await app.request("https://tracked.example/ui", {}, env())).text();
+      expect(html).toContain('id="h-bans"');
+      for (const s of scriptsOf(html)) vm.runInContext(s, ctx);
+      for (let i = 0; i < 20; i++) await new Promise((res) => setTimeout(res, 0));
+      return els.get("h-bans");
+    };
+    const card = await home(bans().pending);
+    expect(card.hidden).toBe(false);
+    expect(card.innerHTML).toContain("Ban this channel?");
+    expect(card.innerHTML).toContain("Fan &lt;Cam&gt;");
+    expect(card.innerHTML).toContain('href="/ui/bans"');
+    expect(card.innerHTML).toContain('class="badge warn"');
+    expect(card.innerHTML).not.toMatch(/\stitle="/);
+    expect((await home([])).hidden).toBe(true);
+  });
+});
+
 function uiPaths(methods: string[]): string[] {
   const sample: Record<string, string> = {
     slug: "some-dj",

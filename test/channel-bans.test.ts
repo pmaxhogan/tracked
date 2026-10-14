@@ -286,6 +286,63 @@ describe("listBanQueue", () => {
   });
 });
 
+describe("routes", () => {
+  const uiEnv = () => {
+    const env = makeEnv();
+    (env as unknown as Record<string, string>).DEV_BYPASS_CF_ACCESS = "1";
+    return env;
+  };
+  it("GET /ui/api/bans lists the queue with the sweep's dry-run flag; answers are posted per channel", async () => {
+    const { app } = await import("../src/index");
+    const env = uiEnv();
+    await removed(env, "fan00000001", { channel: "UCfan" });
+    await processBanQueue(env, { log, now: NOW });
+    await env.SUBS.put("hygiene:last_sweep", String(NOW));
+    const list = await app.request("http://x/ui/api/bans", {}, env);
+    expect(list.status).toBe(200);
+    const body = (await list.json()) as { pending: Array<{ channelId: string }>; dryRun: boolean };
+    expect(body.pending.map((p) => p.channelId)).toEqual(["UCfan"]);
+    expect(body.dryRun).toBe(true);
+
+    const post = (path: string) =>
+      app.request(
+        `http://x${path}`,
+        { method: "POST", headers: { origin: "http://x", "content-type": "application/json" } },
+        env,
+      );
+    expect((await post("/ui/api/bans/UCfan/nuke")).status).toBe(400);
+    expect((await post("/ui/api/bans/UCnone/ban")).status).toBe(404);
+    expect((await post("/ui/api/bans/UCfan/lift")).status).toBe(409);
+    const ban = await post("/ui/api/bans/UCfan/ban");
+    expect(ban.status).toBe(200);
+    expect(await ban.json()).toEqual({ ok: true, state: "banned", dryRun: true });
+    // The sweep runs at the next tick instead of up to 6 hours later.
+    expect(await env.SUBS.get("hygiene:last_sweep")).toBeNull();
+    expect(await bannedChannelIds(env)).toEqual(new Set(["UCfan"]));
+    expect(await (await post("/ui/api/bans/UCfan/lift")).json()).toMatchObject({
+      state: "lifted",
+    });
+  });
+
+  it("the Bans page and its API sit behind Cloudflare Access", async () => {
+    const { app } = await import("../src/index");
+    const locked = {
+      ...makeEnv(),
+      CF_ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
+      CF_ACCESS_AUD: "aud",
+      CF_ACCESS_ALLOWED_EMAILS: "owner@example.com",
+    } as unknown as Env;
+    for (const [method, path] of [
+      ["GET", "/ui/bans"],
+      ["GET", "/ui/api/bans"],
+      ["POST", "/ui/api/bans/UCfan/ban"],
+    ] as const) {
+      const r = await app.request(`http://x${path}`, { method }, locked);
+      expect([401, 403], path).toContain(r.status);
+    }
+  });
+});
+
 describe("channelBanPayload", () => {
   it("names one channel, or lists several in one push", () => {
     const one = channelBanPayload(
