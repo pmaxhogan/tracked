@@ -172,16 +172,16 @@ describe("migrations on a copy of the pre-pool schema with data", () => {
     ]);
   });
 
-  it("0022 adds the channel columns over existing video_meta and removed_videos rows: unknown, not checked, not yet asked", () => {
+  it("0023 adds the channel columns over existing video_meta and removed_videos rows: unknown, not checked, not yet asked", () => {
     const db = openRawDb();
-    for (const f of upTo(21)) db.exec(readFileSync(join(DIR, f), "utf8"));
+    for (const f of upTo(22)) db.exec(readFileSync(join(DIR, f), "utf8"));
     db.exec(
       "INSERT INTO video_meta (video_id, duration_seconds, embed_width, embed_height, alive, fetched_at) VALUES ('gX0uFq9hv_E', 2833, 1280, 2276, 1, 5)",
     );
     db.exec(
       "INSERT INTO removed_videos (playlist_id, video_id, slug, set_url, reason, at) VALUES ('PL1', 'gX0uFq9hv_E', 'maup', NULL, 'owner', 7)",
     );
-    for (const f of after(21)) db.exec(readFileSync(join(DIR, f), "utf8"));
+    for (const f of after(22)) db.exec(readFileSync(join(DIR, f), "utf8"));
     expect(
       rows(
         db,

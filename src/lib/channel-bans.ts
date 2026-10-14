@@ -1,5 +1,5 @@
 /**
- * Channel bans (migrations/0022, docs/superpowers/specs/2026-10-14-bad-videos-design.md).
+ * Channel bans (migrations/0023, docs/superpowers/specs/2026-10-14-bad-videos-design.md).
  *
  * When the owner removes a video from a managed playlist (found by the
  * 6-hourly comparison, reason `owner`) or uses Remove & replace (`button`),

@@ -57,7 +57,7 @@ same channel, duration rules, orientation.
 
 ## Design
 
-### Data (migration 0022_channel_bans.sql)
+### Data (migration 0023_channel_bans.sql)
 
 - `video_meta` + `channel_id`, `channel_title` (videos.list adds `snippet`; the
   call stays 1 unit per 50 ids).
