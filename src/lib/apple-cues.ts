@@ -66,7 +66,7 @@ const STOP = new Set([
   "featuring",
 ]);
 
-const stripAccents = (s: string) => s.normalize("NFKD").replace(/[̀-ͯ]/g, "");
+const stripAccents = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "");
 
 /** Name tokens for matching: accents, case, feat. clauses, mix-word brackets and punctuation gone; remixer words kept. */
 export function nameTokens(s: string | null | undefined): string[] {
@@ -129,7 +129,15 @@ export function matchRows(
   const out = new Map<number, number>();
   if (!n || !m) return out;
   const sim = (bi: number, aj: number) => {
-    const s = nameSimilarity(base[bi]!.r.title!, apple[aj]!.name);
+    const r = base[bi]!.r;
+    const t = apple[aj]!;
+    // Title alone, or artist + title (some albums name tracks "Artist - Title", or carry the artist apart).
+    const full = r.artist ? `${r.artist} ${r.title}` : null;
+    const s = Math.max(
+      nameSimilarity(r.title!, t.name),
+      full ? nameSimilarity(full, t.name) : 0,
+      full && t.artist ? nameSimilarity(full, `${t.artist} ${t.name}`) : 0,
+    );
     return s >= MATCH_SIMILARITY ? s : 0;
   };
   const W = m + 1;
@@ -279,7 +287,8 @@ export function planAppleCues<T extends CueRow>(
     cue = Math.round(cue);
     // Strictly between the nearest real cues around it (matched or not).
     let lo = -1;
-    let hi = Infinity;
+    // Never past the end of the recording when its length is known.
+    let hi = opts.sourceSeconds != null && opts.sourceSeconds > 0 ? opts.sourceSeconds : Infinity;
     for (const j of baseIdx) {
       const c = j === 0 ? (realCue(rows[0]!) ?? 0) : realCue(rows[j]!);
       if (c === null) continue;

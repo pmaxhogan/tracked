@@ -85,6 +85,40 @@ describe("matchRows", () => {
   it("treats a title of just ID as unmatchable", () => {
     expect(matchRows([row("ID", 0, { isId: false })], [at("ID", 10)]).size).toBe(0);
   });
+  it("matches an Apple name that carries the artist too", () => {
+    const rows = [row("Opus", 0, { artist: "Eric Prydz" })];
+    expect(matchRows(rows, [at("Eric Prydz - Opus (Mixed)", 10)]).get(0)).toBe(0);
+    expect(
+      matchRows(rows, [{ name: "Opus (Mixed)", artist: "Eric Prydz", seconds: 10 }]).get(0),
+    ).toBe(0);
+  });
+});
+
+describe("planAppleCues bounds", () => {
+  it("never places a cue at or past the end of a recording of known length", () => {
+    const names = [
+      "Opus",
+      "Sirens",
+      "Losing It",
+      "Cola",
+      "Pjanoo",
+      "Strobe",
+      "Cafe Del Mar",
+      "Silence",
+      "Insomnia",
+      "Children",
+    ];
+    const rows = names.map((n, i) => row(n, i === 0 ? 0 : i === 5 ? 1700 : null));
+    const apple = names.map((n) => at(n, 300));
+    const p = planAppleCues(rows, apple, {
+      minMatchShare: 0.7,
+      tolerancePct: 3,
+      toleranceSeconds: 120,
+      sourceSeconds: 2900,
+    });
+    expect(p.tracks[8]!.cueSeconds).toBe(2600);
+    expect(p.tracks[9]!.cueSeconds).toBeNull();
+  });
 });
 
 describe("planAppleCues", () => {
