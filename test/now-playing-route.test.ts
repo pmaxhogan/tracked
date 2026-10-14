@@ -445,10 +445,20 @@ describe("POST /now-playing - the phone time budget for link lookups", () => {
             ? new Promise(() => {})
             : { appleLink: null, youtubeLink: `https://youtu.be/v${id}` },
       );
+      const lookups = resolveTrackMediaLinks as ReturnType<typeof vi.fn>;
+      lookups.mockClear();
       const pending = post(env, {
         videoTitle: SET_TITLE,
         videoDurationSeconds: 6967,
         currentSeconds: 400,
+      });
+      // Advance only once the lookups are in flight: the phases before them can wait on
+      // real async work (slower under coverage), and a budget that fires first would
+      // leave every track pending.
+      await vi.waitFor(() => {
+        const ids = lookups.mock.calls.map((c) => c[1]);
+        expect(ids).toContain("101");
+        expect(ids).toContain("102");
       });
       await vi.advanceTimersByTimeAsync(PHONE_ANSWER_BUDGET_MS + 100);
       const res = await pending;
