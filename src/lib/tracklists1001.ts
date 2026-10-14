@@ -963,14 +963,27 @@ function parseCueEntries(html: string): Map<string, { seconds: number; own: bool
  *   embed.music.apple.com/album/<slug>/<id>/<country>/album/<slug>/<id>?app=music&at=...
  * - the country code lives in the middle of the path after the first
  * /album/<slug>/<id> repeats. We rebuild the canonical user-facing URL.
+ * Most pages (sampled 2026-10-14: 57 of 60 with an album) use the plain form
+ *   embed.music.apple.com/<country>/album/<slug>/<id>?app=music...
+ * whose query is dropped. A link with `i=<song id>` is one song, not the set's
+ * album, and is not taken.
  */
 export function extractSetAppleLink(html: string): string | null {
   const m = html.match(
     /embed\.music\.apple\.com\/album\/[^/"]+\/\d+\/(\w{2})\/album\/([^/"]+)\/(\d+)([^"\s]*)/,
   );
-  if (!m) return null;
-  const [, country, slug, albumId, query] = m;
-  return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ""}`;
+  if (m) {
+    const [, country, slug, albumId, query] = m;
+    return `https://music.apple.com/${country}/album/${slug}/${albumId}${query ?? ""}`;
+  }
+  const plain = html.matchAll(
+    /embed\.music\.apple\.com\/(\w{2})\/album\/([^/"?&\s]+)\/(\d+)([^"\s]*)/g,
+  );
+  for (const [, country, slug, albumId, query] of plain) {
+    if (/[?&](amp;)?i=\d/.test(query ?? "")) continue;
+    return `https://music.apple.com/${country}/album/${slug}/${albumId}`;
+  }
+  return null;
 }
 
 /**

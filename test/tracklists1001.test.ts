@@ -660,6 +660,30 @@ describe("extractSetAppleLink (unit)", () => {
       '<iframe src="https://embed.music.apple.com/album/foo/999/gb/album/foo/999"></iframe>';
     expect(extractSetAppleLink(html)).toBe("https://music.apple.com/gb/album/foo/999");
   });
+
+  it("reads the plain embed form most set pages use (2026-10-14), without its query", () => {
+    const html =
+      '<iframe src="https://embed.music.apple.com/us/album/hi-lo-at-elements-music-and-arts-festival-2025-dj-mix/1855972000?app=music&amp;itscg=30200"></iframe>';
+    expect(extractSetAppleLink(html)).toBe(
+      "https://music.apple.com/us/album/hi-lo-at-elements-music-and-arts-festival-2025-dj-mix/1855972000",
+    );
+  });
+
+  it("skips a plain embed of one song (i=) and takes the album after it", () => {
+    const html =
+      '<a href="https://embed.music.apple.com/us/album/some-single/111?i=222&app=music"></a>' +
+      '<iframe src="https://embed.music.apple.com/de/album/the-set-dj-mix/333?app=music"></iframe>';
+    expect(extractSetAppleLink(html)).toBe("https://music.apple.com/de/album/the-set-dj-mix/333");
+    expect(
+      extractSetAppleLink('<a href="https://embed.music.apple.com/us/album/x/1?i=2"></a>'),
+    ).toBeNull();
+  });
+
+  it("ignores artist links", () => {
+    expect(
+      extractSetAppleLink('<a href="https://music.apple.com/artist/mau-p/1636676418"></a>'),
+    ).toBeNull();
+  });
 });
 
 describe("normalizeArtworkUrl", () => {
