@@ -36,7 +36,6 @@ import {
   countMkvidRequests,
   getMkvidLastPoll,
   listMkvidDjs,
-  MKVID_ACCOUNTS,
   MKVID_FINISHED_SQL,
   MKVID_SOURCES,
   mkvidAccountUsage,
@@ -75,7 +74,8 @@ const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
   // The DJ, by slug: the DJ select filters `eq:<slug>`.
   dj: { sql: "slug", type: "text", searchable: true },
   source: { type: "enum", options: MKVID_SOURCES },
-  account: { type: "enum", options: MKVID_ACCOUNTS },
+  // Any upload project key (primary, shared, mkvid's extras): no fixed options.
+  account: { type: "enum" },
   attempts: { type: "number" },
   createdAt: { sql: "created_at", type: "datetime", storage: "s" },
   updatedAt: { sql: "updated_at", type: "datetime", storage: "s" },

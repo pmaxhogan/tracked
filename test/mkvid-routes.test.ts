@@ -218,6 +218,7 @@ describe("/mkvid routes", () => {
       verifiedLists: true,
       trackUploads: true,
       presaveSearch: true,
+      uploadProjects: true,
       recreateStyle: "scene",
       counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0, banned: 0 },
       accounts: [
@@ -746,7 +747,6 @@ describe("/mkvid routes", () => {
     for (const qs of [
       "queue?f.status=in:nope",
       "queue?f.source=in:bandcamp",
-      "finished?f.account=in:other",
       "finished?sort=nope",
       "queue?f.position=has:1",
     ]) {
@@ -763,7 +763,7 @@ describe("/mkvid routes", () => {
     expect(
       ((await (await post(env, "/mkvid/claim", {})).json()) as { request: unknown }).request,
     ).toBeNull();
-    expect((await post(env, "/mkvid/claim", { accounts: ["bogus"] })).status).toBe(400);
+    expect((await post(env, "/mkvid/claim", { accounts: ["Bogus!"] })).status).toBe(400);
     const { request } = (await (
       await post(env, "/mkvid/claim", { accounts: ["primary", "shared"] })
     ).json()) as { request: { account: string; setUrl: string } };
@@ -779,8 +779,12 @@ describe("/mkvid routes", () => {
     for (const n of ["a", "b"])
       await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` });
     expect(
-      (await post(env, "/mkvid/claim", { accounts: ["primary", "shared"], preferAccount: "bogus" }))
-        .status,
+      (
+        await post(env, "/mkvid/claim", {
+          accounts: ["primary", "shared"],
+          preferAccount: "Bogus!",
+        })
+      ).status,
     ).toBe(400);
     const claim = async (b: object) =>
       ((await (await post(env, "/mkvid/claim", b)).json()) as { request: { account: string } })
@@ -789,6 +793,46 @@ describe("/mkvid routes", () => {
       { account: "shared" },
     );
     expect(await claim({ accounts: ["primary", "shared"] })).toMatchObject({ account: "primary" });
+  });
+
+  it("an extra upload project mkvid reports is filled after the primary, before shared, and gets a Settings row", async () => {
+    const env = makeEnv({
+      DEV_BYPASS_CF_ACCESS: "1",
+      MKVID_DAILY_CLAIM_CAP: "0",
+      MKVID_SHARED_DAILY_CLAIM_CAP: "5",
+    });
+    for (const n of ["a", "b"])
+      await enqueueMkvidRequest(env, { ...input, setUrl: `https://x/tracklist/${n}` });
+    const projects = [
+      { key: "primary", label: "mkvid-uploads" },
+      { key: "upload2", label: "mkvid-uploads-2" },
+      { key: "shared", label: "tracked-youtube" },
+    ];
+    const r = (await (
+      await post(env, "/mkvid/claim", { accounts: ["primary", "shared", "upload2"], projects })
+    ).json()) as { request: { account: string } };
+    expect(r.request.account).toBe("upload2");
+    const health = (await (
+      await app.request(
+        "http://x/mkvid/health",
+        { headers: { Authorization: "Bearer mk-secret" } },
+        env,
+      )
+    ).json()) as { uploadProjects: boolean; accounts: Array<{ account: string; label: string }> };
+    expect(health.uploadProjects).toBe(true);
+    expect(health.accounts.map((a) => [a.account, a.label])).toEqual([
+      ["primary", "mkvid-uploads"],
+      ["upload2", "mkvid-uploads-2"],
+      ["shared", "tracked-youtube"],
+    ]);
+    const settings = (await (await app.request("http://x/ui/api/settings", {}, env)).json()) as {
+      mkvidProjects: unknown;
+    };
+    expect(settings.mkvidProjects).toEqual([{ key: "upload2", label: "mkvid-uploads-2", cap: 6 }]);
+    // A track claim takes the extra key too.
+    expect(
+      (await post(env, "/mkvid/track/claim", { accounts: ["upload2"], projects })).status,
+    ).toBe(200);
   });
 
   it("the panel can reorder and ban queued sets", async () => {

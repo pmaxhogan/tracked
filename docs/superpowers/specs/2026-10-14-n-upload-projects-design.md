@@ -42,7 +42,7 @@ no D1 migration and no SQLite migration.
 - `GOOGLE_OAUTH_CLIENT_ID/SECRET` - project `primary` (unchanged).
 - `SHARED_GOOGLE_OAUTH_CLIENT_ID/SECRET` - project `shared` (unchanged).
 - `UPLOAD_PROJECTS` - comma-separated extra keys, in claim order, e.g.
-  `uploads2`. For each key `k`, with `K` = `k` upper-cased:
+  `upload2`. For each key `k`, with `K` = `k` upper-cased:
   - `K_GOOGLE_OAUTH_CLIENT_ID`, `K_GOOGLE_OAUTH_CLIENT_SECRET` (required; a
     key without both is skipped with a startup warning),
   - `K_GOOGLE_PROJECT` (optional label, the GCP project id; default = key).
@@ -52,6 +52,9 @@ no D1 migration and no SQLite migration.
   `mkvid-uploads`), `SHARED_GOOGLE_PROJECT` (default `tracked-youtube`).
 - Invalid keys, duplicates and `primary`/`shared` inside `UPLOAD_PROJECTS` are
   skipped with a warning, never fatal.
+- `mkvid-uploads-2` is project `upload2`: `UPLOAD_PROJECTS=upload2`,
+  `UPLOAD2_GOOGLE_OAUTH_CLIENT_ID`, `UPLOAD2_GOOGLE_OAUTH_CLIENT_SECRET`,
+  `UPLOAD2_GOOGLE_PROJECT=mkvid-uploads-2`.
 
 `config.uploadProjects` is the ordered list `[primary, ...extras, shared?]`,
 each `{ key, label, google }`. `config.google` / `config.googleShared` stay.

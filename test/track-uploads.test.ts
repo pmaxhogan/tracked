@@ -674,6 +674,27 @@ describe("/mkvid/track routes", () => {
     ).toBe("found");
   });
 
+  it("fail: a youtube_quota failure is back to pending in 10 min, no attempt used, the claim refunded", async () => {
+    const env = makeEnv();
+    const id = await seedPresave(env);
+    const q = await maybeQueueTrackUpload(env, id);
+    // An extra project nobody reported is not claimed against; the primary is.
+    expect((await claimTrackUpload(env, log, ["upload2"])).request).toBeNull();
+    expect((await claimTrackUpload(env, log)).request).not.toBeNull();
+    expect((await mkvidAccountUsage(env)).find((u) => u.account === "primary")!.used).toBe(1);
+    const t0 = Math.floor(Date.now() / 1000);
+    const f = (await (
+      await mk(env, "/mkvid/track/fail", {
+        id: q.uploadId,
+        error: "youtube_quota: primary project: quotaExceeded",
+      })
+    ).json()) as { status: string; attempts: number; notBefore: number };
+    expect(f.status).toBe("pending");
+    expect(f.attempts).toBe(0);
+    expect(f.notBefore / 1000).toBeLessThanOrEqual(t0 + 10 * 60 + 1);
+    expect((await mkvidAccountUsage(env)).find((u) => u.account === "primary")!.used).toBe(0);
+  });
+
   it("fail: backoff x attempts, failed after maxAttempts, permanent fails at once and queues the next source", async () => {
     const env = makeEnv();
     const id = await seedPresave(env);

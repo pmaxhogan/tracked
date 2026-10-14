@@ -6,6 +6,7 @@ import { tipAttr } from "../tip";
 import type { UiPage } from "./index";
 import { YOUTUBE_CARD_CSS, YOUTUBE_CARD_HTML, YOUTUBE_CARD_JS } from "./youtube-card";
 import { SETTINGS_FORM_CSS, SETTINGS_FORM_JS, type FormGroup } from "./settings-form";
+import { DEFAULT_PROJECT_DAILY_CLAIM_CAP } from "../../lib/mkvid";
 
 // App settings (lib/app-settings.ts, GET/PUT /ui/api/settings). A blank
 // env-backed field saves null: the env var, else the old default (shown as
@@ -28,7 +29,7 @@ const APP_GROUPS: FormGroup[] = [
       {
         path: "mkvid.sharedDailyClaimCap",
         label: "Uploads a day, shared project",
-        help: "tracked-youtube, once the first is full.",
+        help: "tracked-youtube, last, once the others are full.",
         min: 0,
         max: 100,
         step: 1,
@@ -706,20 +707,47 @@ ${YOUTUBE_CARD_JS}
   // -- app settings: field-table cards (ui/pages/settings-form.ts) --
 ${SETTINGS_FORM_JS}
   const APP_GROUPS = ${JSON.stringify(APP_GROUPS)};
+  const $app = $('sf-app');
+  // mkvid's extra upload projects (GET mkvidProjects) each get a cap row
+  // between the mkvid one and the shared one (the fill order); the cards are
+  // mounted again when that list changes.
+  let projectSig = '';
+  function projectFields(extra) {
+    const g = APP_GROUPS.find((x) => x.id === 'sf-mkvid');
+    if (!g) return;
+    g.fields = g.fields.filter((f) => f.path.indexOf('mkvid.projectCaps.') !== 0);
+    const at = g.fields.findIndex((f) => f.path === 'mkvid.sharedDailyClaimCap');
+    g.fields.splice(at < 0 ? g.fields.length : at, 0, ...extra.map((p) => ({
+      path: 'mkvid.projectCaps.' + p.key,
+      label: 'Uploads a day, ' + p.label + ' project',
+      help: 'Upload project ' + p.key + ' of mkvid, before the shared one. Blank = ' + ${DEFAULT_PROJECT_DAILY_CLAIM_CAP} + '. 0 pauses it.',
+      min: 0, max: 100, step: 1, nullable: true,
+    })));
+  }
+  async function saveApp(patch) {
+    const r = await fetch('/ui/api/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) }).catch(() => null);
+    const d = r ? await r.json().catch(() => ({})) : {};
+    if (!r || !r.ok) return { ok: false, issues: d.issues || [], message: d.issues ? '' : 'Could not save (HTTP ' + (r ? r.status : 0) + ').' };
+    loadApp();
+    return { ok: true };
+  }
   async function loadApp() {
     const r = await fetch('/ui/api/settings', { credentials: 'same-origin' }).catch(() => null);
     const d = r ? await r.json().catch(() => ({})) : {};
-    if (r && r.ok && d.settings) SF.fill(APP_GROUPS, d.settings, Object.assign({}, d.defaults, { mkvid: Object.assign({}, d.defaults.mkvid, d.effective.mkvid), playlists: Object.assign({}, d.defaults.playlists, d.effective.playlists) }));
+    if (!(r && r.ok && d.settings)) return;
+    const extra = Array.isArray(d.mkvidProjects) ? d.mkvidProjects : [];
+    const sig = extra.map((p) => p.key + '=' + p.label).join(',');
+    if (sig !== projectSig && $app) {
+      projectSig = sig;
+      projectFields(extra);
+      SF.mount($app, APP_GROUPS, saveApp);
+    }
+    const projectCaps = {};
+    for (const p of extra) projectCaps[p.key] = ${DEFAULT_PROJECT_DAILY_CLAIM_CAP};
+    SF.fill(APP_GROUPS, d.settings, Object.assign({}, d.defaults, { mkvid: Object.assign({}, d.defaults.mkvid, d.effective.mkvid, { projectCaps }), playlists: Object.assign({}, d.defaults.playlists, d.effective.playlists) }));
   }
-  const $app = $('sf-app');
   if ($app) {
-    SF.mount($app, APP_GROUPS, async (patch) => {
-      const r = await fetch('/ui/api/settings', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) }).catch(() => null);
-      const d = r ? await r.json().catch(() => ({})) : {};
-      if (!r || !r.ok) return { ok: false, issues: d.issues || [], message: d.issues ? '' : 'Could not save (HTTP ' + (r ? r.status : 0) + ').' };
-      loadApp();
-      return { ok: true };
-    });
+    SF.mount($app, APP_GROUPS, saveApp);
     loadApp();
   }
 

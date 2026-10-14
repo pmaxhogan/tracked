@@ -72,7 +72,8 @@ export const TRACK_UPLOADS_TABLE: TableDef<
     completedAt: { sql: "u.completed_at", type: "datetime", storage: "s" },
     videoId: { sql: "u.video_id", type: "text", searchable: true },
     error: { sql: "u.error", type: "text" },
-    account: { sql: "u.account", type: "enum", options: ["primary", "shared"] },
+    // Any upload project key (primary, shared, mkvid's extras): no fixed options.
+    account: { sql: "u.account", type: "enum" },
   },
   mapRow: (r) => trackUploadOut(r),
 };

@@ -1,9 +1,11 @@
 /**
  * App settings API (lib/app-settings.ts), mounted under /ui/api behind the
  * CF Access gate (routes/subscriptions.ts):
- *   GET /ui/api/settings  `{ settings, defaults, effective }`; `effective` is
+ *   GET /ui/api/settings  `{ settings, defaults, effective, mkvidProjects }`; `effective` is
  *                         what is in force once a null (env-backed) field
- *                         falls back to its env var or the code default.
+ *                         falls back to its env var or the code default;
+ *                         `mkvidProjects` = mkvid's extra upload projects
+ *                         `[{ key, label, cap }]` (a cap row each).
  *   PUT /ui/api/settings  partial settings, deep-merged; `null` resets an
  *                         env-backed field. 200 `{ settings, effective }` or
  *                         400 `{ error: 'invalid_settings', issues }`.
@@ -17,7 +19,7 @@ import {
   updateAppSettings,
   type AppSettings,
 } from "../lib/app-settings";
-import { claimTtl, dailyClaimCap } from "../lib/mkvid";
+import { claimTtl, dailyClaimCap, MKVID_ACCOUNTS, mkvidProjects } from "../lib/mkvid";
 import { rejectVerticalEnabled, sweepSettings } from "../lib/playlist-hygiene";
 
 /** The env-backed fields as they resolve now. */
@@ -45,6 +47,13 @@ appSettingsApp.get("/settings", async (c) => {
     settings,
     defaults: DEFAULT_APP_SETTINGS,
     effective: effectiveAppSettings(c.env, settings),
+    /**
+     * mkvid's extra upload projects (not primary / shared), in fill order, with
+     * the cap in force: the page adds a `mkvid.projectCaps.<key>` row for each.
+     */
+    mkvidProjects: (await mkvidProjects(c.env, settings))
+      .filter((p) => !MKVID_ACCOUNTS.includes(p.key))
+      .map((p) => ({ ...p, cap: dailyClaimCap(c.env, p.key, settings) })),
   });
 });
 

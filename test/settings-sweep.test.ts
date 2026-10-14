@@ -171,6 +171,7 @@ describe("app settings", () => {
     expect(DEFAULT_APP_SETTINGS.mkvid).toEqual({
       dailyClaimCap: null,
       sharedDailyClaimCap: null,
+      projectCaps: {},
       claimTtlMinutes: null,
       maxAttempts: 3,
       retryBackoffHours: 6,

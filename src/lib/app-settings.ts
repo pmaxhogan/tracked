@@ -30,6 +30,15 @@ export const AppSettingsSchema = z.object({
     dailyClaimCap: z.number().int().min(0).max(100).nullable(),
     /** Uploads a quota day through the sync's project once the first is full; null = MKVID_SHARED_DAILY_CLAIM_CAP, else 6. */
     sharedDailyClaimCap: z.number().int().min(0).max(100).nullable(),
+    /**
+     * Uploads a quota day through each extra upload project mkvid reported
+     * (key = its project key, e.g. `upload2`); absent or null = 6. 0 pauses
+     * that project. Filled between the first and the shared one (lib/mkvid.ts).
+     */
+    projectCaps: z.record(
+      z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
+      z.number().int().min(0).max(100).nullable(),
+    ),
     /** A claim mkvid has not finished is handed out again after this; null = MKVID_CLAIM_TTL_SECONDS, else 180 min. */
     claimTtlMinutes: z
       .number()
@@ -230,6 +239,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   mkvid: {
     dailyClaimCap: null,
     sharedDailyClaimCap: null,
+    projectCaps: {},
     claimTtlMinutes: null,
     maxAttempts: 3,
     retryBackoffHours: 6,

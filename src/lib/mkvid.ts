@@ -123,16 +123,105 @@ export const DEFAULT_CLAIM_TTL_SECONDS = 3 * 60 * 60;
  * near 3 200-3 700, and even the combined backfill's own ceiling (80 inserts,
  * 4 000 units, lib/combined-playlist.ts) on top stays under 8 000 of 10 000.
  * A claim fills the primary account first and spills to the shared one.
+ *
+ * Since 2026-10-14 there can be more (docs/superpowers/specs/2026-10-14-n-upload-projects-design.md):
+ * mkvid reports every upload project it has on each claim (`projects`), and
+ * the extra ones (e.g. `upload2` = mkvid-uploads-2) sit between the primary
+ * and the shared one in the fill order, `shared` always last - it is this
+ * Worker's own project. Each extra has its cap in app setting
+ * `mkvid.projectCaps.<key>` (default 6, 0 pauses it).
  */
-export type MkvidAccount = "primary" | "shared";
+/** A project key: `primary`, `shared`, or an extra project mkvid reported (MKVID_PROJECT_KEY). */
+export type MkvidAccount = string;
+/** The two built-in projects. */
 export const MKVID_ACCOUNTS: readonly MkvidAccount[] = ["primary", "shared"];
-/** The Google Cloud project behind each account - what the panel shows. */
-export const MKVID_ACCOUNT_LABELS: Record<MkvidAccount, string> = {
+/** What an upload project key looks like (mkvid's UPLOAD_PROJECTS entries). */
+export const MKVID_PROJECT_KEY = /^[a-z][a-z0-9_]{0,31}$/;
+/** The Google Cloud project behind each built-in account - what the panel shows. */
+export const MKVID_ACCOUNT_LABELS: Readonly<Record<string, string>> = {
   primary: "mkvid-uploads",
   shared: "tracked-youtube",
 };
 export const DEFAULT_DAILY_CLAIM_CAP = 24;
 export const DEFAULT_SHARED_DAILY_CLAIM_CAP = 6;
+/** Claims a quota day on an extra project until its `mkvid.projectCaps` entry says otherwise. */
+export const DEFAULT_PROJECT_DAILY_CLAIM_CAP = 6;
+
+/** One upload project as mkvid reports it on a claim. */
+export type MkvidProjectInfo = { key: string; label: string | null };
+
+/** The label a project is shown with: the built-in name, else the one mkvid reported, else the key. */
+export function mkvidAccountLabel(
+  account: MkvidAccount,
+  registry: readonly MkvidProjectInfo[] = [],
+): string {
+  return MKVID_ACCOUNT_LABELS[account] ?? registry.find((p) => p.key === account)?.label ?? account;
+}
+
+const PROJECTS_KEY = "mkvid:projects";
+
+/** The extra projects mkvid last reported, in its order (no primary / shared). */
+export async function getMkvidProjectRegistry(
+  env: Pick<Env, "CACHE">,
+): Promise<MkvidProjectInfo[]> {
+  try {
+    const p = parseJson<{ projects?: MkvidProjectInfo[] } | null>(
+      await env.CACHE.get(PROJECTS_KEY),
+      null,
+    );
+    return Array.isArray(p?.projects) ? p.projects : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Remember the upload projects mkvid reported (its configured list, also the
+ * disconnected and out-of-quota ones). Only the extras are kept; the KV entry
+ * is rewritten only when the list changes. Best-effort: never fails a claim.
+ */
+export async function recordMkvidProjects(
+  env: Pick<Env, "CACHE">,
+  projects: readonly MkvidProjectInfo[],
+): Promise<void> {
+  const seen = new Set<string>();
+  const extras: MkvidProjectInfo[] = [];
+  for (const p of projects) {
+    if (!MKVID_PROJECT_KEY.test(p.key) || MKVID_ACCOUNTS.includes(p.key) || seen.has(p.key))
+      continue;
+    seen.add(p.key);
+    const label =
+      typeof p.label === "string" && p.label.trim() ? p.label.trim().slice(0, 64) : null;
+    extras.push({ key: p.key, label });
+  }
+  try {
+    const prev = await getMkvidProjectRegistry(env);
+    if (JSON.stringify(prev) === JSON.stringify(extras)) return;
+    await env.CACHE.put(PROJECTS_KEY, JSON.stringify({ at: nowSeconds(), projects: extras }));
+  } catch {
+    // the registry is a convenience; claims go on without it
+  }
+}
+
+/**
+ * Every known upload project in fill order: the primary, the extras mkvid
+ * reported (in its order), extras that only have a cap in settings (sorted),
+ * and the shared one last.
+ */
+export async function mkvidProjects(
+  env: Pick<Env, "CACHE" | "SUBS">,
+  app?: AppSettings,
+): Promise<Array<{ key: MkvidAccount; label: string }>> {
+  const settings = app ?? (await getAppSettings(env));
+  const registry = await getMkvidProjectRegistry(env);
+  const keys = registry.map((p) => p.key);
+  for (const k of Object.keys(settings.mkvid.projectCaps ?? {}).sort())
+    if (!keys.includes(k) && !MKVID_ACCOUNTS.includes(k)) keys.push(k);
+  return ["primary", ...keys, "shared"].map((key) => ({
+    key,
+    label: mkvidAccountLabel(key, registry),
+  }));
+}
 /** The YouTube Data API quota resets at midnight Pacific, not UTC. */
 const QUOTA_TZ = "America/Los_Angeles";
 
@@ -172,6 +261,11 @@ export function dailyClaimCap(
   account: MkvidAccount = "primary",
   app?: AppSettings,
 ): number {
+  // An extra project: its own setting, else the default. No env var.
+  if (!MKVID_ACCOUNTS.includes(account)) {
+    const own = app?.mkvid.projectCaps?.[account];
+    return typeof own === "number" ? own : DEFAULT_PROJECT_DAILY_CLAIM_CAP;
+  }
   const saved = app
     ? account === "shared"
       ? app.mkvid.sharedDailyClaimCap
@@ -253,15 +347,15 @@ export async function dailyClaimsUsed(
 
 export type MkvidAccountUsage = { account: MkvidAccount; label: string; used: number; cap: number };
 
-/** Today's claims against each account's cap, in fill order. */
+/** Today's claims against each known project's cap, in fill order (mkvidProjects). */
 export async function mkvidAccountUsage(env: Env): Promise<MkvidAccountUsage[]> {
   const app = await getAppSettings(env);
   return Promise.all(
-    MKVID_ACCOUNTS.map(async (account) => ({
-      account,
-      label: MKVID_ACCOUNT_LABELS[account],
-      used: await dailyClaimsUsed(env, account),
-      cap: dailyClaimCap(env, account, app),
+    (await mkvidProjects(env, app)).map(async ({ key, label }) => ({
+      account: key,
+      label,
+      used: await dailyClaimsUsed(env, key),
+      cap: dailyClaimCap(env, key, app),
     })),
   );
 }
@@ -717,7 +811,7 @@ export function rowToRequest(r: MkvidRow): MkvidRequest {
     trackCount: r.track_count,
     idedCount: r.ided_count,
     status: r.status as MkvidStatus,
-    account: r.account === "shared" ? "shared" : "primary",
+    account: r.account || "primary",
     attempts: Number(r.attempts),
     notBefore: r.not_before,
     claimedAt: r.claimed_at,
@@ -1847,6 +1941,8 @@ export type FailInput = { id: string; error: string; permanent?: boolean; jobId?
 export const KNOWN_PERMANENT_RE =
   /incomplete_recording|unsupported url|not available|is private|private (?:track|video)|removed|does not exist|\b404\b|geo[- ]?restricted|no video formats/i;
 export const UNKNOWN_FAILURE_GRACE = 3;
+/** A request whose upload project ran out of YouTube quota is handed out again this soon (to another project). */
+export const QUOTA_RETRY_SECONDS = 10 * 60;
 
 /** mkvid gave a claim back (nothing uploaded): its latest log row stops counting. */
 async function refundLatestClaim(env: Env, requestId: string, now: number): Promise<void> {
@@ -1914,6 +2010,25 @@ export async function failMkvidRequest(
   // source is spent (hearthis: page fetches and downloads per hour): back to
   // pending without using an attempt, until the budget frees up. The error
   // ends with "retry in <N> s" when mkvid knows when (default: an hour).
+  // mkvid's upload project ran out of YouTube quota for the day (mkvid stops
+  // offering that project until midnight Pacific): back to pending without
+  // using an attempt, soon, so another project takes it.
+  if (/^youtube_quota\b/.test(input.error)) {
+    await dbOf(env)
+      .prepare(
+        "UPDATE mkvid_requests SET status = 'pending', attempts = MAX(0, attempts - 1), claimed_at = NULL, not_before = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?",
+      )
+      .bind(now + QUOTA_RETRY_SECONDS, input.error.slice(0, 500), v(input.jobId), now, req.id)
+      .run();
+    await refundLatestClaim(env, req.id, now);
+    log.warn("mkvid.refused_youtube_quota", {
+      id: req.id,
+      slug: req.slug,
+      setUrl: req.setUrl,
+      error: input.error.slice(0, 200),
+    });
+    return { status: "pending", attempts: Math.max(0, req.attempts - 1) };
+  }
   if (/^source_busy\b/.test(input.error)) {
     const n = Number(input.error.match(/retry in (\d+) s\b/)?.[1]);
     const wait = Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 60), 6 * 3600) : 3600;
@@ -2048,7 +2163,7 @@ export function requestSummary(r: MkvidRequest, since?: number | null): Record<s
     ...r,
     sourceLabel: r.source === "soundcloud" ? "SoundCloud" : "hearthis.at",
     artistLabel: artistLabel(r.artistName, r.slug),
-    accountLabel: MKVID_ACCOUNT_LABELS[r.account],
+    accountLabel: mkvidAccountLabel(r.account),
     /** A video made with a style other than the current one (unknown counts): "Recreate all old-style videos" takes it. */
     oldStyle: !!r.videoId && isOldStyle(r.style),
     /** Where a finished request ended (lib/mkvid-outcome.ts); null while it is queued or rendering. */

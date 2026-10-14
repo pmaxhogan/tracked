@@ -378,16 +378,26 @@ export const LikedSongsResponse = z
 
 // --- /mkvid/claim (mkvid's work queue; bearer MKVID_TOKEN, not API_TOKEN) ---
 
+/** An upload project key: `primary`, `shared`, or an extra project of mkvid's (UPLOAD_PROJECTS). */
+export const MkvidAccountKey = z.string().regex(/^[a-z][a-z0-9_]{0,31}$/);
+
+/** Every upload project mkvid has configured (connected or not), in its order, with the Google Cloud project it is. */
+export const MkvidProjectsReport = z
+  .array(z.object({ key: MkvidAccountKey, label: z.string().max(64).nullable().optional() }))
+  .max(16)
+  .optional()
+  .openapi({
+    description:
+      "Every upload project mkvid has configured (also disconnected or out-of-quota ones), in its order. The extras are remembered: they get a cap row in Settings and are filled between the primary and the shared one.",
+  });
+
 export const MkvidClaimBody = z
   .object({
-    accounts: z
-      .array(z.enum(["primary", "shared"]))
-      .max(2)
-      .optional()
-      .openapi({
-        description:
-          'Accounts mkvid can upload through right now; default ["primary"]. The primary fills first, then the shared one.',
-      }),
+    accounts: z.array(MkvidAccountKey).max(16).optional().openapi({
+      description:
+        'Accounts (upload projects) mkvid can upload through right now; default ["primary"]. The primary fills first, then the extra projects in the order mkvid reported them, the shared one last.',
+    }),
+    projects: MkvidProjectsReport,
     style: z
       .string()
       .regex(/^[a-z][a-z0-9_-]{0,31}$/)
@@ -397,7 +407,7 @@ export const MkvidClaimBody = z
           "The visual style mkvid renders tracked jobs with (TRACKED_STYLE). A delete-and-recreate request is only handed to an mkvid that says `scene`; others leave it pending.",
         example: "scene",
       }),
-    preferAccount: z.enum(["primary", "shared"]).optional().openapi({
+    preferAccount: MkvidAccountKey.optional().openapi({
       description:
         "Upload through this account if it is one of `accounts` and has claims left today; otherwise the usual fill order. mkvid sends it with TRACKED_SPREAD_ACCOUNTS so sets that upload at the same time use different Google projects.",
       example: "shared",
@@ -450,9 +460,9 @@ export const MkvidClaimedRequest = z
     lastCueSeconds: z.number().int().nullable(),
     trackCount: z.number().int().nullable(),
     idedCount: z.number().int().nullable(),
-    account: z.enum(["primary", "shared"]).openapi({
+    account: MkvidAccountKey.openapi({
       description:
-        "Google Cloud project to upload through: primary = mkvid-uploads, shared = tracked-youtube.",
+        "Upload project to upload through: primary = mkvid-uploads, shared = tracked-youtube, or one of mkvid's extra projects (always one it offered).",
     }),
     attempts: z.number().int(),
     tracks: z.array(MkvidTrackSchema).max(300).openapi({

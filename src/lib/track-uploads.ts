@@ -33,7 +33,13 @@ import { dbOf, parseJson, v } from "./db";
 import { errorFields, type Logger } from "./log";
 import { noteQuotaOut } from "./youtube-quota";
 import { getAppSettings, type AppSettings } from "./app-settings";
-import { claimTtl, mkvidAccountUsage, quotaDayStart, type MkvidAccount } from "./mkvid";
+import {
+  claimTtl,
+  mkvidAccountUsage,
+  QUOTA_RETRY_SECONDS,
+  quotaDayStart,
+  type MkvidAccount,
+} from "./mkvid";
 import {
   cachePlaylistVideoIds,
   findOrCreatePlaylist,
@@ -1204,6 +1210,26 @@ export async function failTrackUpload(
     return { status: row.status, attempts: row.attempts, notBefore: ms(row.not_before) };
   }
   await refundTrackClaim(env, row.id, now);
+  // mkvid's upload project is out of YouTube quota (it stops offering it until
+  // midnight Pacific): back to pending, no attempt used, soon - another project takes it.
+  if (/^youtube_quota\b/.test(input.error)) {
+    const notBefore = now + QUOTA_RETRY_SECONDS;
+    await dbOf(env)
+      .prepare(
+        "UPDATE track_uploads SET status = 'pending', attempts = MAX(0, attempts - 1), not_before = ?, claimed_at = NULL, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?",
+      )
+      .bind(notBefore, input.error.slice(0, 500), v(input.jobId), now, row.id)
+      .run();
+    log.warn("track_upload.refused_youtube_quota", {
+      id: row.id,
+      error: input.error.slice(0, 200),
+    });
+    return {
+      status: "pending",
+      attempts: Math.max(0, row.attempts - 1),
+      notBefore: ms(notBefore),
+    };
+  }
   const app = (await getAppSettings(env)).trackUploads;
   const exhausted = row.attempts >= app.maxAttempts;
   const status: TrackUploadStatus = input.permanent || exhausted ? "failed" : "pending";

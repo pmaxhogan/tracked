@@ -160,7 +160,7 @@ ${MKVID_STATE_JS}
     const m = { status: null, source: null, account: null, dj: null, q: null };
     for (const t of ['q', 'fin']) {
       if (/^(soundcloud|hearthis)$/.test(source)) m[t + '.f.source'] = 'in:' + source;
-      if (/^(primary|shared)$/.test(account)) m[t + '.f.account'] = 'in:' + account;
+      if (/^[a-z][a-z0-9_]{0,31}$/.test(account)) m[t + '.f.account'] = 'in:' + account;
       if (dj) m[t + '.f.dj'] = 'eq:' + dj;
       if (q) m[t + '.q'] = q;
     }
@@ -170,6 +170,9 @@ ${MKVID_STATE_JS}
   let tab = ['queue', 'settled', 'old'].indexOf(TK.qs.get('tab') || '') >= 0 ? TK.qs.get('tab') : 'queue';
 
   let header = null, capped = false;
+  // The upload projects (the Project filter's options), refreshed from the header's accounts: primary, mkvid's extras, shared.
+  const ACCOUNTS = [{ value: 'primary', label: 'mkvid-uploads' }, { value: 'shared', label: 'tracked-youtube' }];
+  const projectLabel = (r) => { const a = ACCOUNTS.find((x) => x.value === r.account); return a ? a.label : (r.accountLabel || r.account); };
 
   // -- the sets mkvid is working on now (GET /ui/api/mkvid/progress, every 15 s while visible) --
   // Up to two at once, never in the same stage: one queued for the stage the other holds is waiting.
@@ -276,6 +279,7 @@ ${MKVID_STATE_JS}
     capped = eff.cap === 0 || eff.used >= eff.cap || !!(d.lastPoll && d.lastPoll.outcome === 'capped');
     $state.className = 'mk-state ' + st[0];
     $state.innerHTML = '<strong>' + esc(st[1]) + '</strong><span class="sub">' + esc(st[2]) + '</span>';
+    if (Array.isArray(d.accounts) && d.accounts.length) ACCOUNTS.splice(0, ACCOUNTS.length, ...d.accounts.map((a) => ({ value: a.account, label: a.label })));
 
     const tiles = (d.accounts || []).map((a) => {
       const pct = a.cap > 0 ? Math.min(100, Math.round((a.used / a.cap) * 100)) : 100;
@@ -412,7 +416,6 @@ ${MKVID_STATE_JS}
 
   // -- the three tables --
   const SOURCES = [{ value: 'soundcloud', label: 'SoundCloud' }, { value: 'hearthis', label: 'hearthis.at' }];
-  const ACCOUNTS = [{ value: 'primary', label: 'primary' }, { value: 'shared', label: 'shared' }];
   const when = (sec) => (sec ? '<span class="tkt-when"' + TK.tip(TK.fmt.time(isoOf(sec))) + '>' + esc(rel(sec)) + '</span>' : '<span class="tkt-nil">-</span>');
   const nil = '<span class="tkt-nil">-</span>';
   function titleCell(r, sub) {
@@ -424,7 +427,7 @@ ${MKVID_STATE_JS}
     // Sorted and filtered by slug (the DJ select sets eq:<slug>); shows the DJ's name.
     dj: { key: 'dj', label: 'DJ', type: 'text', value: (r) => r.slug, render: djCell },
     source: { key: 'source', label: 'Source', type: 'enum', options: SOURCES, hideOn: 'phone', render: (r) => r.sourceUrl ? link(r.sourceUrl, r.sourceLabel || r.source, '', 'Opens the recording mkvid renders from.') : esc(r.sourceLabel || r.source) },
-    account: { key: 'account', label: 'Project', type: 'enum', options: ACCOUNTS, hideOn: 'phone', tip: 'The Google project the video is uploaded through.', render: (r) => esc(r.accountLabel || r.account) },
+    account: { key: 'account', label: 'Project', type: 'enum', options: ACCOUNTS, hideOn: 'phone', tip: 'The Google project the video is uploaded through.', render: (r) => esc(projectLabel(r)) },
     attempts: { key: 'attempts', label: 'Tries', type: 'number', hideOn: 'phone', tip: 'Render attempts so far.' },
   };
 
@@ -700,7 +703,7 @@ ${MKVID_STATE_JS}
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '-'],
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy === 'private' ? ' <span class="warn">(an unverified OAuth app forces private whatever was requested)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + esc(rel(r.notBefore)) : '')],
-      r.status !== 'pending' ? ['project', esc(r.accountLabel || r.account)] : null,
+      r.status !== 'pending' ? ['project', esc(projectLabel(r))] : null,
       r.videoId ? ['style', r.style ? esc(r.style) : '<span class="warn">unknown (old style)</span>'] : null,
       r.replacesVideoId ? ['recreating', 'replaces <span class="mono">' + esc(r.replacesVideoId) + '</span> ' + link('https://youtu.be/' + encodeURIComponent(r.replacesVideoId), 'open') + ' <span class="when">(stays up until the new video is in the playlists, then is deleted)</span>'] : null,
       r.readiness ? ['waiting', mkWhy(r.readiness, false, capped)] : null,

@@ -4,7 +4,7 @@
  * at /mkvid/track in src/index.ts ahead of /mkvid, so the API_TOKEN wildcard
  * gate skips it too. Request ids are INTEGERS (track_uploads.id), not UUIDs.
  *
- *   POST /mkvid/track/claim    { accounts?: ['primary'|'shared'...], sources?: ['soulseek'|'spotify'...] } -> { request: TrackRequest | null }
+ *   POST /mkvid/track/claim    { accounts?: ['primary'|'shared'|<extra project>...], projects?, sources?: ['soulseek'|'spotify'...] } -> { request: TrackRequest | null }
  *                              Oldest claimable first; needs room under trackUploads.dailyCap AND the
  *                              account's per-project mkvid cap (shared with set uploads).
  *   POST /mkvid/track/job      { id, jobId } -> { ok }   renews the claim while the job is queued / running;
@@ -34,20 +34,19 @@ import {
   failTrackUpload,
   getTrackUploadRow,
 } from "../lib/track-uploads";
+import { recordMkvidProjects } from "../lib/mkvid";
+import { MkvidAccountKey, MkvidProjectsReport } from "../schemas";
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const Id = z.number().int().positive();
 
 export const MkvidTrackClaimBody = z
   .object({
-    accounts: z
-      .array(z.enum(["primary", "shared"]))
-      .max(2)
-      .optional()
-      .openapi({
-        description:
-          'Accounts mkvid can upload through right now; default ["primary"]. The primary fills first, then the shared one. A track claim counts against the same per-project caps as a set claim.',
-      }),
+    accounts: z.array(MkvidAccountKey).max(16).optional().openapi({
+      description:
+        'Accounts (upload projects) mkvid can upload through right now; default ["primary"]. The primary fills first, then the extra projects, the shared one last. A track claim counts against the same per-project caps as a set claim.',
+    }),
+    projects: MkvidProjectsReport,
     sources: z.array(z.string().min(1).max(40)).max(20).optional().openapi({
       description:
         "Extra sources this mkvid can rip beyond the yt-dlp ones (soulseek, spotify). Requests from approved pre-save matches with those sources go only to an mkvid that lists them.",
@@ -85,7 +84,7 @@ export const MkvidTrackRequest = z
         "Refuse (permanent, preview_clip) a rip shorter than expectedDurationSeconds x this.",
     }),
     privacy: z.enum(["public", "unlisted", "private"]),
-    account: z.enum(["primary", "shared"]),
+    account: MkvidAccountKey,
     attempts: z.number().int().openapi({ description: "Including this claim." }),
   })
   .openapi("MkvidTrackRequest");
@@ -155,6 +154,11 @@ mkvidTrackApp.post("/claim", async (c) => {
   const log = logger(c, "mkvid.track.claim");
   const parsed = MkvidTrackClaimBody.safeParse((await c.req.json().catch(() => null)) ?? {});
   if (!parsed.success) return c.json({ error: "invalid_request" }, 400);
+  if (parsed.data.projects)
+    await recordMkvidProjects(
+      c.env,
+      parsed.data.projects.map((p) => ({ key: p.key, label: p.label ?? null })),
+    );
   try {
     const { request } = await claimTrackUpload(
       c.env,

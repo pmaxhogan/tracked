@@ -3,7 +3,9 @@
  * own bearer token (`MKVID_TOKEN`) - never the Tasker token - and mounted in
  * src/index.ts *above* the API_TOKEN wildcard gate, which also skips this path.
  *
- *   POST /mkvid/claim     { accounts?: ['primary'|'shared'...], style?, preferAccount? } -> { request } (null when nothing is queued / claimable)
+ *   POST /mkvid/claim     { accounts?: ['primary'|'shared'|<extra project>...], projects?, style?, preferAccount? } -> { request } (null when nothing is queued / claimable)
+ *                         `projects` = [{ key, label }] every upload project mkvid has configured, in its order:
+ *                         the extras are remembered (fill order primary, extras, shared; a cap row each in Settings)
  *                         `preferAccount` = upload through that account if it is offered and has claims left today
  *                         (else the usual fill order); an mkvid spreading concurrent uploads over both projects sends it
  *                         `style` = what mkvid renders tracked jobs with; a recreation is only handed out when it is `scene`
@@ -22,8 +24,11 @@
  *                         which the Worker then asks mkvid to delete (lib/mkvid-recreate.ts).
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
- *                         no attempt used.
- *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
+ *                         no attempt used; `youtube_quota` = its upload project is out of quota: the same,
+ *                         handed out again after 10 min (to another project).
+ *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
+ *                         `uploadProjects: true` = claims take any project key and `projects` (an mkvid offers
+ *                         only primary / shared until it sees it)
  *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
  *                         is retryable; a scene-style mkvid claims nothing until it sees it
  *
@@ -47,6 +52,7 @@ import {
   failMkvidRequest,
   mkvidAccountUsage,
   recordMkvidPoll,
+  recordMkvidProjects,
 } from "../lib/mkvid";
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
@@ -101,6 +107,8 @@ mkvidApp.get("/health", async (c) => {
     trackUploads: true,
     // This Worker serves pre-save match searches at /mkvid/presave/* (routes/mkvid-presave.ts).
     presaveSearch: true,
+    // Claims take any upload project key, plus mkvid's `projects` report (lib/mkvid.ts mkvidProjects).
+    uploadProjects: true,
     // Recreations go only to an mkvid whose claim says this style.
     recreateStyle: RECREATE_STYLE,
     counts: await countMkvidRequests(c.env),
@@ -116,6 +124,11 @@ mkvidApp.post("/claim", async (c) => {
   const parsed = ClaimBody.safeParse((await c.req.json().catch(() => null)) ?? {});
   if (!parsed.success) return c.json({ error: "invalid_request" }, 400);
   const accounts = parsed.data.accounts ?? ["primary"];
+  if (parsed.data.projects)
+    await recordMkvidProjects(
+      c.env,
+      parsed.data.projects.map((p) => ({ key: p.key, label: p.label ?? null })),
+    );
   try {
     return c.json({
       request: await claimMkvidRequest(
