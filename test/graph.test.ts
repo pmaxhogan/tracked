@@ -27,7 +27,7 @@ import {
   type GNode,
 } from "../src/lib/graph/query";
 import { nodeInfo } from "../src/lib/graph/info";
-import { graphPagesStep, PAGES_DONE_KEY } from "../src/lib/graph/backfill";
+import { graphPagesStep, PAGES_DONE_KEY, resetPagesPass } from "../src/lib/graph/backfill";
 import { DEFAULT_APP_SETTINGS, updateAppSettings } from "../src/lib/app-settings";
 import { app } from "../src/index";
 import { GRAPH_LIBS } from "../src/ui/pages/graph";
@@ -441,6 +441,13 @@ describe("stored-pages backfill", () => {
     expect(await pagesGraphUrls(env)).toEqual([HAB_URL]);
     expect(await env.CACHE.get(PAGES_DONE_KEY)).toBe(String(NOW));
     expect(await graphPagesStep(env, { limit: 10 })).toMatchObject({ read: 0, done: true });
+    // A reset starts over; the set already parsed is not read again, the refused one is.
+    await resetPagesPass(env);
+    expect(await graphPagesStep(env, { limit: 10, nowSec: NOW })).toMatchObject({
+      read: 1,
+      written: 0,
+      done: true,
+    });
   });
 
   it("does nothing without a PAGES bucket", async () => {

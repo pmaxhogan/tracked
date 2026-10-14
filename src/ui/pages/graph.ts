@@ -258,7 +258,7 @@ const JS = /* js */ `
     const fresh = data.nodes.filter((n) => !graph.hasNode(n[0]));
     if (!opts.noConfirm && fresh.length > limits.confirmOver) {
       const ok = await TK.ask('This adds ' + fresh.length.toLocaleString() + ' nodes to the graph (' + graph.order.toLocaleString() + ' now). Large graphs get slow to draw. Add them?', { yes: 'Add them' });
-      if (!ok) { say('Nothing added.'); return 0; }
+      if (!ok) { say('Nothing added.'); return -1; }
     }
     const room = Math.max(0, limits.nodeCap - graph.order);
     const take = fresh.slice(0, room);
@@ -298,8 +298,10 @@ const JS = /* js */ `
     say('Reading the neighbours\\u2026');
     const d = await fetchJson('/ui/api/graph/expand?depth=1&id=' + encodeURIComponent(id));
     if (!d) return;
-    expanded.add(id);
+    // Declined (-1): not expanded, so Expand and a click still offer it.
     const n = await add(d, id);
+    if (n < 0) return;
+    expanded.add(id);
     if (n === 0 && d.nodes.length <= 1) say('No more neighbours here.');
   }
   async function focus(id) {
@@ -307,9 +309,15 @@ const JS = /* js */ `
     say('Reading the graph\\u2026');
     const d = await fetchJson('/ui/api/graph/expand?depth=' + encodeURIComponent(depth) + '&id=' + encodeURIComponent(id));
     if (!d) return;
+    if (d.limits) limits = d.limits;
+    // Asked before the current graph is cleared, so a "no" keeps it.
+    if (d.nodes.length > limits.confirmOver) {
+      const ok = await TK.ask('Starting here draws ' + d.nodes.length.toLocaleString() + ' nodes. Large graphs get slow to draw. Draw them? (Depth 1 draws fewer.)', { yes: 'Draw them' });
+      if (!ok) { say('Nothing changed.'); return; }
+    }
     clearGraph();
     expanded.add(id);
-    await add(d, null);
+    await add(d, null, { noConfirm: true });
     try { TK.qs.set({ focus: id }); } catch (e) {}
     if (graph.hasNode(id)) select(id);
     setTimeout(() => { try { renderer.getCamera().animatedReset(); } catch (e) {} }, 600);

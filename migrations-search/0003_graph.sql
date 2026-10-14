@@ -8,11 +8,13 @@
 -- the two. Artists are keyed by a slug of their display name.
 
 -- The page id of an indexed track, from its track_url
--- ('https://www.1001tracklists.com/track/' is 37 characters).
+-- ('https://www.1001tracklists.com/track/' is 37 characters). Only the
+-- /track/<id>/<slug>/index.html form carries an id; an old
+-- /track/<slug>/index.html URL gets none.
 ALTER TABLE search_tracks ADD COLUMN page_id TEXT;
 UPDATE search_tracks
    SET page_id = substr(track_url, 38, instr(substr(track_url, 38), '/') - 1)
- WHERE track_url LIKE 'https://www.1001tracklists.com/track/%/%';
+ WHERE track_url LIKE 'https://www.1001tracklists.com/track/%/%/%';
 CREATE INDEX search_tracks_page_id ON search_tracks(page_id) WHERE page_id IS NOT NULL;
 
 CREATE TABLE search_artists (

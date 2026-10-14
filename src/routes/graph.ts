@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { getAppSettings } from "../lib/app-settings";
 import { errorFields, makeLogger } from "../lib/log";
-import { graphPagesStep, pagesPassDone } from "../lib/graph/backfill";
+import { graphPagesStep, pagesPassDone, resetPagesPass } from "../lib/graph/backfill";
 import { nodeInfo } from "../lib/graph/info";
 import { expandNode, findNodes, MAX_DEPTH, parseNodeId, wholeLibrary } from "../lib/graph/query";
 import { searchDbOf } from "../lib/search/db";
@@ -106,10 +106,15 @@ graphApp.get("/api/graph/info", async (c) => {
 graphApp.post("/api/graph/backfill/pages", async (c) => {
   if (!c.env.SEARCH_DB) return c.json(UNBOUND, 503);
   if (!c.env.PAGES) return c.json({ error: "pages_not_configured" }, 503);
-  const body = (await c.req.json().catch(() => null)) as { limit?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as {
+    limit?: unknown;
+    reset?: unknown;
+  } | null;
   const limit = body?.limit ?? 25;
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 200)
     return c.json({ error: "invalid_request", message: "limit: 1 to 200" }, 400);
   const log = makeLogger({ route: "graph.backfill_pages", by: c.get("cfAccessEmail") });
+  // `reset: true` starts the pass over from the first stored page (sets already parsed are skipped).
+  if (body?.reset === true) await resetPagesPass(c.env);
   return c.json(await graphPagesStep(c.env, { limit, log }));
 });

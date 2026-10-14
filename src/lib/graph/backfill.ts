@@ -22,12 +22,12 @@ import { searchDbOf } from "../search/db";
 import { parseSetGraph } from "../tracklist-credits";
 import { parseTracklist } from "../tracklists1001";
 import { tracklistFingerprint, verifiedFingerprint } from "../verification";
-import { setsWithGraph, writeSetGraph } from "./store";
+import { GRAPH_FORMAT, setsWithGraph, writeSetGraph } from "./store";
 
-/** CACHE KV: the last R2 key the pass looked at. */
-export const PAGES_CURSOR_KEY = "graph:pages_after";
+/** CACHE KV: the last R2 key the pass looked at. Both keys carry GRAPH_FORMAT: a format bump runs the pass again. */
+export const PAGES_CURSOR_KEY = `graph:pages_after:v${GRAPH_FORMAT}`;
 /** CACHE KV: the pass has read every stored page (unix seconds when it finished). */
-export const PAGES_DONE_KEY = "graph:pages_done";
+export const PAGES_DONE_KEY = `graph:pages_done:v${GRAPH_FORMAT}`;
 /** Objects one listing reads (metadata only). */
 const LIST_LIMIT = 200;
 
@@ -44,6 +44,12 @@ export type PagesStepResult = {
 };
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
+
+/** Start the stored-pages pass over from the first stored page. */
+export async function resetPagesPass(env: Env): Promise<void> {
+  await env.CACHE.delete(PAGES_CURSOR_KEY);
+  await env.CACHE.delete(PAGES_DONE_KEY);
+}
 
 /** Whether the stored-pages pass has finished (or cannot run: no PAGES bucket). */
 export async function pagesPassDone(env: Env): Promise<boolean> {

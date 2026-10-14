@@ -117,8 +117,17 @@ export async function djContext(env: Env): Promise<DjContext> {
   return { keyBySlug, slugsByKey, nameBySlug };
 }
 
-/** Every edge touching one of `ids` (the relations listed in the header). */
-export async function edgesOf(env: Env, dj: DjContext, ids: Iterable<string>): Promise<GEdge[]> {
+/**
+ * Every edge touching one of `ids` (the relations listed in the header).
+ * `setTracks: false` skips reading every track of the sets: the whole
+ * library reads the set -> track edges from the track side instead.
+ */
+export async function edgesOf(
+  env: Env,
+  dj: DjContext,
+  ids: Iterable<string>,
+  opts: { setTracks?: boolean } = {},
+): Promise<GEdge[]> {
   const g = groupIds(ids);
   const sdb = searchDbOf(env);
   const out: GEdge[] = [];
@@ -169,13 +178,14 @@ export async function edgesOf(env: Env, dj: DjContext, ids: Iterable<string>): P
       j(g.s),
     ))
       out.push([`src:${r.source_id}`, `s:${r.set_url}`, "source"]);
-    for (const r of await q<{ set_url: string; page_id: string | null; track_key: string }>(
-      `SELECT ts.set_url AS set_url, t.page_id AS page_id, t.track_key AS track_key
+    if (opts.setTracks !== false)
+      for (const r of await q<{ set_url: string; page_id: string | null; track_key: string }>(
+        `SELECT ts.set_url AS set_url, t.page_id AS page_id, t.track_key AS track_key
          FROM search_track_sets ts JOIN search_tracks t ON t.track_key = ts.track_key
         WHERE ts.set_url IN (SELECT value FROM json_each(?)) ORDER BY ts.set_url, ts.pos`,
-      j(g.s),
-    ))
-      out.push([`s:${r.set_url}`, trackNodeId(r.page_id, r.track_key), "has"]);
+        j(g.s),
+      ))
+        out.push([`s:${r.set_url}`, trackNodeId(r.page_id, r.track_key), "has"]);
   }
   if (g.src.size)
     for (const r of await q<{ set_url: string; source_id: string }>(
@@ -402,11 +412,13 @@ export async function wholeLibrary(env: Env, cap: number): Promise<Subgraph> {
         "SELECT 'a:' || artist_key AS id FROM search_track_artists GROUP BY artist_key ORDER BY COUNT(*) DESC, artist_key LIMIT ?",
       ),
     );
-  // Edges among the kept nodes: every relation of the sets and tracks covers them all.
+  // Edges among the kept nodes: every relation of the sets, sources and tracks
+  // covers them all; set -> track edges come from the kept tracks' side.
   const edges = await edgesOf(
     env,
     dj,
-    [...keep].filter((id) => /^(s|t|src):/.test(id)),
+    [...keep].filter((id) => /^(s|t|k|src):/.test(id)),
+    { setTracks: false },
   );
   return finish(env, dj, keep, edges, truncated);
 }
