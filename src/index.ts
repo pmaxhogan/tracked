@@ -37,6 +37,7 @@ import { checkDeletedMkvidVideos, retryDueOldVideoDeletions } from './lib/mkvid-
 import { youtubeTokenRefresher } from './lib/google-oauth'
 import { maybeSnapshotStats } from './lib/stats'
 import { setAccessTokenRefresher } from './lib/youtube-playlists'
+import { drainLinkPrewarm } from './lib/link-prewarm'
 
 // Validation failures (zod) default to `{ success:false, error:<ZodError> }`,
 // which is not the `{ error, message }` shape every route documents. Normalise
@@ -185,7 +186,10 @@ app.doc('/openapi.json', {
  *                     (DJ discovery, new sets, verification second fetches,
  *                     rechecks by set age, DJ backfill), highest priority
  *                     first, stopping at the pool's first refusal. tlpool owns
- *                     budget and pacing; nothing here bursts.
+ *                     budget and pacing; nothing here bursts. Then a few
+ *                     per-track link lookups the sync queued (lib/link-prewarm.ts,
+ *                     linkPrewarm.maxPerTick at priority backfill), so a phone
+ *                     tap finds every track's links cached.
  *   - `0 6 * * *`     daily housekeeping only (audit pruning). It no longer
  *                     crawls every DJ at once: discovery is spread around the
  *                     clock by the scheduler.
@@ -238,6 +242,9 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         } catch (e) {
           log.error('cron.threw', errorFields(e))
         }
+        // Per-track links of the sets the sync read, a few a tick at pool priority backfill, after the tick's own fetches (lib/link-prewarm.ts; never throws).
+        const w = await drainLinkPrewarm(env, log)
+        if (w.read > 0 || w.stoppedBy) log.info('cron.link_prewarm', w)
       }
       // The Stats page's hourly snapshot (lib/stats.ts; never throws, at most once an hour).
       if (!isDaily && (await maybeSnapshotStats(env, log))) log.info('cron.stats_snapshot')

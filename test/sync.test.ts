@@ -38,6 +38,9 @@ import { IPBlockedError, CloudflareChallengeError } from '../src/lib/fetch'
 import { _resetTallyForTests, setPause } from '../src/lib/ban-state'
 import { TRACKLIST_TTL } from '../src/lib/tracklist-cache'
 import { resolveTracklistPage } from '../src/lib/tracklist-resolve'
+import { prewarmIds } from '../src/lib/link-prewarm'
+import { parseTracklist } from '../src/lib/tracklists1001'
+import { updateAppSettings } from '../src/lib/app-settings'
 
 // Stub the network-touching primitives so syncOne becomes a deterministic
 // orchestrator test. This is the most important behavior to lock down: state
@@ -2231,5 +2234,71 @@ describe('manual syncs queue for a pool browser; pool faults read as what they a
     const r2 = await syncOne(env, sub, 'tok', { trigger: 'manual.one' })
     expect(r2.stoppedBy).toBeUndefined()
     expect(fetch1001Html).toHaveBeenCalled()
+  })
+})
+
+describe('link pre-warm queue inside a sync', () => {
+  const fixture = (name: string) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
+  const page = fixture('tracklist-maxstyler.html')
+  const setUrl = 'https://www.1001tracklists.com/tracklist/2f4x9k7t/max-styler-edc.html'
+  const queuedIds = async (env: Env) => (await env.DB.prepare('SELECT track_id FROM link_prewarm ORDER BY queued_at, rowid').all<{ track_id: string }>()).results.map((r) => r.track_id)
+
+  function newSet(html: string) {
+    mockCrawl([setUrl], 'Max Styler')
+    ;(findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'PL', title: 'Max Styler (1001tklists)' })
+    ;(fetch1001Html as ReturnType<typeof vi.fn>).mockResolvedValue({ html, via: 'pool', state: { cookie: '' }, accountId: 'acct-1' })
+    ;(parseSetYouTubeId as ReturnType<typeof vi.fn>).mockReturnValue(null)
+  }
+
+  it("a new set's page queues its identified tracks' medialink ids, with no pool fetch of its own", async () => {
+    const env = makeEnv()
+    newSet(page)
+    await syncOne(env, sub, 'tok')
+    const ids = prewarmIds(parseTracklist(setUrl, page))
+    expect(ids.length).toBeGreaterThan(10)
+    expect(await queuedIds(env)).toEqual(ids)
+    // The set page was the only 1001tracklists fetch.
+    expect(fetch1001Html).toHaveBeenCalledTimes(1)
+  })
+
+  it('a recheck queues the page too; a track already queued is not queued twice', async () => {
+    const env = makeEnv()
+    newSet(page)
+    await syncOne(env, sub, 'tok')
+    const before = await queuedIds(env)
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [setUrl] } })
+    expect(fetch1001Html).toHaveBeenCalledTimes(2)
+    expect(await queuedIds(env)).toEqual(before)
+    // Once a lookup has drained the queue, the next recheck queues the page again (the drain skips cached ids).
+    await env.DB.prepare('DELETE FROM link_prewarm').run()
+    await syncOne(env, sub, 'tok', { skipDjCrawl: true, priority: 'recheck', selection: { newUrls: [], recheckUrls: [setUrl] } })
+    expect(await queuedIds(env)).toEqual(before)
+  })
+
+  it('a decoy page (never cached) queues nothing, nor does a sync with linkPrewarm off', async () => {
+    const env = makeEnv()
+    newSet(fixture('tracklist-decoy-dcr839.html'))
+    await syncOne(env, sub, 'tok')
+    expect(await queuedIds(env)).toEqual([])
+
+    const env2 = makeEnv()
+    await updateAppSettings(env2, { linkPrewarm: { enabled: false } })
+    newSet(page)
+    await syncOne(env2, sub, 'tok')
+    expect(await queuedIds(env2)).toEqual([])
+  })
+
+  it('a queue that cannot be written never fails the set', async () => {
+    const env = makeEnv()
+    const db = env.DB
+    const prepare = db.prepare.bind(db)
+    ;(env as { DB: unknown }).DB = new Proxy(db, {
+      get: (t, k) => (k === 'prepare' ? (sql: string) => { if (sql.includes('link_prewarm')) throw new Error('D1_ERROR: no such table: link_prewarm'); return prepare(sql) } : Reflect.get(t, k)),
+    })
+    newSet(page)
+    const r = await syncOne(env, sub, 'tok')
+    expect(r.ok).toBe(true)
+    expect(r.stats.tracklistsProcessed).toBe(1)
+    expect((await playlistAdditions(env))[0]!.record).toMatchObject({ status: 'no_youtube' })
   })
 })

@@ -119,6 +119,13 @@ export const AppSettingsSchema = z.object({
     /** mkvid refuses a rip shorter than this share of the expected length (a preview clip; default 0.85). */
     minDurationRatio: z.number().min(0).max(1),
   }),
+  /** Per-track link pre-warm (lib/link-prewarm.ts): the sync queues a parsed set's tracks, the cron looks a few up. */
+  linkPrewarm: z.object({
+    /** Queue and look up at all (off: nothing is queued and the queue is left as it is). */
+    enabled: z.boolean(),
+    /** Lookups one 5-minute cron tick makes at most, at pool priority backfill (default 3: at most 864 a day). Cached ids cost none. */
+    maxPerTick: z.number().int().min(0).max(20),
+  }),
   retention: z.object({
     /** Now-playing and playlist-addition audit rows are kept this many days (default 90). */
     auditDays: z.number().int().min(1).max(3650),
@@ -170,6 +177,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     retryBackoffHours: 6,
     minDurationRatio: 0.85,
   },
+  linkPrewarm: { enabled: true, maxPerTick: 3 },
   retention: { auditDays: 90, tickHistoryDays: 14 },
 }
 

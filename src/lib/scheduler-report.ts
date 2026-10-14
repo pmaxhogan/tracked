@@ -13,6 +13,7 @@ import type { Env } from '../types'
 import { dbOf, parseJson } from './db'
 import { labelFromSetUrl } from './activity'
 import { listSchedulerTicks, type TickHistoryRow } from './tick-history'
+import { linkPrewarmPending } from './link-prewarm'
 import type { TableDef } from './table-query'
 
 export const SCHEDULER_CLASSES = ['new', 'verify', 'recheck', 'backfill'] as const
@@ -174,6 +175,8 @@ export type SchedulerSummary = {
   latestDue: { at: number; due: Record<string, number> } | null
   /** The oldest tick on record (history is kept 14 days), or null when there is none. */
   oldestTickAt: number | null
+  /** Track ids waiting for a link pre-warm lookup (lib/link-prewarm.ts), null when unknown. */
+  linkPrewarmPending: number | null
 }
 
 export async function schedulerSummary(env: Env, nowSec = Math.floor(Date.now() / 1000)): Promise<SchedulerSummary> {
@@ -198,6 +201,7 @@ export async function schedulerSummary(env: Env, nowSec = Math.floor(Date.now() 
     lastRun: { byClass: {}, byKind: {} },
     latestDue: null,
     oldestTickAt: null,
+    linkPrewarmPending: null,
   }
   for (const t of recent) {
     s.drawn += t.drawn || 0
@@ -245,6 +249,7 @@ export async function schedulerSummary(env: Env, nowSec = Math.floor(Date.now() 
   }
   const oldest = await db.prepare('SELECT MIN(at) AS at FROM scheduler_ticks').first<{ at: number | null }>()
   s.oldestTickAt = oldest?.at ?? null
+  s.linkPrewarmPending = await linkPrewarmPending(env)
   return s
 }
 

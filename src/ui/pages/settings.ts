@@ -112,6 +112,15 @@ const APP_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: 'sf-link-prewarm',
+    title: 'Link pre-warm',
+    intro: "A set the sync reads queues its tracks' Apple Music and YouTube links, and the cron looks a few up, so What's playing finds them cached.",
+    fields: [
+      { path: 'linkPrewarm.enabled', label: 'Pre-warm track links', help: 'Off stops queueing and lookups.', kind: 'bool' },
+      { path: 'linkPrewarm.maxPerTick', label: 'Lookups a cron tick', help: 'Every 5 minutes, at pool priority backfill; one page view each, cached tracks cost none. Default 3.', min: 0, max: 20, step: 1 },
+    ],
+  },
+  {
     id: 'sf-retention',
     title: 'Retention',
     fields: [

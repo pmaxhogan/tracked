@@ -41,6 +41,14 @@ describe('migrations on a copy of the pre-pool schema with data', () => {
     ])
   })
 
+  it('0021 creates the link pre-warm queue: one row per track id', () => {
+    const db = openRawDb()
+    for (const f of files) db.exec(readFileSync(join(DIR, f), 'utf8'))
+    db.exec("INSERT INTO link_prewarm (track_id, set_url, queued_at) VALUES ('909720', 's', 1)")
+    db.exec("INSERT OR IGNORE INTO link_prewarm (track_id, set_url, queued_at) VALUES ('909720', 'other', 2)")
+    expect(rows(db, 'SELECT track_id, set_url, queued_at, attempts, next_at, last_error FROM link_prewarm')).toEqual([{ track_id: '909720', set_url: 's', queued_at: 1, attempts: 0, next_at: 0, last_error: null }])
+  })
+
   it('0015 creates the scheduler tick history table', () => {
     const db = openRawDb()
     for (const f of files) db.exec(readFileSync(join(DIR, f), 'utf8'))

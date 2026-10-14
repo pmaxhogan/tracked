@@ -98,6 +98,7 @@ import { pickSetVideo, rejectionNote } from './playlist-hygiene'
 import { combinedRefuses, markInPlaylist, markOutOfPlaylist } from './playlist-blocklist'
 import { parseTracklist, type ScrapedTracklist } from './tracklists1001'
 import { cacheTracklistFromHtml } from './tracklist-cache'
+import { enqueueLinkPrewarm } from './link-prewarm'
 import { findRenamedTracklists, mergeRenamedState, retireRenamedTracklists } from './tracklist-renames'
 import { enqueueMkvidRequest, extractSetAudioSource, extractSetDate, extractSetTitle, lastCueSeconds, mkvidRowCounts, quotaDayEnd, saveMkvidTracks, supersedeMkvidRequestForSet } from './mkvid'
 import {
@@ -1064,7 +1065,9 @@ export async function syncOne(
         viaSeen.add(setFetched.via)
         // Write-through: the phone button then serves this list from cache.
         parsedPage = parsePage(setUrl, setFetched.html)
-        await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new', parsedPage)
+        const written = await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.new', parsedPage)
+        // Its tracks' links are looked up ahead of a phone tap by the cron (lib/link-prewarm.ts; one D1 batch, never throws).
+        if (written?.cached && parsedPage) await enqueueLinkPrewarm(env, setUrl, parsedPage, log)
         foundVia = setFetched.via
         // Full-recording rule + never-re-add list (lib/playlist-hygiene.ts): a turned-down video counts as none.
         pick = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log, noLookup: quotaHeld })
@@ -1280,7 +1283,9 @@ export async function syncOne(
       const setFetched = await fetch1001Html(setUrl, fetchOpts)
       viaSeen.add(setFetched.via)
       const parsedPage = parsePage(setUrl, setFetched.html)
-      await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck', parsedPage)
+      const written = await cacheTracklistFromHtml(env, setUrl, setFetched.html, log, 'sync.recheck', parsedPage)
+      // Tracks new to the page (or whose links' cache expired) are pre-warmed too; cached ones are dropped by the drain.
+      if (written?.cached && parsedPage) await enqueueLinkPrewarm(env, setUrl, parsedPage, log)
       const { videoId } = await pickSetVideo(env, { slug: sub.slug, setUrl, html: setFetched.html, rawVideoId: parseSetYouTubeId(setFetched.html), playlistId, accessToken, log, noLookup: quotaHeld })
       const checkedAt = nowSeconds()
       await noteFetched(setUrl, setFetched, videoId ?? prev?.videoId ?? null, parsedPage)

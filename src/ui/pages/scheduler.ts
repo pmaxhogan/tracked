@@ -139,7 +139,8 @@ const JS = /* js */ `
       tile('Ticks', String(n(s.ticks)), esc(n(s.ranTicks) + ' ran, ' + skippedTotal + ' skipped')) +
       tile('Items run', String(n(s.items)), esc(goodItems + ' ok of ' + n(s.drawn) + ' drawn')) +
       tile('Stopped early', String(Object.keys(s.stopReasons || {}).reduce((a, k) => a + n(s.stopReasons[k]), 0)), 'ticks cut short') +
-      tile('Errors', String(n(s.errored)), n(s.errored) ? '<span class="error">ticks that threw</span>' : 'ticks that threw');
+      tile('Errors', String(n(s.errored)), n(s.errored) ? '<span class="error">ticks that threw</span>' : 'ticks that threw') +
+      (s.linkPrewarmPending == null ? '' : tile('Link pre-warms', String(n(s.linkPrewarmPending)), '<span' + TK.tip('Tracks of the sets the sync read whose Apple Music / YouTube links are still to be looked up ahead of a phone tap: a few each tick at pool priority backfill.') + '>tracks waiting</span>'));
     $('sc-asof').textContent = s.oldestTickAt ? 'history since ' + (TK.fmt.time(iso(s.oldestTickAt)) || '') : 'no ticks recorded yet';
 
     const due = s.latestDue && s.latestDue.due ? s.latestDue.due : null;
