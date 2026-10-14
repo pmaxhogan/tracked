@@ -2868,6 +2868,62 @@ describe("channel bans and strikes (lib/channel-bans.ts)", () => {
     expect(await row(env, setUrl(1))).toMatchObject({ video_id: null, checked_at: 0 });
   });
 
+  it("the sweep judges combined-playlist videos no set resolves to by the rules that need no page: vertical and a banned channel", async () => {
+    const env = makeEnv();
+    await seedSub(env);
+    await seedCombined(env);
+    await seedSet(env, setUrl(1), "good0000001");
+    await strikes(env, "UCfanA", 1);
+    await processBanQueue(env, { log });
+    await decideBan(env, "UCfanA", "ban");
+    await setOverride(env, "kept0000001");
+    // The combined playlist's last listing: one tracked video, then orphans.
+    await savePlaylistMembers(
+      env,
+      PLC,
+      new Set(["good0000001", "vert0000001", "fanA0000009", "land0000001", "kept0000001"]),
+    );
+    metaAnswer({
+      vert0000001: { embedWidth: 1280, embedHeight: 2276 },
+      fanA0000009: { channelId: "UCfanA" },
+      kept0000001: { embedWidth: 1280, embedHeight: 2276 },
+    });
+    const dry = await runRemovalSweep(env, "tok", {
+      log,
+      settings: { dryRun: true, dailyRemovals: 40 },
+    });
+    expect(dry).toMatchObject({ orphans: 3, rejected: 2, reported: 2, deletes: 0 });
+    expect(removeVideoFromPlaylist).not.toHaveBeenCalled();
+    expect(
+      (await removals(env)).map((x) => [x.video_id, x.status, x.reason, x.playlist_kind]),
+    ).toEqual([
+      ["fanA0000009", "would_remove", "banned_channel", "combined"],
+      ["vert0000001", "would_remove", "vertical", "combined"],
+    ]);
+    const live = await runRemovalSweep(env, "tok", {
+      log,
+      settings: { dryRun: false, dailyRemovals: 1 },
+    });
+    expect(live).toMatchObject({ removedVideos: 1, deletes: 1, stoppedBy: "budget" });
+    expect(vi.mocked(removeVideoFromPlaylist).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      [PLC, "fanA0000009"],
+    ]);
+    expect((await removals(env)).find((x) => x.video_id === "fanA0000009")).toMatchObject({
+      status: "removed",
+      detail: "uploaded by UCfanA, a channel you banned; in the combined playlist only",
+    });
+    // The next day's budget takes the vertical one.
+    await runRemovalSweep(env, "tok", {
+      log,
+      settings: { dryRun: false, dailyRemovals: 1 },
+      nowMs: Date.now() + 86_400_000,
+    });
+    expect((await removals(env)).find((x) => x.video_id === "vert0000001")).toMatchObject({
+      status: "removed",
+      detail: "embed 1280x2276; in the combined playlist only",
+    });
+  });
+
   it("requestSweepSoon makes the sweep due at the next tick", async () => {
     const env = makeEnv();
     await seedSub(env);

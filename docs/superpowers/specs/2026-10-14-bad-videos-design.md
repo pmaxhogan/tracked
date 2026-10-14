@@ -186,10 +186,26 @@ ignored, push once, retry when not delivered); compare -> question end to end;
 sweep removing a banned channel's videos; routes; Bans page and Home card in
 test/ui-pages.test.ts; migration on prod-shaped data.
 
+## Combined-playlist orphans (added after the dry run)
+
+The read-only dry run (2026-10-14) found no sweep candidate left to reject:
+the live sweep had already taken the portrait videos out of the artist
+playlists. Two portrait fan recordings were still in the combined playlist,
+where nothing looks at them again, because no `tracklists` row points at them:
+
+- `lLiclA_GCEQ` (Knock2, Ultra Taiwan, 1280x2276): the sweep removed it from
+  the artist playlist, then its combined delete failed (the 2026-10-08 OAuth
+  401 incident), and clearing the set made it invisible to every later sweep.
+- `gX0uFq9hv_E` (Mau P, 1280x2276): the owner removed it from the artist
+  playlist by hand; removals are per playlist, so it stayed in the combined one.
+
+So the sweep also judges the combined playlist's orphans (in its last complete
+listing, referenced by no set, not mkvid's, not kept, not already taken out by
+tracked) by the rules that need no set page: vertical and banned channel. Same
+dry run, budget and log rows (`playlist_kind = combined`, no set), undoable.
+
 ## Out of scope
 
 - The sweep does not swap on strikes alone (only on a ban).
-- Videos the owner added by hand (in no `tracklists` row) are not swept for a
-  ban; the sync never picks them again anyway.
-- Retrying sweep removals that failed on the combined playlist after the artist
-  removal cleared the set (found during the dry run; reported, not fixed here).
+- Videos the owner added by hand to an artist playlist (in no `tracklists`
+  row) are not swept; the sync never picks a banned channel's video anyway.

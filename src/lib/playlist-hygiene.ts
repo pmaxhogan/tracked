@@ -807,26 +807,204 @@ export type SweepResult = {
   metaFailed: boolean;
   /** Rejected for one set, but another accepted set of the DJ uses the same video: kept, nothing deleted. */
   keptShared: number;
+  /** Videos in the combined playlist that no set resolves to, judged by the rules that need no set page (`sweepCombinedOrphans`). */
+  orphans?: number;
 };
 
 type AddedRow = { slug: string; url: string; video_id: string; playlist_id: string | null };
+
+type SweepOpts = {
+  log: Logger;
+  settings?: SweepSettings;
+  fetcher?: typeof fetch;
+  nowMs?: number;
+  /** Deletes the comparison of this same tick knows the day stands at (its dead videos): KV may not show them yet. */
+  usedAtLeast?: number;
+};
 
 /**
  * Judge every video the sync has put in an artist playlist (tracklists rows
  * with a 1001tl video; mkvid's own renders are not judged - they are the
  * replacement) and remove the rejected ones, or in a dry run only log them.
+ * Then the combined playlist's orphans (`sweepCombinedOrphans`), on what is
+ * left of the same budget.
  */
 export async function runRemovalSweep(
   env: Env,
   accessToken: string,
-  opts: {
+  opts: SweepOpts,
+): Promise<SweepResult> {
+  const nowMs = opts.nowMs ?? Date.now();
+  const settings = opts.settings ?? sweepSettings(env, await getAppSettings(env));
+  const usedStart = Math.max(await sweepDeletesUsed(env, nowMs), opts.usedAtLeast ?? 0);
+  const r = await sweepTrackedVideos(env, accessToken, { ...opts, settings, nowMs });
+  if (r.stoppedBy) return r;
+  try {
+    const o = await sweepCombinedOrphans(env, accessToken, {
+      log: opts.log,
+      settings,
+      fetcher: opts.fetcher,
+      nowMs,
+      known: usedStart + r.deletes,
+      budgetLeft: r.budgetLeft,
+    });
+    r.orphans = o.judged;
+    r.rejected += o.rejected;
+    r.reported += o.reported;
+    r.removedVideos += o.removed;
+    r.deletes += o.deletes;
+    r.failed += o.failed;
+    r.budgetLeft = o.budgetLeft;
+    r.stoppedBy = o.stoppedBy;
+  } catch (e) {
+    opts.log.warn("hygiene.sweep.orphans_failed", errorFields(e));
+  }
+  return r;
+}
+
+/**
+ * Videos in the combined playlist that no set resolves to any more (in its
+ * last complete listing, `playlist_members`): an owner removal from the
+ * artist playlist only (removals are per playlist), or a sweep removal whose
+ * combined delete failed after the artist one cleared the set. Nothing else
+ * ever looks at them again. With no set page, only the rules that need none
+ * apply: vertical, and a banned uploader channel (a dead one is the
+ * comparison's). Never mkvid's own renders or a video the owner kept. Same
+ * rails as the sweep: dry run, daily budget, logged as `sweep` rows of the
+ * combined playlist (undo puts the video back).
+ */
+async function sweepCombinedOrphans(
+  env: Env,
+  accessToken: string,
+  o: {
     log: Logger;
-    settings?: SweepSettings;
+    settings: SweepSettings;
     fetcher?: typeof fetch;
-    nowMs?: number;
-    /** Deletes the comparison of this same tick knows the day stands at (its dead videos): KV may not show them yet. */
-    usedAtLeast?: number;
+    nowMs: number;
+    known: number;
+    budgetLeft: number;
   },
+): Promise<{
+  judged: number;
+  rejected: number;
+  reported: number;
+  removed: number;
+  deletes: number;
+  failed: number;
+  budgetLeft: number;
+  stoppedBy: "budget" | "quota" | null;
+}> {
+  const out = {
+    judged: 0,
+    rejected: 0,
+    reported: 0,
+    removed: 0,
+    deletes: 0,
+    failed: 0,
+    budgetLeft: o.budgetLeft,
+    stoppedBy: null as "budget" | "quota" | null,
+  };
+  const combinedId = (await loadCombinedState(env)).playlistId ?? null;
+  if (!combinedId) return out;
+  const referenced = new Set(
+    (
+      await dbOf(env)
+        .prepare("SELECT DISTINCT video_id FROM tracklists WHERE video_id IS NOT NULL")
+        .all<{ video_id: string }>()
+    ).results.map((r) => r.video_id),
+  );
+  const kept = await overriddenIds(env);
+  const mkvidOwn = await mkvidUploadedIds(env, o.log);
+  // Taken out by tracked since that listing ('out'): not judged again before the next listing drops it.
+  const membership = await confirmedMembership(env, combinedId);
+  const orphans = [...(await playlistMembers(env, combinedId))]
+    .filter(
+      (id) =>
+        !referenced.has(id) && !kept.has(id) && !mkvidOwn.has(id) && membership.get(id) !== "out",
+    )
+    .sort();
+  if (orphans.length === 0) return out;
+  let metas: Map<string, VideoMeta>;
+  try {
+    metas = await getVideoMeta(env, orphans, accessToken, {
+      fetcher: o.fetcher,
+      now: Math.floor(o.nowMs / 1000),
+    });
+  } catch (e) {
+    o.log.warn("hygiene.sweep.orphans_meta_failed", { count: orphans.length, ...errorFields(e) });
+    if (isQuotaError(e)) {
+      await noteQuotaOut(env, e, o.log);
+      return { ...out, stoppedBy: "quota" };
+    }
+    metas = await readCachedVideoMeta(env, orphans);
+  }
+  const judgeOpts = await judgeOptions(env);
+  const rejected: Array<{ videoId: string; reason: string; detail: string }> = [];
+  for (const id of orphans) {
+    out.judged++;
+    const v = judgeVideo(null, metas.get(id), judgeOpts);
+    if (!v.ok && v.reason !== "dead") rejected.push({ videoId: id, ...v });
+  }
+  out.rejected = rejected.length;
+  const row = (r: (typeof rejected)[number], status: RemovalStatus, detail: string) =>
+    logRemoval(env, {
+      source: "sweep",
+      status,
+      slug: null,
+      set_url: null,
+      video_id: r.videoId,
+      playlist_id: combinedId,
+      playlist_kind: "combined",
+      reason: r.reason,
+      detail,
+    });
+  const note = (r: (typeof rejected)[number]) => `${r.detail}; in the combined playlist only`;
+  if (o.settings.dryRun) {
+    for (const r of rejected) await row(r, "would_remove", note(r));
+    out.reported = rejected.length;
+    if (rejected.length) o.log.info("hygiene.sweep.orphans_dry_run", { ...out });
+    return out;
+  }
+  let known = o.known;
+  let touched = false;
+  for (const r of rejected) {
+    if (out.budgetLeft < 1) {
+      out.stoppedBy = "budget";
+      break;
+    }
+    try {
+      const n = await removeVideoFromPlaylist(combinedId, r.videoId, accessToken, o.fetcher);
+      out.deletes += n;
+      out.budgetLeft -= n;
+      known = await bumpSweepDeletes(env, n, o.nowMs, known);
+      touched = true;
+      await markOutOfPlaylist(env, combinedId, r.videoId, "sweep");
+      await row(r, "removed", n === 0 ? `${note(r)}; was not in the playlist` : note(r));
+      out.removed++;
+    } catch (e) {
+      out.failed++;
+      o.log.warn("hygiene.sweep.orphan_remove_failed", {
+        videoId: r.videoId,
+        playlistId: combinedId,
+        ...errorFields(e),
+      });
+      await row(r, "failed", (e instanceof Error ? e.message : String(e)).slice(0, 300));
+      if (isQuotaError(e)) {
+        await noteQuotaOut(env, e, o.log);
+        out.stoppedBy = "quota";
+        break;
+      }
+    }
+  }
+  if (touched) await invalidatePlaylistVideoIds(env, combinedId);
+  o.log.info("hygiene.sweep.orphans_done", { ...out });
+  return out;
+}
+
+async function sweepTrackedVideos(
+  env: Env,
+  accessToken: string,
+  opts: SweepOpts,
 ): Promise<SweepResult> {
   const { log } = opts;
   const nowMs = opts.nowMs ?? Date.now();

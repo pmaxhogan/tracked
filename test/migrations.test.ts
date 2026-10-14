@@ -172,6 +172,30 @@ describe("migrations on a copy of the pre-pool schema with data", () => {
     ]);
   });
 
+  it("0022 adds the channel columns over existing video_meta and removed_videos rows: unknown, not checked, not yet asked", () => {
+    const db = openRawDb();
+    for (const f of upTo(21)) db.exec(readFileSync(join(DIR, f), "utf8"));
+    db.exec(
+      "INSERT INTO video_meta (video_id, duration_seconds, embed_width, embed_height, alive, fetched_at) VALUES ('gX0uFq9hv_E', 2833, 1280, 2276, 1, 5)",
+    );
+    db.exec(
+      "INSERT INTO removed_videos (playlist_id, video_id, slug, set_url, reason, at) VALUES ('PL1', 'gX0uFq9hv_E', 'maup', NULL, 'owner', 7)",
+    );
+    for (const f of after(21)) db.exec(readFileSync(join(DIR, f), "utf8"));
+    expect(
+      rows(
+        db,
+        "SELECT duration_seconds, channel_id, channel_title, channel_checked FROM video_meta",
+      ),
+    ).toEqual([
+      { duration_seconds: 2833, channel_id: null, channel_title: null, channel_checked: 0 },
+    ]);
+    expect(rows(db, "SELECT reason, channel_id, ban_noted FROM removed_videos")).toEqual([
+      { reason: "owner", channel_id: null, ban_noted: 0 },
+    ]);
+    expect(rows(db, "SELECT COUNT(*) AS n FROM channel_bans")).toEqual([{ n: 0 }]);
+  });
+
   it("are numbered without gaps or duplicates", () => {
     const nums = files.map((f) => Number(f.slice(0, 4)));
     expect(nums).toEqual(nums.map((_, i) => i + 1));
