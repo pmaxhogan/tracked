@@ -106,6 +106,11 @@ export type MkvidReadiness =
   /** A failed attempt's retry backoff. */
   | { state: "backoff"; until: number };
 
+/** Readiness as the panel shows it: plus the Apple Music backstop's hint (lib/apple-backstop.ts) when it ran. */
+export type MkvidReadinessView = MkvidReadiness & {
+  apple?: { cues: number; note: string | null };
+};
+
 /** What readiness is computed from: the request plus its stored list's summary. */
 export type ReadinessInput = {
   status: string;
@@ -217,13 +222,13 @@ export async function readinessFor(
     skipIdWait: boolean;
   }>,
   now = Math.floor(Date.now() / 1000),
-): Promise<Map<string, MkvidReadiness>> {
-  const out = new Map<string, MkvidReadiness>();
+): Promise<Map<string, MkvidReadinessView>> {
+  const out = new Map<string, MkvidReadinessView>();
   if (!requests.length) return out;
   const res = await dbOf(env)
     .prepare(
       `SELECT r.id AS id, ${DISCOVERED_SQL} AS discovered, t.trusted AS trusted, t.track_count AS n, t.id_rows AS id_rows,
-              t.base_rows AS base_rows, t.timed_rows AS timed_rows
+              t.base_rows AS base_rows, t.timed_rows AS timed_rows, t.apple_cues AS apple_cues, t.apple_note AS apple_note
          FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id
         WHERE r.id IN (${requests.map(() => "?").join(", ")})`,
     )
@@ -236,13 +241,18 @@ export async function readinessFor(
       id_rows: number | null;
       base_rows: number | null;
       timed_rows: number | null;
+      apple_cues: number | null;
+      apple_note: string | null;
     }>();
   const byId = new Map(res.results.map((x) => [x.id, x]));
   for (const r of requests) {
     const x = byId.get(r.id);
-    out.set(
-      r.id,
-      mkvidReadiness(
+    const apple =
+      Number(x?.apple_cues ?? 0) > 0 || x?.apple_note
+        ? { apple: { cues: Number(x?.apple_cues ?? 0), note: x?.apple_note ?? null } }
+        : {};
+    out.set(r.id, {
+      ...mkvidReadiness(
         {
           status: r.status,
           notBefore: r.notBefore,
@@ -258,7 +268,8 @@ export async function readinessFor(
         },
         now,
       ),
-    );
+      ...apple,
+    });
   }
   return out;
 }

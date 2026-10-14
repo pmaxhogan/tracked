@@ -163,6 +163,16 @@ export const AppSettingsSchema = z.object({
     /** Lookups one 5-minute cron tick makes at most, at pool priority backfill (default 3: at most 864 a day). Cached ids cost none. */
     maxPerTick: z.number().int().min(0).max(20),
   }),
+  /** Apple Music timing backstop for held mkvid sets (lib/apple-cues.ts). */
+  appleCues: z.object({
+    /** Fill missing cue times of a held list from the set's Apple Music album at all. */
+    enabled: z.boolean(),
+    /** The album is used only when at least this share of the list's base rows matches one of its tracks (default 0.7). */
+    minMatchShare: z.number().min(0.1).max(1),
+    /** The album's length must be within the larger of this percent and the minutes below of the source audio (default 3 %). */
+    lengthTolerancePct: z.number().min(0).max(50),
+    lengthToleranceMinutes: z.number().min(0).max(60),
+  }),
   retention: z.object({
     /** Now-playing and playlist-addition audit rows are kept this many days (default 90). */
     auditDays: z.number().int().min(1).max(3650),
@@ -225,6 +235,12 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     minDurationRatio: 0.85,
   },
   linkPrewarm: { enabled: true, maxPerTick: 3 },
+  appleCues: {
+    enabled: true,
+    minMatchShare: 0.7,
+    lengthTolerancePct: 3,
+    lengthToleranceMinutes: 2,
+  },
   retention: { auditDays: 90, tickHistoryDays: 14 },
 };
 

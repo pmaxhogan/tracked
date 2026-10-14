@@ -15,6 +15,20 @@ export const MKVID_STATE_JS = /* js */ `
   // Why one waiting set is (not) next, as HTML. Capped only matters for a set
   // that is otherwise ready; the caller says whether today's caps are used.
   function mkWhy(rd, short, capped) {
+    return mkWhyState(rd, short, capped) + mkApple(rd);
+  }
+
+  // The Apple Music backstop's hint (lib/apple-backstop.ts): how many cues came
+  // from the set's Apple Music album, or why the album was not used. Information only.
+  function mkApple(rd) {
+    const a = rd && rd.apple;
+    if (!a) return '';
+    if (a.cues > 0) return ' <span class="why apple"' + TK.tip('These cue times were missing on 1001tracklists and were taken from the Apple Music album of the set, lined up with the real cues around them. ' + (a.note || '')) + '>' + TK.esc(a.cues) + ' cue' + (a.cues === 1 ? '' : 's') + ' from Apple Music</span>';
+    if (rd.state === 'untimed' && a.note) return ' <span class="why apple"' + TK.tip('Apple Music album not used: ' + a.note) + '>Apple Music not used</span>';
+    return '';
+  }
+
+  function mkWhyState(rd, short, capped) {
     if (!rd) return '';
     const day = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
     if (rd.state === 'unverified') return '<span class="why"' + TK.tip('Nothing is rendered from an unverified track list. It needs a second fetch, by another account, that matches the first.') + '>not verified' + (short ? '' : ' - the track list needs a second matching fetch before anything is rendered') + '</span>';

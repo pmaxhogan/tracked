@@ -716,6 +716,9 @@ ${MKVID_STATE_JS}
     if (r.readiness && r.readiness.state === 'waiting_ids' && !r.skipIdWait) {
       btns.push('<button type="button" class="btn" data-do="render-now"' + TK.tip('Renders now with ID shown for the unidentified tracks, instead of waiting until the set is 7 days old. The track list must still be verified.') + '>Render now</button>');
     }
+    if (r.status === 'pending' && r.readiness && r.readiness.state === 'untimed') {
+      btns.push('<button type="button" class="btn" data-do="recheck-now"' + TK.tip(RECHECK_TIP) + '>Queue for re-check now</button>');
+    }
     if (r.status === 'done' && r.videoId && !r.replacesVideoId) {
       btns.push('<button type="button" class="btn danger" data-do="recreate"' + TK.tip('Renders the set again at the back of the queue (it counts against the daily upload cap). The old video stays up until the new one is in the playlists, then it is deleted.') + '>Delete and recreate</button>');
       btns.push('<button type="button" class="btn danger" data-do="unpublish"' + TK.tip('Takes the video out of the playlists and deletes it from YouTube right now. The set goes back in the queue and renders again when it is ready.') + '>Delete video</button>');
@@ -727,7 +730,8 @@ ${MKVID_STATE_JS}
     return out.join('');
   }
 
-  const UNPUBLISH_ASK = 'Delete this video now? It comes out of the playlists and is deleted from YouTube right away. The set goes back in the queue and renders again once it is ready.';
+  const RECHECK_TIP = 'Fills the missing cue times from the Apple Music album of the set now, if it has a matching one, and fetches the 1001tracklists page again soon (within the pool budget).';
+  const UNPUBLISH_ASK ='Delete this video now? It comes out of the playlists and is deleted from YouTube right away. The set goes back in the queue and renders again once it is ready.';
   const RECREATE_ASK = 'Delete and recreate this video? The set is rendered again at the back of the queue; the current video stays up until the new one is in the playlists, then it is deleted from YouTube.';
   // errMsg: the reason the last action on this request failed, shown in the drawer.
   let drawerFor = null;
@@ -744,7 +748,7 @@ ${MKVID_STATE_JS}
       const what = b.dataset.do;
       if (what === 'recreate' && !(await TK.ask(RECREATE_ASK, { yes: 'Delete and recreate', danger: true }))) return;
       if (what === 'unpublish' && !(await TK.ask(UNPUBLISH_ASK, { yes: 'Delete video', danger: true }))) return;
-      const url = what === 'retry' ? '/ui/api/mkvid/retry/' + id : what === 'render-now' ? '/ui/api/mkvid/render-now/' + id : what === 'unpublish' ? '/ui/api/mkvid/unpublish/' + id : '/ui/api/mkvid/recreate/' + id;
+      const url = what === 'retry' ? '/ui/api/mkvid/retry/' + id : what === 'render-now' ? '/ui/api/mkvid/render-now/' + id : what === 'recheck-now' ? '/ui/api/mkvid/recheck-now/' + id : what === 'unpublish' ? '/ui/api/mkvid/unpublish/' + id : '/ui/api/mkvid/recreate/' + id;
       if (errLine) errLine.hidden = true;
       const res = await TK.busy(b, 'Working…', () => TK.api.post(url, {}));
       if (res && res.ok) { TK.drawer.close(); await reloadAll(); return; }

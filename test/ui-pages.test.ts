@@ -2722,3 +2722,92 @@ describe("Access gate on every /ui route", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe("Apple Music cue hints (mkvid page, set page)", () => {
+  async function stateCtx() {
+    const { RUNTIME_JS } = await import("../src/ui/runtime");
+    const { MKVID_STATE_JS } = await import("../src/ui/pages/mkvid-state");
+    const { SET_DIAG_JS } = await import("../src/ui/pages/set-diag");
+    const ctx = vm.createContext({ document: { getElementById: () => null }, console, Date });
+    vm.runInContext(RUNTIME_JS, ctx);
+    vm.runInContext("TK.fmt.rel = () => 'REL'; TK.fmt.until = () => 'UNTIL';", ctx);
+    vm.runInContext(`(function () { ${MKVID_STATE_JS}; globalThis.mkWhy = mkWhy; })();`, ctx);
+    vm.runInContext(SET_DIAG_JS, ctx);
+    return ctx as any;
+  }
+  const untimed = { state: "untimed", timedRows: 5, baseRows: 10 };
+
+  it("mkWhy shows N cues from Apple Music with a data-tip, and why an album was not used", async () => {
+    const ctx = await stateCtx();
+    const used = ctx.mkWhy(
+      {
+        state: "ready",
+        apple: { cues: 5, note: "5 cues from Apple Music (10 of 10 tracks matched, album 10:00)" },
+      },
+      true,
+      false,
+    ) as string;
+    expect(used).toContain(">5 cues from Apple Music</span>");
+    expect(used).toMatch(/data-tip="[^"]*10 of 10 tracks matched/);
+    expect(used).not.toContain(" title=");
+    const skipped = ctx.mkWhy(
+      { ...untimed, apple: { cues: 0, note: "length mismatch: album 58:10 vs source 1:02:45" } },
+      true,
+      false,
+    ) as string;
+    expect(skipped).toContain("too few cue times");
+    expect(skipped).toContain(
+      'data-tip="Apple Music album not used: length mismatch: album 58:10 vs source 1:02:45"',
+    );
+    expect(ctx.mkWhy(untimed, true, false)).not.toContain("Apple Music");
+  });
+
+  it("the set page diagnostics list the Apple Music fact and offer Queue for re-check now on a held set", async () => {
+    const ctx = await stateCtx();
+    const mk = (readiness: object) => ({
+      url: "https://www.1001tracklists.com/tracklist/x/s.html",
+      now: 1_790_000_000,
+      discovered: [],
+      schedule: null,
+      verification: null,
+      media: null,
+      video: null,
+      playlist: { additions: [], confirmed: [] },
+      hygiene: { removed: [], removals: [] },
+      mkvid: {
+        id: "r1",
+        status: "pending",
+        position: 2,
+        readiness,
+        attempts: 0,
+        notBefore: null,
+        error: null,
+        videoId: null,
+        style: null,
+        account: "primary",
+        skipIdWait: false,
+        list: null,
+      },
+    });
+    const held = mk({
+      ...untimed,
+      apple: {
+        cues: 0,
+        note: "weak match: 3 of 10 tracks matched the Apple Music album (70% needed)",
+      },
+    });
+    const row = ctx.setDiagRows(held).find((r: any) => r.key === "mkvid");
+    expect(row.facts).toContainEqual([
+      "Apple Music",
+      "not used: weak match: 3 of 10 tracks matched the Apple Music album (70% needed)",
+    ]);
+    const html = ctx.renderDiag(held) as string;
+    expect(html).toContain('data-recheck-now="r1"');
+    expect(html).toContain("Queue for re-check now");
+    const ready = ctx.renderDiag(
+      mk({ state: "ready", apple: { cues: 4, note: "4 cues from Apple Music" } }),
+    ) as string;
+    expect(ready).not.toContain("data-recheck-now");
+    expect(ready).toContain("4 cues from Apple Music");
+  });
+});

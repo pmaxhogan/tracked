@@ -129,6 +129,16 @@ ${SET_DIAG_JS}
     $diag.hidden = false;
   }
 
+  // "Queue for re-check now" in the mkvid row: Apple Music pass now, refetch soon; then the diagnostics again.
+  $diag.addEventListener('click', async (ev) => {
+    const b = ev.target && ev.target.closest ? ev.target.closest('button[data-recheck-now]') : null;
+    if (!b) return;
+    const res = await TK.busy(b, 'Working...', () => TK.api.post('/ui/api/mkvid/recheck-now/' + encodeURIComponent(b.dataset.recheckNow), {}));
+    if (!res || !res.ok) TK.toast('Re-check failed: ' + TK.errText(res, 'failed (' + (res ? res.status : 0) + ')'), 'bad');
+    else TK.toast(res.data && res.data.readiness && res.data.readiness.state !== 'untimed' ? 'Enough cue times now: the set can render.' : 'Queued: the set page is fetched again soon.', 'ok');
+    await loadDiag(currentUrl, seq);
+  });
+
   // The track list and the diagnostics load in parallel and independently; a
   // newer load drops an older one's responses.
   async function load(url) {

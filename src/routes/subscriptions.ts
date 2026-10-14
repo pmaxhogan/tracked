@@ -70,6 +70,7 @@ import { getPlaylistAddition, listPlaylistAdditions } from "../lib/playlist-audi
 import { getNowPlayingAudit, listNowPlayingAudit } from "../lib/now-playing-audit";
 import { migrationStatus } from "../lib/kv-import";
 import { setSkipIdWait } from "../lib/mkvid-readiness";
+import { recheckNow } from "../lib/apple-recheck";
 import {
   countOldStyleVideos,
   deleteOldVideo,
@@ -1223,6 +1224,17 @@ subscriptionsApp.post("/api/mkvid/render-now/:id", async (c) => {
   const ok = await setSkipIdWait(c.env, id);
   log.info("subs.mkvid_render_now", { id, ok });
   return c.json({ ok, id }, ok ? 200 : 409);
+});
+
+/** "Queue for re-check now" (a set held for too few cue times): Apple Music pass now + a pool refetch (lib/apple-recheck.ts). */
+subscriptionsApp.post("/api/mkvid/recheck-now/:id", async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get("cf-ray") ?? "local",
+    route: "subs.mkvid_recheck_now",
+    by: c.get("cfAccessEmail"),
+  });
+  const r = await recheckNow(c.env, c.req.param("id"), { log });
+  return c.json(r, r.ok ? 200 : r.error === "not_found" ? 404 : 409);
 });
 
 /**

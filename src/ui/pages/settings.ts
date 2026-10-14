@@ -403,6 +403,44 @@ const APP_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: "sf-apple-cues",
+    title: "Cue times from Apple Music",
+    intro:
+      "A set held for too few cue times can take the missing ones from its Apple Music DJ mix album. The 1001tracklists cues stay; only rows without one are filled.",
+    fields: [
+      {
+        path: "appleCues.enabled",
+        label: "Fill cue times from Apple Music",
+        help: "Off leaves held sets as 1001tracklists has them.",
+        kind: "bool",
+      },
+      {
+        path: "appleCues.minMatchShare",
+        label: "Tracks that must match the album",
+        help: "Share of the track list, 0.1 to 1. Below it the album is not used at all. Default 0.7.",
+        min: 0.1,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        path: "appleCues.lengthTolerancePct",
+        label: "Album length may differ from the recording by",
+        help: "Percent of the recording, or the minutes below if that is more. A studio edit is shorter and is skipped. Default 3.",
+        unit: "%",
+        min: 0,
+        max: 50,
+      },
+      {
+        path: "appleCues.lengthToleranceMinutes",
+        label: "Or by at least",
+        help: "Default 2.",
+        unit: "min",
+        min: 0,
+        max: 60,
+      },
+    ],
+  },
+  {
     id: "sf-retention",
     title: "Retention",
     fields: [

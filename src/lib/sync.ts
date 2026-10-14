@@ -1073,7 +1073,7 @@ export async function syncOne(
       // mkvidTracksTrusted); a failure here must not cost the queueing.
       let tracksSaved: string;
       try {
-        tracksSaved = await saveMkvidTracks(env, setUrl, parsed);
+        tracksSaved = await saveMkvidTracks(env, setUrl, parsed, { log });
       } catch (e) {
         tracksSaved = "failed";
         log.warn("sync.mkvid_tracks_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
@@ -1109,7 +1109,7 @@ export async function syncOne(
   ): Promise<void> => {
     if (!mkvidEnabled || !parsed) return;
     try {
-      if (parsed.tracks.length > 0) await saveMkvidTracks(env, setUrl, parsed);
+      if (parsed.tracks.length > 0) await saveMkvidTracks(env, setUrl, parsed, { log });
     } catch (e) {
       log.warn("sync.mkvid_tracks_failed", { slug: sub.slug, setUrl, ...errorFields(e) });
     }

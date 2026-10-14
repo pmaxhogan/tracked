@@ -24,7 +24,7 @@ rechecks into the next few hours within the pool budget.
 
 1. Source: the public album page `music.apple.com/<cc>/album/<slug>/<id>`
    (browser UA), JSON-LD block `<script id=schema:music-album
-   type="application/ld+json">` only (the id attribute is unquoted on the live
+type="application/ld+json">` only (the id attribute is unquoted on the live
    page; other albums' durations appear elsewhere on the page). Fallback when
    the block is missing or unparseable: amp-api
    `amp-api.music.apple.com/v1/catalog/<cc>/albums/<id>` with the web player's

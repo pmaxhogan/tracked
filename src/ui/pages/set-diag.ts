@@ -157,6 +157,8 @@ export const SET_DIAG_JS = /* js */ `
       ['Style', m.style || 'default'],
       ['Skip ID wait', diagYes(m.skipIdWait)],
       ['Stored list', l ? l.trackCount + ' rows, ' + (l.idRows == null ? '?' : l.idRows) + ' ID rows, ' + (l.trusted ? 'trusted' : 'untrusted') + ', ' + l.named + ' named, ' + l.mismatched + ' mismatched, scraped ' + diagRel(l.scrapedAt) : 'none'],
+      // The Apple Music backstop (lib/apple-backstop.ts): what it did, or why the album was not used.
+      ...(r && r.apple ? [['Apple Music', r.apple.cues > 0 ? r.apple.cues + ' cue' + (r.apple.cues === 1 ? '' : 's') + ' from Apple Music' + (r.apple.note ? ' (' + r.apple.note + ')' : '') : 'not used: ' + (r.apple.note || 'no reason recorded')]] : []),
     ];
     return { key: 'mkvid', label: 'mkvid', tone, finding, facts };
   }
@@ -187,6 +189,9 @@ export const SET_DIAG_JS = /* js */ `
         let link = '';
         if (r.key === 'hygiene' && ((h.removed || []).length || (h.removals || []).length)) link = '<a href="/ui/removed">Removed videos</a>';
         if (r.key === 'mkvid' && d.mkvid) link = '<a href="/ui/mkvid">Open mkvid</a>';
+        // A set held for too few cue times: fill them from Apple Music now and refetch the page soon (POST /ui/api/mkvid/recheck-now/:id).
+        if (r.key === 'mkvid' && d.mkvid && d.mkvid.status === 'pending' && d.mkvid.readiness && d.mkvid.readiness.state === 'untimed')
+          link += ' <button type="button" class="btn sm" data-recheck-now="' + e(d.mkvid.id) + '"' + TK.tip('Fills the missing cue times from the Apple Music album of the set now, if it has a matching one, and fetches the 1001tracklists page again soon (within the pool budget).') + '>Queue for re-check now</button>';
         return '<details class="diag-row"' + (r.tone === 'bad' || r.tone === 'warn' ? ' open' : '') + '>' +
           '<summary><span class="diag-label"' + TK.tip(DIAG_LABEL_TIP[r.key]) + '>' + e(r.label) + '</span><span class="badge ' + r.tone + '"' + TK.tip(DIAG_BADGE_TIP[r.tone]) + '>' + DIAG_BADGE[r.tone] + '</span>' +
           '<span class="diag-finding">' + e(r.finding) + '</span></summary>' +

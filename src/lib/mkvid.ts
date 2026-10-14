@@ -82,6 +82,7 @@ import {
   type MkvidOutcome,
 } from "./mkvid-outcome";
 import { removedBurstSince } from "./mkvid-removed-burst";
+import { tryApplyAppleCues } from "./apple-backstop";
 
 export type MkvidSourceKind = "soundcloud" | "hearthis";
 export const MKVID_SOURCES: readonly MkvidSourceKind[] = ["soundcloud", "hearthis"];
@@ -507,7 +508,10 @@ export async function saveMkvidTracks(
   parsed: {
     rows: ReadonlyArray<ParsedTrack & { anonymous?: boolean }>;
     decoy: { named: number; mismatched: number; suspected: boolean; far?: string[] };
+    /** The set's Apple Music album (ScrapedTracklist.setAppleLink), for the timing backstop. */
+    setAppleLink?: string | null;
   },
+  opts: { log?: Logger } = {},
 ): Promise<"saved" | "kept" | "no_request" | "empty"> {
   if (parsed.rows.length === 0) return "empty";
   const db = dbOf(env);
@@ -556,6 +560,16 @@ export async function saveMkvidTracks(
       timedRows,
     )
     .run();
+  // The set's Apple Music album, kept for the timing backstop (the parsed-page cache expires).
+  if (parsed.setAppleLink)
+    await db
+      .prepare(
+        "UPDATE mkvid_request_tracks SET apple_album_url = ? WHERE request_id = ? AND apple_album_url IS NOT ?",
+      )
+      .bind(parsed.setAppleLink, req.id, parsed.setAppleLink)
+      .run();
+  // A held list may take its missing cues from that album (lib/apple-backstop.ts; never fails the save).
+  await tryApplyAppleCues(env, req.id, { log: opts.log });
   // A held (under 90 % timed) list keeps its set due within a week, whichever list was kept.
   await pullInHeldRecheck(env, setUrl);
   if ((r.meta.changes ?? 0) === 0) return "kept";
@@ -609,7 +623,15 @@ export async function getMkvidTracks(
         .first<{ set_url: string }>()
     )?.set_url;
   const verified = setUrl ? await isVerified(env, setUrl) : false;
-  return { tracks, tracksTrusted: Number(row.trusted) === 1 && verified && tracks.length > 0 };
+  return {
+    // The Apple backstop's marker (lib/apple-cues.ts) stays in D1: mkvid gets the plain wire format.
+    tracks: tracks.map((t) => {
+      if (!("cueFrom" in t)) return t;
+      const { cueFrom: _marker, ...rest } = t as MkvidTrack & { cueFrom?: string };
+      return rest;
+    }),
+    tracksTrusted: Number(row.trusted) === 1 && verified && tracks.length > 0,
+  };
 }
 
 // --- queue rows -------------------------------------------------------------

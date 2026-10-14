@@ -38,6 +38,7 @@ import { drainSearchIndex } from "./lib/search/index";
 import { poolPagesApp } from "./routes/pool-pages";
 import { mkvidOpsApp } from "./routes/mkvid-ops";
 import { prunePoolEvents, retryFailedPoolPushes } from "./lib/pool-events";
+import { continueAppleBackstop } from "./lib/apple-backstop";
 import { pruneSchedulerTicks, recordSchedulerTick } from "./lib/tick-history";
 import { playlistHoldNotifier, runPlaylistHygiene } from "./lib/playlist-hygiene";
 import { checkDeletedMkvidVideos, retryDueOldVideoDeletions } from "./lib/mkvid-recreate";
@@ -294,6 +295,11 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         } catch (e) {
           log.warn("cron.push_retries_threw", errorFields(e));
         }
+        // An unfinished Apple Music backstop run goes on by one batch a tick (lib/apple-backstop.ts).
+        if (!isDaily)
+          await continueAppleBackstop(env, log).catch((e) =>
+            log.warn("cron.apple_backstop_threw", errorFields(e)),
+          );
         // Separate try/catch: a failed tick shouldn't stop the combined
         // playlist from catching up on everything that *did* land.
         try {
