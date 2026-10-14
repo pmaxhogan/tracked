@@ -46,6 +46,7 @@
  * windows, bounded by `manualMaxFetches` (lib/pool-settings.ts).
  */
 
+import { notifyPlaylistAdd } from './playlist-add-push'
 import type { Env } from '../types'
 import { listSubscriptions, djUrlFor, type Subscription } from './subscriptions'
 import { crawlDjIndex, fetch1001Html, parseSetYouTubeId, youtubeFingerprint } from './dj-index'
@@ -1002,6 +1003,7 @@ export async function syncOne(
     existingVideoIds.add(videoId)
     // Confirmed insert: from now on the comparison expects it in this playlist.
     await markInPlaylist(env, playlistId, videoId, 'sync')
+    await notifyPlaylistAdd(env, { setUrl, videoId, playlistTitle, via: 'sync' }, log)
     videoIdsAdded += 1
     playlistChanged = true
   }

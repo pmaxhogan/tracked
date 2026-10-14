@@ -34,6 +34,7 @@
  * is failed permanently as `incomplete_recording`.
  */
 
+import { notifyPlaylistAdd } from './playlist-add-push'
 import type { Env, ParsedTrack } from '../types'
 import { dbOf, parseJson, v } from './db'
 import { errorFields, type Logger } from './log'
@@ -1272,6 +1273,7 @@ export async function completeMkvidRequest(env: Env, input: CompleteInput, acces
     existing.add(input.videoId)
     await cachePlaylistVideoIds(env, playlistId!, existing)
     await markInPlaylist(env, playlistId!, input.videoId, 'mkvid')
+    await notifyPlaylistAdd(env, { setUrl: req.setUrl, videoId: input.videoId, playlistTitle, via: 'mkvid', setTitle: req.setTitle }, log)
     playlistStatus = 'added'
   }
 
