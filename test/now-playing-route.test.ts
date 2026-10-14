@@ -349,4 +349,20 @@ describe('POST /now-playing — the phone time budget for link lookups', () => {
     const priorities = (resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[3] ?? 'phone')
     expect(priorities).toEqual(['phone', 'phone', 'phone', 'recheck', 'recheck'])
   })
+
+  it('never looks up a row without a media link: its numeric id is only a page position', async () => {
+    const env = makeEnv()
+    await seedMkvidUpload(env)
+    await seedTracklistVideo(env)
+    const list = withIds()
+    list.tracks[1] = { ...list.tracks[1]!, trackId: '9381908', mediaId: null }
+    list.tracks[4] = { ...list.tracks[4]!, trackId: '9381911', mediaId: null }
+    ;(resolveTracklistPage as ReturnType<typeof vi.fn>).mockImplementation(async () => list)
+    ;(resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mockImplementation(async (_env: Env, id: string) => ({ appleLink: null, youtubeLink: `https://youtu.be/v${id}` }))
+    const body = (await (await post(env, { videoTitle: SET_TITLE, videoDurationSeconds: 6967, currentSeconds: 400 })).json()) as any
+    expect(body.tracks.find((t: any) => t.title === 'Turn Off The Lights').youtubeLink).toBeNull()
+    await new Promise((r) => setTimeout(r, 10))
+    const asked = (resolveTrackMediaLinks as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1])
+    expect(asked).toEqual(['101', '103', '104'])
+  })
 })

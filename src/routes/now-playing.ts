@@ -506,8 +506,9 @@ export const nowPlayingHandler: RouteHandler<typeof nowPlayingRoute, { Bindings:
     ...new Set(
       selectable
         .slice(lastIdx + 1)
-        .filter((p) => !p.anonymous && !p.isUnidentified && p.trackId && /^\d+$/.test(p.trackId))
-        .map((p) => p.trackId!),
+        .filter((p) => !p.anonymous && !p.isUnidentified)
+        .map((p) => medialinkIdOf(p))
+        .filter((id): id is string => id !== null),
     ),
   ].slice(0, LINKS_PREFETCH_AHEAD)
   background(
@@ -595,6 +596,18 @@ async function resolveTracklistByTitle(env: Env, title: string, log: Logger): Pr
   return result.tracklistUrl
 }
 
+/**
+ * The id get_medialink.php takes for a row, or null when it has none. A row's
+ * `mediaId` is that id (null: the row has no media player, and its numeric
+ * `trackId` is only a page position, so a lookup would spend a page view on
+ * nothing). A list cached before `mediaId` existed (undefined) falls back to a
+ * numeric trackId, as before.
+ */
+function medialinkIdOf(p: ParsedTrack & { mediaId?: string | null }): string | null {
+  if (p.mediaId !== undefined) return p.mediaId && /^\d+$/.test(p.mediaId) ? p.mediaId : null
+  return p.trackId && /^\d+$/.test(p.trackId) ? p.trackId : null
+}
+
 async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: ResponseTrack, log: Logger): Promise<{ appleLink: string | null; youtubeLink: string | null }> {
   if (t.isUnidentified) {
     log.info('links.skip_unidentified', { artist: t.artist, title: t.title })
@@ -604,11 +617,12 @@ async function resolveLinks(env: Env, parsed: ParsedTrack | undefined, t: Respon
   let apple: string | null = null
   let youtube: string | null = null
 
-  if (parsed?.trackId && /^\d+$/.test(parsed.trackId)) {
-    const ml = await resolveTrackMediaLinks(env, parsed.trackId, log)
+  const medialinkId = parsed ? medialinkIdOf(parsed) : null
+  if (medialinkId) {
+    const ml = await resolveTrackMediaLinks(env, medialinkId, log)
     apple = ml.appleLink
     youtube = ml.youtubeLink
-    log.info('links.medialink_result', { trackId: parsed.trackId, artist: t.artist, title: t.title, apple, youtube })
+    log.info('links.medialink_result', { trackId: medialinkId, artist: t.artist, title: t.title, apple, youtube })
   } else {
     log.info('links.no_medialink_id', { artist: t.artist, title: t.title, parsedTrackId: parsed?.trackId ?? null })
   }
