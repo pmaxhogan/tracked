@@ -571,11 +571,14 @@ describe("runSchedulerTick", () => {
         by.set(String(c[0]), (by.get(String(c[0])) ?? 0) + 1);
       return by;
     };
-    /** `n` ticks, 5 minutes apart, each drawing the most it can. */
-    const ticks = async (env: Env, n: number) => {
+    /** `n` ticks, 5 minutes apart from `start`, each drawing the most it can. */
+    const ticks = async (env: Env, n: number, start = NOW) => {
       for (let i = 0; i < n; i++)
-        await runSchedulerTick(env, { random: always(0.99), now: NOW + i * 300 });
+        await runSchedulerTick(env, { random: always(0.99), now: start + i * 300 });
     };
+    /** NOW, or 01:00 UTC the next day when `n` ticks from NOW would cross midnight (the daily attempt count resets there). */
+    const sameUtcDayStart = (n: number) =>
+      (NOW % D) + n * 300 < D ? NOW : NOW - (NOW % D) + D + H;
     const holdFor = (env: Env, seconds: number) =>
       env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since: NOW, until: NOW + seconds }));
 
@@ -628,7 +631,7 @@ describe("runSchedulerTick", () => {
       mocked(addVideoToPlaylist).mockRejectedValue(
         new YouTubeApiError("playlistItems.insert", 403, "rateLimitExceeded", "{}"),
       );
-      await ticks(env, 40);
+      await ticks(env, 40, sameUtcDayStart(40));
       expect(await getQuotaOut(env, NOW * 1000)).toBeNull();
       expect(fetchesBy().get(url)).toBeLessThanOrEqual(MAX_SET_ATTEMPTS_PER_DAY);
       expect(mocked(addVideoToPlaylist).mock.calls.length).toBeLessThanOrEqual(
