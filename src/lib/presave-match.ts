@@ -126,7 +126,7 @@ const NOISE = new Set([
 export function nameTokens(s: string | null | undefined): string[] {
   return (s ?? "")
     .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/&/g, " and ")
     .replace(/[^a-z0-9]+/g, " ")
