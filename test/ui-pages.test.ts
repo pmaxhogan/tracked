@@ -365,6 +365,29 @@ it("pool pages report the Challenges count themselves and keep the phone-critica
   expect(POOL_PAGES.SETTINGS_PAGE_HTML).toContain("Render feeder: first fetches a day");
 });
 
+it("the Graph page has the Display and Forces drawers, Release pins and its helpers (script tests: graph-page.test.ts)", async () => {
+  const html = await (await app.request("https://tracked.example/ui/graph", {}, env())).text();
+  for (const id of [
+    "gr-display-btn",
+    "gr-display",
+    "gr-display-rows",
+    "gr-display-reset",
+    "gr-forces-btn",
+    "gr-forces",
+    "gr-forces-rows",
+    "gr-forces-reset",
+    "gr-rerun",
+    "gr-unpin",
+    "gr-layout",
+    "gr-labels",
+  ])
+    expect(html).toContain(`id="${id}"`);
+  expect(html).toContain("const GRK = (() => {");
+  expect(html).not.toMatch(/\stitle="/);
+  // The page script parses (no stray backtick or dollar-brace broke the template).
+  for (const s of scriptsOf(html)) expect(() => new vm.Script(s)).not.toThrow();
+});
+
 /** The minimal stub plus createElement, location, history and URLSearchParams: enough for a page script to run. */
 function richStub(fetchImpl: (u: string) => Promise<Response>, pathname: string) {
   const el = (): any => ({

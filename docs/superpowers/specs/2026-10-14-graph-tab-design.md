@@ -136,7 +136,8 @@ Writers:
 - `GET /ui/api/graph/info?id=` the info panel for one node.
 - `POST /ui/api/graph/backfill/pages` one manual page-store step.
 
-Compact JSON: `nodes: [[id, cat, label, size]]`, `edges: [[from, to, kind]]`.
+Compact JSON: `nodes: [[id, cat, label, size, sub?]]`, `edges: [[from, to, kind]]`.
+Tracks and remixes carry the title as `label` and the artist as `sub`.
 503 when SEARCH_DB is unbound.
 
 ## Page (src/ui/pages/graph.ts, /ui/graph)
@@ -148,10 +149,44 @@ versions and SRI hashes, loaded on this page only (first external JS in
 tracked; README notes it). Toolbar: find box with results, depth, Whole
 library, Fit, Layout run/stop, labels toggle. Legend chips double as category
 toggles. Click a node: info panel (desktop right column, phone bottom sheet)
-plus expansion; double click focuses. Drag moves and pins a node. Edge click
-shows the edge's kind. New nodes are placed around their parent and the
-layout runs a few seconds. Colors: validated categorical palette; the DJ
-category also has a ring (node border program); sigma has no other shapes.
+plus expansion; double click focuses. Edge click shows the edge's kind.
+Colors: validated categorical palette; the DJ category also has a ring (node
+border program); sigma has no other shapes.
+
+### Labels, pins, Display and Forces (second pass, 2026-10-14)
+
+- Labels are drawn inside the nodes (custom `defaultDrawNodeLabel` /
+  `defaultDrawNodeHover` on sigma's canvas layer): centred, shrunk a little
+  then cut with an ellipsis, and not drawn at all when the node is under
+  10 px on screen. Tracks and remixes are two lines, title then artist in
+  smaller text; a set "DJ @ Event" is the event then the DJ. Hover shows the
+  full name in a box. Node sizes are in graph units
+  (`itemSizesReference: "positions"`), so text appears as you zoom in.
+- Drag works while the layout runs: the FA2 supervisor gets an
+  `outputReducer`, which makes it copy the graph's positions back into its
+  matrices every tick; the reducer holds dragged and pinned nodes in place.
+  A dragged node stays pinned (dashed ring) until Unpin in the info panel or
+  Release pins. Links to a pinned node weigh `1 + pinPull * (degree - 1)` of
+  the other end (`getEdgeWeight`), so neighbours gather around it even when
+  they are hubs.
+- Root cause of "dragged nodes did not pull their neighbours" (measured on a
+  seeded 986-node graph): the old settings (strong gravity, every link
+  weight 1) put a DJ's sets in equilibrium after moving ~15% toward the
+  dragged DJ: each set is held by 15 to 30 track links and mass-weighted
+  gravity, against one link to the DJ. Also, while the layout ran, the worker
+  overwrote a drag every tick (the supervisor never re-read positions), and
+  `fixed` was only read at start and never cleared.
+- The layout stops by itself when at most 1% of nodes still move (a ceiling
+  of 20 s to 2 min). "No overlap" (`adjustSizes`) runs as a finishing phase
+  once the main phase settles, switched live.
+- Display drawer, per category: show, label, size (0.25x to 4x on a log
+  slider) and color; `tk-graph:display` in localStorage. Forces drawer: the
+  ForceAtlas2 knobs plus Pin pull, applied live (the supervisor sends its
+  settings object every tick; pin pull restarts the worker), Re-run layout
+  and Reset to defaults; `tk-graph:layout`. Defaults: gravity 1, strong
+  gravity off, spread (scalingRatio) 10, slow down 2, LinLog off, spread hubs
+  (outboundAttractionDistribution) off, no overlap on, Barnes-Hut auto (on
+  from 500 nodes), theta 0.6, edge weight 1, pin pull 1.
 
 ## Error handling
 
