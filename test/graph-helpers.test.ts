@@ -23,9 +23,13 @@ describe("labelLines", () => {
     const lines: string[] = GRK.labelLines("track", "Title", "Artist");
     expect(lines.some((l) => l.includes(" - "))).toBe(false);
   });
-  it("a set 'DJ @ Event' shows the event, then the DJ; other names stay whole", () => {
+  it("a set 'DJ @ Event date' shows the event, then the date (else the DJ); other names stay whole", () => {
     expect(GRK.labelLines("set", "Matroda @ Tomorrowland 2026-07-19", undefined)).toEqual([
-      "Tomorrowland 2026-07-19",
+      "Tomorrowland",
+      "2026-07-19",
+    ]);
+    expect(GRK.labelLines("set", "Matroda @ Tomorrowland, Boom", undefined)).toEqual([
+      "Tomorrowland, Boom",
       "Matroda",
     ]);
     expect(GRK.labelLines("set", "Essential Mix", undefined)).toEqual(["Essential Mix"]);
@@ -173,16 +177,19 @@ describe("layout settings", () => {
     expect(l.scalingRatio).toBe(10);
     expect(GRK.readLayout("nope")).toEqual(GRK.layoutDefault());
   });
-  it("FA2 settings: Barnes-Hut by graph size on auto, no-overlap only in the finishing phase", () => {
+  it("FA2 settings: Barnes-Hut by graph size on auto, FA2's own anti-collision off, spread grown with size", () => {
     const d = GRK.layoutDefault();
-    expect(GRK.fa2Settings(d, 499, "main").barnesHutOptimize).toBe(false);
-    expect(GRK.fa2Settings(d, 500, "main").barnesHutOptimize).toBe(true);
-    expect(GRK.fa2Settings({ ...d, barnesHut: "off" }, 5000, "main").barnesHutOptimize).toBe(false);
-    expect(GRK.fa2Settings({ ...d, barnesHut: "on" }, 10, "main").barnesHutOptimize).toBe(true);
-    expect(GRK.fa2Settings(d, 10, "main").adjustSizes).toBe(false);
-    expect(GRK.fa2Settings(d, 10, "overlap").adjustSizes).toBe(true);
-    expect(GRK.fa2Settings({ ...d, adjustSizes: false }, 10, "overlap").adjustSizes).toBe(false);
-    const s = GRK.fa2Settings(d, 10, "main");
+    expect(GRK.fa2Settings(d, 499).barnesHutOptimize).toBe(false);
+    expect(GRK.fa2Settings(d, 500).barnesHutOptimize).toBe(true);
+    expect(GRK.fa2Settings({ ...d, barnesHut: "off" }, 5000).barnesHutOptimize).toBe(false);
+    expect(GRK.fa2Settings({ ...d, barnesHut: "on" }, 10).barnesHutOptimize).toBe(true);
+    expect(GRK.fa2Settings(d, 10).adjustSizes).toBe(false);
+    expect(GRK.fa2Settings(d, 10).scalingRatio).toBe(10);
+    expect(GRK.fa2Settings(d, 1500).scalingRatio).toBe(50);
+    expect(GRK.fa2Settings(d, 100000).scalingRatio).toBe(80);
+    expect(GRK.spreadScale(300)).toBe(1);
+    expect(GRK.spreadScale(600)).toBe(2);
+    const s = GRK.fa2Settings(d, 10);
     expect(Object.keys(s).sort()).toEqual(
       [
         "adjustSizes",
@@ -241,5 +248,92 @@ describe("makeSettle", () => {
     expect(s.step(200, 1000)).toBe(false);
     expect(s.step(0, 1000)).toBe(false);
     expect(s.step(0, 1000)).toBe(true);
+  });
+});
+
+describe("making room", () => {
+  it("spacing: the nearest-neighbour distance over the room two nodes need, as a quantile", () => {
+    // Three nodes of radius 10 in a row, 30 apart (room needed: 10 + 10 + margin 10 = 30).
+    const row = [0, 30, 60].map((x) => ({ x, y: 0, r: 10 }));
+    expect(GRK.spacing(row, 10, 0.5)).toBeCloseTo(1);
+    const tight = [0, 15, 30].map((x) => ({ x, y: 0, r: 10 }));
+    expect(GRK.spacing(tight, 10, 0.25)).toBeCloseTo(0.5);
+    expect(GRK.spacing([{ x: 0, y: 0, r: 1 }], 0, 0.5)).toBe(Infinity);
+  });
+  it("fitShrink only ever shrinks, down to 0.3", () => {
+    expect(GRK.fitShrink(1.4)).toBe(1);
+    expect(GRK.fitShrink(0.5)).toBe(0.5);
+    expect(GRK.fitShrink(0.1)).toBe(0.3);
+    expect(GRK.fitShrink(0)).toBe(0.3);
+    expect(GRK.fitShrink(Infinity)).toBe(1);
+    expect(GRK.fitShrink(NaN)).toBe(1);
+  });
+  it("maxMove: the largest move between two position maps", () => {
+    expect(
+      GRK.maxMove(
+        { a: { x: 0, y: 0 }, b: { x: 5, y: 5 } },
+        { a: { x: 3, y: 4 }, b: { x: 5, y: 5 } },
+      ),
+    ).toBe(7);
+    expect(GRK.maxMove({}, { a: { x: 1, y: 1 } })).toBe(0);
+  });
+  it("childOffset: children spiral out around their parent, never on top of it or of each other", () => {
+    const pts = Array.from({ length: 400 }, (_, c) => GRK.childOffset(36, 27, c, 0));
+    for (const p of pts) expect(Math.hypot(p.x, p.y)).toBeGreaterThan(36 + 27);
+    let closest = Infinity;
+    for (let i = 0; i < pts.length; i++)
+      for (let j = i + 1; j < pts.length; j++)
+        closest = Math.min(closest, Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y));
+    // Not a clump: neighbours on the spiral keep most of a node's width apart.
+    expect(closest).toBeGreaterThan(27);
+  });
+});
+
+describe("placeLabels", () => {
+  const box = (x: number, y: number, w = 20, h = 10) => ({
+    x0: x - w / 2,
+    x1: x + w / 2,
+    y0: y - h / 2,
+    y1: y + h / 2,
+  });
+  const item = (
+    key: string,
+    x: number,
+    y: number,
+    r: number,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    key,
+    x,
+    y,
+    r,
+    box: box(x, y),
+    cat: "track",
+    deg: 1,
+    ...extra,
+  });
+  it("labels every node that has room", () => {
+    expect(
+      GRK.placeLabels([item("a", 0, 0, 20), item("b", 100, 0, 20), item("c", 0, 100, 20)]),
+    ).toEqual(["a", "b", "c"]);
+  });
+  it("no label where another node's disc covers it, in either direction", () => {
+    expect(GRK.placeLabels([item("a", 0, 0, 20), item("b", 12, 0, 20)])).toEqual([]);
+    // A small node sitting on a big one's label blocks it; the small one keeps its own when clear.
+    const big = item("big", 0, 0, 40, { box: box(0, 0, 50, 12) });
+    const small = item("small", 20, 0, 4, { box: null });
+    expect(GRK.placeLabels([big, small])).toEqual([]);
+  });
+  it("label boxes never overlap: the more important one wins", () => {
+    // Two nodes too small for their label boxes (r 2), boxes overlapping.
+    const set = item("set", 0, 0, 2, { cat: "set", box: box(0, 0, 40, 10) });
+    const track = item("track", 30, 0, 2, { cat: "track", deg: 50, box: box(30, 0, 40, 10) });
+    expect(GRK.placeLabels([track, set])).toEqual(["set"]);
+    const dimSet = { ...set, dim: true };
+    expect(GRK.placeLabels([track, dimSet])).toEqual(["track"]);
+  });
+  it("nodes without a label are still obstacles, and a node never blocks its own label", () => {
+    expect(GRK.placeLabels([item("a", 0, 0, 30)])).toEqual(["a"]);
+    expect(GRK.placeLabels([item("a", 0, 0, 30), item("dot", 3, 0, 2, { box: null })])).toEqual([]);
   });
 });

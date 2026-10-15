@@ -239,7 +239,9 @@ const JS =
   function drawInside(ctx, d) {
     if (!d.label || d.noLabel) return;
     measureCtx = ctx;
-    const fit = GRK.fitLabel(measure, GRK.labelLines(d.cat, d.label, d.sub), d.size);
+    paintFit(ctx, d, GRK.fitLabel(measure, GRK.labelLines(d.cat, d.label, d.sub), d.size));
+  }
+  function paintFit(ctx, d, fit) {
     if (!fit) return;
     ctx.save();
     ctx.fillStyle = textOn(d.color);
@@ -248,9 +250,38 @@ const JS =
     for (const l of fit) { ctx.font = (l.main ? '600 ' : '400 ') + l.px + 'px ' + FONT; ctx.fillText(l.text, d.x, d.y + l.y); }
     ctx.restore();
   }
+  // Sigma hands every node on screen to drawLabel while it draws a frame; the
+  // labels are only queued there and placed once the frame is done (afterRender):
+  // greedy by importance, and never over another node or another label, so a
+  // dense core shows fewer names instead of a pile of overprinted text.
+  let frame = [], labelCtx = null, lastLabels = null;
   function drawLabel(ctx, d) {
     if (d.pinned) drawPin(ctx, d);
-    drawInside(ctx, d);
+    labelCtx = ctx;
+    frame.push(d);
+  }
+  function placeFrame() {
+    const ctx = labelCtx, items = frame;
+    frame = [];
+    if (!ctx || !items.length) return;
+    measureCtx = ctx;
+    const list = items.map((d) => {
+      let box = null, fit = null;
+      if (d.label && !d.noLabel) {
+        fit = GRK.fitLabel(measure, GRK.labelLines(d.cat, d.label, d.sub), d.size);
+        if (fit) {
+          let w = 0;
+          for (const l of fit) w = Math.max(w, measure(l.text, l.px));
+          const a = fit[0], z = fit[fit.length - 1];
+          box = { x0: d.x - w / 2 - 1, x1: d.x + w / 2 + 1, y0: d.y + a.y - a.px / 2, y1: d.y + z.y + z.px / 2 };
+        }
+      }
+      return { key: d.key, x: d.x, y: d.y, r: d.size, box: box, fit: fit, d: d, sel: d.key === selected, dim: !!d.dim, cat: d.cat, deg: graph.hasNode(d.key) ? graph.degree(d.key) : 0 };
+    });
+    const byKey = new Map(list.map((it) => [it.key, it]));
+    const placed = GRK.placeLabels(list);
+    for (const k of placed) { const it = byKey.get(k); paintFit(ctx, it.d, it.fit); }
+    lastLabels = { onScreen: list.length, withRoom: list.filter((it) => it.box).length, drawn: placed.length, placed: placed, list: list };
   }
   // Hover: a halo, the inside label again (the hovered node is redrawn on top) and the full name in a box below.
   function drawHover(ctx, d) {
@@ -329,6 +360,8 @@ const JS =
     say('The graph could not start: this browser has no WebGL.', true);
     return;
   }
+  renderer.on('beforeRender', () => { frame = []; });
+  renderer.on('afterRender', placeFrame);
   // The hover canvas goes above the hovered-node layer, so a hovered node keeps its inside label.
   try { const cv = renderer.getCanvases(); if (cv.hovers && cv.mouse && cv.mouse.parentNode) cv.mouse.parentNode.insertBefore(cv.hovers, cv.mouse); } catch (e) {}
   function retheme() { readColors(); textColors.clear(); applyUserColors(); renderer.refresh(); legend(); paintDisplay(); }
@@ -349,7 +382,7 @@ const JS =
   const releaseFrame = () => { try { renderer.setCustomBBox(null); } catch (e) {} };
 
   // -- layout (ForceAtlas2, in a worker when the browser has one) --
-  let fa2 = null, running = false, userPaused = false, stopTimer = null, phase = 'main';
+  let fa2 = null, running = false, userPaused = false, stopTimer = null, phase = 'main', ending = false, passToken = 0;
   const settle = GRK.makeSettle();
   const $layout = $('gr-layout');
   let tickMoving = 0, tickN = 0, minX = 0, maxX = 0, minY = 0, maxY = 0, moveThr = 0;
@@ -373,13 +406,17 @@ const JS =
     moveThr = settle.eps * Math.max(1, maxX - minX, maxY - minY);
     tickN = 0; tickMoving = 0;
     if (dragged) { settle.reset(); return; }
-    if (!settle.step(moving, total)) return;
-    // Settled: finish with the no-overlap pass when it is on, then stop.
-    if (phase === 'main' && layout.adjustSizes && fa2) { setPhase('overlap'); return; }
-    stopLayout(false);
+    if (ending || !settle.step(moving, total)) return;
+    // Settled. Never kill the worker from in here: this runs inside the
+    // supervisor's message handler, which writes to its matrices right after
+    // (killing nulls them: "Cannot set properties of null (setting 'nodes')").
+    ending = true;
+    const f = fa2;
+    setTimeout(() => { if (fa2 === f && running && phase === 'main') finish(); }, 0);
   });
   function paintLayout() { if ($layout) { $layout.textContent = running ? 'Stop layout' : 'Run layout'; $layout.setAttribute('aria-pressed', running ? 'true' : 'false'); } }
-  function killWorker() { if (fa2) { try { fa2.kill(); } catch (e) {} fa2 = null; } }
+  // Kills the worker and cancels a no-overlap pass in progress.
+  function killWorker() { passToken++; if (fa2) { const f = fa2; fa2 = null; try { f.kill(); } catch (e) {} } }
   function stopLayout(byUser) {
     clearTimeout(stopTimer);
     killWorker();
@@ -394,8 +431,8 @@ const JS =
     userPaused = false;
     if (graph.order < 2) { running = false; paintLayout(); return; }
     settle.reset(); tickN = 0; tickMoving = 0; moveThr = 0;
-    phase = 'main';
-    const settings = GRK.fa2Settings(layout, graph.order, phase);
+    phase = 'main'; ending = false;
+    const settings = GRK.fa2Settings(layout, graph.order);
     try {
       if (typeof Worker === 'undefined' || !W.graphologyLibrary.FA2Layout) throw new Error('no worker');
       fa2 = new W.graphologyLibrary.FA2Layout(graph, { settings: settings, getEdgeWeight: edgeWeight, outputReducer: outputReducer });
@@ -412,32 +449,64 @@ const JS =
     }
     paintLayout();
   }
-  // The time ceiling (a big graph can keep jittering): the main phase still gets its
-  // no-overlap finish, for a few seconds, before the layout stops.
-  function ceiling() {
-    if (phase === 'main' && layout.adjustSizes && fa2) { setPhase('overlap'); stopTimer = setTimeout(() => stopLayout(false), 8000); return; }
-    stopLayout(false);
-  }
-  function setPhase(p) {
-    phase = p;
-    settle.reset();
-    if (fa2 && fa2.settings) Object.assign(fa2.settings, GRK.fa2Settings(layout, graph.order, phase));
+  // The time ceiling (a big graph can keep jittering) ends the main phase like settling does.
+  function ceiling() { if (running && phase === 'main') finish(); }
+  // The main phase is over: the no-overlap pass when it is on, else stop.
+  function finish() { if (layout.adjustSizes) overlapPass(); else stopLayout(false); }
+  // No overlap: graphology's noverlap layout, a few iterations per round with the
+  // page free in between, until a round moves nothing (or a round limit). Pinned
+  // nodes stay where they are.
+  function overlapPass() {
+    clearTimeout(stopTimer);
+    killWorker();
+    const L = W.graphologyLibrary.layoutNoverlap;
+    if (!L || graph.order < 2) { stopLayout(false); return; }
+    // First make room: noverlap only nudges neighbours apart and cannot open up a
+    // packed core, so nodes shrink until three quarters of them clear their
+    // nearest neighbour; the pass below sorts out the rest.
+    const pts = [];
+    graph.forEachNode((n, a) => pts.push({ x: a.x, y: a.y, r: a.size }));
+    const shrink = GRK.fitShrink(GRK.spacing(pts, GRK.NOVERLAP.margin, 0.25));
+    if (shrink < 0.97) { fitScale *= shrink; graph.updateEachNodeAttributes((n, a) => { a.size = sizeOf(a.cat, a.weight); return a; }, { attributes: ['size'] }); }
+    running = true; phase = 'overlap';
+    paintLayout();
+    const token = passToken;
+    let rounds = 0;
+    const round = () => {
+      if (token !== passToken || !running) return;
+      let moved = 0;
+      try {
+        const before = {};
+        graph.forEachNode((n, a) => { before[n] = { x: a.x, y: a.y }; });
+        const after = L(graph, { maxIterations: GRK.NOVERLAP_ROUND, settings: GRK.NOVERLAP });
+        moved = GRK.maxMove(before, after);
+        graph.updateEachNodeAttributes((n, a) => { const p = pins.get(n) || after[n]; if (p) { a.x = p.x; a.y = p.y; } return a; }, { attributes: ['x', 'y'] });
+      } catch (e) { moved = 0; }
+      rounds++;
+      if (moved < 0.5 || rounds >= GRK.NOVERLAP_ROUNDS) { stopLayout(false); return; }
+      stopTimer = setTimeout(round, 0);
+    };
+    stopTimer = setTimeout(round, 0);
   }
   // Live settings: the supervisor sends its settings object with every tick.
   function applyLayoutSettings(restart) {
-    if (!running || restart) { startLayout(); return; }
-    if (fa2 && fa2.settings) Object.assign(fa2.settings, GRK.fa2Settings(layout, graph.order, phase));
+    if (!running || restart || phase !== 'main' || !fa2) { startLayout(); return; }
+    if (fa2.settings) Object.assign(fa2.settings, GRK.fa2Settings(layout, graph.order));
     settle.reset();
   }
   if ($layout) $layout.addEventListener('click', () => { if (running) stopLayout(true); else startLayout(); });
 
   // -- sizes --
   const baseOf = (cat) => { const c = CATS.find((x) => x.key === cat); return c ? c.base : 14; };
-  const sizeOf = (cat, w) => (baseOf(cat) + Math.min(12, Math.log2(1 + (w || 0)) * 2.4)) * GRK.sizeMult(display[cat] ? display[cat].size : 0);
+  // fitScale shrinks every node when the settled layout has no room for them (a dense 2,000-node core).
+  let fitScale = 1;
+  const sizeOf = (cat, w) => (baseOf(cat) + Math.min(12, Math.log2(1 + (w || 0)) * 2.4)) * GRK.sizeMult(display[cat] ? display[cat].size : 0) * fitScale;
+  let resizeTimer = null;
   function resize() {
     graph.updateEachNodeAttributes((n, a) => { a.size = sizeOf(a.cat, a.weight); return a; }, { attributes: ['size'] });
-    // FA2 reads sizes when it starts and only the no-overlap finish uses them: restart so that pass sees the new sizes.
-    if (running && layout.adjustSizes) startLayout();
+    // Only the no-overlap pass uses sizes: run it again on a still graph so bigger nodes do not overlap.
+    clearTimeout(resizeTimer);
+    if (layout.adjustSizes && !userPaused && (!running || phase === 'overlap')) resizeTimer = setTimeout(overlapPass, 300);
   }
 
   // -- adding data --
@@ -461,10 +530,28 @@ const JS =
     const base = anchor && graph.hasNode(anchor) ? graph.getNodeAttributes(anchor) : { x: 0, y: 0 };
     const spread = 40 + Math.sqrt(take.length) * 25;
     for (const n of data.nodes) if (graph.hasNode(n[0])) { graph.mergeNodeAttributes(n[0], { label: n[2], cat: n[1], weight: n[3] || 0, sub: n[4] || undefined }); }
+    // The worker goes first: adding nodes makes a running supervisor respawn its worker on a timer.
+    if (take.length) killWorker();
+    // Nodes come nearest first: each new one starts next to a neighbour already placed.
+    const adj = new Map();
+    for (const e of data.edges) { for (const [a, b] of [[e[0], e[1]], [e[1], e[0]]]) { const l = adj.get(a); if (l) l.push(b); else adj.set(a, [b]); } }
+    const kids = new Map();
     take.forEach((n, i) => {
-      const ang = (i / Math.max(1, take.length)) * Math.PI * 2;
-      const r = spread * (0.5 + Math.random() * 0.5);
-      graph.addNode(n[0], Object.assign(nodeAttrs(n), { x: base.x + Math.cos(ang) * r, y: base.y + Math.sin(ang) * r }));
+      const a = nodeAttrs(n);
+      let p = null, pk = null;
+      for (const m of adj.get(n[0]) || []) if (graph.hasNode(m)) { p = graph.getNodeAttributes(m); pk = m; break; }
+      let x, y;
+      if (p) {
+        const c = kids.get(pk) || 0;
+        kids.set(pk, c + 1);
+        const o = GRK.childOffset(p.size || 20, a.size, c, Math.random() * 0.3);
+        x = p.x + o.x; y = p.y + o.y;
+      } else {
+        const ang = (i / Math.max(1, take.length)) * Math.PI * 2;
+        const r = spread * (0.5 + Math.random() * 0.5);
+        x = base.x + Math.cos(ang) * r; y = base.y + Math.sin(ang) * r;
+      }
+      graph.addNode(n[0], Object.assign(a, { x: x, y: y }));
     });
     let edges = 0;
     for (const e of data.edges) {
@@ -522,6 +609,7 @@ const JS =
     graph.clear();
     expanded.clear();
     pins.clear();
+    fitScale = 1;
     paintPins();
     selected = null;
     closePanel();
@@ -742,8 +830,7 @@ const JS =
       paintPins();
       // A new pin changes link weights, read when the worker starts. A layout that
       // settled by itself wakes up so the neighbours follow; a paused one stays paused.
-      if (running ? !was : !userPaused) startLayout();
-      else if (running && phase !== 'main') setPhase('main');
+      if (running ? !was || phase !== 'main' : !userPaused) startLayout();
     }
     pins.set(dragged, { x: pos.x, y: pos.y });
     graph.mergeNodeAttributes(dragged, { x: pos.x, y: pos.y });
@@ -838,7 +925,7 @@ const JS =
   document.addEventListener('click', (e) => { if ($hits && !$hits.hidden && e.target !== $q && !(e.target && e.target.closest && e.target.closest('#gr-hits'))) $hits.hidden = true; });
 
   // A read-only handle for debugging in the console (and the browser checks).
-  W.tkGraph = { graph: graph, renderer: renderer, pins: pins, running: () => running, settings: () => (fa2 ? fa2.settings : null) };
+  W.tkGraph = { graph: graph, renderer: renderer, pins: pins, running: () => running, settings: () => (fa2 ? fa2.settings : null), labels: () => lastLabels };
 
   // -- start --
   legend();

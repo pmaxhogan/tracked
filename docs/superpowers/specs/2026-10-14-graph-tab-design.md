@@ -159,9 +159,18 @@ border program); sigma has no other shapes.
   `defaultDrawNodeHover` on sigma's canvas layer): centred, shrunk a little
   then cut with an ellipsis, and not drawn at all when the node is under
   10 px on screen. Tracks and remixes are two lines, title then artist in
-  smaller text; a set "DJ @ Event" is the event then the DJ. Hover shows the
-  full name in a box. Node sizes are in graph units
-  (`itemSizesReference: "positions"`), so text appears as you zoom in.
+  smaller text; a set "DJ @ Event 2026-03-28" is the event then the date
+  (the event then the DJ when there is no date). Hover shows the full name in
+  a box. Node sizes are in graph units (`itemSizesReference: "positions"`),
+  so text appears as you zoom in.
+- Labels never overprint (third pass, after real data: 1,872 nodes for one
+  DJ at depth 2). Sigma draws labels on a canvas above every node, so in a
+  packed core the names of overlapping nodes piled up. `drawLabel` now only
+  queues the node; after the frame (`afterRender`) the labels are placed
+  greedily: the selected node, then undimmed before dimmed, then DJs,
+  sources, sets, artists, tracks and remixes, then by links. A label is drawn
+  only when its box touches no other node's disc and no label already placed
+  (`placeLabels`, a grid on screen).
 - Drag works while the layout runs: the FA2 supervisor gets an
   `outputReducer`, which makes it copy the graph's positions back into its
   matrices every tick; the reducer holds dragged and pinned nodes in place.
@@ -182,9 +191,25 @@ border program); sigma has no other shapes.
   start. (c) `fixed` was set on drag and never cleared, with no way to
   release it.
 - The layout stops by itself when at most 5% of nodes still move more than
-  0.2% of the graph's extent per tick (a ceiling of 20 s to 2 min). "No
-  overlap" (`adjustSizes`) runs as a finishing phase once the main phase
-  settles or hits the ceiling, switched live, for up to 8 s after a ceiling.
+  0.2% of the graph's extent per tick (a ceiling of 20 s to 2 min). The stop
+  is never done inside the supervisor's message handler (the settle test runs
+  there, through `eachNodeAttributesUpdated`): `kill()` nulls its matrices
+  and the handler then threw "Cannot set properties of null (setting
+  'nodes')". It is deferred to the next turn, and `add()` kills the worker
+  before adding nodes (adding makes a running supervisor respawn on a timer).
+- "No overlap" is a finishing pass, not FA2's `adjustSizes`: on a 1,700-node
+  seeded graph FA2's anti-collision left 1,400 of 1,700 nodes overlapping
+  after its phase, and noverlap alone cannot open up a packed core (it only
+  nudges neighbours apart; 300 iterations changed nothing). So the pass first
+  shrinks every node until three quarters clear their nearest neighbour
+  (`spacing`, `fitShrink`, never under 0.3x, reset by Clear), then runs
+  graphology's noverlap in rounds of 10 iterations until a round moves
+  nothing (at most 80). Result on that graph: 1 overlapping pair. The spread
+  (scalingRatio) grows with the node count past 300 (`spreadScale`, x5.8 at
+  1,700, at most x8).
+- New nodes start next to a neighbour already placed (nodes arrive nearest
+  first), on a sunflower spiral around it (`childOffset`), so 400 sets around
+  one DJ start as a disc, not a clump.
 - Display drawer, per category: show, label, size (0.25x to 4x on a log
   slider) and color; `tk-graph:display` in localStorage. Forces drawer: the
   ForceAtlas2 knobs plus Pin pull, applied live (the supervisor sends its

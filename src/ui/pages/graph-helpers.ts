@@ -16,15 +16,21 @@ const GRK = (() => {
   const parse = (raw) => { if (!raw) return null; try { const v = JSON.parse(raw); return v && typeof v === 'object' ? v : null; } catch (e) { return null; } };
 
   // -- labels --
-  // The lines drawn inside a node: tracks and remixes are title then artist,
-  // a set "DJ @ Event" is the event then the DJ, everything else its name.
+  // The lines drawn inside a node: tracks and remixes are title then artist;
+  // a set "DJ @ Event 2026-03-28" is the event then its date (a DJ's sets all
+  // share the DJ, the neighbour node already says it), or the event then the
+  // DJ when there is no date; everything else its name.
   function labelLines(cat, label, sub) {
     const main = String(label == null ? '' : label).trim();
     const second = sub == null ? '' : String(sub).trim();
     if (cat === 'track' || cat === 'remix') return second ? [main, second] : [main];
     if (cat === 'set') {
       const at = main.indexOf(' @ ');
-      if (at > 0 && at < main.length - 3) return [main.slice(at + 3).trim(), main.slice(0, at).trim()];
+      if (at > 0 && at < main.length - 3) {
+        const ev = main.slice(at + 3).trim(), dj = main.slice(0, at).trim();
+        const m = /^(.*\\S)\\s+(\\d{4}-\\d{2}-\\d{2})$/.exec(ev);
+        return m ? [m[1], m[2]] : [ev, dj];
+      }
     }
     return [main];
   }
@@ -115,11 +121,11 @@ const GRK = (() => {
   const LAYOUT_FIELDS = [
     { key: 'gravity', label: 'Gravity', min: 0, max: 2, step: 0.01, def: 0.05, tip: 'Pull toward the middle. Higher keeps loose parts close and the graph rounder.' },
     { key: 'strongGravityMode', label: 'Strong gravity', bool: true, def: true, tip: 'Gravity grows with distance, so small loose parts stay near the rest instead of drifting off.' },
-    { key: 'scalingRatio', label: 'Spread', min: 0.5, max: 50, step: 0.5, def: 10, tip: 'How hard nodes push each other apart (scalingRatio). Higher spreads the graph out.' },
+    { key: 'scalingRatio', label: 'Spread', min: 0.5, max: 50, step: 0.5, def: 10, tip: 'How hard nodes push each other apart (scalingRatio, grown with the square root of the node count past 300). Higher spreads the graph out.' },
     { key: 'slowDown', label: 'Slow down', min: 1, max: 30, step: 0.5, def: 2, tip: 'Damping. Higher moves calmer but settles later.' },
     { key: 'linLogMode', label: 'LinLog', bool: true, def: false, tip: 'Logarithmic attraction: tighter clusters, more space between them.' },
     { key: 'outboundAttractionDistribution', label: 'Spread hubs', bool: true, def: false, tip: 'Hubs (DJs, big sets) attract less, so they move to the edge of their cluster (outboundAttractionDistribution). Also weakens the pull of pinned nodes.' },
-    { key: 'adjustSizes', label: 'No overlap', bool: true, def: true, tip: 'Once the layout settles, a last pass pushes overlapping nodes apart (adjustSizes), so the names inside them stay readable.' },
+    { key: 'adjustSizes', label: 'No overlap', bool: true, def: true, tip: 'Once the layout settles, a last pass pushes overlapping nodes apart, so the names inside them stay readable.' },
     { key: 'barnesHut', label: 'Barnes-Hut', choice: ['auto', 'on', 'off'], def: 'auto', tip: 'Approximate far repulsion: much faster on big graphs. Auto turns it on from 500 nodes.' },
     { key: 'barnesHutTheta', label: 'Barnes-Hut theta', min: 0.1, max: 1.5, step: 0.05, def: 0.6, tip: 'Approximation level: higher is faster and rougher.' },
     { key: 'edgeWeightInfluence', label: 'Edge weight', min: 0, max: 2, step: 0.1, def: 1, tip: 'How much link weight counts (pinned links are heavier).' },
@@ -138,20 +144,23 @@ const GRK = (() => {
     }
     return d;
   }
-  // The settings object FA2 takes, from the page's layout settings, the graph size
-  // and the phase. "No overlap" (adjustSizes) is a finishing phase: FA2's
-  // anti-collision mode caps every step, so running it from the start leaves a
-  // dragged node's neighbours crawling. The page lays out in the 'main' phase,
-  // then switches to 'overlap' once that settles (a live switch, no restart).
-  function fa2Settings(l, order, phase) {
+  // How much the spread grows with the graph: a big graph needs more room per
+  // node or its core packs into one blob. 1 up to 300 nodes, then in step with
+  // the size (about 5.8 at 1,700 nodes), at most 8.
+  const spreadScale = (order) => clamp(Math.max(1, order) / 300, 1, 8);
+  // The settings object FA2 takes, from the page's layout settings and the graph
+  // size. FA2's own anti-collision (adjustSizes) stays off: it caps every step,
+  // so a dragged node's neighbours crawl, and at 2,000 nodes it never finishes.
+  // "No overlap" is a separate pass with the noverlap layout once FA2 settles.
+  function fa2Settings(l, order) {
     return {
       gravity: l.gravity,
       strongGravityMode: !!l.strongGravityMode,
-      scalingRatio: l.scalingRatio,
+      scalingRatio: l.scalingRatio * spreadScale(order),
       slowDown: l.slowDown,
       linLogMode: !!l.linLogMode,
       outboundAttractionDistribution: !!l.outboundAttractionDistribution,
-      adjustSizes: !!l.adjustSizes && phase === 'overlap',
+      adjustSizes: false,
       barnesHutOptimize: l.barnesHut === 'on' || (l.barnesHut === 'auto' && order >= 500),
       barnesHutTheta: l.barnesHutTheta,
       edgeWeightInfluence: l.edgeWeightInfluence,
@@ -185,6 +194,102 @@ const GRK = (() => {
     };
   }
 
-  return { CATS, ELLIPSIS, labelLines, truncate, fitLabel, textOn, SIZE_STEPS, sizeMult, multLabel, displayDefault, readDisplay, LAYOUT_FIELDS, layoutDefault, readLayout, fa2Settings, pinWeight, edgeWeight, makeSettle };
+  // How crowded the layout is: for each node, the distance to its nearest
+  // neighbour over the room both need (their radii plus margin); the q-quantile
+  // of that over the nodes. Under 1, that share of nodes overlaps its neighbour.
+  // pts: [{ x, y, r }]. Big graphs are sampled (every node is still a neighbour).
+  function spacing(pts, margin, q) {
+    const n = pts.length;
+    if (n < 2) return Infinity;
+    const step = Math.max(1, Math.floor(n / 1500));
+    const ratios = [];
+    for (let i = 0; i < n; i += step) {
+      const a = pts[i];
+      let best = Infinity;
+      for (let j = 0; j < n; j++) {
+        if (j === i) continue;
+        const b = pts[j];
+        const d = Math.sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)) / (a.r + b.r + margin);
+        if (d < best) best = d;
+      }
+      ratios.push(best);
+    }
+    ratios.sort((x, y) => x - y);
+    return ratios[Math.min(ratios.length - 1, Math.floor(q * (ratios.length - 1)))];
+  }
+  // The node size factor that leaves room for most nodes (the 25% most crowded
+  // are left to the noverlap pass): only ever shrinks, never under 0.3.
+  const fitShrink = (s) => (!(s < 1) ? 1 : Math.max(0.3, s));
+
+  // -- no-overlap pass (graphology's noverlap layout, run in short rounds) --
+  const NOVERLAP = { margin: 6, ratio: 1, expansion: 1.1, gridSize: 20, speed: 3 };
+  const NOVERLAP_ROUND = 10, NOVERLAP_ROUNDS = 80;
+  // The largest move of a round, from the positions before and after it; the pass
+  // ends once a round moves nothing (noverlap stops when nothing overlaps).
+  function maxMove(before, after) {
+    let m = 0;
+    for (const k in after) { const a = after[k], b = before[k]; if (!b) continue; const d = Math.abs(a.x - b.x) + Math.abs(a.y - b.y); if (d > m) m = d; }
+    return m;
+  }
+
+  // -- initial placement: each new node next to a neighbour already placed --
+  // The c-th child of a parent goes on a sunflower spiral around it (golden
+  // angle, radius growing with the square root of c), so 400 sets around one DJ
+  // start as a disc, not one clump, and a set's tracks start around that set.
+  function childOffset(parentSize, childSize, c, jitter) {
+    const ang = c * 2.39996 + (jitter || 0);
+    const r = parentSize + childSize * 2.4 * Math.sqrt(c + 1);
+    return { x: Math.cos(ang) * r, y: Math.sin(ang) * r };
+  }
+
+  // -- labels that never overprint --
+  // Who gets a label first: the selected node, then nodes that are not dimmed,
+  // then DJs, sources, sets, artists, tracks and remixes, then by links, then size.
+  const CAT_RANK = { dj: 0, source: 1, set: 2, artist: 3, track: 4, remix: 4 };
+  function labelOrder(a, b) {
+    if (!!a.sel !== !!b.sel) return a.sel ? -1 : 1;
+    if (!!a.dim !== !!b.dim) return a.dim ? 1 : -1;
+    const ra = a.cat in CAT_RANK ? CAT_RANK[a.cat] : 5, rb = b.cat in CAT_RANK ? CAT_RANK[b.cat] : 5;
+    if (ra !== rb) return ra - rb;
+    if ((b.deg || 0) !== (a.deg || 0)) return (b.deg || 0) - (a.deg || 0);
+    return (b.r || 0) - (a.r || 0);
+  }
+  const rectsHit = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+  function rectHitsCircle(b, c) {
+    const nx = clamp(c.x, b.x0, b.x1), ny = clamp(c.y, b.y0, b.y1);
+    const dx = c.x - nx, dy = c.y - ny;
+    return dx * dx + dy * dy < c.r * c.r;
+  }
+  // Greedy label placement on screen. items: { key, x, y, r, box, sel, dim, cat, deg }
+  // for every node on screen (box: the label's rectangle, null when it has none).
+  // A label is drawn only when its box touches no other node's disc (the node
+  // would cover it or it would cover the node) and no label placed before it.
+  // Returns the keys to label, in placement order.
+  function placeLabels(items, cell) {
+    const C = cell || 64;
+    const circles = new Map(), boxes = new Map();
+    const span = (x0, y0, x1, y1, fn) => {
+      const cx0 = Math.floor(x0 / C), cx1 = Math.floor(x1 / C), cy0 = Math.floor(y0 / C), cy1 = Math.floor(y1 / C);
+      for (let i = cx0; i <= cx1; i++) for (let j = cy0; j <= cy1; j++) fn(i + ',' + j);
+    };
+    const put = (map, k, v) => { const l = map.get(k); if (l) l.push(v); else map.set(k, [v]); };
+    for (const it of items) span(it.x - it.r, it.y - it.r, it.x + it.r, it.y + it.r, (k) => put(circles, k, it));
+    const out = [];
+    for (const it of items.filter((x) => x.box).sort(labelOrder)) {
+      const b = it.box;
+      let ok = true;
+      span(b.x0, b.y0, b.x1, b.y1, (k) => {
+        if (!ok) return;
+        for (const c of circles.get(k) || []) if (c !== it && rectHitsCircle(b, c)) { ok = false; return; }
+        for (const o of boxes.get(k) || []) if (rectsHit(b, o)) { ok = false; return; }
+      });
+      if (!ok) continue;
+      out.push(it.key);
+      span(b.x0, b.y0, b.x1, b.y1, (k) => put(boxes, k, b));
+    }
+    return out;
+  }
+
+  return { CATS, ELLIPSIS, labelLines, truncate, fitLabel, textOn, SIZE_STEPS, sizeMult, multLabel, displayDefault, readDisplay, LAYOUT_FIELDS, layoutDefault, readLayout, spreadScale, fa2Settings, spacing, fitShrink, pinWeight, edgeWeight, makeSettle, NOVERLAP, NOVERLAP_ROUND, NOVERLAP_ROUNDS, maxMove, childOffset, labelOrder, rectHitsCircle, placeLabels };
 })();
 `;
