@@ -624,6 +624,30 @@ describe("Graph page script", () => {
     expect(order.sort(GRK.labelOrder).map((x) => x.key)).toEqual(["sel", "dj", "s", "t", "d"]);
   });
 
+  it("a bigger category does not shrink the others: the room check ignores the Display sizes", async () => {
+    const noverlap = (g: FakeGraph) => {
+      const out: Record<string, { x: number; y: number }> = {};
+      g.forEachNode((k: string, a: any) => (out[k] = { x: a.x, y: a.y }));
+      return out;
+    };
+    const { graph, fa2s, flush, els } = await boot({ noverlap });
+    // Room for every node at plain size (120 apart), none for a 4x track.
+    let i = 0;
+    graph.updateEachNodeAttributes((k: string, a: any) => ({ ...a, x: i++ * 120, y: 0 }));
+    for (let t = 0; t < 200; t++) fa2s[0].tick();
+    flush();
+    const dj = graph.getNodeAttribute("a:dj", "size");
+    const track = graph.getNodeAttribute("t:1", "size");
+    const field = {
+      getAttribute: (a: string) => (a === "data-cat" ? "track" : a === "data-k" ? "size" : null),
+      value: "8",
+    };
+    els.get("gr-display-rows").fire("input", { target: field });
+    flush(true);
+    expect(graph.getNodeAttribute("t:1", "size")).toBeCloseTo(track * 4);
+    expect(graph.getNodeAttribute("a:dj", "size")).toBeCloseTo(dj);
+  });
+
   it("works without storage, and says so when the libraries did not load", async () => {
     const { graph } = await boot({
       storage: { "tk-graph:display": "{broken", "tk-graph:layout": "[]" },

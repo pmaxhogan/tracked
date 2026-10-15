@@ -463,9 +463,10 @@ const JS =
     if (!L || graph.order < 2) { stopLayout(false); return; }
     // First make room: noverlap only nudges neighbours apart and cannot open up a
     // packed core, so nodes shrink until three quarters of them clear their
-    // nearest neighbour; the pass below sorts out the rest.
+    // nearest neighbour (at their plain size: the Display sizes are the viewer's
+    // choice); the pass below sorts out the rest at the real sizes.
     const pts = [];
-    graph.forEachNode((n, a) => pts.push({ x: a.x, y: a.y, r: a.size }));
+    graph.forEachNode((n, a) => pts.push({ x: a.x, y: a.y, r: plainSize(a.cat, a.weight) }));
     const shrink = GRK.fitShrink(GRK.spacing(pts, GRK.NOVERLAP.margin, 0.25));
     if (shrink < 0.97) { fitScale *= shrink; graph.updateEachNodeAttributes((n, a) => { a.size = sizeOf(a.cat, a.weight); return a; }, { attributes: ['size'] }); }
     running = true; phase = 'overlap';
@@ -500,7 +501,10 @@ const JS =
   const baseOf = (cat) => { const c = CATS.find((x) => x.key === cat); return c ? c.base : 14; };
   // fitScale shrinks every node when the settled layout has no room for them (a dense 2,000-node core).
   let fitScale = 1;
-  const sizeOf = (cat, w) => (baseOf(cat) + Math.min(12, Math.log2(1 + (w || 0)) * 2.4)) * GRK.sizeMult(display[cat] ? display[cat].size : 0) * fitScale;
+  // The size before the viewer's Display multiplier: what the room check measures,
+  // so making one category bigger does not shrink every other one.
+  const plainSize = (cat, w) => (baseOf(cat) + Math.min(12, Math.log2(1 + (w || 0)) * 2.4)) * fitScale;
+  const sizeOf = (cat, w) => plainSize(cat, w) * GRK.sizeMult(display[cat] ? display[cat].size : 0);
   let resizeTimer = null;
   function resize() {
     graph.updateEachNodeAttributes((n, a) => { a.size = sizeOf(a.cat, a.weight); return a; }, { attributes: ['size'] });
