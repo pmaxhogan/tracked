@@ -275,7 +275,12 @@ describe("graph reads", () => {
     expect(hasEdge(t.edges, "a:jstjr", "t:kt2xfq25", "remixer")).toBe(true);
     expect(hasEdge(t.edges, "t:1dpy4tqp", "t:kt2xfq25", "remix")).toBe(true);
     expect(cat(t.nodes, "t:1dpy4tqp")).toBe("track");
-    expect(t.nodes.find((n) => n[0] === "t:1dpy4tqp")![2]).toBe("Cloonee - Sippin' Yak");
+    // Title as the label, the artist apart: the page draws them on two lines.
+    expect(t.nodes.find((n) => n[0] === "t:1dpy4tqp")!.slice(2)).toEqual([
+      "Sippin' Yak",
+      expect.any(Number),
+      "Cloonee",
+    ]);
     const src = await expandNode(env, "src:f4lzj3", { depth: 1, cap: 5000 });
     expect(ids(src.nodes).sort()).toEqual([`s:${HAB_URL}`, "src:f4lzj3"].sort());
     const s = await expandNode(env, `s:${HAB_URL}`, { depth: 1, cap: 5000 });

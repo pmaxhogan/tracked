@@ -33,8 +33,12 @@ export const EDGE_KINDS = [
 ] as const;
 export type EdgeKind = (typeof EDGE_KINDS)[number];
 
-/** [id, category, label, weight]; weight is a size hint (sets played, tracks in a set). */
-export type GNode = [string, NodeCat, string, number];
+/**
+ * [id, category, label, weight, sub?]; weight is a size hint (sets played, tracks in a set).
+ * Tracks and remixes carry the title as the label and the artist as `sub` (the page
+ * draws them on two lines, never as one "Artist - Title" string).
+ */
+export type GNode = [string, NodeCat, string, number] | [string, NodeCat, string, number, string];
 export type GEdge = [string, string, EdgeKind];
 export type Subgraph = {
   nodes: GNode[];
@@ -298,8 +302,9 @@ export async function describeNodes(
     for (const id of g.t) {
       const a = m.get(id)?.artist ?? p.get(id)?.artist ?? null;
       const t = m.get(id)?.title ?? p.get(id)?.title ?? null;
-      const label = a && t ? `${a} - ${t}` : (t ?? a ?? id);
-      out.push([`t:${id}`, remixes.has(id) ? "remix" : "track", label, p.get(id)?.sets_count ?? 0]);
+      const cat = remixes.has(id) ? "remix" : "track";
+      const weight = p.get(id)?.sets_count ?? 0;
+      out.push(t && a ? [`t:${id}`, cat, t, weight, a] : [`t:${id}`, cat, t ?? a ?? id, weight]);
     }
   }
   if (g.k.size) {
@@ -310,7 +315,9 @@ export async function describeNodes(
     const by = new Map(rows.map((r) => [r.track_key, r]));
     for (const key of g.k) {
       const r = by.get(key);
-      out.push([`k:${key}`, "track", r ? `${r.artist} - ${r.title}` : key, r?.sets_count ?? 0]);
+      out.push(
+        r ? [`k:${key}`, "track", r.title, r.sets_count, r.artist] : [`k:${key}`, "track", key, 0],
+      );
     }
   }
   return out;
