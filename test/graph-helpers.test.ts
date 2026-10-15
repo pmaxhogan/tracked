@@ -143,8 +143,8 @@ describe("display settings", () => {
 describe("layout settings", () => {
   it("defaults: the tuned ForceAtlas2 values", () => {
     expect(GRK.layoutDefault()).toEqual({
-      gravity: 1,
-      strongGravityMode: false,
+      gravity: 0.05,
+      strongGravityMode: true,
       scalingRatio: 10,
       slowDown: 2,
       linLogMode: false,
@@ -166,7 +166,7 @@ describe("layout settings", () => {
         scalingRatio: "x",
       }),
     );
-    expect(l.gravity).toBe(5);
+    expect(l.gravity).toBe(2);
     expect(l.slowDown).toBe(1);
     expect(l.linLogMode).toBe(true);
     expect(l.barnesHut).toBe("auto");

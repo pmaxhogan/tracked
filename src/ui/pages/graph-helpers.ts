@@ -105,14 +105,16 @@ const GRK = (() => {
   }
 
   // -- layout: ForceAtlas2 knobs --
-  // Defaults tuned on seeded libraries of 1,000 to 3,000 nodes (DJs -> sets -> tracks):
-  // plain gravity (strong gravity ties hubs to the middle and cut the pull of a
-  // dragged node by half), no outbound attraction distribution (it divides a
-  // pinned node's pull by its mass), and a pinned node pulls its neighbours as
-  // hard as all their other links together (pinPull 1).
+  // Defaults tuned on seeded libraries of 1,000 and 3,000 nodes (DJs -> sets -> tracks):
+  // strong gravity, weak (plain gravity lets small loose components drift so far
+  // that Fit shrinks the main cluster to a dot), no outbound attraction
+  // distribution (it divides a pinned node's pull by its mass), a pinned node
+  // pulls its neighbours as hard as all their other links together (pinPull 1),
+  // and spread 10 with the no-overlap finish so the names inside nodes stay
+  // readable.
   const LAYOUT_FIELDS = [
-    { key: 'gravity', label: 'Gravity', min: 0, max: 5, step: 0.05, def: 1, tip: 'Pull toward the middle. Higher keeps loose parts close.' },
-    { key: 'strongGravityMode', label: 'Strong gravity', bool: true, def: false, tip: 'Gravity grows with distance, so far-flung nodes come back hard.' },
+    { key: 'gravity', label: 'Gravity', min: 0, max: 2, step: 0.01, def: 0.05, tip: 'Pull toward the middle. Higher keeps loose parts close and the graph rounder.' },
+    { key: 'strongGravityMode', label: 'Strong gravity', bool: true, def: true, tip: 'Gravity grows with distance, so small loose parts stay near the rest instead of drifting off.' },
     { key: 'scalingRatio', label: 'Spread', min: 0.5, max: 50, step: 0.5, def: 10, tip: 'How hard nodes push each other apart (scalingRatio). Higher spreads the graph out.' },
     { key: 'slowDown', label: 'Slow down', min: 1, max: 30, step: 0.5, def: 2, tip: 'Damping. Higher moves calmer but settles later.' },
     { key: 'linLogMode', label: 'LinLog', bool: true, def: false, tip: 'Logarithmic attraction: tighter clusters, more space between them.' },

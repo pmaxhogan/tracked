@@ -183,8 +183,9 @@ border program); sigma has no other shapes.
   slider) and color; `tk-graph:display` in localStorage. Forces drawer: the
   ForceAtlas2 knobs plus Pin pull, applied live (the supervisor sends its
   settings object every tick; pin pull restarts the worker), Re-run layout
-  and Reset to defaults; `tk-graph:layout`. Defaults: gravity 1, strong
-  gravity off, spread (scalingRatio) 10, slow down 2, LinLog off, spread hubs
+  and Reset to defaults; `tk-graph:layout`. Defaults: gravity 0.05, strong
+  gravity on (plain gravity lets small components drift far off), spread
+  (scalingRatio) 10, slow down 2, LinLog off, spread hubs
   (outboundAttractionDistribution) off, no overlap on, Barnes-Hut auto (on
   from 500 nodes), theta 0.6, edge weight 1, pin pull 1.
 

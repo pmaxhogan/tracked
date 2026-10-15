@@ -445,13 +445,13 @@ describe("Graph page script", () => {
       type,
       checked: value === "true",
     });
-    rows.fire("input", { target: knob("gravity", "2.5") });
+    rows.fire("input", { target: knob("gravity", "1.5") });
     expect(fa2s.length).toBe(1);
-    expect(fa2.settings.gravity).toBe(2.5);
+    expect(fa2.settings.gravity).toBe(1.5);
     rows.fire("input", { target: knob("linLogMode", "true", "checkbox") });
     expect(fa2.settings.linLogMode).toBe(true);
     expect(JSON.parse(storage.get("tk-graph:layout")!)).toMatchObject({
-      gravity: 2.5,
+      gravity: 1.5,
       linLogMode: true,
       slowDown: 6,
     });
@@ -460,12 +460,12 @@ describe("Graph page script", () => {
     expect(fa2s.length).toBe(2);
     els.get("gr-forces-reset").fire("click");
     expect(JSON.parse(storage.get("tk-graph:layout")!)).toMatchObject({
-      gravity: 1,
+      gravity: 0.05,
       slowDown: 2,
       pinPull: 1,
       linLogMode: false,
     });
-    expect(fa2s[fa2s.length - 1].params.settings.gravity).toBe(1);
+    expect(fa2s[fa2s.length - 1].params.settings.gravity).toBe(0.05);
   });
 
   it("Display: per category show, label, size and color, kept per viewer", async () => {
