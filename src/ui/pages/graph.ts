@@ -402,7 +402,7 @@ const JS =
       fa2.start();
       running = true;
       // A ceiling in case the graph never settles (a big hairball keeps jittering).
-      stopTimer = setTimeout(() => stopLayout(false), Math.max(20000, Math.min(120000, graph.order * 40)));
+      stopTimer = setTimeout(ceiling, Math.max(20000, Math.min(120000, graph.order * 40)));
     } catch (e) {
       fa2 = null; running = false;
       try {
@@ -411,6 +411,12 @@ const JS =
       } catch (e2) {}
     }
     paintLayout();
+  }
+  // The time ceiling (a big graph can keep jittering): the main phase still gets its
+  // no-overlap finish, for a few seconds, before the layout stops.
+  function ceiling() {
+    if (phase === 'main' && layout.adjustSizes && fa2) { setPhase('overlap'); stopTimer = setTimeout(() => stopLayout(false), 8000); return; }
+    stopLayout(false);
   }
   function setPhase(p) {
     phase = p;
@@ -430,8 +436,8 @@ const JS =
   const sizeOf = (cat, w) => (baseOf(cat) + Math.min(12, Math.log2(1 + (w || 0)) * 2.4)) * GRK.sizeMult(display[cat] ? display[cat].size : 0);
   function resize() {
     graph.updateEachNodeAttributes((n, a) => { a.size = sizeOf(a.cat, a.weight); return a; }, { attributes: ['size'] });
-    // FA2 reads sizes when it starts; only "No overlap" uses them.
-    if (running && layout.adjustSizes && phase === 'overlap') startLayout();
+    // FA2 reads sizes when it starts and only the no-overlap finish uses them: restart so that pass sees the new sizes.
+    if (running && layout.adjustSizes) startLayout();
   }
 
   // -- adding data --

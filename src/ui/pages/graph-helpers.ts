@@ -176,7 +176,7 @@ const GRK = (() => {
   // jittering hubs do not keep a settled graph running, while neighbours still
   // gathering around a dragged node do.
   function makeSettle(opts) {
-    const o = Object.assign({ eps: 0.001, share: 0.01, ticks: 30, minTicks: 60 }, opts || {});
+    const o = Object.assign({ eps: 0.002, share: 0.05, ticks: 30, minTicks: 60 }, opts || {});
     let calm = 0, n = 0;
     return {
       eps: o.eps,

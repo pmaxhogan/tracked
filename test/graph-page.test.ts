@@ -469,7 +469,9 @@ describe("Graph page script", () => {
   });
 
   it("Display: per category show, label, size and color, kept per viewer", async () => {
-    const { graph, sigma, els, storage } = await boot({ storage: { "tk-graph:hidden": "remix" } });
+    const { graph, sigma, els, storage, fa2s } = await boot({
+      storage: { "tk-graph:hidden": "remix" },
+    });
     const rows = els.get("gr-display-rows");
     for (const k of ["dj", "artist", "source", "set", "track", "remix"])
       expect(rows.innerHTML).toContain('data-cat="' + k + '"');
@@ -479,7 +481,10 @@ describe("Graph page script", () => {
       checked,
     });
     const base = graph.getNodeAttribute("t:1", "size");
+    const workers = fa2s.length;
     rows.fire("input", { target: field("track", "size", "8") });
+    // The no-overlap finish reads sizes when the worker starts: a size change restarts it.
+    expect(fa2s.length).toBe(workers + 1);
     expect(graph.getNodeAttribute("t:1", "size")).toBeCloseTo(base * 4);
     rows.fire("input", { target: field("track", "size", "-8") });
     expect(graph.getNodeAttribute("t:1", "size")).toBeCloseTo(base / 4);

@@ -170,15 +170,21 @@ border program); sigma has no other shapes.
   the other end (`getEdgeWeight`), so neighbours gather around it even when
   they are hubs.
 - Root cause of "dragged nodes did not pull their neighbours" (measured on a
-  seeded 986-node graph): the old settings (strong gravity, every link
-  weight 1) put a DJ's sets in equilibrium after moving ~15% toward the
-  dragged DJ: each set is held by 15 to 30 track links and mass-weighted
-  gravity, against one link to the DJ. Also, while the layout ran, the worker
-  overwrote a drag every tick (the supervisor never re-read positions), and
-  `fixed` was only read at start and never cleared.
-- The layout stops by itself when at most 1% of nodes still move (a ceiling
-  of 20 s to 2 min). "No overlap" (`adjustSizes`) runs as a finishing phase
-  once the main phase settles, switched live.
+  seeded 986-node graph), three separate findings: (a) pause, drag, resume
+  reached an equilibrium, not a slow crawl: with every link weighing 1, each
+  of a DJ's sets is held by 15 to 30 track links plus mass-weighted gravity
+  against one link to the DJ, so the sets moved ~15% of the way and no
+  further (the same at 6 s and 20 s; slowDown 1 or 4 made no difference;
+  outboundAttractionDistribution made it worse, it divides the pull by the
+  pinned node's mass). The fix is the pin weight above. (b) While the layout
+  ran, the worker overwrote a drag every tick: the supervisor re-reads graph
+  positions only when it has an outputReducer, and reads `fixed` only at
+  start. (c) `fixed` was set on drag and never cleared, with no way to
+  release it.
+- The layout stops by itself when at most 5% of nodes still move more than
+  0.2% of the graph's extent per tick (a ceiling of 20 s to 2 min). "No
+  overlap" (`adjustSizes`) runs as a finishing phase once the main phase
+  settles or hits the ceiling, switched live, for up to 8 s after a ceiling.
 - Display drawer, per category: show, label, size (0.25x to 4x on a log
   slider) and color; `tk-graph:display` in localStorage. Forces drawer: the
   ForceAtlas2 knobs plus Pin pull, applied live (the supervisor sends its
