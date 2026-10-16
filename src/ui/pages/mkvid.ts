@@ -437,6 +437,13 @@ ${MKVID_STATE_JS}
     if (r.readiness) return mkWhy(r.readiness, true, capped);
     return r.notBefore && r.notBefore > Date.now() / 1000 ? 'retry ' + untilTime(r.notBefore) : nil;
   }
+  // The Queue's Timed cell: the share of tracks with a cue time in the list from the set page's last check.
+  function timedCell(r) {
+    if (r.timedPct == null) return nil;
+    const apple = r.appleCues > 0 ? ' (' + r.appleCues + ' from Apple Music)' : '';
+    const tip = r.timedRows + ' of ' + r.baseRows + ' tracks have a cue time' + apple + (r.listCheckedAt ? ', checked ' + rel(r.listCheckedAt) : '') + '.';
+    return '<span' + TK.tip(tip) + '>' + esc(r.timedPct) + '%</span>';
+  }
   function queueMeta(r) {
     const bits = [];
     if (r.replacesVideoId) bits.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
@@ -498,6 +505,7 @@ ${MKVID_STATE_JS}
       { key: 'position', label: '#', type: 'number', width: '4.5em', tip: 'Place in the whole queue (claim order): the newest set goes first, undated sets last. No filter or sort changes it. Sort by # to reorder.', render: (r) => '<span class="mk-pos">#' + esc(r.position) + '</span>' },
       { key: 'setTitle', label: 'Set', type: 'text', render: (r) => titleCell(r, queueMeta(r)) },
       { key: 'status', label: 'Status', type: 'enum', options: Q_STATES, tip: 'Why this set is or is not next: ready, not verified yet, waiting for track IDs, too few cue times, or pausing before another try.', render: queueState },
+      { key: 'timedPct', label: 'Timed', type: 'number', width: '5em', tip: 'Share of the tracks with a cue time, in the track list from the last check of the set page (Apple Music cues included). A set needs 90%, or 75% if it is at least 5 months old.', render: timedCell },
       common.dj,
       common.setDate,
       common.source,

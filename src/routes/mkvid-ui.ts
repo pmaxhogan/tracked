@@ -62,7 +62,15 @@ import { dbOf } from "../lib/db";
 
 export const mkvidUiApp = new Hono<{ Bindings: Env; Variables: { cfAccessEmail: string } }>();
 
-type QueueDbRow = MkvidRow & { position?: number | null };
+/** The queue's rows also carry the stored list's cue-time counts (mkvid_request_tracks), when it has one. */
+type QueueDbRow = MkvidRow & {
+  position?: number | null;
+  timed_pct?: number | null;
+  timed_rows?: number | null;
+  base_rows?: number | null;
+  apple_cues?: number | null;
+  list_checked_at?: number | null;
+};
 
 /** The columns both lists share (stored seconds; filters take unix ms like every datetime). Each list adds its own `status`. */
 const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
@@ -89,10 +97,14 @@ const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
 /**
  * Claim order (lib/mkvid.ts QUEUE_ORDER): newest set first, undated last, ties by most recently queued.
  * Each row also gets its readiness state at `now` as `ready_state`: the list's `status` column.
+ * `timed_pct` is the share of the stored list's base rows that have a cue time, in whole percent
+ * rounded down (so a held 89.6 % never reads 90), as of the list's last save: the `timedPct` column.
  */
 export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
   return {
-    from: `(SELECT r.*, ROW_NUMBER() OVER (ORDER BY r.sort_key DESC, r.created_at DESC, r.rowid ASC) AS position, ${readinessStateSql(now)} AS ready_state
+    from: `(SELECT r.*, ROW_NUMBER() OVER (ORDER BY r.sort_key DESC, r.created_at DESC, r.rowid ASC) AS position, ${readinessStateSql(now)} AS ready_state,
+             CASE WHEN t.base_rows > 0 THEN t.timed_rows * 100 / t.base_rows END AS timed_pct,
+             t.timed_rows AS timed_rows, t.base_rows AS base_rows, t.apple_cues AS apple_cues, t.scraped_at AS list_checked_at
       FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id WHERE r.status = 'pending')`,
     primaryKey: "id",
     defaultSort: "position",
@@ -100,6 +112,7 @@ export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
       ...COLUMNS,
       status: { sql: "ready_state", type: "enum", options: MKVID_READINESS_STATES },
       position: { type: "number" },
+      timedPct: { sql: "timed_pct", type: "number" },
     },
   };
 }
@@ -143,6 +156,17 @@ async function requestTable(
   const reqs = result.rows.map((r) => ({
     req: rowToRequest(r),
     position: r.position == null ? null : Number(r.position),
+    // Queue rows only (the finished list does not select it): the stored list's cue times.
+    timed:
+      r.timed_pct === undefined
+        ? null
+        : {
+            timedPct: r.timed_pct == null ? null : Number(r.timed_pct),
+            timedRows: r.timed_rows == null ? null : Number(r.timed_rows),
+            baseRows: r.base_rows == null ? null : Number(r.base_rows),
+            appleCues: Number(r.apple_cues ?? 0),
+            listCheckedAt: r.list_checked_at == null ? null : Number(r.list_checked_at),
+          },
   }));
   const readiness = await readinessFor(
     c.env,
@@ -154,6 +178,7 @@ async function requestTable(
     rows: reqs.map((x) => ({
       ...summaryOf(x.req, readiness.get(x.req.id) ?? null, since),
       ...(x.position != null ? { position: x.position } : {}),
+      ...(x.timed ?? {}),
     })),
     counts: await counts(),
   });

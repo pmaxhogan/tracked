@@ -742,6 +742,61 @@ describe("/mkvid routes", () => {
     ).toBe(400);
   });
 
+  it("the queue Timed column is the stored list's timed share, rounded down; it sorts and filters on the server", async () => {
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: "1" });
+    const q = async (n: string) => {
+      await enqueueRaw(env, {
+        ...input,
+        setUrl: `https://x/tracklist/${n}`,
+        source: { kind: "soundcloud", url: `https://audio/${n}` },
+      });
+      return (await getMkvidRequestForSet(env, `https://x/tracklist/${n}`))!.id;
+    };
+    await q("full");
+    await storeVerifiedList(env, "https://x/tracklist/full", { rows: 10 });
+    await q("half");
+    await storeVerifiedList(env, "https://x/tracklist/half", { rows: 10, untimedRows: 5 });
+    // 43 of 48 is 89.58 %: shown as 89, never 90.
+    const gc = await q("gc");
+    await storeVerifiedList(env, "https://x/tracklist/gc", { rows: 48, untimedRows: 5 });
+    await env.DB.prepare(
+      "UPDATE mkvid_request_tracks SET apple_cues = 42, scraped_at = 1700000000 WHERE request_id = ?",
+    )
+      .bind(gc)
+      .run();
+    await q("nolist");
+    type Row = {
+      setUrl: string;
+      timedPct: number | null;
+      timedRows: number | null;
+      baseRows: number | null;
+      appleCues: number;
+      listCheckedAt: number | null;
+    };
+    const queue = async (qs: string) => {
+      const r = await app.request(`http://x/ui/api/mkvid/queue${qs}`, {}, env);
+      expect(r.status, qs).toBe(200);
+      return ((await r.json()) as { rows: Row[] }).rows;
+    };
+    const byName = Object.fromEntries((await queue("")).map((r) => [r.setUrl.split("/").pop(), r]));
+    expect(byName.full).toMatchObject({ timedPct: 100, timedRows: 10, baseRows: 10, appleCues: 0 });
+    expect(byName.half).toMatchObject({ timedPct: 50, timedRows: 5, baseRows: 10 });
+    expect(byName.gc).toMatchObject({
+      timedPct: 89,
+      timedRows: 43,
+      baseRows: 48,
+      appleCues: 42,
+      listCheckedAt: 1700000000,
+    });
+    expect(byName.nolist).toMatchObject({ timedPct: null, timedRows: null, baseRows: null });
+    const names = (rows: Row[]) => rows.map((r) => r.setUrl.split("/").pop());
+    expect(names(await queue("?sort=timedPct")).slice(0, 3)).toEqual(["half", "gc", "full"]);
+    expect(names(await queue("?f.timedPct=gte:75")).sort()).toEqual(["full", "gc"]);
+    // The finished list has no such column.
+    const fin = await app.request("http://x/ui/api/mkvid/finished?sort=timedPct", {}, env);
+    expect(fin.status).toBe(400);
+  });
+
   it("a filter the table API does not know is a 400, not an empty list", async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: "1" });
     for (const qs of [

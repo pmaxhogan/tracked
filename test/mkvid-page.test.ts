@@ -90,7 +90,18 @@ const tableOf = (rows: unknown[]) => ({
 function answers(url: string): Response {
   if (url.startsWith("/ui/api/mkvid/finished?")) return Response.json(tableOf([DONE]));
   if (url.startsWith("/ui/api/mkvid/queue?"))
-    return Response.json(tableOf([WAITING("r3", 7), WAITING("r4", 8)]));
+    return Response.json(
+      tableOf([
+        WAITING("r3", 7, {
+          timedPct: 89,
+          timedRows: 43,
+          baseRows: 48,
+          appleCues: 42,
+          listCheckedAt: NOW - 3600,
+        }),
+        WAITING("r4", 8),
+      ]),
+    );
   if (url === "/ui/api/mkvid") return Response.json(header());
   return Response.json({ error: "mkvid_unavailable" }, { status: 503 });
 }
@@ -304,6 +315,13 @@ describe("mkvid page tables", () => {
     expect(q).toContain("Waiting &lt;b&gt;r3");
     expect(q).not.toContain("<b>r3");
     for (const a of ["top", "up", "down", "bottom", "ban"]) expect(q).toContain(`data-act="${a}"`);
+    // The Timed column: the list's share with cue times, the counts in its tooltip; no list reads "-".
+    expect(get("q-head").innerHTML).toContain("Timed");
+    expect(q).toContain(">89%</span>");
+    expect(q).toContain(
+      'data-tip="43 of 48 tracks have a cue time (42 from Apple Music), checked ',
+    );
+    expect(get("fin-head").innerHTML).not.toContain("Timed");
     expect(get("fin-body").innerHTML).toContain('href="https://youtu.be/abcdefghijk"');
     expect(get("old-body").innerHTML).toContain("oldvid00001");
     expect(get("mk-n-queue").textContent).toBe("3");
