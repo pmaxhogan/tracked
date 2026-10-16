@@ -322,7 +322,7 @@ describe("render feeder: what it feeds, in which order", () => {
     expect(await candidates(env)).toContain(young);
   });
 
-  it("leaves out a set whose known list is under 90 % timed (its weekly recheck fetches it instead)", async () => {
+  it("leaves out a set whose known list is under 90 % timed, 75 % for an old set (its weekly recheck fetches it instead)", async () => {
     const env = makeEnv();
     await subscribe(env, "dj");
     const held = await waitingSet(env, "held");
@@ -337,11 +337,17 @@ describe("render feeder: what it feeds, in which order", () => {
         .bind(req!.id, base, NOON, base, timedRows)
         .run();
     };
+    // 8 of 10: enough for a set 5 months old (75 %), not for a newer one (90 %).
+    const old80 = await waitingSet(env, "old80", { daysAgo: 200 });
+    const young80 = await waitingSet(env, "young80", { daysAgo: 30 });
     await store(held, 33, 2);
     await store(timed, 10, 9);
+    await store(old80, 10, 8);
+    await store(young80, 10, 8);
     const got = await candidates(env);
     expect(got).not.toContain(held);
-    expect(got).toContain(timed);
+    expect(got).not.toContain(young80);
+    expect(got).toEqual(expect.arrayContaining([timed, old80]));
   });
 
   it("sits in the verify class: after new sets and due second fetches, before rechecks and backfill", async () => {

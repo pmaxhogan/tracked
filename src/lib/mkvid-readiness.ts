@@ -11,7 +11,10 @@
  *     on the request, which skips that wait (never the verification).
  *   - A verified list whose base rows (every row but a "w/" one) are under
  *     90 % timed is held: mkvid spreads untimed rows evenly between timed
- *     neighbours, which is only a fair guess when they are few. The set is
+ *     neighbours, which is only a fair guess when they are few. A set at
+ *     least 5 months old (by its date, else its discovery, as above) needs
+ *     75 % only: 1001tracklists users rarely add cue times to an old set, so
+ *     holding it for 90 % mostly holds it forever. The set is
  *     rechecked at least weekly (pullInHeldRecheck) and renders once
  *     1001tracklists has the times. Render now does not
  *     skip this.
@@ -36,6 +39,22 @@ export const ID_WAIT_SECONDS = 7 * 86400;
 /** A list renders only when at least this share of its base rows has a cue time. */
 export const MIN_TIMED_SHARE = 0.9;
 
+/** The share an old set (OLD_SET_SECONDS or more, by setAgeReference) needs instead. */
+export const MIN_TIMED_SHARE_OLD = 0.75;
+
+/** A set this old (about 5 months) is old for the timed gate: its cue times are unlikely to grow. */
+export const OLD_SET_SECONDS = 150 * 86400;
+
+/** Whether the set (age counted from `ageReference`, see setAgeReference) is old for the timed gate. */
+export function isOldSet(ageReference: number, now = Math.floor(Date.now() / 1000)): boolean {
+  return now - ageReference >= OLD_SET_SECONDS;
+}
+
+/** The share of base rows that must be timed, in whole percent: 90, or 75 for an old set. */
+export function minTimedPct(oldSet: boolean): number {
+  return Math.round((oldSet ? MIN_TIMED_SHARE_OLD : MIN_TIMED_SHARE) * 100);
+}
+
 /** Base rows (every row but a "w/" one) and how many of them are timed; row 0 is always timed (mkvid starts it at 0). */
 export function timedRowCounts(
   tracks: ReadonlyArray<{ cueSeconds: number | null; layered: boolean }>,
@@ -50,13 +69,39 @@ export function timedRowCounts(
   return { baseRows, timedRows };
 }
 
-/** MIN_TIMED_SHARE in integers, the same test as TIMED_SQL. */
-export function isTimedEnough(baseRows: number, timedRows: number): boolean {
-  return baseRows > 0 && timedRows * 10 >= baseRows * 9;
+/** MIN_TIMED_SHARE (MIN_TIMED_SHARE_OLD for an old set) in integers, the same test as timedSql. */
+export function isTimedEnough(baseRows: number, timedRows: number, oldSet = false): boolean {
+  return (
+    baseRows > 0 && (timedRows * 10 >= baseRows * 9 || (oldSet && timedRows * 4 >= baseRows * 3))
+  );
 }
 
-/** isTimedEnough over `mkvid_request_tracks t` (a list stored before migration 0013 counts as untimed until saved again). */
-export const TIMED_SQL = "t.base_rows > 0 AND t.timed_rows * 10 >= t.base_rows * 9";
+/** SQL for the set's discovery time: the earliest tracklists row for the URL, else the request's own creation. */
+export const DISCOVERED_SQL =
+  "(COALESCE((SELECT MIN(tl.discovered_at) FROM tracklists tl WHERE tl.url = r.set_url), r.created_at))";
+
+/** SQL for the request's set date as unix seconds (NULL when it has none). */
+const SET_DAY_SQL =
+  "(CASE WHEN r.set_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' THEN CAST(strftime('%s', r.set_date) AS INTEGER) END)";
+
+/** setAgeReference in SQL over `mkvid_requests r`: the set date, else its discovery. */
+export const SET_AGE_REFERENCE_SQL = `COALESCE(${SET_DAY_SQL}, ${DISCOVERED_SQL})`;
+
+/**
+ * isTimedEnough over the stored list `t` (an alias of mkvid_request_tracks)
+ * of the request `r`, the set's age taken at `now` (an SQL expression; the
+ * database clock by default). A list stored before migration 0013 has no
+ * counts and counts as untimed until saved again.
+ */
+export function timedSql(opts: { t?: string; now?: string } = {}): string {
+  const t = opts.t ?? "t";
+  const now = opts.now ?? "CAST(strftime('%s', 'now') AS INTEGER)";
+  return `(${t}.base_rows > 0 AND (${t}.timed_rows * 10 >= ${t}.base_rows * 9
+    OR (${t}.timed_rows * 4 >= ${t}.base_rows * 3 AND ${SET_AGE_REFERENCE_SQL} <= ${now} - ${OLD_SET_SECONDS})))`;
+}
+
+/** timedSql() over `mkvid_request_tracks t` of `mkvid_requests r`, at the database clock. */
+export const TIMED_SQL = timedSql();
 
 /** A held set is due for a recheck at most this long from when its list was last saved or its request reopened. */
 export const HELD_UNTIMED_RECHECK_SECONDS = 7 * 86400;
@@ -99,8 +144,8 @@ export type MkvidReadiness =
   | { state: "ready" }
   /** No verified track list yet: nothing is rendered until there is one. */
   | { state: "unverified" }
-  /** Too few rows have cue times (under MIN_TIMED_SHARE): held until a recheck finds them. */
-  | { state: "untimed"; timedRows: number; baseRows: number }
+  /** Too few rows have cue times (under `minPct`, see minTimedPct): held until a recheck finds them. */
+  | { state: "untimed"; timedRows: number; baseRows: number; minPct: number }
   /** Verified, but `idRows` rows are still ID: held until `until` (unix seconds) unless Render now is pressed. */
   | { state: "waiting_ids"; until: number; idRows: number }
   /** A failed attempt's retry backoff. */
@@ -143,8 +188,14 @@ export function mkvidReadiness(
   now = Math.floor(Date.now() / 1000),
 ): MkvidReadiness {
   if (!r.verified || r.listRows <= 0) return { state: "unverified" };
-  if (!isTimedEnough(r.baseRows, r.timedRows))
-    return { state: "untimed", timedRows: r.timedRows, baseRows: r.baseRows };
+  const oldSet = isOldSet(setAgeReference(r.setDate, r.discoveredAt), now);
+  if (!isTimedEnough(r.baseRows, r.timedRows, oldSet))
+    return {
+      state: "untimed",
+      timedRows: r.timedRows,
+      baseRows: r.baseRows,
+      minPct: minTimedPct(oldSet),
+    };
   if (r.idRows > 0 && !r.skipIdWait) {
     const until = setAgeReference(r.setDate, r.discoveredAt) + ID_WAIT_SECONDS;
     if (now < until) return { state: "waiting_ids", until, idRows: r.idRows };
@@ -153,10 +204,6 @@ export function mkvidReadiness(
     return { state: "backoff", until: r.notBefore };
   return { state: "ready" };
 }
-
-/** SQL for the set's discovery time: the earliest tracklists row for the URL, else the request's own creation. */
-export const DISCOVERED_SQL =
-  "(COALESCE((SELECT MIN(tl.discovered_at) FROM tracklists tl WHERE tl.url = r.set_url), r.created_at))";
 
 /**
  * SQL condition (over `mkvid_requests r JOIN mkvid_request_tracks t`) for the
@@ -186,12 +233,10 @@ export const MKVID_READINESS_STATES: ReadonlyArray<MkvidReadiness["state"]> = [
  */
 export function readinessStateSql(now: number): string {
   const n = Math.floor(now);
-  const setDay =
-    "(CASE WHEN r.set_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' THEN CAST(strftime('%s', r.set_date) AS INTEGER) END)";
   return `(CASE
     WHEN COALESCE(t.trusted, 0) != 1 OR COALESCE(t.track_count, 0) <= 0 THEN 'unverified'
-    WHEN NOT COALESCE(${TIMED_SQL}, 0) THEN 'untimed'
-    WHEN COALESCE(t.id_rows, 1) > 0 AND COALESCE(r.skip_id_wait, 0) != 1 AND ${n} < COALESCE(${setDay}, ${DISCOVERED_SQL}) + ${ID_WAIT_SECONDS} THEN 'waiting_ids'
+    WHEN NOT COALESCE(${timedSql({ now: String(n) })}, 0) THEN 'untimed'
+    WHEN COALESCE(t.id_rows, 1) > 0 AND COALESCE(r.skip_id_wait, 0) != 1 AND ${n} < ${SET_AGE_REFERENCE_SQL} + ${ID_WAIT_SECONDS} THEN 'waiting_ids'
     WHEN r.status = 'pending' AND r.not_before IS NOT NULL AND r.not_before > ${n} THEN 'backoff'
     ELSE 'ready' END)`;
 }

@@ -22,8 +22,11 @@ import {
 } from "../src/lib/mkvid";
 import {
   ID_WAIT_SECONDS,
+  isTimedEnough,
   isVerified,
   mkvidReadiness,
+  OLD_SET_SECONDS,
+  readinessStateSql,
   readinessFor,
   pullInHeldRecheck,
   setAgeReference,
@@ -185,14 +188,52 @@ describe("mkvidReadiness", () => {
       state: "untimed",
       timedRows: 8,
       baseRows: 10,
+      minPct: 90,
     });
     expect(mkvidReadiness({ ...base, timedRows: 2, baseRows: 33, skipIdWait: true })).toEqual({
       state: "untimed",
       timedRows: 2,
       baseRows: 33,
+      minPct: 90,
     });
     // A list stored before migration 0013 has no counts: held until it is saved again.
     expect(mkvidReadiness({ ...base, timedRows: 0, baseRows: 0 }).state).toBe("untimed");
+  });
+
+  it("a set at least 5 months old needs 75 % timed, by its date, else its discovery", () => {
+    const old = { ...base, setDate: isoDay(NOW - OLD_SET_SECONDS - DAY) };
+    expect(mkvidReadiness({ ...old, timedRows: 8 }, NOW)).toEqual({ state: "ready" });
+    expect(mkvidReadiness({ ...old, timedRows: 15, baseRows: 20 }, NOW)).toEqual({
+      state: "ready",
+    });
+    expect(mkvidReadiness({ ...old, timedRows: 14, baseRows: 20 }, NOW)).toEqual({
+      state: "untimed",
+      timedRows: 14,
+      baseRows: 20,
+      minPct: 75,
+    });
+    // A newer set still needs 90 %.
+    const young = { ...base, setDate: isoDay(NOW - OLD_SET_SECONDS + 2 * DAY) };
+    expect(mkvidReadiness({ ...young, timedRows: 8 }, NOW)).toMatchObject({
+      state: "untimed",
+      minPct: 90,
+    });
+    // No set date: the discovery counts.
+    expect(
+      mkvidReadiness({ ...base, discoveredAt: NOW - OLD_SET_SECONDS, timedRows: 8 }, NOW),
+    ).toEqual({ state: "ready" });
+    // Still never an empty count.
+    expect(mkvidReadiness({ ...old, timedRows: 0, baseRows: 0 }, NOW).state).toBe("untimed");
+  });
+
+  it("isTimedEnough: 90 %, or 75 % for an old set", () => {
+    expect(isTimedEnough(10, 9)).toBe(true);
+    expect(isTimedEnough(10, 8)).toBe(false);
+    expect(isTimedEnough(10, 8, true)).toBe(true);
+    expect(isTimedEnough(4, 3, true)).toBe(true);
+    expect(isTimedEnough(48, 35, true)).toBe(false);
+    expect(isTimedEnough(48, 36, true)).toBe(true);
+    expect(isTimedEnough(0, 0, true)).toBe(false);
   });
 
   it("an unverified or empty list is never ready", () => {
@@ -335,7 +376,47 @@ describe("claim: verified lists only, IDs wait 7 days", () => {
       state: "untimed",
       timedRows: 2,
       baseRows: 33,
+      minPct: 75,
     });
+  });
+
+  it("claims a set 5 months old at 75 % timed, holds a newer one, and the queue state SQL agrees", async () => {
+    const env = makeEnv();
+    const young = await queue(env, "young", {
+      setDate: isoDay(NOW - 30 * DAY),
+      rows: 20,
+      untimedRows: 5,
+    });
+    const oldShort = await queue(env, "oldshort", {
+      setDate: isoDay(NOW - OLD_SET_SECONDS - DAY),
+      rows: 20,
+      untimedRows: 6,
+    });
+    const old = await queue(env, "old", {
+      setDate: isoDay(NOW - OLD_SET_SECONDS - DAY),
+      rows: 20,
+      untimedRows: 5,
+    });
+    const states = async () =>
+      Object.fromEntries(
+        (
+          await env.DB.prepare(
+            `SELECT r.id AS id, ${readinessStateSql(NOW)} AS st FROM mkvid_requests r
+               LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id`,
+          ).all<{ id: string; st: string }>()
+        ).results.map((x) => [x.id, x.st]),
+      );
+    expect(await states()).toEqual({
+      [young.id]: "untimed",
+      [oldShort.id]: "untimed",
+      [old.id]: "ready",
+    });
+    const rd = await readinessFor(env, [young, oldShort, old]);
+    expect(rd.get(young.id)).toMatchObject({ state: "untimed", minPct: 90 });
+    expect(rd.get(oldShort.id)).toMatchObject({ state: "untimed", minPct: 75 });
+    expect(rd.get(old.id)).toEqual({ state: "ready" });
+    expect((await claimMkvidRequest(env, log, ["primary"], "scene"))!.id).toBe(old.id);
+    expect(await claimMkvidRequest(env, log, ["primary"], "scene")).toBeNull();
   });
 
   it("an untrusted stored list is not claimable either (the stub reads trusted)", async () => {

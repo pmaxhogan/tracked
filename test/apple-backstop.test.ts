@@ -53,7 +53,12 @@ const NOW = Math.floor(Date.now() / 1000);
 async function heldSet(
   env: Env,
   n: string,
-  opts: { album?: boolean; sourceSeconds?: number | null } = {},
+  opts: {
+    album?: boolean;
+    sourceSeconds?: number | null;
+    setDate?: string;
+    untimedRows?: number;
+  } = {},
 ) {
   const setUrl = `https://www.1001tracklists.com/tracklist/${n}/x.html`;
   await enqueueMkvidRequest(env, {
@@ -61,13 +66,13 @@ async function heldSet(
     setUrl,
     artistName: "DJ",
     setTitle: `set ${n}`,
-    setDate: "2020-01-01",
+    setDate: opts.setDate ?? "2020-01-01",
     source: { kind: "soundcloud", url: `https://api.soundcloud.com/tracks/${n}` },
     lastCueSeconds: 240,
     trackCount: 10,
     idedCount: 10,
   });
-  await storeVerifiedList(env, setUrl, { rows: 10, untimedRows: 5 });
+  await storeVerifiedList(env, setUrl, { rows: 10, untimedRows: opts.untimedRows ?? 5 });
   const id = (await getMkvidRequestForSet(env, setUrl))!.id;
   if (opts.album !== false)
     await env.DB.prepare("UPDATE mkvid_request_tracks SET apple_album_url = ? WHERE request_id = ?")
@@ -90,6 +95,32 @@ const readiness = async (env: Env, id: string) =>
   ).get(id)!;
 
 describe("applyAppleCuesToRequest", () => {
+  it("an old set at 80 % still takes the album's cues, and is timed enough even when the album is skipped", async () => {
+    const env = makeEnv();
+    const { id } = await heldSet(env, "old80", { untimedRows: 2 });
+    expect(await applyAppleCuesToRequest(env, id)).toMatchObject({
+      outcome: "applied",
+      filled: 2,
+      timedEnough: true,
+    });
+    const { id: skipped } = await heldSet(env, "old80b", { untimedRows: 2, sourceSeconds: 3765 });
+    expect(await applyAppleCuesToRequest(env, skipped)).toMatchObject({
+      outcome: "skipped",
+      timedEnough: true,
+    });
+    // A newer set at 80 % with the same skipped album stays held.
+    const young = new Date((NOW - 30 * 86400) * 1000).toISOString().slice(0, 10);
+    const { id: held } = await heldSet(env, "young80", {
+      untimedRows: 2,
+      sourceSeconds: 3765,
+      setDate: young,
+    });
+    expect(await applyAppleCuesToRequest(env, held)).toMatchObject({
+      outcome: "skipped",
+      timedEnough: false,
+    });
+  });
+
   it("fills the untimed rows from the album, unblocks the set, and keeps the wire format plain", async () => {
     const env = makeEnv();
     const { id } = await heldSet(env, "a");

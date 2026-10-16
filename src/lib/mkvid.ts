@@ -21,7 +21,7 @@
  *   done --panel "Delete and recreate"--> pending (back of the queue; lib/mkvid-recreate.ts)
  *
  * A pending request is only claimable once its track list is verified, at
- * least 90 % timed, and any wait for IDs is over (lib/mkvid-readiness.ts); until then the claim
+ * least 90 % timed (75 % for a set 5 months old), and any wait for IDs is over (lib/mkvid-readiness.ts); until then the claim
  * passes over it without using an attempt. mkvid refusing a list as
  * `unverified_tracklist` puts it back the same way.
  *
@@ -629,7 +629,7 @@ export async function saveMkvidTracks(
   const tracks = toMkvidTracks(parsed.rows, trusted);
   // ID rows of the list mkvid would draw - what the 7-day ID wait looks at (lib/mkvid-readiness.ts).
   const idRows = tracks.filter((t) => t.isId).length;
-  // How much of the list has cue times - what the 90 % timed gate looks at (lib/mkvid-readiness.ts).
+  // How much of the list has cue times - what the timed gate (90 %, 75 % for an old set) looks at (lib/mkvid-readiness.ts).
   const { baseRows, timedRows } = timedRowCounts(tracks);
   const r = await db
     .prepare(
@@ -664,7 +664,7 @@ export async function saveMkvidTracks(
       .run();
   // A held list may take its missing cues from that album (lib/apple-backstop.ts; never fails the save).
   await tryApplyAppleCues(env, req.id, { log: opts.log });
-  // A held (under 90 % timed) list keeps its set due within a week, whichever list was kept.
+  // A held (under 90 % timed, 75 % for an old set) list keeps its set due within a week, whichever list was kept.
   await pullInHeldRecheck(env, setUrl);
   if ((r.meta.changes ?? 0) === 0) return "kept";
   // The request's counts follow the stored list: every row, anonymous "ID - ID" ones included.

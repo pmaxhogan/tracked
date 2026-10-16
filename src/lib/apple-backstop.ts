@@ -20,7 +20,14 @@ import { errorFields, type Logger } from "./log";
 import { getAppSettings } from "./app-settings";
 import { planAppleCues, withoutAppleCues, type CueRow } from "./apple-cues";
 import { fetchAppleAlbum, type AppleFetchDeps } from "./apple-album";
-import { isTimedEnough, timedRowCounts, TIMED_SQL } from "./mkvid-readiness";
+import {
+  DISCOVERED_SQL,
+  isOldSet,
+  isTimedEnough,
+  setAgeReference,
+  timedRowCounts,
+  TIMED_SQL,
+} from "./mkvid-readiness";
 import { readCachedTracklistEntry, tracklistSlug } from "./tracklist-cache";
 import { setDateFromUrl } from "./pool-settings";
 
@@ -37,7 +44,7 @@ export type AppleOutcome =
 export type AppleResult = {
   outcome: AppleOutcome;
   filled: number;
-  /** Whether the stored list is timed-enough (the 90 % gate) after the pass. */
+  /** Whether the stored list is timed-enough (the 90 % gate, 75 % for an old set) after the pass. */
   timedEnough: boolean;
   /** Whether an Apple album was known for the set (link found). */
   hadAlbum: boolean;
@@ -56,6 +63,8 @@ type StoredRow = {
   apple_note: string | null;
   replaced_seconds: number | null;
   audio_max_seconds: number | null;
+  set_date: string | null;
+  discovered: number;
 };
 
 /** Length of the audio mkvid renders from, best known first: the video this request replaces, else the longest player on the set page. */
@@ -73,6 +82,7 @@ export async function applyAppleCuesToRequest(
   const r = await db
     .prepare(
       `SELECT r.id AS id, r.set_url AS set_url, r.replaces_video_id AS replaces_video_id, t.tracks AS tracks, t.trusted AS trusted,
+              r.set_date AS set_date, ${DISCOVERED_SQL} AS discovered,
               t.scraped_at AS scraped_at, t.apple_album_url AS apple_album_url, t.apple_cues AS apple_cues, t.apple_note AS apple_note,
               (SELECT vm.duration_seconds FROM video_meta vm WHERE vm.video_id = r.replaces_video_id) AS replaced_seconds,
               (SELECT f.audio_max_seconds FROM set_media_facts f WHERE f.set_url = r.set_url) AS audio_max_seconds
@@ -91,6 +101,7 @@ export async function applyAppleCuesToRequest(
   const stored = parseJson<CueRow[] | null>(r.tracks, null);
   if (!Array.isArray(stored) || !stored.length) return none("no_list");
   const reset = withoutAppleCues(stored);
+  const oldSet = isOldSet(setAgeReference(r.set_date, Number(r.discovered)));
 
   // Store a result, only over the list it was computed from (a save in between wins).
   const store = async (
@@ -124,10 +135,11 @@ export async function applyAppleCuesToRequest(
           r.tracks,
         )
         .run();
-    return isTimedEnough(baseRows, timedRows);
+    return isTimedEnough(baseRows, timedRows, oldSet);
   };
 
   const own = timedRowCounts(reset);
+  // The 90 % test even for an old set: one that passes on 75 % still takes what the album can fill.
   if (isTimedEnough(own.baseRows, own.timedRows))
     return { ...none("timed"), timedEnough: await store(reset, 0, null, null) };
   const settings = (await getAppSettings(env)).appleCues;

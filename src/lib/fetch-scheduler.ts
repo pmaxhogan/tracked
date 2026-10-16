@@ -80,7 +80,7 @@ import { INDEX_FORMAT_SINCE, queueSearchIndex } from "./search/index";
 import { GRAPH_FORMAT_SINCE, pagesGraphUrls } from "./graph/store";
 import { updatePresaveCandidates } from "./presave-candidates";
 import { getAppSettings } from "./app-settings";
-import { DISCOVERED_SQL, ID_WAIT_SECONDS } from "./mkvid-readiness";
+import { DISCOVERED_SQL, ID_WAIT_SECONDS, timedSql } from "./mkvid-readiness";
 import { getQuotaOut } from "./youtube-quota";
 import { duePresaves, presaveOnSetParsed, runScheduledPresave } from "./presave";
 
@@ -631,7 +631,7 @@ function retryAfterOf(e: unknown): number | null {
  * ID wait whose last known list has ID rows (it is young, so its 12 h / 1 d
  * recheck fetches it anyway), one whose longest audio player is known to be
  * shorter than the last cue (mkvid would refuse it as incomplete), one whose
- * known list is under 90 % timed (held; lib/mkvid-readiness.ts
+ * known list is under 90 % timed, 75 % for an old set (held; lib/mkvid-readiness.ts
  * pullInHeldRecheck keeps its set due within a week), one whose
  * set-page fetch is waiting out a failed attempt or is out of attempts today
  * (set_schedule.retry_at / attempts_today; a request's own mkvid retry
@@ -661,7 +661,7 @@ export async function renderFeedCandidates(
           AND r.slug IN (SELECT slug FROM subscriptions)
           AND NOT EXISTS (SELECT 1 FROM set_verification v WHERE v.url = r.set_url)
           AND (t.video_id IS NULL OR (t.video_source = 'mkvid' AND t.video_id = r.replaces_video_id))
-          AND NOT COALESCE(k.base_rows > 0 AND k.timed_rows * 10 < k.base_rows * 9, 0)
+          AND NOT COALESCE(k.base_rows > 0 AND NOT ${timedSql({ t: "k", now: String(Math.floor(nowSec)) })}, 0)
           AND NOT (f.audio_max_seconds IS NOT NULL AND r.last_cue_seconds IS NOT NULL AND f.audio_max_seconds < r.last_cue_seconds)
           AND NOT (r.skip_id_wait = 0
                    AND COALESCE(k.id_rows, r.track_count - r.ided_count, 1) > 0

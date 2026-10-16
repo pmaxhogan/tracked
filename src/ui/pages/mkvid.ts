@@ -510,7 +510,7 @@ ${MKVID_STATE_JS}
       { id: 'ready', label: 'Ready', group: 'q', filters: [{ col: 'status', op: 'in', value: 'ready' }], count: countOf(['ready']), tip: 'Verified and allowed to render: mkvid takes them in order, as the daily caps allow.' },
       { id: 'unverified', label: 'Not verified', group: 'q', filters: [{ col: 'status', op: 'in', value: 'unverified' }], count: countOf(['unverified']), tip: 'Sets whose track list still needs a second matching fetch.' },
       { id: 'ids', label: 'Waiting for IDs', group: 'q', filters: [{ col: 'status', op: 'in', value: 'waiting_ids' }], count: countOf(['waiting_ids']), tip: 'Sets with unidentified tracks, held until they are 7 days old.' },
-      { id: 'untimed', label: 'Too few cue times', group: 'q', filters: [{ col: 'status', op: 'in', value: 'untimed' }], count: countOf(['untimed']), tip: 'Sets with under 90% of their tracks timed. Rechecked weekly.' },
+      { id: 'untimed', label: 'Too few cue times', group: 'q', filters: [{ col: 'status', op: 'in', value: 'untimed' }], count: countOf(['untimed']), tip: 'Sets with under 90% of their tracks timed, or under 75% for a set at least 5 months old. Rechecked weekly.' },
       { id: 'retry', label: 'Retrying', group: 'q', filters: [{ col: 'error', op: 'nempty', value: '' }], tip: 'Sets whose last attempt failed and that are waiting to be tried again.' },
       { id: 'undated', label: 'Undated', group: 'q', filters: [{ col: 'setDate', op: 'empty', value: '' }], tip: 'Sets without a date: they wait at the back of the queue.' },
     ],
