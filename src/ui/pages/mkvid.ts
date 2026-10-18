@@ -444,6 +444,12 @@ ${MKVID_STATE_JS}
     const tip = r.timedRows + ' of ' + r.baseRows + ' tracks have a cue time' + apple + (r.listCheckedAt ? ', checked ' + rel(r.listCheckedAt) : '') + '.';
     return '<span' + TK.tip(tip) + '>' + esc(r.timedPct) + '%</span>';
   }
+  // The Queue's IDs cell: the share of identified tracks (not "ID") in the list from the set page's last check.
+  function idsCell(r) {
+    if (r.idsPct == null) return nil;
+    const tip = (r.listRows - r.listIdRows) + ' of ' + r.listRows + ' tracks are identified, ' + r.listIdRows + ' still ID' + (r.listCheckedAt ? ', checked ' + rel(r.listCheckedAt) : '') + '.';
+    return '<span' + TK.tip(tip) + '>' + esc(r.idsPct) + '%</span>';
+  }
   function queueMeta(r) {
     const bits = [];
     if (r.replacesVideoId) bits.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
@@ -506,6 +512,7 @@ ${MKVID_STATE_JS}
       { key: 'setTitle', label: 'Set', type: 'text', render: (r) => titleCell(r, queueMeta(r)) },
       { key: 'status', label: 'Status', type: 'enum', options: Q_STATES, tip: 'Why this set is or is not next: ready, not verified yet, waiting for track IDs, too few cue times, or pausing before another try.', render: queueState },
       { key: 'timedPct', label: 'Timed', type: 'number', width: '5em', tip: 'Share of the tracks with a cue time, in the track list from the last check of the set page (Apple Music cues included). A set needs 90%, or 75% if it is at least 5 months old.', render: timedCell },
+      { key: 'idsPct', label: 'IDs', type: 'number', width: '5em', tip: 'Share of the tracks that are identified (not ID), in the track list from the last check of the set page. A set with ID rows waits up to 7 days for them to be identified.', render: idsCell },
       common.dj,
       common.setDate,
       common.source,

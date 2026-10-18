@@ -797,6 +797,47 @@ describe("/mkvid routes", () => {
     expect(fin.status).toBe(400);
   });
 
+  it("the queue IDs column is the stored list's identified share, rounded down; it sorts and filters on the server", async () => {
+    const env = makeEnv({ DEV_BYPASS_CF_ACCESS: "1" });
+    const q = async (n: string) => {
+      await enqueueRaw(env, {
+        ...input,
+        setUrl: `https://x/tracklist/${n}`,
+        source: { kind: "soundcloud", url: `https://audio/${n}` },
+      });
+    };
+    await q("full");
+    await storeVerifiedList(env, "https://x/tracklist/full", { rows: 10 });
+    await q("half");
+    await storeVerifiedList(env, "https://x/tracklist/half", { rows: 10, idRows: 5 });
+    // 43 of 48 is 89.58 %: shown as 89, never 90.
+    await q("most");
+    await storeVerifiedList(env, "https://x/tracklist/most", { rows: 48, idRows: 5 });
+    await q("nolist");
+    type Row = {
+      setUrl: string;
+      idsPct: number | null;
+      listRows: number | null;
+      listIdRows: number | null;
+    };
+    const queue = async (qs: string) => {
+      const r = await app.request(`http://x/ui/api/mkvid/queue${qs}`, {}, env);
+      expect(r.status, qs).toBe(200);
+      return ((await r.json()) as { rows: Row[] }).rows;
+    };
+    const byName = Object.fromEntries((await queue("")).map((r) => [r.setUrl.split("/").pop(), r]));
+    expect(byName.full).toMatchObject({ idsPct: 100, listRows: 10, listIdRows: 0 });
+    expect(byName.half).toMatchObject({ idsPct: 50, listRows: 10, listIdRows: 5 });
+    expect(byName.most).toMatchObject({ idsPct: 89, listRows: 48, listIdRows: 5 });
+    expect(byName.nolist).toMatchObject({ idsPct: null, listRows: null, listIdRows: null });
+    const names = (rows: Row[]) => rows.map((r) => r.setUrl.split("/").pop());
+    expect(names(await queue("?sort=idsPct")).slice(0, 3)).toEqual(["half", "most", "full"]);
+    expect(names(await queue("?f.idsPct=gte:75")).sort()).toEqual(["full", "most"]);
+    // The finished list has no such column.
+    const fin = await app.request("http://x/ui/api/mkvid/finished?sort=idsPct", {}, env);
+    expect(fin.status).toBe(400);
+  });
+
   it("a filter the table API does not know is a 400, not an empty list", async () => {
     const env = makeEnv({ DEV_BYPASS_CF_ACCESS: "1" });
     for (const qs of [

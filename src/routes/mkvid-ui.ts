@@ -62,7 +62,7 @@ import { dbOf } from "../lib/db";
 
 export const mkvidUiApp = new Hono<{ Bindings: Env; Variables: { cfAccessEmail: string } }>();
 
-/** The queue's rows also carry the stored list's cue-time counts (mkvid_request_tracks), when it has one. */
+/** The queue's rows also carry the stored list's cue-time and ID counts (mkvid_request_tracks), when it has one. */
 type QueueDbRow = MkvidRow & {
   position?: number | null;
   timed_pct?: number | null;
@@ -70,6 +70,9 @@ type QueueDbRow = MkvidRow & {
   base_rows?: number | null;
   apple_cues?: number | null;
   list_checked_at?: number | null;
+  ids_pct?: number | null;
+  list_rows?: number | null;
+  list_id_rows?: number | null;
 };
 
 /** The columns both lists share (stored seconds; filters take unix ms like every datetime). Each list adds its own `status`. */
@@ -99,12 +102,16 @@ const COLUMNS: Record<string, TableColumn<QueueDbRow>> = {
  * Each row also gets its readiness state at `now` as `ready_state`: the list's `status` column.
  * `timed_pct` is the share of the stored list's base rows that have a cue time, in whole percent
  * rounded down (so a held 89.6 % never reads 90), as of the list's last save: the `timedPct` column.
+ * `ids_pct` is the share of the stored list's rows that are identified (not ID rows: `id_rows`
+ * counts the rows with `isId`, lib/mkvid.ts toMkvidTracks), rounded down the same way: the `idsPct` column.
  */
 export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
   return {
     from: `(SELECT r.*, ROW_NUMBER() OVER (ORDER BY r.sort_key DESC, r.created_at DESC, r.rowid ASC) AS position, ${readinessStateSql(now)} AS ready_state,
              CASE WHEN t.base_rows > 0 THEN t.timed_rows * 100 / t.base_rows END AS timed_pct,
-             t.timed_rows AS timed_rows, t.base_rows AS base_rows, t.apple_cues AS apple_cues, t.scraped_at AS list_checked_at
+             t.timed_rows AS timed_rows, t.base_rows AS base_rows, t.apple_cues AS apple_cues, t.scraped_at AS list_checked_at,
+             CASE WHEN t.track_count > 0 AND t.id_rows IS NOT NULL THEN (t.track_count - t.id_rows) * 100 / t.track_count END AS ids_pct,
+             t.track_count AS list_rows, t.id_rows AS list_id_rows
       FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id WHERE r.status = 'pending')`,
     primaryKey: "id",
     defaultSort: "position",
@@ -113,6 +120,7 @@ export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
       status: { sql: "ready_state", type: "enum", options: MKVID_READINESS_STATES },
       position: { type: "number" },
       timedPct: { sql: "timed_pct", type: "number" },
+      idsPct: { sql: "ids_pct", type: "number" },
     },
   };
 }
@@ -166,6 +174,9 @@ async function requestTable(
             baseRows: r.base_rows == null ? null : Number(r.base_rows),
             appleCues: Number(r.apple_cues ?? 0),
             listCheckedAt: r.list_checked_at == null ? null : Number(r.list_checked_at),
+            idsPct: r.ids_pct == null ? null : Number(r.ids_pct),
+            listRows: r.list_rows == null ? null : Number(r.list_rows),
+            listIdRows: r.list_id_rows == null ? null : Number(r.list_id_rows),
           },
   }));
   const readiness = await readinessFor(

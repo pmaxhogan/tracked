@@ -98,6 +98,9 @@ function answers(url: string): Response {
           baseRows: 48,
           appleCues: 42,
           listCheckedAt: NOW - 3600,
+          idsPct: 89,
+          listRows: 48,
+          listIdRows: 5,
         }),
         WAITING("r4", 8),
       ]),
@@ -322,6 +325,10 @@ describe("mkvid page tables", () => {
       'data-tip="43 of 48 tracks have a cue time (42 from Apple Music), checked ',
     );
     expect(get("fin-head").innerHTML).not.toContain("Timed");
+    // The IDs column: the list's identified share, the counts in its tooltip.
+    expect(get("q-head").innerHTML).toContain(">IDs<");
+    expect(q).toContain('data-tip="43 of 48 tracks are identified, 5 still ID, checked ');
+    expect(get("fin-head").innerHTML).not.toContain(">IDs<");
     expect(get("fin-body").innerHTML).toContain('href="https://youtu.be/abcdefghijk"');
     expect(get("old-body").innerHTML).toContain("oldvid00001");
     expect(get("mk-n-queue").textContent).toBe("3");
