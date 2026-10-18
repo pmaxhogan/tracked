@@ -64,6 +64,7 @@ type MkvidListTrack = {
   artworkUrl?: unknown;
   isId?: unknown;
   layered?: unknown;
+  cueFrom?: unknown;
 };
 
 const str = (x: unknown) => (typeof x === "string" ? x.trim() : "");
@@ -155,7 +156,8 @@ export async function backfillSearch(
         title,
         label: null,
         artworkUrl: usableImageUrl(typeof t.artworkUrl === "string" ? t.artworkUrl : null),
-        cueSeconds: typeof t.cueSeconds === "number" ? t.cueSeconds : null,
+        // An audio-estimated cue (lib/audio-cues.ts) is mkvid's guess, not the set page's: not indexed.
+        cueSeconds: typeof t.cueSeconds === "number" && t.cueFrom !== "audio" ? t.cueSeconds : null,
         layered: t.layered === true,
       });
     }

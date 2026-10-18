@@ -218,6 +218,7 @@ describe("/mkvid routes", () => {
       verifiedLists: true,
       trackUploads: true,
       presaveSearch: true,
+      audioCues: true,
       uploadProjects: true,
       recreateStyle: "scene",
       counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0, banned: 0 },

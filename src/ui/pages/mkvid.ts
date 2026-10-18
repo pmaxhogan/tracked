@@ -104,6 +104,7 @@ const CSS = /* css */ `
   .mk-meta { color: var(--muted); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mk-meta .why, .mk-dl .why { color: var(--warn); }
   .mk-meta .why.ready, .mk-dl .why.ready { color: var(--ok); }
+  .mk-meta .why.audio, .mk-dl .why.audio { color: var(--info); }
   .mk-meta .flag { color: var(--danger); }
   .mk-watch { font-size: var(--fs-sm); white-space: nowrap; flex: none; }
   .mk-acts { display: flex; gap: 2px; flex: none; }
@@ -440,7 +441,8 @@ ${MKVID_STATE_JS}
   // The Queue's Timed cell: the share of tracks with a cue time in the list from the set page's last check.
   function timedCell(r) {
     if (r.timedPct == null) return nil;
-    const apple = r.appleCues > 0 ? ' (' + r.appleCues + ' from Apple Music)' : '';
+    const from = [r.appleCues > 0 ? r.appleCues + ' from Apple Music' : '', r.audioCues > 0 ? r.audioCues + ' estimated from audio' : ''].filter(Boolean);
+    const apple = from.length ? ' (' + from.join(', ') + ')' : '';
     const tip = r.timedRows + ' of ' + r.baseRows + ' tracks have a cue time' + apple + (r.listCheckedAt ? ', checked ' + rel(r.listCheckedAt) : '') + '.';
     return '<span' + TK.tip(tip) + '>' + esc(r.timedPct) + '%</span>';
   }

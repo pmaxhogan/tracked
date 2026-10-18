@@ -15,7 +15,21 @@ export const MKVID_STATE_JS = /* js */ `
   // Why one waiting set is (not) next, as HTML. Capped only matters for a set
   // that is otherwise ready; the caller says whether today's caps are used.
   function mkWhy(rd, short, capped) {
-    return mkWhyState(rd, short, capped) + mkApple(rd);
+    return mkWhyState(rd, short, capped) + mkApple(rd) + mkAudio(rd);
+  }
+
+  // The audio estimate's hint (lib/audio-backstop.ts): how many cues were
+  // estimated from audio, or that it is running or will retry. Information
+  // only (it retries by itself): never red.
+  function mkAudio(rd) {
+    const a = rd && rd.audio;
+    if (!a) return '';
+    let h = '';
+    if (a.cues > 0) h += ' <span class="why audio"' + TK.tip('These cue times were missing on 1001tracklists and were estimated by matching the audio of each track against the recording (typically within 30 s). Only confident rows are used, and a real cue always wins. ' + (a.note || '')) + '>' + TK.esc(a.cues) + ' cue' + (a.cues === 1 ? '' : 's') + ' from audio</span>';
+    if (a.state === 'running') h += ' <span class="why audio"' + TK.tip('mkvid is matching the audio of the tracks against the recording to estimate the missing cue times. This can take hours. ' + (a.note || '')) + '>estimating cues from audio</span>';
+    else if (a.state === 'retrying') h += ' <span class="why audio-wait"' + TK.tip('The last audio estimate could not finish and is tried again by itself. ' + (a.note || '')) + '>audio estimate retries ' + (a.nextAt ? untilTime(a.nextAt) : 'later') + '</span>';
+    else if (a.state === 'done' && a.cues === 0 && rd.state === 'untimed') h += ' <span class="why audio"' + TK.tip('The audio estimate ran but no track was placed confidently. ' + (a.note || '')) + '>audio placed none</span>';
+    return h;
   }
 
   // The Apple Music backstop's hint (lib/apple-backstop.ts): how many cues came

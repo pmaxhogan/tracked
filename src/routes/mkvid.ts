@@ -26,7 +26,7 @@
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used; `youtube_quota` = its upload project is out of quota: the same,
  *                         handed out again after 10 min (to another project).
- *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
+ *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
  *                         `uploadProjects: true` = claims take any project key and `projects` (an mkvid offers
  *                         only primary / shared until it sees it)
  *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
@@ -107,6 +107,8 @@ mkvidApp.get("/health", async (c) => {
     trackUploads: true,
     // This Worker serves pre-save match searches at /mkvid/presave/* (routes/mkvid-presave.ts).
     presaveSearch: true,
+    // This Worker serves audio cue estimation for held sets at /mkvid/audio/* (routes/mkvid-audio.ts).
+    audioCues: true,
     // Claims take any upload project key, plus mkvid's `projects` report (lib/mkvid.ts mkvidProjects).
     uploadProjects: true,
     // Recreations go only to an mkvid whose claim says this style.

@@ -19,6 +19,8 @@ import { dbOf, parseJson } from "./db";
 import { errorFields, type Logger } from "./log";
 import { getAppSettings } from "./app-settings";
 import { planAppleCues, withoutAppleCues, type CueRow } from "./apple-cues";
+import { withoutAudioCues } from "./audio-cues";
+import { audioFill, AUDIO_DROPPED_NOTE } from "./audio-backstop";
 import { fetchAppleAlbum, type AppleFetchDeps } from "./apple-album";
 import {
   DISCOVERED_SQL,
@@ -61,6 +63,9 @@ type StoredRow = {
   apple_album_url: string | null;
   apple_cues: number | null;
   apple_note: string | null;
+  audio_estimates: string | null;
+  audio_stats: string | null;
+  audio_cues: number | null;
   replaced_seconds: number | null;
   audio_max_seconds: number | null;
   set_date: string | null;
@@ -84,6 +89,7 @@ export async function applyAppleCuesToRequest(
       `SELECT r.id AS id, r.set_url AS set_url, r.replaces_video_id AS replaces_video_id, t.tracks AS tracks, t.trusted AS trusted,
               r.set_date AS set_date, ${DISCOVERED_SQL} AS discovered,
               t.scraped_at AS scraped_at, t.apple_album_url AS apple_album_url, t.apple_cues AS apple_cues, t.apple_note AS apple_note,
+              t.audio_estimates AS audio_estimates, t.audio_stats AS audio_stats, t.audio_cues AS audio_cues,
               (SELECT vm.duration_seconds FROM video_meta vm WHERE vm.video_id = r.replaces_video_id) AS replaced_seconds,
               (SELECT f.audio_max_seconds FROM set_media_facts f WHERE f.set_url = r.set_url) AS audio_max_seconds
          FROM mkvid_requests r JOIN mkvid_request_tracks t ON t.request_id = r.id WHERE r.id = ?`,
@@ -100,27 +106,35 @@ export async function applyAppleCuesToRequest(
   if (!r) return none("no_list");
   const stored = parseJson<CueRow[] | null>(r.tracks, null);
   if (!Array.isArray(stored) || !stored.length) return none("no_list");
-  const reset = withoutAppleCues(stored);
+  // Apple and audio cues both come out: Apple plans on the 1001tl cues alone, audio fills after it (lib/audio-backstop.ts).
+  const reset = withoutAudioCues(withoutAppleCues(stored));
   const oldSet = isOldSet(setAgeReference(r.set_date, Number(r.discovered)));
 
   // Store a result, only over the list it was computed from (a save in between wins).
+  // The stored audio estimates fill what the 1001tl and Apple cues leave (dropped once the 1001tl cues reach 90 %).
   const store = async (
-    tracks: CueRow[],
+    appleTracks: CueRow[],
     filled: number,
     note: string | null,
     albumUrl: string | null,
   ) => {
+    const audio = audioFill(appleTracks, r);
+    const tracks = audio.tracks;
     const { baseRows, timedRows } = timedRowCounts(tracks);
     const changed =
       JSON.stringify(tracks) !== r.tracks ||
       Number(r.apple_cues ?? 0) !== filled ||
+      Number(r.audio_cues ?? 0) !== audio.filled ||
+      audio.drop ||
       (r.apple_note ?? null) !== note ||
       (albumUrl !== null && albumUrl !== r.apple_album_url);
     if (changed)
       await db
         .prepare(
           `UPDATE mkvid_request_tracks SET tracks = ?, base_rows = ?, timed_rows = ?, apple_cues = ?, apple_note = ?,
-                  apple_album_url = COALESCE(?, apple_album_url)
+                  apple_album_url = COALESCE(?, apple_album_url), audio_cues = ?,
+                  audio_estimates = CASE WHEN ? = 1 THEN NULL ELSE audio_estimates END,
+                  audio_note = CASE WHEN ? = 1 THEN ? ELSE audio_note END
             WHERE request_id = ? AND scraped_at = ? AND tracks = ?`,
         )
         .bind(
@@ -130,6 +144,10 @@ export async function applyAppleCuesToRequest(
           filled,
           note,
           albumUrl,
+          audio.filled,
+          audio.drop ? 1 : 0,
+          audio.drop ? 1 : 0,
+          AUDIO_DROPPED_NOTE,
           r.id,
           r.scraped_at,
           r.tracks,

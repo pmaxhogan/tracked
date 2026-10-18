@@ -21,6 +21,7 @@ import { noFraming, sameOriginJson } from "./middleware/same-origin";
 import { mkvidApp } from "./routes/mkvid";
 import { mkvidTrackApp, MkvidTrackClaimBody, MkvidTrackClaimResponse } from "./routes/mkvid-track";
 import { mkvidPresaveApp } from "./routes/mkvid-presave";
+import { mkvidAudioApp } from "./routes/mkvid-audio";
 import { poolUiApp } from "./routes/pool-ui";
 import { MkvidClaimBody, MkvidClaimResponse } from "./schemas";
 import { bearerAuth } from "./middleware/auth";
@@ -132,6 +133,7 @@ app.route("/subscriptions", legacyApp);
 // Work queue for mkvid (the NAS render/upload service). Gated by its own
 // MKVID_TOKEN inside the sub-app, so like /ui it must be skipped by
 // the API_TOKEN wildcard gate below.
+app.route("/mkvid/audio", mkvidAudioApp); // audio cue estimation for held sets (routes/mkvid-audio.ts), same MKVID_TOKEN; ahead of /mkvid
 app.route("/mkvid/presave", mkvidPresaveApp); // pre-save match searches (routes/mkvid-presave.ts), same MKVID_TOKEN; ahead of /mkvid
 app.route("/mkvid/track", mkvidTrackApp); // mkvid's track-upload queue (routes/mkvid-track.ts), same MKVID_TOKEN; ahead of /mkvid
 app.route("/mkvid", mkvidApp);

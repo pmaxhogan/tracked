@@ -69,6 +69,7 @@ type QueueDbRow = MkvidRow & {
   timed_rows?: number | null;
   base_rows?: number | null;
   apple_cues?: number | null;
+  audio_cues?: number | null;
   list_checked_at?: number | null;
   ids_pct?: number | null;
   list_rows?: number | null;
@@ -109,7 +110,7 @@ export function mkvidQueueTable(now: number): TableDef<QueueDbRow> {
   return {
     from: `(SELECT r.*, ROW_NUMBER() OVER (ORDER BY r.sort_key DESC, r.created_at DESC, r.rowid ASC) AS position, ${readinessStateSql(now)} AS ready_state,
              CASE WHEN t.base_rows > 0 THEN t.timed_rows * 100 / t.base_rows END AS timed_pct,
-             t.timed_rows AS timed_rows, t.base_rows AS base_rows, t.apple_cues AS apple_cues, t.scraped_at AS list_checked_at,
+             t.timed_rows AS timed_rows, t.base_rows AS base_rows, t.apple_cues AS apple_cues, t.audio_cues AS audio_cues, t.scraped_at AS list_checked_at,
              CASE WHEN t.track_count > 0 AND t.id_rows IS NOT NULL THEN (t.track_count - t.id_rows) * 100 / t.track_count END AS ids_pct,
              t.track_count AS list_rows, t.id_rows AS list_id_rows
       FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id WHERE r.status = 'pending')`,
@@ -173,6 +174,7 @@ async function requestTable(
             timedRows: r.timed_rows == null ? null : Number(r.timed_rows),
             baseRows: r.base_rows == null ? null : Number(r.base_rows),
             appleCues: Number(r.apple_cues ?? 0),
+            audioCues: Number(r.audio_cues ?? 0),
             listCheckedAt: r.list_checked_at == null ? null : Number(r.list_checked_at),
             idsPct: r.ids_pct == null ? null : Number(r.ids_pct),
             listRows: r.list_rows == null ? null : Number(r.list_rows),

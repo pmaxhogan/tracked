@@ -32,6 +32,7 @@ import type { Env } from "../types";
 import { dbOf } from "./db";
 import { isVerified } from "./verification";
 import { setDateFromUrl } from "./pool-settings";
+import { audioCueView, type AudioCueView } from "./audio-cues";
 
 /** A verified list with ID rows is held until the set is this old. */
 export const ID_WAIT_SECONDS = 7 * 86400;
@@ -151,9 +152,14 @@ export type MkvidReadiness =
   /** A failed attempt's retry backoff. */
   | { state: "backoff"; until: number };
 
-/** Readiness as the panel shows it: plus the Apple Music backstop's hint (lib/apple-backstop.ts) when it ran. */
+/**
+ * Readiness as the panel shows it: plus the Apple Music backstop's hint
+ * (lib/apple-backstop.ts) when it ran, and the audio estimate's
+ * (lib/audio-backstop.ts) when it ran or is running.
+ */
 export type MkvidReadinessView = MkvidReadiness & {
   apple?: { cues: number; note: string | null };
+  audio?: AudioCueView;
 };
 
 /** What readiness is computed from: the request plus its stored list's summary. */
@@ -273,7 +279,9 @@ export async function readinessFor(
   const res = await dbOf(env)
     .prepare(
       `SELECT r.id AS id, ${DISCOVERED_SQL} AS discovered, t.trusted AS trusted, t.track_count AS n, t.id_rows AS id_rows,
-              t.base_rows AS base_rows, t.timed_rows AS timed_rows, t.apple_cues AS apple_cues, t.apple_note AS apple_note
+              t.base_rows AS base_rows, t.timed_rows AS timed_rows, t.apple_cues AS apple_cues, t.apple_note AS apple_note,
+              t.audio_cues AS audio_cues, t.audio_note AS audio_note, t.audio_claimed_at AS audio_claimed_at,
+              t.audio_next_at AS audio_next_at, t.audio_attempts AS audio_attempts, t.audio_ran_at AS audio_ran_at
          FROM mkvid_requests r LEFT JOIN mkvid_request_tracks t ON t.request_id = r.id
         WHERE r.id IN (${requests.map(() => "?").join(", ")})`,
     )
@@ -288,6 +296,12 @@ export async function readinessFor(
       timed_rows: number | null;
       apple_cues: number | null;
       apple_note: string | null;
+      audio_cues: number | null;
+      audio_note: string | null;
+      audio_claimed_at: number | null;
+      audio_next_at: number | null;
+      audio_attempts: number | null;
+      audio_ran_at: number | null;
     }>();
   const byId = new Map(res.results.map((x) => [x.id, x]));
   for (const r of requests) {
@@ -296,6 +310,8 @@ export async function readinessFor(
       Number(x?.apple_cues ?? 0) > 0 || x?.apple_note
         ? { apple: { cues: Number(x?.apple_cues ?? 0), note: x?.apple_note ?? null } }
         : {};
+    const audioView = x ? audioCueView(x, now) : null;
+    const audio = audioView ? { audio: audioView } : {};
     out.set(r.id, {
       ...mkvidReadiness(
         {
@@ -314,6 +330,7 @@ export async function readinessFor(
         now,
       ),
       ...apple,
+      ...audio,
     });
   }
   return out;

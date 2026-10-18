@@ -17,14 +17,20 @@ import { formatTime } from "./timestamp";
 /** One Apple album track: its name, artist when the source names one, and its length. */
 export type AppleTrack = { name: string; artist: string | null; seconds: number };
 
-/** The fields of a stored mkvid row the pass reads (MkvidTrack). `cueFrom` marks a cue this pass filled. */
+/**
+ * The fields of a stored mkvid row the pass reads (MkvidTrack). `cueFrom` marks
+ * a cue a backstop filled: "apple" this pass, "audio" the audio estimate
+ * (lib/audio-cues.ts, which also sets `cueConfidence`). Only an unmarked cue is
+ * a real 1001tl one.
+ */
 export type CueRow = {
   cueSeconds: number | null;
   artist: string | null;
   title: string | null;
   isId: boolean;
   layered: boolean;
-  cueFrom?: "apple";
+  cueFrom?: "apple" | "audio";
+  cueConfidence?: number;
 };
 
 export type AppleCueOptions = {
@@ -170,7 +176,7 @@ export function tolerance(seconds: number, pct: number, minSeconds: number): num
 }
 
 const realCue = (r: CueRow): number | null =>
-  r.cueFrom !== "apple" && typeof r.cueSeconds === "number" && Number.isFinite(r.cueSeconds)
+  r.cueFrom === undefined && typeof r.cueSeconds === "number" && Number.isFinite(r.cueSeconds)
     ? r.cueSeconds
     : null;
 

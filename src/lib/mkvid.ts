@@ -718,10 +718,14 @@ export async function getMkvidTracks(
     )?.set_url;
   const verified = setUrl ? await isVerified(env, setUrl) : false;
   return {
-    // The Apple backstop's marker (lib/apple-cues.ts) stays in D1: mkvid gets the plain wire format.
+    // The backstops' markers (Apple, lib/apple-cues.ts; audio, lib/audio-cues.ts) stay in D1: mkvid gets the plain wire format.
     tracks: tracks.map((t) => {
-      if (!("cueFrom" in t)) return t;
-      const { cueFrom: _marker, ...rest } = t as MkvidTrack & { cueFrom?: string };
+      if (!("cueFrom" in t) && !("cueConfidence" in t)) return t;
+      const {
+        cueFrom: _marker,
+        cueConfidence: _confidence,
+        ...rest
+      } = t as MkvidTrack & { cueFrom?: string; cueConfidence?: number };
       return rest;
     }),
     tracksTrusted: Number(row.trusted) === 1 && verified && tracks.length > 0,
