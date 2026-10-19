@@ -228,7 +228,31 @@ describe("/mkvid routes", () => {
       ],
       dailyClaims: 1,
       dailyClaimCap: 30,
+      hearthisDownloadsPerHour: null,
     });
+  });
+
+  it("/mkvid/health carries the hearthis.at downloads-an-hour setting (null = mkvid's own)", async () => {
+    const env = makeEnv();
+    const read = async () =>
+      (
+        (await (
+          await app.request(
+            "http://x/mkvid/health",
+            { headers: { Authorization: "Bearer mk-secret" } },
+            env,
+          )
+        ).json()) as { hearthisDownloadsPerHour: number | null }
+      ).hearthisDownloadsPerHour;
+    expect(await read()).toBeNull();
+    expect((await updateAppSettings(env, { mkvid: { hearthisDownloadsPerHour: 0 } })).ok).toBe(
+      true,
+    );
+    expect(await read()).toBe(0);
+    expect((await updateAppSettings(env, { mkvid: { hearthisDownloadsPerHour: 8 } })).ok).toBe(
+      true,
+    );
+    expect(await read()).toBe(8);
   });
 
   it("/mkvid/job renews the claim of a request still claimed for that job, without moving it in the lists", async () => {

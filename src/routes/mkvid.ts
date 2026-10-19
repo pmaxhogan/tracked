@@ -26,7 +26,9 @@
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used; `youtube_quota` = its upload project is out of quota: the same,
  *                         handed out again after 10 min (to another project).
- *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap }
+ *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap, hearthisDownloadsPerHour }
+ *                         `hearthisDownloadsPerHour` = the setting mkvid.hearthisDownloadsPerHour (null = mkvid's
+ *                         own HEARTHIS_DOWNLOADS_PER_HOUR, else 3); mkvid adopts it on every health read
  *                         `uploadProjects: true` = claims take any project key and `projects` (an mkvid offers
  *                         only primary / shared until it sees it)
  *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
@@ -44,6 +46,7 @@ import { getAccessToken, GoogleOAuthRefreshFailed } from "../lib/google-oauth";
 import { makeLogger, errorFields } from "../lib/log";
 import { noteQuotaOut } from "../lib/youtube-quota";
 import { deleteOldVideo, RECREATE_STYLE } from "../lib/mkvid-recreate";
+import { getAppSettings } from "../lib/app-settings";
 import {
   attachMkvidJob,
   claimMkvidRequest,
@@ -117,6 +120,7 @@ mkvidApp.get("/health", async (c) => {
     accounts,
     dailyClaims: accounts.reduce((n, a) => n + a.used, 0),
     dailyClaimCap: accounts.reduce((n, a) => n + a.cap, 0),
+    hearthisDownloadsPerHour: (await getAppSettings(c.env)).mkvid.hearthisDownloadsPerHour,
   });
 });
 

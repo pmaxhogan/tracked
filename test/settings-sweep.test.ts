@@ -179,6 +179,7 @@ describe("app settings", () => {
       privacy: "unlisted",
       goneCheckHours: 6,
       removedBurstCount: 3,
+      hearthisDownloadsPerHour: null,
     });
     expect(DEFAULT_APP_SETTINGS.playlists.shortToleranceMinutes * 60).toBe(
       SHORTER_THAN_CUE_TOLERANCE_SECONDS,
@@ -209,9 +210,19 @@ describe("app settings", () => {
     expect(JSON.parse((await env.SUBS.get(APP_SETTINGS_KEY))!).mkvid.dailyClaimCap).toBe(0);
     const back = await updateAppSettings(env, { mkvid: { dailyClaimCap: null } });
     expect(back.ok && back.settings.mkvid.dailyClaimCap).toBeNull();
+    // hearthis.at downloads an hour: 0 pauses, null = mkvid's own.
+    const hearthis = await updateAppSettings(env, { mkvid: { hearthisDownloadsPerHour: 0 } });
+    expect(hearthis.ok && hearthis.settings.mkvid.hearthisDownloadsPerHour).toBe(0);
+    const hearthisBack = await updateAppSettings(env, {
+      mkvid: { hearthisDownloadsPerHour: null },
+    });
+    expect(hearthisBack.ok && hearthisBack.settings.mkvid.hearthisDownloadsPerHour).toBeNull();
     for (const bad of [
       { mkvid: { maxAttempts: 0 } },
       { mkvid: { dailyClaimCap: -1 } },
+      { mkvid: { hearthisDownloadsPerHour: -1 } },
+      { mkvid: { hearthisDownloadsPerHour: 1.5 } },
+      { mkvid: { hearthisDownloadsPerHour: 101 } },
       { playlists: { massRemovalRatio: 2 } },
       { retention: { auditDays: 0 } },
       { playlists: { sweepDryRun: "yes" } },
@@ -264,7 +275,16 @@ describe("app settings", () => {
       ),
     ).toBe(false);
     const eff = effectiveAppSettings(env, DEFAULT_APP_SETTINGS);
-    expect(eff.mkvid).toEqual({ dailyClaimCap: 6, sharedDailyClaimCap: 3, claimTtlMinutes: 10 });
+    expect(eff.mkvid).toEqual({
+      dailyClaimCap: 6,
+      sharedDailyClaimCap: 3,
+      claimTtlMinutes: 10,
+      hearthisDownloadsPerHour: 3,
+    });
+    expect(
+      effectiveAppSettings(env, app({ mkvid: { hearthisDownloadsPerHour: 0 } })).mkvid
+        .hearthisDownloadsPerHour,
+    ).toBe(0);
     expect(eff.playlists).toEqual({
       sweepDryRun: true,
       sweepDailyRemovals: 40,
@@ -332,6 +352,7 @@ describe("settings pages", () => {
   it.each([
     ["/ui/pool/settings", SETTINGS_PAGE_HTML, "retry.maxSetAttemptsPerDay", "navTimeoutSeconds"],
     ["/ui/settings", SETTINGS_PAGE.html, "mkvid.dailyClaimCap", "retention.auditDays"],
+    ["/ui/settings", SETTINGS_PAGE.html, "mkvid.hearthisDownloadsPerHour", "mkvid.maxAttempts"],
   ])("%s: the inline scripts parse and carry the new fields", (_, html, a, b) => {
     const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(
       (m) => m[1],

@@ -15,6 +15,7 @@ import type { Env } from "../types";
 import { makeLogger } from "../lib/log";
 import {
   DEFAULT_APP_SETTINGS,
+  DEFAULT_HEARTHIS_DOWNLOADS_PER_HOUR,
   getAppSettings,
   updateAppSettings,
   type AppSettings,
@@ -30,6 +31,9 @@ export function effectiveAppSettings(env: Env, s: AppSettings) {
       dailyClaimCap: dailyClaimCap(env, "primary", s),
       sharedDailyClaimCap: dailyClaimCap(env, "shared", s),
       claimTtlMinutes: Math.round(claimTtl(env, s) / 60),
+      // mkvid's env var is not visible here: blank shows mkvid's code default.
+      hearthisDownloadsPerHour:
+        s.mkvid.hearthisDownloadsPerHour ?? DEFAULT_HEARTHIS_DOWNLOADS_PER_HOUR,
     },
     playlists: {
       sweepDryRun: sweep.dryRun,

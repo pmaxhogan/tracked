@@ -24,6 +24,9 @@ const MEMO_MS = 30_000;
 /** The least a day's reorder budget can usefully be: two moves (50 each) and the listings around them. Below it nothing would ever move. */
 export const ORDER_MIN_DAILY_UNITS = 110;
 
+/** mkvid's own default for hearthis.at downloads an hour (its lib/hearthis.ts), when neither the setting nor its env var is set. */
+export const DEFAULT_HEARTHIS_DOWNLOADS_PER_HOUR = 3;
+
 export const AppSettingsSchema = z.object({
   mkvid: z.object({
     /** Uploads a quota day through mkvid's own project; null = MKVID_DAILY_CLAIM_CAP, else 24. 0 pauses. */
@@ -73,6 +76,12 @@ export const AppSettingsSchema = z.object({
       .min(0)
       .max(50)
       .refine((n) => n !== 1, { message: "0 (never) or 2 to 50" }),
+    /**
+     * hearthis.at downloads mkvid makes per rolling hour (sets and audio cue
+     * jobs); sent on /mkvid/health, which mkvid reads every poll. null =
+     * mkvid's HEARTHIS_DOWNLOADS_PER_HOUR, else 3. 0 pauses hearthis.at.
+     */
+    hearthisDownloadsPerHour: z.number().int().min(0).max(100).nullable(),
   }),
   playlists: z.object({
     /** The daily playlist sweep only reports; null = PLAYLIST_SWEEP_DRY_RUN (unset = true). */
@@ -247,6 +256,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     privacy: "unlisted",
     goneCheckHours: 6,
     removedBurstCount: 3,
+    hearthisDownloadsPerHour: null,
   },
   playlists: {
     sweepDryRun: null,

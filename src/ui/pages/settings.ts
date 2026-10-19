@@ -46,6 +46,15 @@ const APP_GROUPS: FormGroup[] = [
         nullable: true,
       },
       {
+        path: "mkvid.hearthisDownloadsPerHour",
+        label: "hearthis.at downloads an hour",
+        help: "Rolling hour, sets and audio cue jobs together (an audio cue job needs 2 free). A hearthis set over it waits in the queue, no attempt used. 0 pauses hearthis.at. Blank = mkvid's HEARTHIS_DOWNLOADS_PER_HOUR, else 3.",
+        min: 0,
+        max: 100,
+        step: 1,
+        nullable: true,
+      },
+      {
         path: "mkvid.maxAttempts",
         label: "Attempts before a request fails",
         help: "Default 3.",
