@@ -13,7 +13,11 @@
  *   - `drainLinkPrewarm`: the 5-minute cron (src/index.ts) looks up at most
  *     `linkPrewarm.maxPerTick` of them, one at a time, at pool priority
  *     `backfill` (the lowest: tlpool spends that share last and refuses it
- *     first). An id already cached is dropped without a fetch. A pool refusal
+ *     first). The set page that queued an id is its Referer, and rows queued
+ *     from one set share `queued_at`, so a tick's lookups come from one
+ *     tracklist; tlpool makes several of them from one page visit (one
+ *     context page view) instead of opening the site for each. An id
+ *     already cached is dropped without a fetch. A pool refusal
  *     ends the drain and charges the row nothing; a lookup that failed
  *     otherwise is not cached (fetchAllMediaLinks) and waits FAIL_BACKOFF x
  *     attempts, dropped after MAX_ATTEMPTS (the phone can still look it up).
@@ -144,10 +148,10 @@ export async function drainLinkPrewarm(
     const db = env.DB;
     const { results } = await db
       .prepare(
-        "SELECT track_id, attempts, next_at FROM link_prewarm WHERE next_at <= ? ORDER BY next_at, queued_at LIMIT ?",
+        "SELECT track_id, set_url, attempts, next_at FROM link_prewarm WHERE next_at <= ? ORDER BY next_at, queued_at LIMIT ?",
       )
       .bind(nowSec, Math.min(SCAN_MAX, cap * SCAN_PER_CAP))
-      .all<{ track_id: string; attempts: number; next_at: number }>();
+      .all<{ track_id: string; set_url: string | null; attempts: number; next_at: number }>();
     if (results.length === 0) return { ...out, skipped: "nothing_due" };
     for (const row of results) {
       if (out.fetched + out.failed >= cap) break;
@@ -168,6 +172,7 @@ export async function drainLinkPrewarm(
         priority: "backfill",
         log,
         maxWaitSeconds: POOL_WAIT_SECONDS,
+        setUrl: row.set_url,
       });
       if (r.ok) {
         await db.prepare("DELETE FROM link_prewarm WHERE track_id = ?").bind(id).run();

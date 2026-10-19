@@ -268,14 +268,36 @@ export type FetchAllMediaLinksResult =
     };
 
 /**
+ * The Referer for a medialink lookup: the tracklist page the track was seen
+ * on (where a visitor presses its player button), else the home page. tlpool
+ * opens that page first when the account's browser is not on the site yet.
+ */
+export function medialinkReferer(setUrl: string | null | undefined): string {
+  try {
+    const u = new URL(setUrl ?? "");
+    if (u.protocol === "https:" && u.hostname === "www.1001tracklists.com")
+      if (u.pathname.startsWith("/tracklist/")) return `${ORIGIN}${u.pathname}`;
+  } catch {
+    // not a URL: the home page
+  }
+  return ORIGIN + "/";
+}
+
+/**
  * One uncached medialink lookup through the pool (kind `medialink`, one
  * budgeted view). The classic `ml:v1:<id>` cache entry is refreshed with the
- * answer, never consulted. Never throws.
+ * answer, never consulted. `setUrl` (a tracklist the track is on) becomes the
+ * Referer (`medialinkReferer`). Never throws.
  */
 export async function fetchAllMediaLinks(
   env: Env,
   trackId: string,
-  opts: { priority?: PoolPriority; log?: Logger; maxWaitSeconds?: number } = {},
+  opts: {
+    priority?: PoolPriority;
+    log?: Logger;
+    maxWaitSeconds?: number;
+    setUrl?: string | null;
+  } = {},
 ): Promise<FetchAllMediaLinksResult> {
   const t0 = Date.now();
   const log = opts.log;
@@ -292,7 +314,7 @@ export async function fetchAllMediaLinks(
       headers: {
         "X-Requested-With": "XMLHttpRequest",
         Accept: "application/json,text/javascript,*/*;q=0.01",
-        Referer: ORIGIN + "/",
+        Referer: medialinkReferer(opts.setUrl),
       },
     });
     html = r.html;

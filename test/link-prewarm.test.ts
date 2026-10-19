@@ -23,7 +23,7 @@ import {
   prewarmIds,
 } from "../src/lib/link-prewarm";
 import { parseTracklist } from "../src/lib/tracklists1001";
-import { mediaLinksCacheKey } from "../src/lib/medialinks-all";
+import { medialinkReferer, mediaLinksCacheKey } from "../src/lib/medialinks-all";
 import { budgetHoldKey, TICK_BACKOFF_KEY } from "../src/lib/fetch-scheduler";
 import { DEFAULT_APP_SETTINGS, updateAppSettings } from "../src/lib/app-settings";
 import { makeLogger } from "../src/lib/log";
@@ -53,7 +53,7 @@ function makeEnv(): Env {
   } as unknown as Env;
 }
 
-type Asked = Array<{ id: string; priority: string; maxWaitSeconds: number }>;
+type Asked = Array<{ id: string; priority: string; maxWaitSeconds: number; referer?: string }>;
 /** tlpool answers each medialink with `answer(id)`: a body string, or a contract error object. */
 function stubPool(
   answer: (id: string) => string | { error: string; retryAfterSeconds?: number } = () => ML_FOUND,
@@ -68,9 +68,15 @@ function stubPool(
         url: string;
         priority: string;
         maxWaitSeconds: number;
+        headers?: Record<string, string>;
       };
       const id = new URL(body.url).searchParams.get("idItem")!;
-      asked.push({ id, priority: body.priority, maxWaitSeconds: body.maxWaitSeconds });
+      asked.push({
+        id,
+        priority: body.priority,
+        maxWaitSeconds: body.maxWaitSeconds,
+        referer: body.headers?.Referer,
+      });
       const a = answer(id);
       if (typeof a !== "string") return Response.json(a);
       return Response.json({
@@ -249,6 +255,23 @@ describe("drainLinkPrewarm", () => {
     });
   });
 
+  it("each lookup names the set page that queued it as its Referer (home when the row has none usable)", async () => {
+    const env = makeEnv();
+    await enqueueIds(env, ["1", "2"]);
+    await env.DB.prepare(
+      "INSERT INTO link_prewarm (track_id, set_url, queued_at, next_at) VALUES (?, ?, ?, ?)",
+    )
+      .bind("3", "https://evil.example/tracklist/x.html", NOW, NOW)
+      .run();
+    const asked = stubPool();
+    expect(await drainLinkPrewarm(env, log, NOW)).toMatchObject({ fetched: 3 });
+    expect(asked.map((a) => [a.id, a.referer])).toEqual([
+      ["1", SET],
+      ["2", SET],
+      ["3", "https://www.1001tracklists.com/"],
+    ]);
+  });
+
   it("a pool refusal ends the drain, charges the row nothing and keeps the rest queued; budget_exhausted holds the backfill share", async () => {
     const env = makeEnv();
     await enqueueIds(env, ["1", "2", "3"]);
@@ -379,5 +402,22 @@ describe("drainLinkPrewarm", () => {
     };
     expect(await drainLinkPrewarm(env, log, NOW)).toMatchObject({ read: 1, fetched: 0 });
     expect(asked).toHaveLength(0);
+  });
+});
+
+describe("medialinkReferer", () => {
+  it("is the tracklist page on the site (no query or hash), else the home page", () => {
+    expect(medialinkReferer(SET)).toBe(SET);
+    expect(medialinkReferer(`${OTHER_SET}?x=1#y`)).toBe(OTHER_SET);
+    for (const bad of [
+      null,
+      undefined,
+      "",
+      "not a url",
+      "http://www.1001tracklists.com/tracklist/a/b.html",
+      "https://1001tracklists.com.evil.example/tracklist/a/b.html",
+      "https://www.1001tracklists.com/dj/someone/index.html",
+    ])
+      expect(medialinkReferer(bad)).toBe("https://www.1001tracklists.com/");
   });
 });
