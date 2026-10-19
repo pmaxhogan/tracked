@@ -21,7 +21,11 @@ import {
   type RefreshSet,
   type TickItem,
 } from "../src/lib/fetch-scheduler";
-import { trackRefreshCandidates, type TrackRefreshCandidate } from "../src/lib/track-refresh";
+import {
+  runTrackRefresh,
+  trackRefreshCandidates,
+  type TrackRefreshCandidate,
+} from "../src/lib/track-refresh";
 import { labelFromTrackUrl, tickViewFromDb } from "../src/lib/scheduler-report";
 import { PoolPausedError } from "../src/lib/pool";
 import { _resetTallyForTests } from "../src/lib/ban-state";
@@ -362,10 +366,19 @@ describe("track refresh: in the tick", () => {
     await setup(env);
     await candidate(env, "1");
     const picked = await pickRefreshItems(env, S, 0, [], new Set(["dj"]), NOON);
+    expect(picked).toHaveLength(1);
+    // Another tick claims it between this one's pick and its lookup.
     await env.DB.prepare("UPDATE presave_candidates SET links_checked_at = ?")
       .bind(MS(NOON - 60))
       .run();
-    expect(picked).toHaveLength(1);
+    const out = await runTrackRefresh(
+      env,
+      { trackId: "1", url: trackUrl("1") },
+      { cooldownHours: S.refresh.trackCooldownHours, nowMs: MS(NOON), log: makeLogger() },
+    );
+    expect(out).toEqual({ outcome: "skipped", counted: false });
+    expect(await checkedAt(env, "1")).toBe(MS(NOON - 60));
+    // And the next tick does not pick it at all.
     const r = await runSchedulerTick(env, { random: always(0), now: NOON });
     expect(r.skipped).toBe("zero_draw");
     expect(mocked(fetchAllMediaLinks)).not.toHaveBeenCalled();
