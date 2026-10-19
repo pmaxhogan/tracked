@@ -275,7 +275,7 @@ const SCHED_GROUPS: FormGroup[] = [
     id: "sf-refresh",
     title: "Idle refresh",
     intro:
-      "When a tick has nothing else to do (or draws zero), it fetches the stalest known sets again at the lowest pool priority, so spare account budget finds changed lists: new cue times, identified IDs, new videos. Sets mkvid is waiting on go first.",
+      "When a tick has nothing else to do (or draws zero), it fetches the stalest known sets again at the lowest pool priority, so spare account budget finds changed lists: new cue times, identified IDs, new videos. Sets mkvid is waiting on go first; then sets and pre-save candidate tracks (their links) take turns, the staler first.",
     fields: [
       {
         path: "refresh.perDay",
@@ -305,6 +305,22 @@ const SCHED_GROUPS: FormGroup[] = [
         path: "refresh.mkvidCooldownHours",
         label: "Refresh a set mkvid waits on fetched more than",
         help: "Hours ago: held sets (too few cue times) find their times sooner. Default 24.",
+        unit: "h",
+        min: 1,
+        max: 1440,
+      },
+      {
+        path: "refresh.tracksPerDay",
+        label: "Track link lookups per day",
+        help: "Pre-save candidate tracks (a pre-save badge, no YouTube or Spotify link) looked up again, one medialink request each, taking turns with the sets once no set mkvid waits on is left. Counted in the refresh fetches per day too. A track that has its link now leaves the candidates. Default 150; 0 = sets only.",
+        min: 0,
+        max: 5000,
+        step: 1,
+      },
+      {
+        path: "refresh.trackCooldownHours",
+        label: "Look a candidate track up again after",
+        help: "Hours since a set fetch saw it or its last lookup (a failed lookup waits this too). Default 168 (a week).",
         unit: "h",
         min: 1,
         max: 1440,

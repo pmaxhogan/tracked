@@ -25,6 +25,7 @@ export const SCHEDULER_KINDS = [
   "recheck",
   "index_catchup",
   "refresh",
+  "track_refresh",
   "dj_backfill",
   "presave",
 ] as const;
@@ -64,6 +65,17 @@ export function redactText(s: string | null | undefined): string | null {
   return out;
 }
 
+/** A track page's label: the name part of `/track/<id>/<name>/index.html`, else the URL. */
+export function labelFromTrackUrl(u: string): string {
+  try {
+    const seg = new URL(u).pathname.split("/").filter(Boolean);
+    const name = seg[0] === "track" && seg[2] ? seg[2].replace(/[-_]+/g, " ").trim() : "";
+    return name || u;
+  } catch {
+    return u;
+  }
+}
+
 export type TickItemView = {
   kind: string;
   cls: string;
@@ -94,12 +106,17 @@ function viewOf(t: TickHistoryRow): TickView {
     error: redactText(t.error),
     items: (Array.isArray(t.items) ? t.items : []).map((x) => {
       const url = typeof x.url === "string" && x.url ? x.url : null;
+      const kind = String(x.kind ?? "");
       return {
-        kind: String(x.kind ?? ""),
+        kind,
         cls: String(x.cls ?? ""),
         slug: String(x.slug ?? ""),
         url,
-        label: url ? labelFromSetUrl(url) : null,
+        label: url
+          ? kind === "track_refresh"
+            ? labelFromTrackUrl(url)
+            : labelFromSetUrl(url)
+          : null,
         outcome: String(x.outcome ?? ""),
         stopReason: redactText(x.stopReason),
       };

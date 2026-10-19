@@ -32,7 +32,10 @@
  *   - idle refresh (fills the tick's free slots, `refresh`): the stalest
  *                  known sets fetched again so spare account budget finds
  *                  changed lists; sets mkvid waits on first. A zero draw
- *                  still gets one slot, so a tick rarely does nothing
+ *                  still gets one slot, so a tick rarely does nothing.
+ *                  Pre-save candidate tracks take turns with the sets
+ *                  (`track_refresh`, lib/track-refresh.ts: one medialink
+ *                  lookup each)
  *
  * Set pages still go through `syncOne` (lib/sync.ts) - playlist inserts,
  * swaps, mkvid queueing all stay there - with an explicit selection instead
@@ -87,6 +90,11 @@ import { getAppSettings } from "./app-settings";
 import { DISCOVERED_SQL, ID_WAIT_SECONDS, timedSql } from "./mkvid-readiness";
 import { getQuotaOut } from "./youtube-quota";
 import { duePresaves, presaveOnSetParsed, runScheduledPresave } from "./presave";
+import {
+  runTrackRefresh,
+  trackRefreshCandidates,
+  type TrackRefreshCandidate,
+} from "./track-refresh";
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const HOUR = 3600;
@@ -152,6 +160,7 @@ export function itemPoolPriority(item: TickItem): PoolPriority {
       return "recheck";
     case "index_catchup":
     case "refresh":
+    case "track_refresh":
     case "dj_backfill":
       return "backfill";
     case "discovery":
@@ -967,7 +976,7 @@ export async function refreshCandidates(
   settings: PoolSettings,
   nowSec: number,
   limit: number,
-): Promise<Array<{ url: string; slug: string }>> {
+): Promise<RefreshSet[]> {
   if (limit <= 0) return [];
   const waiting =
     "EXISTS (SELECT 1 FROM mkvid_requests m WHERE m.set_url = t.url AND m.status = 'pending')";
@@ -993,8 +1002,13 @@ export async function refreshCandidates(
       utcDay(nowSec),
       limit,
     )
-    .all<{ url: string; slug: string }>();
-  return res.results.map((r) => ({ url: r.url, slug: r.slug }));
+    .all<{ url: string; slug: string; waiting: number; fetched: number }>();
+  return res.results.map((r) => ({
+    url: r.url,
+    slug: r.slug,
+    waiting: !!r.waiting,
+    fetched: Number(r.fetched) || 0,
+  }));
 }
 
 /** Idle refresh items allowed this tick: perTick, and what is left of perDay. */
@@ -1009,18 +1023,85 @@ export async function refreshAllowance(
   return Math.max(0, Math.min(perTick, perDay - used));
 }
 
-async function countRefresh(env: Env, nowSec: number): Promise<void> {
-  const key = refreshCountKey(utcDay(nowSec));
-  const used = Number((await env.CACHE.get(key)) ?? 0) || 0;
-  await env.CACHE.put(key, String(used + 1), { expirationTtl: 2 * 86400 });
+/** CACHE KV: the idle refresh's track lookups on a UTC day (they count toward refresh.perDay too). */
+const trackRefreshCountKey = (day: string) => `scheduler:refresh_tracks:${day}`;
+
+/** Track lookups of the idle refresh allowed this tick: refreshAllowance, and what is left of tracksPerDay. */
+export async function trackRefreshAllowance(
+  env: Env,
+  settings: PoolSettings,
+  nowSec: number,
+): Promise<number> {
+  const { tracksPerDay } = settings.refresh;
+  if (tracksPerDay <= 0) return 0;
+  const used = Number((await env.CACHE.get(trackRefreshCountKey(utcDay(nowSec)))) ?? 0) || 0;
+  return Math.max(0, Math.min(await refreshAllowance(env, settings, nowSec), tracksPerDay - used));
+}
+
+async function countRefresh(env: Env, nowSec: number, track = false): Promise<void> {
+  const keys = [refreshCountKey(utcDay(nowSec))];
+  if (track) keys.push(trackRefreshCountKey(utcDay(nowSec)));
+  for (const key of keys) {
+    const used = Number((await env.CACHE.get(key)) ?? 0) || 0;
+    await env.CACHE.put(key, String(used + 1), { expirationTtl: 2 * 86400 });
+  }
+}
+
+/** An idle-refresh set (refreshCandidates): `fetched` = last fetched, unix s (0 = never). */
+export type RefreshSet = { url: string; slug: string; waiting: boolean; fetched: number };
+
+/**
+ * The idle refresh's order for `slots` items: sets mkvid waits on first (they
+ * are held for cue times only a set fetch brings), then sets and tracks in
+ * turn, the staler of the two first, at most `trackSlots` tracks. When one
+ * kind runs out the other fills the rest. Both lists come stalest first.
+ */
+export function mixRefresh(
+  sets: readonly RefreshSet[],
+  tracks: readonly TrackRefreshCandidate[],
+  slots: number,
+  trackSlots: number,
+): TickItem[] {
+  const out: TickItem[] = [];
+  let si = 0;
+  let ti = 0;
+  const setItem = (c: RefreshSet): TickItem => ({
+    cls: "recheck",
+    kind: "refresh",
+    slug: c.slug,
+    url: c.url,
+  });
+  while (out.length < slots && si < sets.length && sets[si]!.waiting)
+    out.push(setItem(sets[si++]!));
+  const trackMax = Math.min(tracks.length, trackSlots);
+  let trackTurn =
+    trackMax > 0 && (si >= sets.length || tracks[0]!.seenAt / 1000 < sets[si]!.fetched);
+  while (out.length < slots) {
+    const canTrack = ti < trackMax;
+    const canSet = si < sets.length;
+    if (!canTrack && !canSet) break;
+    if ((trackTurn && canTrack) || !canSet) {
+      const t = tracks[ti++]!;
+      out.push({
+        cls: "recheck",
+        kind: "track_refresh",
+        slug: t.slug,
+        url: t.url,
+        trackId: t.trackId,
+      });
+    } else out.push(setItem(sets[si++]!));
+    trackTurn = !trackTurn;
+  }
+  return out;
 }
 
 /**
  * The idle refresh's items for a tick that picked `picked` (its URLs are left
  * out): the tick's free slots - `max(1, drawn)` minus what it picked, so a
- * zero draw still gets one - within refreshAllowance. None while a low
- * priority's budget is held (budgetHolds), and the query is not run again
- * for a while after it found nothing.
+ * zero draw still gets one - within refreshAllowance, sets and tracks as
+ * mixRefresh orders them (tracks within trackRefreshAllowance). None while a
+ * low priority's budget is held (budgetHolds), and the queries are not run
+ * again for a while after both found nothing.
  */
 export async function pickRefreshItems(
   env: Env,
@@ -1029,6 +1110,7 @@ export async function pickRefreshItems(
   picked: readonly TickItem[],
   slugs: ReadonlySet<string>,
   nowSec: number,
+  log?: Logger,
 ): Promise<TickItem[]> {
   const free = Math.max(1, drawn) - picked.length;
   if (free <= 0) return [];
@@ -1039,18 +1121,34 @@ export async function pickRefreshItems(
   const skip = new Set<string>(parseJsonArray(await env.CACHE.get(INFLIGHT_KEY)));
   for (const i of picked) if ("url" in i && i.url) skip.add(i.url);
   const cands = await refreshCandidates(env, settings, nowSec, slots + skip.size + 10);
-  if (cands.length === 0)
+  const trackSlots = Math.min(slots, await trackRefreshAllowance(env, settings, nowSec));
+  let trackCands: TrackRefreshCandidate[] = [];
+  let tracksFailed = false;
+  try {
+    if (trackSlots > 0)
+      trackCands = await trackRefreshCandidates(
+        env,
+        settings.refresh.trackCooldownHours,
+        nowSec * 1000,
+        trackSlots + skip.size + 10,
+      );
+  } catch (e) {
+    // The tracks' query failing (migration 0027 not applied yet) must not cost the sets their slots.
+    tracksFailed = true;
+    log?.warn("scheduler.track_refresh_pick_failed", errorFields(e));
+  }
+  if (cands.length === 0 && trackCands.length === 0 && !tracksFailed)
     await env.CACHE.put(REFRESH_EMPTY_KEY, String(nowSec + REFRESH_EMPTY_SECONDS), {
       expirationTtl: 2 * REFRESH_EMPTY_SECONDS,
     });
-  const out: TickItem[] = [];
+  const sets: RefreshSet[] = [];
   for (const c of cands) {
-    if (out.length >= slots) break;
     if (!slugs.has(c.slug) || skip.has(c.url)) continue;
     skip.add(c.url);
-    out.push({ cls: "recheck", kind: "refresh", slug: c.slug, url: c.url });
+    sets.push(c);
   }
-  return out;
+  const tracks = trackCands.filter((t) => !skip.has(t.url));
+  return mixRefresh(sets, tracks, slots, trackSlots);
 }
 
 // --- picking a tick ---------------------------------------------------------
@@ -1064,6 +1162,8 @@ export type TickItem =
   | { cls: "recheck"; kind: "index_catchup"; slug: string; url: string }
   /** The idle refresh (pickRefreshItems): the stalest sets, in the tick's free slots. */
   | { cls: "recheck"; kind: "refresh"; slug: string; url: string }
+  /** The idle refresh's track lookup (lib/track-refresh.ts). `url` = the track page, `slug` = its DJ or ''. */
+  | { cls: "recheck"; kind: "track_refresh"; slug: string; url: string; trackId: string }
   | { cls: "new"; kind: "discovery"; slug: string }
   | { cls: "backfill"; kind: "dj_backfill"; slug: string }
   /** A pre-saved track's scheduled check (lib/presave.ts), on top of the drawn items. `slug` = its DJ or ''. */
@@ -1390,14 +1490,17 @@ export async function runSchedulerTick(
   // account budget is not left idle. Never throws past here.
   let refreshed: TickItem[] = [];
   try {
-    refreshed = await pickRefreshItems(env, settings, drawn, items, slugs, nowSec);
+    refreshed = await pickRefreshItems(env, settings, drawn, items, slugs, nowSec, log);
   } catch (e) {
     log.warn("scheduler.refresh_pick_failed", errorFields(e));
   }
-  if (refreshed.length > 0) {
+  // Track lookups need no YouTube token: they run like the pre-save items, after the token check.
+  const trackItems = refreshed.filter((i) => i.kind === "track_refresh");
+  const setRefresh = refreshed.filter((i) => i.kind !== "track_refresh");
+  if (refreshed.length > 0) skipped = undefined;
+  if (setRefresh.length > 0) {
     if (drawn <= 0) quotaOut = !!(await getQuotaOut(env, nowSec * 1000));
-    items = [...items, ...refreshed];
-    skipped = undefined;
+    items = [...items, ...setRefresh];
   }
   if (skipped === "zero_draw") log.info("scheduler.zero_draw");
   else if (skipped === "quota_hold") log.info("scheduler.quota_hold", { drawn });
@@ -1415,8 +1518,9 @@ export async function runSchedulerTick(
     drawn: drawn <= 0 ? 0 : drawn,
     ...(due ? { due } : {}),
   };
-  if (presaveItems.length === 0 && skipped) return { ...head, items: [] };
-  items = [...items, ...presaveItems];
+  const tokenless = [...trackItems, ...presaveItems];
+  if (tokenless.length === 0 && skipped) return { ...head, items: [] };
+  items = [...items, ...tokenless];
   // Spread over the window: item 0 now, the rest at sorted random offsets.
   const spreadMs = opts.sleep ? Math.max(0, settings.tick.spreadSeconds) * 1000 : 0;
   const offsets = items
@@ -1506,7 +1610,18 @@ export async function runSchedulerTick(
     /** Set once a render_feed item holds its D1 claim (the row as it was before). */
     let feedClaim: { before: RenderFeedRow | null } | null = null;
     try {
-      if (item.kind === "dj_backfill") {
+      if (item.kind === "track_refresh") {
+        // Claimed and looked up in lib/track-refresh.ts; counted toward the day's caps unless the pool refused it.
+        const t = await runTrackRefresh(env, item, {
+          cooldownHours: settings.refresh.trackCooldownHours,
+          nowMs: nowSec * 1000,
+          log,
+        });
+        if (t.counted) await countRefresh(env, nowSec, true);
+        r = { item, outcome: t.outcome, ...(t.stopReason ? { stopReason: t.stopReason } : {}) };
+        retryAfter = t.retryAfterSeconds ?? null;
+        poolCode = t.poolCode ?? null;
+      } else if (item.kind === "dj_backfill") {
         // Claim for a short while; only a completed step earns the full interval.
         await setDjDue(
           env,

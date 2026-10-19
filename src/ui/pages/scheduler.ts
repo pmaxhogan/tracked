@@ -85,8 +85,8 @@ const JS = /* js */ `
 (() => {
   const $ = TK.$, esc = TK.esc;
   const CLASSES = ['new', 'verify', 'recheck', 'backfill'];
-  const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'index_catchup', 'refresh', 'dj_backfill', 'presave'];
-  const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', index_catchup: 'Search index catch-up', refresh: 'Idle refresh (stalest sets)', dj_backfill: 'DJ backfill', presave: 'Pre-save recheck' };
+  const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'index_catchup', 'refresh', 'track_refresh', 'dj_backfill', 'presave'];
+  const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', index_catchup: 'Search index catch-up', refresh: 'Idle refresh (stalest sets)', track_refresh: 'Idle refresh (track links)', dj_backfill: 'DJ backfill', presave: 'Pre-save recheck' };
   const SKIP_WORDS = { paused: 'Paused (IP block)', backoff: 'Pool backoff', pool_not_configured: 'Pool not configured', youtube_not_connected: 'YouTube not connected', nothing_due: 'Nothing due', quota_hold: 'Waiting for YouTube quota', zero_draw: 'Drew zero' };
   const GOOD = new Set(['ok', 'stepped', 'done', 'no_cursor']);
   const OVERDUE_BAD = 6 * 3600;
@@ -122,9 +122,9 @@ const JS = /* js */ `
     backoff: 'The pool asked the scheduler to wait before the next tick.',
     pool_not_configured: 'No tlpool is set up, so nothing can be fetched.',
     youtube_not_connected: 'YouTube is not connected, so the sync cannot add videos.',
-    nothing_due: 'Nothing was due at this tick, and the idle refresh had nothing to fetch (off, its daily cap reached, or every set fetched recently).',
+    nothing_due: 'Nothing was due at this tick, and the idle refresh had nothing to fetch (off, its daily cap reached, or every set and candidate track looked at recently).',
     quota_hold: 'Nothing else was due. New sets whose video is already known wait for YouTube quota and are added when it is back.',
-    zero_draw: 'The random draw picked zero items (the tick size allows 0), and the idle refresh had nothing to fetch (off, its daily cap reached, or every set fetched recently).',
+    zero_draw: 'The random draw picked zero items (the tick size allows 0), and the idle refresh had nothing to fetch (off, its daily cap reached, or every set and candidate track looked at recently).',
   };
   const djLink = (slug, name) => slug ? '<a href="/ui/dj/' + encodeURIComponent(slug) + '">' + esc(name || slug) + '</a>' : '';
   const n = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
@@ -242,7 +242,10 @@ const JS = /* js */ `
 
   // -- the tick list (server-side table) --
   function itemHtml(x) {
-    const what = x.label
+    // A track lookup links to its 1001tracklists track page, everything else to the set.
+    const what = x.label && x.kind === 'track_refresh'
+      ? '<a class="lbl" href="' + esc(x.url || '') + '" target="_blank" rel="noopener noreferrer"' + TK.tip('A pre-save candidate track: its links were looked up again (one medialink request).') + '>' + esc(x.label) + '</a>'
+      : x.label
       ? '<a class="lbl" href="/ui/set?url=' + encodeURIComponent(x.url || '') + '">' + esc(x.label) + '</a>'
       : '<span class="lbl">' + djLink(x.slug, x.slug) + '</span>';
     return '<li>' + badge(outCls(x.outcome), x.outcome || '?', OUT_TIPS[x.outcome] || 'How this item ended.') + '<span class="kind">' + esc(KIND_WORDS[x.kind] || x.kind) + '</span>' +
@@ -264,11 +267,14 @@ const JS = /* js */ `
   // One line on why the tick drew what it did: the idle refresh fills free slots.
   function whyOf(t) {
     const items = Array.isArray(t.items) ? t.items : [];
-    const refresh = items.filter((x) => x.kind === 'refresh').length;
+    const sets = items.filter((x) => x.kind === 'refresh').length;
+    const tracks = items.filter((x) => x.kind === 'track_refresh').length;
+    const refresh = sets + tracks;
     if (!refresh) return '';
+    const what = sets && tracks ? 'the stalest sets and track links' : tracks ? 'the stalest track links' : 'the stalest sets';
     const dueTotal = t.due ? CLASSES.reduce((a, c) => a + n(t.due[c]), 0) : 0;
-    if (!n(t.drawn)) return 'Drew zero: one idle-refresh slot instead.';
-    return (dueTotal ? 'Less was due than drawn' : 'Nothing due') + ': ' + refresh + ' free slot' + (refresh === 1 ? '' : 's') + ' refreshed the stalest sets.';
+    if (!n(t.drawn)) return 'Drew zero: one idle-refresh slot instead (' + what + ').';
+    return (dueTotal ? 'Less was due than drawn' : 'Nothing due') + ': ' + refresh + ' free slot' + (refresh === 1 ? '' : 's') + ' refreshed ' + what + '.';
   }
   // The Picked column: outcome counts and the first item; the drawer has them all.
   function pickedHtml(t) {

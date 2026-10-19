@@ -231,8 +231,12 @@ export const PoolSettingsSchema = z.object({
    * the stalest known sets are fetched again so the accounts' spare budget
    * finds changed lists (cue times, IDs, videos). Sets mkvid waits on come
    * first and may be refetched after `mkvidCooldownHours`; every other set
-   * after `cooldownHours`. At the lowest pool priority (backfill), at most
-   * `perTick` a tick and `perDay` a UTC day (0 = off).
+   * after `cooldownHours`. Pre-save candidate tracks (lib/track-refresh.ts)
+   * get their links looked up again, taking turns with the sets once no set
+   * mkvid waits on is left: a track looked at more than `trackCooldownHours`
+   * ago, at most `tracksPerDay` a UTC day (0 = sets only). At the lowest pool
+   * priority (backfill), at most `perTick` a tick and `perDay` a UTC day, sets
+   * and tracks together (0 = off).
    */
   refresh: z.object({
     perDay: z.number().int().min(0).max(5000),
@@ -242,6 +246,11 @@ export const PoolSettingsSchema = z.object({
       .positive()
       .max(24 * 60),
     mkvidCooldownHours: z
+      .number()
+      .positive()
+      .max(24 * 60),
+    tracksPerDay: z.number().int().min(0).max(5000),
+    trackCooldownHours: z
       .number()
       .positive()
       .max(24 * 60),
@@ -286,7 +295,14 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   },
   renderFeed: { maxPerTick: 1, cooldownHours: 48, maxCooldownDays: 14, maxFailures: 3 },
   indexCatchUp: { perDay: 200, perTick: 1, cooldownHours: 72 },
-  refresh: { perDay: 400, perTick: 2, cooldownHours: 72, mkvidCooldownHours: 24 },
+  refresh: {
+    perDay: 400,
+    perTick: 2,
+    cooldownHours: 72,
+    mkvidCooldownHours: 24,
+    tracksPerDay: 150,
+    trackCooldownHours: 168,
+  },
 };
 
 type Plain = Record<string, unknown>;
