@@ -208,6 +208,8 @@ const run = (env: Env, yt: ReturnType<typeof fakeYouTube>) =>
 const NEWEST_FIRST = ["v6", "v5", "v4", "v3", "v2", "v1"];
 const SORTED = ["v1", "v2", "v3", "v4", "v5", "v6"];
 const W_SORTED = ["w1", "w2", "w3"];
+/** Sorted but for the newest set at the front: one move, v6 from index 0 to 5. Under 'before' it lands at 4, a place neither plan nor old order has. */
+const ONE_OUT = ["v6", "v1", "v2", "v3", "v4", "v5"];
 const UNSORTED_COMBINED = ["w3", "v6", "v1", "w1"];
 const T0 = Date.parse("2026-10-12T18:00:00Z");
 const at = (ms: number) => vi.setSystemTime(new Date(ms));
@@ -467,7 +469,7 @@ describe("runOrderPass", () => {
 describe("the pass reads its first move back", () => {
   it("stops a playlist after ONE move when the video is not where it was sent, whatever the update replied", async () => {
     const env = await makeEnv();
-    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    const yt = fakeYouTube({ PLdj: ONE_OUT, PLdj2: W_SORTED });
     yt.semantics = "before";
     // The reply repeats the request: only an independent read can tell.
     yt.reply = "echo";
@@ -477,15 +479,17 @@ describe("the pass reads its first move back", () => {
     const s = (await loadOrderState(env)).playlists.PLdj!;
     expect(s.problem).toBe("unexpected_position");
     expect(s.detail).toMatch(
-      /the moved video should be at index 5 after a move to index 5 and is at index 4/,
+      /the moved video should be at index 5 after a move to index 5 and is at index 4$/,
     );
-    // It looked twice, a moment apart, before saying so.
-    expect(slept).toEqual([1500]);
-    // Not tried again on the next ticks; a day later it is, by itself.
-    at(T0 + 5 * 60_000);
-    await run(env, yt);
+    // It looked three times, a while apart, before saying so.
+    expect(slept).toEqual([1500, 4000]);
+    // Not tried again on the next ticks; an hour later it is, by itself.
+    for (const min of [5, 30, 55]) {
+      at(T0 + min * 60_000);
+      await run(env, yt);
+    }
     expect(yt.moves).toHaveLength(1);
-    at(T0 + 25 * HOUR);
+    at(T0 + HOUR + 5 * 60_000);
     await run(env, yt);
     expect(yt.moves).toHaveLength(2);
   });
@@ -512,6 +516,83 @@ describe("the pass reads its first move back", () => {
     expect(slept).toEqual([1500]);
     expect(yt.playlists.PLdj).toEqual(SORTED);
     expect((await loadOrderState(env)).playlists.PLdj!.problem).toBeNull();
+  });
+
+  it("a read that lags past every look is no stop: the move counts as unconfirmed and the next tick carries on", async () => {
+    // Production at one move per run: every move is read back, and a slow read used to stop the playlist for a day.
+    const env = await makeEnv();
+    await updateAppSettings(env, { playlists: { orderMovesPerRun: 1 } });
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    yt.staleLookups = 3;
+    const info = vi.spyOn(log, "info");
+    expect(await run(env, yt)).toMatchObject({ moved: 1 });
+    expect(slept).toEqual([1500, 4000]);
+    expect(info.mock.calls.map((c) => c[0])).toContain("playlist_order.move_unconfirmed");
+    info.mockRestore();
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({
+      problem: null,
+      moves: 4,
+      lastRun: { needed: 5, applied: 1, unconfirmed: true },
+    });
+    // The next ticks read the real order (the move did land), see the progress and go on: nobody presses Retry now.
+    for (let tick = 1; tick <= 4; tick++) {
+      at(T0 + tick * 5 * 60_000);
+      await run(env, yt);
+    }
+    expect(yt.moves).toHaveLength(5);
+    expect(yt.playlists.PLdj).toEqual(SORTED);
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ problem: null, moves: 0 });
+  });
+
+  it("a move that never shows at all is stopped at the next reading (no_progress), for an hour", async () => {
+    const env = await makeEnv();
+    await updateAppSettings(env, { playlists: { orderMovesPerRun: 1 } });
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    yt.semantics = "ignored";
+    await run(env, yt);
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({
+      problem: null,
+      lastRun: { unconfirmed: true },
+    });
+    at(T0 + 5 * 60_000);
+    expect(await run(env, yt)).toMatchObject({ moved: 0 });
+    const s = (await loadOrderState(env)).playlists.PLdj!;
+    expect(s.problem).toBe("no_progress");
+    expect(s.detail).toBe(
+      "1 move was made (not seen to land) and the playlist still needs 5 (it needed 5 before)",
+    );
+    at(T0 + 50 * 60_000);
+    await run(env, yt);
+    expect(yt.moves).toHaveLength(1);
+    // An hour after the stop it is tried again by itself.
+    at(T0 + 5 * 60_000 + HOUR);
+    await run(env, yt);
+    expect(yt.moves).toHaveLength(2);
+  });
+
+  it("the same lag on a move whose read-back saw the neighbour where it was before is no stop either", async () => {
+    const env = await makeEnv();
+    const yt = fakeYouTube({ PLdj: ["v3", "v1", "v2"], PLdj2: W_SORTED });
+    // The moved video reads right, its neighbour still at its old place, on every look.
+    let lookups = 0;
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const v = new URL(String(input)).searchParams.get("videoId");
+      if (v) lookups += 1;
+      if (v === "v2") yt.staleLookups = 1;
+      return yt.fetch(input, init);
+    }) as typeof fetch;
+    await runOrderPass(env, {
+      log,
+      fetcher,
+      accessToken: "tok",
+      trigger: "test",
+      sleep: async (ms) => void slept.push(ms),
+    });
+    expect(lookups).toBe(6);
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({
+      problem: null,
+      lastRun: { unconfirmed: true },
+    });
   });
 
   it("does not rely on the update reply at all", async () => {
@@ -543,14 +624,14 @@ describe("the pass reads its first move back", () => {
 
   it("Retry now clears a stop so the next run tries again", async () => {
     const env = await makeEnv();
-    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    const yt = fakeYouTube({ PLdj: ONE_OUT, PLdj2: W_SORTED });
     yt.semantics = "before";
     await run(env, yt);
     expect((await loadOrderState(env)).playlists.PLdj!.problem).toBe("unexpected_position");
     yt.semantics = "documented";
     at(T0 + 5 * 60_000);
     expect(await retryOrderPlaylist(env, "PLdj")).toEqual({ ok: true });
-    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ problem: null, moves: 4 });
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ problem: null, moves: 0 });
     await run(env, yt);
     expect(yt.playlists.PLdj).toEqual(SORTED);
     expect(await retryOrderPlaylist(env, "PLnope")).toEqual({ ok: false, reason: "not_found" });
@@ -570,22 +651,39 @@ describe("the pass reads its first move back", () => {
     expect(yt.playlists.PLdj).toEqual(SORTED);
   });
 
-  it("Check now does not put off the daily retry of a stopped playlist", async () => {
+  it("Check now does not put off the hourly retry of a stopped playlist", async () => {
     const env = await makeEnv();
-    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    const yt = fakeYouTube({ PLdj: ONE_OUT, PLdj2: W_SORTED });
     yt.semantics = "before";
     await run(env, yt);
     yt.semantics = "documented";
-    // 23 hours on, the owner looks.
-    at(T0 + 23 * HOUR);
+    // 50 minutes on, the owner looks.
+    at(T0 + 50 * 60_000);
     const rep = await orderReport(env, { log, fresh: true, fetcher: yt.fetch, accessToken: "tok" });
     expect(rep.playlists[0]).toMatchObject({ playlistId: "PLdj", problem: "unexpected_position" });
     await run(env, yt);
     expect(yt.moves).toHaveLength(1);
-    // An hour and a bit later the day is up, counted from the stop and not from the look.
-    at(T0 + 24 * HOUR + 5 * 60_000);
+    // A quarter of an hour later the hour is up, counted from the stop and not from the look.
+    at(T0 + HOUR + 5 * 60_000);
     await run(env, yt);
     expect(yt.playlists.PLdj).toEqual(SORTED);
+  });
+
+  it("a playlist that is not on manual order still waits a day: only the owner can fix it, and each try is a refused move", async () => {
+    const env = await makeEnv();
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    yt.manualSortRequired.add("PLdj");
+    await run(env, yt);
+    expect((await loadOrderState(env)).playlists.PLdj!.problem).toBe("manual_sort");
+    at(T0 + 2 * HOUR);
+    await run(env, yt);
+    at(T0 + 23 * HOUR);
+    await run(env, yt);
+    const tries = () => yt.calls.filter((c) => c.startsWith("PUT")).length;
+    expect(tries()).toBe(1);
+    at(T0 + 24 * HOUR + 5 * 60_000);
+    await run(env, yt);
+    expect(tries()).toBe(2);
   });
 });
 
@@ -646,13 +744,13 @@ describe("a video that is gone from YouTube (deleted, or made private by its upl
     const env = await makeEnv();
     const yt = fakeYouTube({ PLdj: ["v3", "v1", "v2", "gone"], PLdj2: W_SORTED });
     yt.dead.add("gone");
-    yt.semantics = "ignored";
+    yt.semantics = "before";
     await run(env, yt);
     expect(yt.moves).toHaveLength(1);
-    expect(slept).toEqual([1500]);
+    expect(slept).toEqual([1500, 4000]);
     const s = (await loadOrderState(env)).playlists.PLdj!;
     expect(s.problem).toBe("unexpected_position");
-    expect(s.detail).toMatch(/the moved video should be at index 2 .* and is at index 0/);
+    expect(s.detail).toMatch(/the moved video should be at index 2 .* and is at index 1$/);
   });
 
   it("a lookup that answers videoNotFound for a video the listing showed as there falls back to the listing: no move_failed", async () => {
@@ -849,7 +947,7 @@ describe("one run at a time", () => {
 
   it("Retry now takes no lock, so a Move now right after it is not shut out, and it works while a run holds the lock", async () => {
     const env = await makeEnv();
-    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    const yt = fakeYouTube({ PLdj: ONE_OUT, PLdj2: W_SORTED });
     yt.semantics = "before";
     await run(env, yt);
     yt.semantics = "documented";
@@ -865,7 +963,7 @@ describe("one run at a time", () => {
 
   it("a run that saves after a Retry now keeps what the retry cleared on a playlist it did not read", async () => {
     const env = await makeEnv();
-    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: ["w3", "w2", "w1"] });
+    const yt = fakeYouTube({ PLdj: ONE_OUT, PLdj2: ["w3", "w1", "w2"] });
     yt.semantics = "before";
     await run(env, yt);
     expect((await loadOrderState(env)).playlists.PLdj!.problem).toBe("unexpected_position");
@@ -893,7 +991,7 @@ describe("one run at a time", () => {
 
   it("Check now keeps a stop that Retry now cleared while it was reading cleared", async () => {
     const env = await makeEnv();
-    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    const yt = fakeYouTube({ PLdj: ONE_OUT, PLdj2: W_SORTED });
     yt.semantics = "before";
     await run(env, yt);
     let retried: Promise<unknown> | null = null;
@@ -909,7 +1007,7 @@ describe("one run at a time", () => {
   it('a KV that keeps answering "not set" for the lock does not make a run think it lost it: the stop is saved and the move is not paid for again', async () => {
     const env = await makeEnv();
     await updateAppSettings(env, { playlists: { orderMovesPerRun: 1 } });
-    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    const yt = fakeYouTube({ PLdj: ONE_OUT, PLdj2: W_SORTED });
     yt.semantics = "before";
     // The key was read as absent just before it was written; KV goes on saying so.
     const get = env.CACHE.get.bind(env.CACHE);
@@ -964,6 +1062,53 @@ describe("one run at a time", () => {
     expect(warn.mock.calls.map((c) => c[0])).toContain("playlist_order.lock_lapsed");
     expect(await env.CACHE.get("yt:order:lock")).toBeNull();
     warn.mockRestore();
+  });
+
+  it("a run killed in the middle (its lock left behind, nothing saved) holds nothing up past the next tick", async () => {
+    const env = await makeEnv();
+    await updateAppSettings(env, { playlists: { orderMovesPerRun: 1 } });
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    // The invocation died after its move: no release, no state, the lock as it wrote it. KV is late expiring it.
+    await yt.fetch("https://www.googleapis.com/youtube/v3/playlistItems?part=snippet", {
+      method: "PUT",
+      body: JSON.stringify({
+        id: "item-v1",
+        snippet: { playlistId: "PLdj", position: 0, resourceId: { videoId: "v1" } },
+      }),
+    });
+    await env.CACHE.put("yt:order:lock", JSON.stringify({ token: "dead-run", at: T0 }));
+    // The next cron tick, five minutes on: the lapsed lock is taken over, the playlist read as it is and worked on.
+    at(T0 + 5 * 60_000);
+    const warn = vi.spyOn(log, "warn");
+    expect(await run(env, yt)).toMatchObject({ moved: 1, stoppedBy: "run" });
+    expect(warn.mock.calls.map((c) => c[0])).toContain("playlist_order.lock_lapsed");
+    warn.mockRestore();
+    const s = (await loadOrderState(env)).playlists.PLdj!;
+    expect(s).toMatchObject({ problem: null, moves: 3 });
+    expect(await env.CACHE.get("yt:order:lock")).toBeNull();
+  });
+
+  it("a run whose YouTube calls throw gives the lock back, and the playlist is tried again within the hour", async () => {
+    const env = await makeEnv();
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED });
+    const fetcher = (async (...a: Parameters<typeof fetch>) => {
+      if ((a[1]?.method ?? "GET") !== "GET") throw new TypeError("Network connection lost.");
+      return yt.fetch(...a);
+    }) as typeof fetch;
+    const once = () =>
+      runOrderPass(env, {
+        log,
+        fetcher,
+        accessToken: "tok",
+        trigger: "test",
+        sleep: async () => {},
+      });
+    expect(await once()).toMatchObject({ moved: 0 });
+    expect((await loadOrderState(env)).playlists.PLdj).toMatchObject({ problem: "move_failed" });
+    expect(await env.CACHE.get("yt:order:lock")).toBeNull();
+    at(T0 + HOUR);
+    await run(env, yt);
+    expect(yt.playlists.PLdj).toEqual(SORTED);
   });
 });
 

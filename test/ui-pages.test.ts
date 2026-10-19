@@ -867,7 +867,7 @@ describe("Playlists page script", () => {
     expect(ord).toContain("playlist_order.first_move_confirmed");
     // A playlist stopped by its own check is retried by itself: a warning. Only the one the owner must fix on YouTube is red, with how.
     expect(ord).toContain(
-      '<span class="badge warn">1 stopped for a day</span> DJ 3 (a video moved to index 4 is at index 3)',
+      '<span class="badge warn">1 stopped for an hour</span> DJ 3 (a video moved to index 4 is at index 3)',
     );
     expect(ord).toContain("set the ordering of the playlist to Manual in its settings on YouTube");
     const table = els.get("ord-table").innerHTML as string;

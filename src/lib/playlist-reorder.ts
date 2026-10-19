@@ -38,14 +38,22 @@
  *     puts next to it is. The update's own reply is not used for this: it may
  *     only repeat the request. Both must be at the index the plan gives them;
  *     the neighbour is what tells "taken out, put back at that index" from
- *     any other way of shifting. A read that disagrees is repeated once after
- *     a short wait (YouTube's reads can lag its writes) before the playlist is
- *     stopped (`unexpected_position`);
- *   - a run that made 3 or more moves must leave the playlist needing fewer
- *     moves at the next reading than before it. If it does not, the moves are
- *     not doing what the plan thinks and the playlist stops (`no_progress`).
- * A stopped playlist is tried again a day later, or at once with Retry now on
- * the card, so a wrong assumption costs a move or two, not the backfill.
+ *     any other way of shifting. A read that disagrees is repeated after a
+ *     short wait, twice (YouTube's reads can lag its writes). One that still
+ *     finds a video where neither the plan nor the order before the move puts
+ *     it stops the playlist (`unexpected_position`);
+ *   - a read that still shows the order from BEFORE the move is YouTube's
+ *     lag, not a wrong move: the playlist is not stopped, only left for this
+ *     run, and the move counts as unconfirmed. Taking that lag for a wrong
+ *     move is what used to stop playlists for a day, over and over: at one
+ *     move per run every move is read back. The next reading settles it;
+ *   - a run that made 3 or more moves, or whose move was unconfirmed, must
+ *     leave the playlist needing fewer moves at the next reading than before
+ *     it. If it does not, the moves are not doing what the plan thinks and the
+ *     playlist stops (`no_progress`).
+ * A stopped playlist is tried again an hour later by itself, or at once with
+ * Retry now on the card, so a wrong assumption costs a move or two an hour,
+ * not the backfill, and nothing has to be cleared by hand.
  *
  * **Videos that are gone.** A playlist keeps the item of a video that was
  * deleted or made private by its uploader, and YouTube answers 404
@@ -166,8 +174,10 @@ const LOCK_TTL = 60;
 const REPORT_DEADLINE_MS = 40_000;
 /** A YouTube playlist id as a route may hand it over (the real ones are `PL` + 16 to 32 of these). */
 const PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{2,64}$/;
-/** A playlist with nothing left to move is looked at again this often; so is one that stopped for a reason someone has to look at. */
+/** A playlist with nothing left to move is looked at again this often; so is one not on manual order (only the owner can change that, and each try is a refused 50-unit move). */
 const RECHECK_SECONDS = 24 * 60 * 60;
+/** A playlist its own checks stopped (`unexpected_position`, `no_progress`) is tried again after this long, by itself. */
+const STOP_RETRY_SECONDS = 60 * 60;
 /** A playlist that could not be read, or refused a move, is left alone this long (a refused move costs 50 units). */
 const PROBLEM_RETRY_SECONDS = 60 * 60;
 /** An item a move was refused for (`videoNotFound`) is planned around this long, then its move is tried once more. */
@@ -178,15 +188,18 @@ const PASS_DEADLINE_MS = 10_000;
 const MAX_PLAYLISTS_PER_PASS = 6;
 /** A run of at least this many moves must have lowered what the playlist needs by the next reading. */
 const PROGRESS_CHECK_MIN_MOVES = 3;
-/** The read-back of a first move that disagrees is repeated once after this long (read-after-write lag). */
-const CONFIRM_RETRY_MS = 1500;
+/** The read-back of a first move that disagrees is repeated after each of these waits (read-after-write lag). */
+const CONFIRM_RETRY_MS = [1500, 4000];
+const CONFIRM_LOOKS = CONFIRM_RETRY_MS.length + 1;
 /**
  * Units the read-back of a first move may cost in a playlist of `items`
- * entries: two lookups and two more when it has to look again. When a video
- * it asks about turns out to be gone a listing takes over, at the worst after
- * two lookups with a second listing to look again, or after four lookups.
+ * entries: two lookups per look. When a video it asks about turns out to be
+ * gone a listing takes over for that look and every later one, so the worst is
+ * two lookups per look plus one listing at the last, or two lookups and then a
+ * listing per look.
  */
-const confirmUnits = (items: number) => Math.max(2 + 2 * listUnits(items), 4 + listUnits(items));
+const confirmUnits = (items: number) =>
+  Math.max(2 * CONFIRM_LOOKS + listUnits(items), 2 + CONFIRM_LOOKS * listUnits(items));
 /** Budgets the report gives a duration for, so a paused pass still says what each would mean. */
 const SAMPLE_DAILY_UNITS = [1000, 2000, 4000];
 
@@ -208,12 +221,20 @@ export type ManagedPlaylist = { playlistId: string; slug: string; title: string 
  *   - `move_failed`          a move was refused for another reason, or could
  *                            not be read back; tried again. Never because a
  *                            video is gone (see the file comment).
- * The first three stop the playlist for a day (`STOPPING`); the pass tries
- * each again by itself then, or at once after Retry now.
+ * The first three stop the playlist (`STOPPING`): `manual_sort` for a day,
+ * the other two for an hour; the last two keep it waiting an hour too. The
+ * pass tries each again by itself then, or at once after Retry now.
  */
 export type OrderProblem =
   "manual_sort" | "unexpected_position" | "no_progress" | "unreadable" | "move_failed";
 const STOPPING: readonly OrderProblem[] = ["manual_sort", "unexpected_position", "no_progress"];
+/** How long a problem keeps the pass away from its playlist, counted from when the pass ran into it. */
+const problemWaitSeconds = (p: OrderProblem): number =>
+  p === "manual_sort"
+    ? RECHECK_SECONDS
+    : STOPPING.includes(p)
+      ? STOP_RETRY_SECONDS
+      : PROBLEM_RETRY_SECONDS;
 
 export type OrderPlaylistState = ManagedPlaylist &
   OrderNeed & {
@@ -225,8 +246,12 @@ export type OrderPlaylistState = ManagedPlaylist &
     detail?: string | null;
     /** Unix seconds the pass ran into `problem`; its retry is timed from here, so a dry run in between does not put it off. */
     problemAt?: number | null;
-    /** The last run that moved something: what the playlist needed before it and how many moves it made (the progress check). */
-    lastRun?: { needed: number; applied: number } | null;
+    /**
+     * The last run that moved something: what the playlist needed before it and
+     * how many moves it made (the progress check). `unconfirmed` = its read-back
+     * only found the order from before the move (YouTube's lag).
+     */
+    lastRun?: { needed: number; applied: number; unconfirmed?: boolean } | null;
     /** Items a move was refused for with `videoNotFound`, and when: planned around while they are in the playlist, for a week or until Retry now. */
     unmovable?: Array<{ id: string; at: number }>;
   };
@@ -488,12 +513,10 @@ export function orderQueue(
   const rank = (p: ManagedPlaylist): [number, number] | null => {
     const s = own(state, p.playlistId);
     if (!s) return [0, 0];
-    // A playlist with a problem waits (a day when it stopped), timed from when the pass ran into it, not from the last dry run.
+    // A playlist with a problem waits (`problemWaitSeconds`), timed from when the pass ran into it, not from the last dry run.
     if (s.problem) {
       const since = s.problemAt ?? s.checkedAt;
-      return now - since >= (STOPPING.includes(s.problem) ? RECHECK_SECONDS : PROBLEM_RETRY_SECONDS)
-        ? [2, since]
-        : null;
+      return now - since >= problemWaitSeconds(s.problem) ? [2, since] : null;
     }
     if (s.moves > 0) return [1, s.moves];
     return now - s.checkedAt >= RECHECK_SECONDS ? [2, s.checkedAt] : null;
@@ -507,14 +530,20 @@ export function orderQueue(
     .map((x) => x.p);
 }
 
-type Confirmed = { ok: true } | { ok: false; detail: string };
+/**
+ * `lagging` = the last look found every video either where the plan puts it or
+ * where it was before the move, at least one of them before: YouTube had not
+ * caught up with its own write yet, which says nothing against the plan.
+ */
+type Confirmed = { ok: true } | { ok: false; lagging: boolean; detail: string };
 
 /**
  * Read back the first move of a run: is the moved item at the index it was
  * sent to, and is the item the plan puts beside it (after it, or before it
- * when it went last) where the plan has it? Two lookups, 1 unit each, and
- * once more after `sleep` when they disagree. Throws what a lookup throws;
- * `spent.units` counts every lookup made, the one that threw included.
+ * when it went last) where the plan has it? Two lookups, 1 unit each, looked
+ * at again after each of `CONFIRM_RETRY_MS` (`sleep`) while they disagree.
+ * Throws what a lookup throws; `spent.units` counts every lookup made, the one
+ * that threw included.
  *
  * A lookup names the video, and YouTube answers `videoNotFound` for one that
  * is gone. So when the neighbour is such a video (`fixed`), or a lookup gets
@@ -538,11 +567,15 @@ async function confirmMove(a: {
   const byId = new Map(a.before.map((e) => [e.id, e]));
   const neighbourAt =
     a.move.position + 1 < expected.length ? a.move.position + 1 : a.move.position - 1;
-  const checks = [{ id: a.move.id, at: a.move.position, what: "the moved video" }];
+  const wasAt = new Map(a.before.map((e, i) => [e.id, i]));
+  const checks = [
+    { id: a.move.id, at: a.move.position, was: wasAt.get(a.move.id)!, what: "the moved video" },
+  ];
   if (neighbourAt >= 0)
     checks.push({
       id: expected[neighbourAt]!,
       at: neighbourAt,
+      was: wasAt.get(expected[neighbourAt]!)!,
       what: neighbourAt > a.move.position ? "the video after it" : "the video before it",
     });
   /** Item id -> index, from one listing of the playlist. One that fails is charged its first page, like any other. */
@@ -563,8 +596,9 @@ async function confirmMove(a: {
   };
   let byListing = checks.some((c) => byId.get(c.id)!.fixed);
   let detail = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await a.sleep(CONFIRM_RETRY_MS);
+  let lagging = false;
+  for (let attempt = 0; attempt < CONFIRM_LOOKS; attempt++) {
+    if (attempt > 0) await a.sleep(CONFIRM_RETRY_MS[attempt - 1]!);
     detail = "";
     let positions = byListing ? await listed() : null;
     for (const c of checks) {
@@ -587,13 +621,15 @@ async function confirmMove(a: {
       }
       if (positions) got = positions.get(c.id) ?? null;
       if (got !== c.at) {
-        detail = `${c.what} should be at index ${c.at} after a move to index ${a.move.position} and is ${got === null ? "not found" : `at index ${got}`}`;
+        // Still where it was before the move (the moved video is checked first): the write has not shown yet.
+        lagging = got === c.was;
+        detail = `${c.what} should be at index ${c.at} after a move to index ${a.move.position} and is ${got === null ? "not found" : `at index ${got}`}${lagging ? " (where it was before the move)" : ""}`;
         break;
       }
     }
     if (!detail) return { ok: true };
   }
-  return { ok: false, detail };
+  return { ok: false, lagging, detail };
 }
 
 export type OrderPassResult = {
@@ -790,12 +826,16 @@ async function passLocked(
       next.detail = detail;
       next.problemAt = now;
     };
-    // The last run moved videos here and the playlist needs no fewer moves than before it: the moves are not doing what the plan thinks.
+    // The last run moved videos here (or one it could not see land) and the playlist needs no fewer moves than before it: the moves are not doing what the plan thinks.
     const last = before?.lastRun;
-    if (last && last.applied >= PROGRESS_CHECK_MIN_MOVES && plan.moves.length >= last.needed) {
+    if (
+      last &&
+      (last.applied >= PROGRESS_CHECK_MIN_MOVES || last.unconfirmed) &&
+      plan.moves.length >= last.needed
+    ) {
       stop(
         "no_progress",
-        `${last.applied} moves were made and the playlist still needs ${plan.moves.length} (it needed ${last.needed} before them)`,
+        `${last.applied} ${last.applied === 1 ? "move was" : "moves were"} made${last.unconfirmed ? " (not seen to land)" : ""} and the playlist still needs ${plan.moves.length} (it needed ${last.needed} before)`,
       );
       log.warn("playlist_order.no_progress", {
         playlistId: p.playlistId,
@@ -810,6 +850,8 @@ async function passLocked(
     let applied = 0;
     /** A move of the plan that will never be made: its video turned out to be gone. */
     let dropped = 0;
+    /** The first move's read-back only found the order from before it (`confirmMove`'s `lagging`). */
+    let unconfirmed = false;
     for (const m of plan.moves) {
       if (moved >= lim.movesPerRun) {
         stoppedBy = "run";
@@ -882,6 +924,18 @@ async function passLocked(
             spent,
           });
           units += spent.units;
+          if (!c.ok && c.lagging) {
+            // YouTube has not caught up: no stop. Nothing more is moved here this run, and the next reading's progress check settles it.
+            unconfirmed = true;
+            log.info("playlist_order.move_unconfirmed", {
+              playlistId: p.playlistId,
+              slug: p.slug,
+              itemId: m.id,
+              position: m.position,
+              detail: c.detail,
+            });
+            break;
+          }
           if (!c.ok) {
             stop("unexpected_position", c.detail);
             log.warn("playlist_order.unexpected_position", {
@@ -920,7 +974,9 @@ async function passLocked(
     next.units = next.moves * UNITS_PER_MOVE;
     next.moved += applied;
     if (applied > 0) {
-      next.lastRun = { needed: plan.moves.length, applied };
+      next.lastRun = unconfirmed
+        ? { needed: plan.moves.length, applied, unconfirmed }
+        : { needed: plan.moves.length, applied };
       log.info("playlist_order.moved", {
         playlistId: p.playlistId,
         slug: p.slug,

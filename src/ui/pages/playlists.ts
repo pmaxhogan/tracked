@@ -178,8 +178,8 @@ ${YOUTUBE_CARD_JS}
       (t.unread === t.playlists ? ' Check now first counts the moves.' : d.estimate && d.estimate.moves ? ' ' + (d.daysAt || []).map((x) => x.dailyUnits.toLocaleString() + ' a day: about ' + x.days + ' day' + (x.days === 1 ? '' : 's')).join(' · ') + '.' : '') +
       ' For the first day set Playlist moves per run to 1 and a small budget (200), and watch the log for playlist_order.first_move_confirmed (a move landed where planned) before raising either.</div>';
     // A move that was not found where planned stops that playlist before more quota is spent. It is tried again by itself: a warning, not red.
-    if (stopped.length) html += '<div class="bits"><span class="badge warn">' + stopped.length + ' stopped for a day</span> ' + stopped.map((p) => esc(p.title) + ' (' + esc(p.detail || p.problem) + ')').join(', ') +
-      ': a move was not found where the plan expects it, so no more quota is spent there. It is tried again by itself after a day, or now with Retry now in the table below.</div>';
+    if (stopped.length) html += '<div class="bits"><span class="badge warn">' + stopped.length + ' stopped for an hour</span> ' + stopped.map((p) => esc(p.title) + ' (' + esc(p.detail || p.problem) + ')').join(', ') +
+      ': a move was not found where the plan expects it, so no more quota is spent there. It is tried again by itself after an hour, or now with Retry now in the table below.</div>';
     // The one state that needs the owner: YouTube refuses positions on a playlist that sorts itself.
     if (manual.length) html += '<div class="bits"><span class="badge bad">' + manual.length + ' cannot be ordered</span> ' + manual.map((p) => esc(p.title)).join(', ') +
       ': set the ordering of the playlist to Manual in its settings on YouTube. The pass looks again by itself after a day, or now with Retry now in the table below.</div>';
@@ -188,7 +188,7 @@ ${YOUTUBE_CARD_JS}
     $ordDetails.hidden = !rows.length;
     $ordTable.innerHTML = '<table><thead><tr><th>Playlist</th><th>Videos</th><th>No date</th><th>To move</th><th>Units</th><th>Read</th></tr></thead><tbody>' +
       rows.map((p) => '<tr><td>' + link('https://www.youtube.com/playlist?list=' + encodeURIComponent(p.playlistId), p.title) +
-        (p.problem === 'manual_sort' || p.problem === 'unexpected_position' || p.problem === 'no_progress' ? ' <span class="badge ' + (p.problem === 'manual_sort' ? 'bad' : 'warn') + '"' + TK.tip(p.detail || '') + '>' + (p.problem === 'manual_sort' ? 'not on manual order' : 'stopped for a day') + '</span>' +
+        (p.problem === 'manual_sort' || p.problem === 'unexpected_position' || p.problem === 'no_progress' ? ' <span class="badge ' + (p.problem === 'manual_sort' ? 'bad' : 'warn') + '"' + TK.tip(p.detail || '') + '>' + (p.problem === 'manual_sort' ? 'not on manual order' : 'stopped for an hour') + '</span>' +
           ' <button type="button" class="btn small" data-ord-retry="' + esc(p.playlistId) + '"' + TK.tip('Clears the stop so the next run reads this playlist again and tries. Moves nothing itself.') + '>Retry now</button>' : p.problem ? ' <span class="badge info"' + TK.tip(p.detail || '') + '>' + (p.problem === 'unreadable' ? 'not read' : 'retrying') + '</span>' : '') +
         (p.unmovable && p.unmovable.length ? ' <span class="badge neutral"' + TK.tip('YouTube no longer finds ' + (p.unmovable.length === 1 ? 'this video' : 'these videos') + ', so a move was refused. Left in place; tried once more after a week.') + '>' + p.unmovable.length + ' not movable</span>' +
           (p.problem === 'manual_sort' || p.problem === 'unexpected_position' || p.problem === 'no_progress' ? '' : ' <button type="button" class="btn small" data-ord-retry="' + esc(p.playlistId) + '"' + TK.tip('Forgets the refused move so the next run tries it again. Moves nothing itself.') + '>Retry now</button>') : '') +
