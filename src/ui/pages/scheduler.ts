@@ -85,8 +85,8 @@ const JS = /* js */ `
 (() => {
   const $ = TK.$, esc = TK.esc;
   const CLASSES = ['new', 'verify', 'recheck', 'backfill'];
-  const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'index_catchup', 'dj_backfill', 'presave'];
-  const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', index_catchup: 'Search index catch-up', dj_backfill: 'DJ backfill', presave: 'Pre-save recheck' };
+  const KINDS = ['discovery', 'set', 'verify', 'render_feed', 'recheck', 'index_catchup', 'refresh', 'dj_backfill', 'presave'];
+  const KIND_WORDS = { discovery: 'DJ discovery', set: 'Set (first fetch)', verify: 'Verify (2nd fetch)', render_feed: 'Render feeder', recheck: 'Recheck', index_catchup: 'Search index catch-up', refresh: 'Idle refresh (stalest sets)', dj_backfill: 'DJ backfill', presave: 'Pre-save recheck' };
   const SKIP_WORDS = { paused: 'Paused (IP block)', backoff: 'Pool backoff', pool_not_configured: 'Pool not configured', youtube_not_connected: 'YouTube not connected', nothing_due: 'Nothing due', quota_hold: 'Waiting for YouTube quota', zero_draw: 'Drew zero' };
   const GOOD = new Set(['ok', 'stepped', 'done', 'no_cursor']);
   const OVERDUE_BAD = 6 * 3600;
@@ -122,9 +122,9 @@ const JS = /* js */ `
     backoff: 'The pool asked the scheduler to wait before the next tick.',
     pool_not_configured: 'No tlpool is set up, so nothing can be fetched.',
     youtube_not_connected: 'YouTube is not connected, so the sync cannot add videos.',
-    nothing_due: 'Nothing was due at this tick.',
+    nothing_due: 'Nothing was due at this tick, and the idle refresh had nothing to fetch (off, its daily cap reached, or every set fetched recently).',
     quota_hold: 'Nothing else was due. New sets whose video is already known wait for YouTube quota and are added when it is back.',
-    zero_draw: 'The random draw picked zero items (the tick size allows 0).',
+    zero_draw: 'The random draw picked zero items (the tick size allows 0), and the idle refresh had nothing to fetch (off, its daily cap reached, or every set fetched recently).',
   };
   const djLink = (slug, name) => slug ? '<a href="/ui/dj/' + encodeURIComponent(slug) + '">' + esc(name || slug) + '</a>' : '';
   const n = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
@@ -257,7 +257,18 @@ const JS = /* js */ `
     if (t.stoppedBy) res += badge('warn', 'stopped', 'The tick ended early because of this refusal; the items left are drawn again later.') + ' <span>' + esc(t.stoppedBy) + '</span>';
     if (t.error) res += '<span class="error">' + esc(t.error) + '</span>';
     if (!res) res = items.length ? badge('ok', 'done', 'Every drawn item ran.') : '<span class="muted">-</span>';
+    const why = whyOf(t);
+    if (why) res += ' <span class="muted">' + esc(why) + '</span>';
     return '<span class="sc-res">' + res + '</span>';
+  }
+  // One line on why the tick drew what it did: the idle refresh fills free slots.
+  function whyOf(t) {
+    const items = Array.isArray(t.items) ? t.items : [];
+    const refresh = items.filter((x) => x.kind === 'refresh').length;
+    if (!refresh) return '';
+    const dueTotal = t.due ? CLASSES.reduce((a, c) => a + n(t.due[c]), 0) : 0;
+    if (!n(t.drawn)) return 'Drew zero: one idle-refresh slot instead.';
+    return (dueTotal ? 'Less was due than drawn' : 'Nothing due') + ': ' + refresh + ' free slot' + (refresh === 1 ? '' : 's') + ' refreshed the stalest sets.';
   }
   // The Picked column: outcome counts and the first item; the drawer has them all.
   function pickedHtml(t) {

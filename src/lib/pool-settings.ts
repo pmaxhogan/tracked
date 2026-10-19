@@ -225,6 +225,27 @@ export const PoolSettingsSchema = z.object({
       .positive()
       .max(24 * 60),
   }),
+  /**
+   * The idle refresh (lib/fetch-scheduler.ts refreshCandidates): when a tick
+   * has free slots (fewer items than it drew, or a zero draw - one slot then)
+   * the stalest known sets are fetched again so the accounts' spare budget
+   * finds changed lists (cue times, IDs, videos). Sets mkvid waits on come
+   * first and may be refetched after `mkvidCooldownHours`; every other set
+   * after `cooldownHours`. At the lowest pool priority (backfill), at most
+   * `perTick` a tick and `perDay` a UTC day (0 = off).
+   */
+  refresh: z.object({
+    perDay: z.number().int().min(0).max(5000),
+    perTick: z.number().int().min(0).max(10),
+    cooldownHours: z
+      .number()
+      .positive()
+      .max(24 * 60),
+    mkvidCooldownHours: z
+      .number()
+      .positive()
+      .max(24 * 60),
+  }),
 });
 
 export type PoolSettings = z.infer<typeof PoolSettingsSchema>;
@@ -265,6 +286,7 @@ export const DEFAULT_POOL_SETTINGS: PoolSettings = {
   },
   renderFeed: { maxPerTick: 1, cooldownHours: 48, maxCooldownDays: 14, maxFailures: 3 },
   indexCatchUp: { perDay: 200, perTick: 1, cooldownHours: 72 },
+  refresh: { perDay: 400, perTick: 2, cooldownHours: 72, mkvidCooldownHours: 24 },
 };
 
 type Plain = Record<string, unknown>;

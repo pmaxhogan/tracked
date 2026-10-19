@@ -272,6 +272,46 @@ const SCHED_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: "sf-refresh",
+    title: "Idle refresh",
+    intro:
+      "When a tick has nothing else to do (or draws zero), it fetches the stalest known sets again at the lowest pool priority, so spare account budget finds changed lists: new cue times, identified IDs, new videos. Sets mkvid is waiting on go first.",
+    fields: [
+      {
+        path: "refresh.perDay",
+        label: "Refresh fetches per day",
+        help: "Default 400; 0 = off. tlpool's own budget and pacing still apply.",
+        min: 0,
+        max: 5000,
+        step: 1,
+      },
+      {
+        path: "refresh.perTick",
+        label: "Refresh fetches per tick, at most",
+        help: "Only the tick's free slots are used. Default 2; 0 = off.",
+        min: 0,
+        max: 10,
+        step: 1,
+      },
+      {
+        path: "refresh.cooldownHours",
+        label: "Refresh a set fetched more than",
+        help: "Hours ago. Default 72.",
+        unit: "h",
+        min: 1,
+        max: 1440,
+      },
+      {
+        path: "refresh.mkvidCooldownHours",
+        label: "Refresh a set mkvid waits on fetched more than",
+        help: "Hours ago: held sets (too few cue times) find their times sooner. Default 24.",
+        unit: "h",
+        min: 1,
+        max: 1440,
+      },
+    ],
+  },
+  {
     id: "sf-manual",
     title: "Manual fetches and reports",
     fields: [

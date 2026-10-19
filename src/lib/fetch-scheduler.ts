@@ -29,6 +29,10 @@
  *                  verified, fetched again so it is verified and indexed;
  *                  ~1,500 sets synced before verification (2026-09-30) and
  *                  search (2026-10-01) were otherwise months from a recheck
+ *   - idle refresh (fills the tick's free slots, `refresh`): the stalest
+ *                  known sets fetched again so spare account budget finds
+ *                  changed lists; sets mkvid waits on first. A zero draw
+ *                  still gets one slot, so a tick rarely does nothing
  *
  * Set pages still go through `syncOne` (lib/sync.ts) - playlist inserts,
  * swaps, mkvid queueing all stay there - with an explicit selection instead
@@ -147,6 +151,7 @@ export function itemPoolPriority(item: TickItem): PoolPriority {
     case "recheck":
       return "recheck";
     case "index_catchup":
+    case "refresh":
     case "dj_backfill":
       return "backfill";
     case "discovery":
@@ -937,6 +942,117 @@ async function countIndexCatchUp(env: Env, nowSec: number): Promise<void> {
   await env.CACHE.put(key, String(used + 1), { expirationTtl: 2 * 86400 });
 }
 
+// --- idle refresh -----------------------------------------------------------
+
+/** CACHE KV: the idle refresh found no candidate; not looked for again before this (unix seconds). */
+export const REFRESH_EMPTY_KEY = "scheduler:refresh_empty_until";
+const REFRESH_EMPTY_SECONDS = 30 * 60;
+/** CACHE KV: idle refresh fetches run on a UTC day (approximate, like the catch-up's). */
+const refreshCountKey = (day: string) => `scheduler:refresh:${day}`;
+
+/**
+ * Known sets to fetch again when a tick has nothing else to do, stalest
+ * first, sets with a pending mkvid request (most of them held for missing cue
+ * times, which only a fetch can bring) ahead of the rest: processed,
+ * subscribed, not abandoned, not marked for a resync, not already due as a
+ * recheck (that class has them), not waiting on a verification's second fetch
+ * (the verify class has them, with its excluded accounts), not one the render
+ * feeder cools down or gave up on, with fetch attempts left today, and last
+ * fetched more than `refresh.cooldownHours` ago (`mkvidCooldownHours` for a
+ * set mkvid waits on). Sets that are never due by age are included: nothing
+ * else would fetch them again.
+ */
+export async function refreshCandidates(
+  env: Env,
+  settings: PoolSettings,
+  nowSec: number,
+  limit: number,
+): Promise<Array<{ url: string; slug: string }>> {
+  if (limit <= 0) return [];
+  const waiting =
+    "EXISTS (SELECT 1 FROM mkvid_requests m WHERE m.set_url = t.url AND m.status = 'pending')";
+  const res = await dbOf(env)
+    .prepare(
+      `SELECT t.url AS url, MIN(t.slug) AS slug, MIN(COALESCE(s.last_fetched_at, 0)) AS fetched,
+              MAX(CASE WHEN ${waiting} THEN 1 ELSE 0 END) AS waiting
+         FROM tracklists t JOIN set_schedule s ON s.url = t.url
+        WHERE t.processed = 1 AND t.abandoned = 0 AND COALESCE(t.checked_at, 1) <> 0 AND t.slug IN (SELECT slug FROM subscriptions)
+          AND (s.next_due_at IS NULL OR s.next_due_at > ?)
+          AND (s.last_fetched_at IS NULL OR s.last_fetched_at <= ? OR (s.last_fetched_at <= ? AND ${waiting}))
+          AND NOT EXISTS (SELECT 1 FROM set_verification v WHERE v.url = t.url AND v.state = 'pending')
+          AND NOT EXISTS (SELECT 1 FROM render_feed rf WHERE rf.url = t.url AND (rf.gave_up = 1 OR rf.next_feed_at > ?))
+          AND ${attemptOkSql(settings.retry.maxSetAttemptsPerDay)}
+        GROUP BY t.url ORDER BY waiting DESC, fetched ASC, t.url LIMIT ?`,
+    )
+    .bind(
+      nowSec,
+      nowSec - settings.refresh.cooldownHours * HOUR,
+      nowSec - settings.refresh.mkvidCooldownHours * HOUR,
+      nowSec,
+      nowSec,
+      utcDay(nowSec),
+      limit,
+    )
+    .all<{ url: string; slug: string }>();
+  return res.results.map((r) => ({ url: r.url, slug: r.slug }));
+}
+
+/** Idle refresh items allowed this tick: perTick, and what is left of perDay. */
+export async function refreshAllowance(
+  env: Env,
+  settings: PoolSettings,
+  nowSec: number,
+): Promise<number> {
+  const { perDay, perTick } = settings.refresh;
+  if (perDay <= 0 || perTick <= 0) return 0;
+  const used = Number((await env.CACHE.get(refreshCountKey(utcDay(nowSec)))) ?? 0) || 0;
+  return Math.max(0, Math.min(perTick, perDay - used));
+}
+
+async function countRefresh(env: Env, nowSec: number): Promise<void> {
+  const key = refreshCountKey(utcDay(nowSec));
+  const used = Number((await env.CACHE.get(key)) ?? 0) || 0;
+  await env.CACHE.put(key, String(used + 1), { expirationTtl: 2 * 86400 });
+}
+
+/**
+ * The idle refresh's items for a tick that picked `picked` (its URLs are left
+ * out): the tick's free slots - `max(1, drawn)` minus what it picked, so a
+ * zero draw still gets one - within refreshAllowance. None while a low
+ * priority's budget is held (budgetHolds), and the query is not run again
+ * for a while after it found nothing.
+ */
+export async function pickRefreshItems(
+  env: Env,
+  settings: PoolSettings,
+  drawn: number,
+  picked: readonly TickItem[],
+  slugs: ReadonlySet<string>,
+  nowSec: number,
+): Promise<TickItem[]> {
+  const free = Math.max(1, drawn) - picked.length;
+  if (free <= 0) return [];
+  if ((await budgetHolds(env, nowSec)).size > 0) return [];
+  const slots = Math.min(free, await refreshAllowance(env, settings, nowSec));
+  if (slots <= 0) return [];
+  if ((Number(await env.CACHE.get(REFRESH_EMPTY_KEY)) || 0) > nowSec) return [];
+  const skip = new Set<string>(parseJsonArray(await env.CACHE.get(INFLIGHT_KEY)));
+  for (const i of picked) if ("url" in i && i.url) skip.add(i.url);
+  const cands = await refreshCandidates(env, settings, nowSec, slots + skip.size + 10);
+  if (cands.length === 0)
+    await env.CACHE.put(REFRESH_EMPTY_KEY, String(nowSec + REFRESH_EMPTY_SECONDS), {
+      expirationTtl: 2 * REFRESH_EMPTY_SECONDS,
+    });
+  const out: TickItem[] = [];
+  for (const c of cands) {
+    if (out.length >= slots) break;
+    if (!slugs.has(c.slug) || skip.has(c.url)) continue;
+    skip.add(c.url);
+    out.push({ cls: "recheck", kind: "refresh", slug: c.slug, url: c.url });
+  }
+  return out;
+}
+
 // --- picking a tick ---------------------------------------------------------
 
 export type TickItem =
@@ -946,6 +1062,8 @@ export type TickItem =
   | { cls: "recheck"; kind: "recheck"; slug: string; url: string }
   /** The search index catch-up (indexCatchUpCandidates), on top of the drawn items. */
   | { cls: "recheck"; kind: "index_catchup"; slug: string; url: string }
+  /** The idle refresh (pickRefreshItems): the stalest sets, in the tick's free slots. */
+  | { cls: "recheck"; kind: "refresh"; slug: string; url: string }
   | { cls: "new"; kind: "discovery"; slug: string }
   | { cls: "backfill"; kind: "dj_backfill"; slug: string }
   /** A pre-saved track's scheduled check (lib/presave.ts), on top of the drawn items. `slug` = its DJ or ''. */
@@ -1246,8 +1364,8 @@ export async function runSchedulerTick(
    * longer than the tick spreads its items.
    */
   let quotaOut = false;
+  const slugs = new Set(bySlug.keys());
   if (drawn <= 0) {
-    log.info("scheduler.zero_draw");
     skipped = "zero_draw";
   } else {
     due = { new: 0, verify: 0, recheck: 0, backfill: 0 } as Record<ScheduledClass, number>;
@@ -1257,7 +1375,7 @@ export async function runSchedulerTick(
       env,
       settings,
       drawn,
-      new Set(bySlug.keys()),
+      slugs,
       nowSec,
       undefined,
       due,
@@ -1265,20 +1383,31 @@ export async function runSchedulerTick(
       quotaOut,
       held,
     );
-    if (items.length === 0 && held.quota > 0) {
-      // Not "nothing due": there is work, and it waits for YouTube.
-      log.info("scheduler.quota_hold", { drawn, held: held.quota });
-      skipped = "quota_hold";
-    } else if (items.length === 0) {
-      log.info("scheduler.nothing_due", { drawn });
-      skipped = "nothing_due";
-    } else {
-      tokenInfo = await getAccessToken(env);
-      if (!tokenInfo) {
-        log.warn("scheduler.youtube_not_connected", { due: items.length });
-        skipped = "youtube_not_connected";
-        items = [];
-      }
+    // Not "nothing due": there is work, and it waits for YouTube.
+    if (items.length === 0) skipped = held.quota > 0 ? "quota_hold" : "nothing_due";
+  }
+  // The tick's free slots (a zero draw gets one): the stalest sets, so spare
+  // account budget is not left idle. Never throws past here.
+  let refreshed: TickItem[] = [];
+  try {
+    refreshed = await pickRefreshItems(env, settings, drawn, items, slugs, nowSec);
+  } catch (e) {
+    log.warn("scheduler.refresh_pick_failed", errorFields(e));
+  }
+  if (refreshed.length > 0) {
+    if (drawn <= 0) quotaOut = !!(await getQuotaOut(env, nowSec * 1000));
+    items = [...items, ...refreshed];
+    skipped = undefined;
+  }
+  if (skipped === "zero_draw") log.info("scheduler.zero_draw");
+  else if (skipped === "quota_hold") log.info("scheduler.quota_hold", { drawn });
+  else if (skipped === "nothing_due") log.info("scheduler.nothing_due", { drawn });
+  if (items.length > 0) {
+    tokenInfo = await getAccessToken(env);
+    if (!tokenInfo) {
+      log.warn("scheduler.youtube_not_connected", { due: items.length });
+      skipped = "youtube_not_connected";
+      items = [];
     }
   }
   const head = {
@@ -1459,6 +1588,32 @@ export async function runSchedulerTick(
             settings,
             quotaHeld,
           });
+        } else if (item.kind === "refresh") {
+          // The idle refresh: lowest pool priority, counted toward the day's cap unless the pool refused it.
+          await claimSetAttempt(env, item.url, nowSec, settings);
+          res = await syncOne(env, sub, tokenInfo!.accessToken, {
+            log,
+            trigger: "cron.refresh",
+            skipDjCrawl: true,
+            priority: "backfill",
+            selection: { newUrls: [], recheckUrls: [item.url] },
+            settings,
+            quotaHeld,
+          });
+          if (!res.stoppedBy) {
+            await countRefresh(env, nowSec);
+            // A set that did not fetch (deleted, 5xx) waits the cooldown, not the attempt backoff.
+            if (!res.ok || res.stats.tracklistsRechecked < 1) {
+              res = { ...res, ok: false };
+              const until = nowSec + settings.refresh.cooldownHours * HOUR;
+              await dbOf(env)
+                .prepare(
+                  "UPDATE set_schedule SET retry_at = ? WHERE url = ? AND COALESCE(retry_at, 0) < ?",
+                )
+                .bind(until, item.url, until)
+                .run();
+            }
+          }
         } else if (item.kind === "index_catchup") {
           // At the lowest pool priority; counted toward the day's cap unless the pool refused it.
           await claimSetAttempt(env, item.url, nowSec, settings);

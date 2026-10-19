@@ -24,6 +24,7 @@ export const SCHEDULER_KINDS = [
   "render_feed",
   "recheck",
   "index_catchup",
+  "refresh",
   "dj_backfill",
   "presave",
 ] as const;
