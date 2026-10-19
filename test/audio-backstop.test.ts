@@ -434,6 +434,44 @@ describe("failAudioJob", () => {
       status: "not_found",
     });
   });
+  it("parks a set whose recording is gone (permanent + a source-gone text) as recording removed", async () => {
+    const env = makeEnv();
+    const { id, setUrl } = await heldSet(env, "gone", { source: "hearthis" });
+    await claimAudioJob(env, ["hearthis"], { now: NOW });
+    const error =
+      "source: hearthis embed gone: this track or mix is not available (removed or private)";
+    expect(
+      await failAudioJob(env, { requestId: id, error, permanent: true }, { now: NOW }),
+    ).toEqual({ status: "removed" });
+    const req = (await getMkvidRequestForSet(env, setUrl))!;
+    expect(req.status).toBe("failed");
+    expect(req.error).toBe(error);
+    expect(await stored(env, id)).toMatchObject({
+      audio_claimed_at: null,
+      audio_attempts: 0,
+      audio_note: `recording removed: ${error}`,
+    });
+    // Not eligible any more: never handed out again.
+    expect(await claimAudioJob(env, ["hearthis"], { now: NOW + 40 * 86400 })).toBeNull();
+    expect((await readiness(env, id)).audio).toMatchObject({ state: "removed" });
+  });
+
+  it("retries a permanent failure whose text is not a removal, and a removal text not called permanent", async () => {
+    const env = makeEnv();
+    const { id, setUrl } = await heldSet(env, "notgone");
+    await claimAudioJob(env, ["soundcloud"], { now: NOW });
+    expect(
+      await failAudioJob(
+        env,
+        { requestId: id, error: "track downloads failing: HTTP Error 403", permanent: true },
+        { now: NOW },
+      ),
+    ).toMatchObject({ status: "retry", attempts: 1 });
+    expect(
+      await failAudioJob(env, { requestId: id, error: "source: x: not available" }, { now: NOW }),
+    ).toMatchObject({ status: "retry", attempts: 2 });
+    expect((await getMkvidRequestForSet(env, setUrl))!.status).toBe("pending");
+  });
 });
 
 describe("/mkvid/audio routes", () => {
@@ -489,6 +527,9 @@ describe("/mkvid/audio routes", () => {
       status: "retry",
       attempts: 1,
     });
+    expect((await call(env, "/fail", { requestId: id, error: "x", permanent: "yes" })).status).toBe(
+      400,
+    );
     expect(await (await call(env, "/status")).json()).toMatchObject({ ranAndReleased: 1 });
   });
 

@@ -9,7 +9,10 @@
  *   POST /mkvid/audio/complete  { requestId, setSeconds?, rows: [{ index, cueSeconds, share, onset, votes, source? }],
  *                                 stats?: { withAudio, missing, sources } }
  *                               -> { status: 'done', rows, gated, filled, timedEnough, nextAt } (404 unknown request)
- *   POST /mkvid/audio/fail      { requestId, error, retryAfterSeconds? } -> { status: 'retry', attempts, nextAt }
+ *   POST /mkvid/audio/fail      { requestId, error, retryAfterSeconds?, permanent? }
+ *                               -> { status: 'retry', attempts, nextAt } | { status: 'removed' }
+ *                               ('removed': the recording is gone; the request is parked as
+ *                               recording_removed, lib/audio-backstop.ts failAudioJob)
  *   GET  /mkvid/audio/status    -> { eligible, due, running, withEstimates, ranAndReleased }
  *
  * mkvid reports every row it had audio for; tracked applies the gate
@@ -64,6 +67,7 @@ const FailBody = z.object({
     .min(1)
     .transform((s) => s.slice(0, 1000)),
   retryAfterSeconds: z.number().finite().nullable().optional(),
+  permanent: z.boolean().optional(),
 });
 
 export const mkvidAudioApp = new Hono<{ Bindings: Env }>();

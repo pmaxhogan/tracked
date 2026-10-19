@@ -14,7 +14,13 @@
  *                       the gated ones and fill the list from them.
  *   failAudioJob        a run that could not finish (recording or track
  *                       downloads failing, YouTube throttling): back off and
- *                       try the set again later. A set is never given up.
+ *                       try the set again later. A set is never given up,
+ *                       except when its recording is gone from its source
+ *                       (`permanent` and mkvidFailureKind says
+ *                       recording_removed): then the request itself is
+ *                       parked as the render queue parks it (failMkvidRequest),
+ *                       a neutral "recording removed", queued again by the
+ *                       sync if the page links another recording.
  *   applyAudioCuesToRequest / audioFill
  *                       put the stored estimates into the stored list, also on
  *                       every save of the list (the Apple pass calls audioFill),
@@ -28,11 +34,14 @@
 
 import type { Env } from "../types";
 import { dbOf, parseJson } from "./db";
-import type { Logger } from "./log";
+import { failMkvidRequest } from "./mkvid";
+import { mkvidFailureKind } from "./mkvid-outcome";
+import { makeLogger, type Logger } from "./log";
 import { withoutAppleCues, type CueRow } from "./apple-cues";
 import {
   AUDIO_CLAIM_TTL_SECONDS,
   AUDIO_DROPPED_NOTE,
+  AUDIO_REMOVED_NOTE_PREFIX,
   gateAudioReports,
   overlayAudioCues,
   parseAudioEstimates,
@@ -91,7 +100,7 @@ export function audioDueSql(now: number): string {
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
-export { AUDIO_CLAIM_TTL_SECONDS, AUDIO_DROPPED_NOTE };
+export { AUDIO_CLAIM_TTL_SECONDS, AUDIO_DROPPED_NOTE, AUDIO_REMOVED_NOTE_PREFIX };
 
 /** One row as a job carries it. */
 export type AudioJobRow = {
@@ -404,12 +413,21 @@ export function audioRetryDelay(attempts: number, retryAfterSeconds?: number | n
   return Math.min(AUDIO_RETRY_MAX_SECONDS, Math.max(backoff, Math.floor(retryAfterSeconds ?? 0)));
 }
 
-/** A run that could not finish: free the claim and try the set again later (never given up). */
+/**
+ * A run that could not finish: free the claim and try the set again later.
+ * A `permanent` failure whose text says the recording is gone from its source
+ * (mkvidFailureKind recording_removed) parks the request instead (status
+ * `removed`); any other text is retried, whatever mkvid called it.
+ */
 export async function failAudioJob(
   env: Env,
-  b: { requestId: string; error: string; retryAfterSeconds?: number | null },
+  b: { requestId: string; error: string; retryAfterSeconds?: number | null; permanent?: boolean },
   opts: { now?: number; log?: Logger } = {},
-): Promise<{ status: "not_found" } | { status: "retry"; attempts: number; nextAt: number }> {
+): Promise<
+  | { status: "not_found" }
+  | { status: "retry"; attempts: number; nextAt: number }
+  | { status: "removed" }
+> {
   const now = opts.now ?? nowSeconds();
   const db = dbOf(env);
   const cur = await db
@@ -417,6 +435,27 @@ export async function failAudioJob(
     .bind(b.requestId)
     .first<{ attempts: number }>();
   if (!cur) return { status: "not_found" };
+  if (b.permanent && mkvidFailureKind(b.error) === "recording_removed") {
+    const parked = await failMkvidRequest(
+      env,
+      { id: b.requestId, error: b.error, permanent: true, jobId: null },
+      opts.log ?? makeLogger({ route: "audio_cues.fail" }),
+    );
+    if (parked?.status === "failed") {
+      await db
+        .prepare(
+          `UPDATE mkvid_request_tracks SET audio_claimed_at = NULL, audio_attempts = 0, audio_next_at = NULL, audio_note = ?
+            WHERE request_id = ?`,
+        )
+        .bind(`${AUDIO_REMOVED_NOTE_PREFIX}${b.error}`.slice(0, 300), b.requestId)
+        .run();
+      opts.log?.info("audio_cues.recording_removed", {
+        requestId: b.requestId,
+        error: b.error.slice(0, 300),
+      });
+      return { status: "removed" };
+    }
+  }
   const attempts = Number(cur.attempts ?? 0) + 1;
   const nextAt = now + audioRetryDelay(attempts, b.retryAfterSeconds);
   await db

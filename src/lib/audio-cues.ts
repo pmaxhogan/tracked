@@ -190,16 +190,28 @@ export function parseAudioEstimates(json: string | null | undefined): AudioEstim
   );
 }
 
-/** A claim not renewed (progress) for this long is handed out again (lib/audio-backstop.ts). */
-export const AUDIO_CLAIM_TTL_SECONDS = 6 * 3600;
+/**
+ * A claim not renewed (progress) for this long is handed out again
+ * (lib/audio-backstop.ts). mkvid renews every 10 minutes while it runs, so a
+ * run that died with its container (a redeploy, a crash) frees its set
+ * within this, after four missed renewals.
+ */
+export const AUDIO_CLAIM_TTL_SECONDS = 40 * 60;
 
 /** The note left when the 1001tl cues alone reach 90 % and the estimates are dropped. */
 export const AUDIO_DROPPED_NOTE = "estimates dropped: 1001tracklists has the cue times now";
 
+/**
+ * The note on a set whose audio run found its recording gone from its source
+ * (lib/audio-backstop.ts failAudioJob): the request is parked as
+ * recording_removed and the set is not tried again.
+ */
+export const AUDIO_REMOVED_NOTE_PREFIX = "recording removed: ";
+
 /** The audio estimate's state for the panel (readinessFor), or null when it never ran for the set. */
 export type AudioCueView = {
   cues: number;
-  state: "running" | "retrying" | "done" | "dropped";
+  state: "running" | "retrying" | "done" | "dropped" | "removed";
   note: string | null;
   nextAt: number | null;
   ranAt: number | null;
@@ -221,14 +233,17 @@ export function audioCueView(
     x.audio_claimed_at != null && Number(x.audio_claimed_at) > now - AUDIO_CLAIM_TTL_SECONDS;
   const attempts = Number(x.audio_attempts ?? 0);
   const ranAt = x.audio_ran_at == null ? null : Number(x.audio_ran_at);
-  if (!claimed && !attempts && ranAt === null && cues === 0) return null;
+  const removed = !claimed && !!x.audio_note?.startsWith(AUDIO_REMOVED_NOTE_PREFIX);
+  if (!claimed && !attempts && ranAt === null && cues === 0 && !removed) return null;
   const state = claimed
     ? "running"
-    : attempts > 0
-      ? "retrying"
-      : x.audio_note === AUDIO_DROPPED_NOTE
-        ? "dropped"
-        : "done";
+    : removed
+      ? "removed"
+      : attempts > 0
+        ? "retrying"
+        : x.audio_note === AUDIO_DROPPED_NOTE
+          ? "dropped"
+          : "done";
   return {
     cues,
     state,

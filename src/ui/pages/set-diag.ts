@@ -159,7 +159,7 @@ export const SET_DIAG_JS = /* js */ `
       ['Stored list', l ? l.trackCount + ' rows, ' + (l.idRows == null ? '?' : l.idRows) + ' ID rows, ' + (l.trusted ? 'trusted' : 'untrusted') + ', ' + l.named + ' named, ' + l.mismatched + ' mismatched, scraped ' + diagRel(l.scrapedAt) : 'none'],
       // The Apple Music backstop (lib/apple-backstop.ts): what it did, or why the album was not used.
       // The audio estimate (lib/audio-backstop.ts): cues estimated from the tracks' audio, or that it runs / retries.
-      ...(r && r.audio ? [['Audio estimate', (r.audio.cues > 0 ? r.audio.cues + ' cue' + (r.audio.cues === 1 ? '' : 's') + ' estimated from audio' : r.audio.state === 'running' ? 'running' : r.audio.state === 'retrying' ? 'retries ' + (r.audio.nextAt ? diagWhen(r.audio.nextAt) : 'later') : 'none placed') + (r.audio.note ? ' (' + r.audio.note + ')' : '')]] : []),
+      ...(r && r.audio ? [['Audio estimate', (r.audio.cues > 0 ? r.audio.cues + ' cue' + (r.audio.cues === 1 ? '' : 's') + ' estimated from audio' : r.audio.state === 'running' ? 'running' : r.audio.state === 'retrying' ? 'retries ' + (r.audio.nextAt ? diagWhen(r.audio.nextAt) : 'later') : r.audio.state === 'removed' ? 'not tried again' : 'none placed') + (r.audio.note ? ' (' + r.audio.note + ')' : '')]] : []),
       ...(r && r.apple ? [['Apple Music', r.apple.cues > 0 ? r.apple.cues + ' cue' + (r.apple.cues === 1 ? '' : 's') + ' from Apple Music' + (r.apple.note ? ' (' + r.apple.note + ')' : '') : 'not used: ' + (r.apple.note || 'no reason recorded')]] : []),
     ];
     return { key: 'mkvid', label: 'mkvid', tone, finding, facts };

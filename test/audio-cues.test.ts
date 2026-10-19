@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AUDIO_DROPPED_NOTE,
   AUDIO_GATE,
+  AUDIO_CLAIM_TTL_SECONDS,
+  AUDIO_REMOVED_NOTE_PREFIX,
   audioCueView,
   audioKey,
   gateAudioReports,
@@ -216,5 +218,13 @@ describe("audioCueView", () => {
     ).toMatchObject({
       state: "dropped",
     });
+    expect(
+      audioCueView({ audio_note: `${AUDIO_REMOVED_NOTE_PREFIX}source: gone` }, NOW),
+    ).toMatchObject({ state: "removed", note: "recording removed: source: gone" });
+  });
+
+  it("frees a dead run's claim within an hour (mkvid renews every 10 minutes)", () => {
+    expect(AUDIO_CLAIM_TTL_SECONDS).toBeLessThanOrEqual(3600);
+    expect(AUDIO_CLAIM_TTL_SECONDS).toBeGreaterThanOrEqual(3 * 600);
   });
 });
