@@ -55,6 +55,15 @@ const APP_GROUPS: FormGroup[] = [
         nullable: true,
       },
       {
+        path: "mkvid.hearthisPagesPerHour",
+        label: "hearthis.at page fetches an hour",
+        help: "Rolling hour: embed and track pages and yt-dlp's lookups, sets and audio cue jobs together. A set needs 3 free (an audio cue job 4), so 1 and 2 are not allowed; a hearthis set over it waits in the queue, no attempt used. 0 pauses hearthis.at. Blank = mkvid's HEARTHIS_PAGES_PER_HOUR, else 20.",
+        min: 0,
+        max: 200,
+        step: 1,
+        nullable: true,
+      },
+      {
         path: "mkvid.maxAttempts",
         label: "Attempts before a request fails",
         help: "Default 3.",

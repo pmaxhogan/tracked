@@ -16,6 +16,7 @@ import { makeLogger } from "../lib/log";
 import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_HEARTHIS_DOWNLOADS_PER_HOUR,
+  DEFAULT_HEARTHIS_PAGES_PER_HOUR,
   getAppSettings,
   updateAppSettings,
   type AppSettings,
@@ -34,6 +35,7 @@ export function effectiveAppSettings(env: Env, s: AppSettings) {
       // mkvid's env var is not visible here: blank shows mkvid's code default.
       hearthisDownloadsPerHour:
         s.mkvid.hearthisDownloadsPerHour ?? DEFAULT_HEARTHIS_DOWNLOADS_PER_HOUR,
+      hearthisPagesPerHour: s.mkvid.hearthisPagesPerHour ?? DEFAULT_HEARTHIS_PAGES_PER_HOUR,
     },
     playlists: {
       sweepDryRun: sweep.dryRun,

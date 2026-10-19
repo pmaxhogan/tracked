@@ -27,6 +27,9 @@ export const ORDER_MIN_DAILY_UNITS = 110;
 /** mkvid's own default for hearthis.at downloads an hour (its lib/hearthis.ts), when neither the setting nor its env var is set. */
 export const DEFAULT_HEARTHIS_DOWNLOADS_PER_HOUR = 3;
 
+/** mkvid's own default for hearthis.at page fetches an hour (its lib/hearthis.ts), when neither the setting nor its env var is set. */
+export const DEFAULT_HEARTHIS_PAGES_PER_HOUR = 20;
+
 export const AppSettingsSchema = z.object({
   mkvid: z.object({
     /** Uploads a quota day through mkvid's own project; null = MKVID_DAILY_CLAIM_CAP, else 24. 0 pauses. */
@@ -82,6 +85,19 @@ export const AppSettingsSchema = z.object({
      * mkvid's HEARTHIS_DOWNLOADS_PER_HOUR, else 3. 0 pauses hearthis.at.
      */
     hearthisDownloadsPerHour: z.number().int().min(0).max(100).nullable(),
+    /**
+     * hearthis.at page fetches (embed and track pages, yt-dlp's lookups) mkvid
+     * makes per rolling hour; sent on /mkvid/health like the downloads one.
+     * null = mkvid's HEARTHIS_PAGES_PER_HOUR, else 20. A set needs 3 free (an
+     * audio cue job 4), so 1 and 2 are refused; 0 pauses hearthis.at.
+     */
+    hearthisPagesPerHour: z
+      .number()
+      .int()
+      .min(0)
+      .max(200)
+      .refine((n) => n === 0 || n >= 3, { message: "0 (pauses) or 3 to 200" })
+      .nullable(),
   }),
   playlists: z.object({
     /** The daily playlist sweep only reports; null = PLAYLIST_SWEEP_DRY_RUN (unset = true). */
@@ -257,6 +273,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     goneCheckHours: 6,
     removedBurstCount: 3,
     hearthisDownloadsPerHour: null,
+    hearthisPagesPerHour: null,
   },
   playlists: {
     sweepDryRun: null,

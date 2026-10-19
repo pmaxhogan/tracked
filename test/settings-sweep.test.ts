@@ -180,6 +180,7 @@ describe("app settings", () => {
       goneCheckHours: 6,
       removedBurstCount: 3,
       hearthisDownloadsPerHour: null,
+      hearthisPagesPerHour: null,
     });
     expect(DEFAULT_APP_SETTINGS.playlists.shortToleranceMinutes * 60).toBe(
       SHORTER_THAN_CUE_TOLERANCE_SECONDS,
@@ -217,12 +218,24 @@ describe("app settings", () => {
       mkvid: { hearthisDownloadsPerHour: null },
     });
     expect(hearthisBack.ok && hearthisBack.settings.mkvid.hearthisDownloadsPerHour).toBeNull();
+    // hearthis.at page fetches an hour: 0 pauses, 3 is the least a set needs, null = mkvid's own.
+    for (const n of [0, 3, 200]) {
+      const pages = await updateAppSettings(env, { mkvid: { hearthisPagesPerHour: n } });
+      expect(pages.ok && pages.settings.mkvid.hearthisPagesPerHour).toBe(n);
+    }
+    const pagesBack = await updateAppSettings(env, { mkvid: { hearthisPagesPerHour: null } });
+    expect(pagesBack.ok && pagesBack.settings.mkvid.hearthisPagesPerHour).toBeNull();
     for (const bad of [
       { mkvid: { maxAttempts: 0 } },
       { mkvid: { dailyClaimCap: -1 } },
       { mkvid: { hearthisDownloadsPerHour: -1 } },
       { mkvid: { hearthisDownloadsPerHour: 1.5 } },
       { mkvid: { hearthisDownloadsPerHour: 101 } },
+      { mkvid: { hearthisPagesPerHour: -1 } },
+      { mkvid: { hearthisPagesPerHour: 1 } },
+      { mkvid: { hearthisPagesPerHour: 2 } },
+      { mkvid: { hearthisPagesPerHour: 2.5 } },
+      { mkvid: { hearthisPagesPerHour: 201 } },
       { playlists: { massRemovalRatio: 2 } },
       { retention: { auditDays: 0 } },
       { playlists: { sweepDryRun: "yes" } },
@@ -280,10 +293,15 @@ describe("app settings", () => {
       sharedDailyClaimCap: 3,
       claimTtlMinutes: 10,
       hearthisDownloadsPerHour: 3,
+      hearthisPagesPerHour: 20,
     });
     expect(
       effectiveAppSettings(env, app({ mkvid: { hearthisDownloadsPerHour: 0 } })).mkvid
         .hearthisDownloadsPerHour,
+    ).toBe(0);
+    expect(
+      effectiveAppSettings(env, app({ mkvid: { hearthisPagesPerHour: 0 } })).mkvid
+        .hearthisPagesPerHour,
     ).toBe(0);
     expect(eff.playlists).toEqual({
       sweepDryRun: true,
@@ -353,6 +371,7 @@ describe("settings pages", () => {
     ["/ui/pool/settings", SETTINGS_PAGE_HTML, "retry.maxSetAttemptsPerDay", "navTimeoutSeconds"],
     ["/ui/settings", SETTINGS_PAGE.html, "mkvid.dailyClaimCap", "retention.auditDays"],
     ["/ui/settings", SETTINGS_PAGE.html, "mkvid.hearthisDownloadsPerHour", "mkvid.maxAttempts"],
+    ["/ui/settings", SETTINGS_PAGE.html, "mkvid.hearthisPagesPerHour", "mkvid.maxAttempts"],
   ])("%s: the inline scripts parse and carry the new fields", (_, html, a, b) => {
     const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(
       (m) => m[1],

@@ -26,9 +26,11 @@
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used; `youtube_quota` = its upload project is out of quota: the same,
  *                         handed out again after 10 min (to another project).
- *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap, hearthisDownloadsPerHour }
+ *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap, hearthisDownloadsPerHour, hearthisPagesPerHour }
  *                         `hearthisDownloadsPerHour` = the setting mkvid.hearthisDownloadsPerHour (null = mkvid's
  *                         own HEARTHIS_DOWNLOADS_PER_HOUR, else 3); mkvid adopts it on every health read
+ *                         `hearthisPagesPerHour` = mkvid.hearthisPagesPerHour the same way (null = its
+ *                         HEARTHIS_PAGES_PER_HOUR, else 20)
  *                         `uploadProjects: true` = claims take any project key and `projects` (an mkvid offers
  *                         only primary / shared until it sees it)
  *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
@@ -102,6 +104,7 @@ async function body<T>(
 
 mkvidApp.get("/health", async (c) => {
   const accounts = await mkvidAccountUsage(c.env);
+  const settings = (await getAppSettings(c.env)).mkvid;
   return c.json({
     ok: true,
     // This Worker hands out verified lists only and treats `unverified_tracklist` as retryable (mkvid's scene style waits for this).
@@ -120,7 +123,8 @@ mkvidApp.get("/health", async (c) => {
     accounts,
     dailyClaims: accounts.reduce((n, a) => n + a.used, 0),
     dailyClaimCap: accounts.reduce((n, a) => n + a.cap, 0),
-    hearthisDownloadsPerHour: (await getAppSettings(c.env)).mkvid.hearthisDownloadsPerHour,
+    hearthisDownloadsPerHour: settings.hearthisDownloadsPerHour,
+    hearthisPagesPerHour: settings.hearthisPagesPerHour,
   });
 });
 
