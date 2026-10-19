@@ -14,6 +14,7 @@ const BODY = /* html */ `
     <div class="field grow"><label for="url">Tracklist URL</label><input id="url" type="url" placeholder="https://www.1001tracklists.com/tracklist/.../....html" required autofocus /></div>
     <button id="load-btn" type="submit" class="btn primary"${tipAttr("Fetches the tracklist (from cache when recent; otherwise one 1001tracklists page view) and shows why it is or is not in your playlists.")}>Load</button>
   </form>
+  <div id="ytm-slot" class="set-ytm" hidden></div>
   <div class="set-layout">
   <aside id="diag" class="tk-card set-diag" aria-label="Diagnostics" hidden></aside>
   <div class="set-main">
@@ -38,7 +39,8 @@ const CSS = /* css */ `
   .set-meta { font-size: var(--fs-sm); margin-bottom: var(--sp-3); }
   .cachebar { font-size: var(--fs-sm); margin-bottom: var(--sp-3); }
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
-  .set-meta .ytm { text-decoration: none; }
+  .set-ytm { margin-bottom: var(--sp-3); }
+  .set-ytm .ytm { text-decoration: none; }
 ${TRACK_ROW_CSS}
 ${SET_DIAG_CSS}`;
 
@@ -54,25 +56,32 @@ ${SET_DIAG_JS}
   // The set's YouTube video, for the YouTube Music button: the diagnostics'
   // video (the synced row's, else the set page's, else the mkvid upload's),
   // else the set page's own YouTube link. The two calls answer in either order.
-  let ytFromDiag = null, ytFromPage = null, $srcPill = null;
+  // For an mkvid upload the synced row's video is the upload (the upload writes
+  // it there). The button has its own slot above the diagnostics, so on a phone
+  // it is on screen first, and it shows as soon as the D1-only diagnostics
+  // answer, even while the 1001tracklists fetch is slow or fails.
+  let ytFromDiag = null, ytFromPage = null;
+  const $ytmSlot = $('ytm-slot');
   function videoIdOf(url) {
     const m = String(url || '').match(/(?:[?&]v=|youtu\\.be\\/|\\/(?:embed|shorts|live)\\/)([A-Za-z0-9_-]{11})/);
     return m ? m[1] : null;
   }
+  function diagVideoId(d) {
+    return d && d.video && typeof d.video.id === 'string' ? d.video.id : null;
+  }
   function renderYtm() {
-    const old = $('ytm');
-    if (old) old.remove();
+    $ytmSlot.textContent = '';
     const id = ytFromDiag || ytFromPage;
-    if (!id || $setmeta.hidden) return;
+    $ytmSlot.hidden = !id;
+    if (!id) return;
     const a = document.createElement('a');
     a.id = 'ytm';
-    a.className = 'btn primary small ytm';
+    a.className = 'btn primary ytm';
     a.href = 'https://music.youtube.com/watch?v=' + encodeURIComponent(id);
     a.target = '_blank'; a.rel = 'noreferrer noopener';
-    a.textContent = 'YouTube Music ↗';
-    a.setAttribute('data-tip', 'Plays this set in YouTube Music.');
-    if ($srcPill) $setmeta.insertBefore(a, $srcPill);
-    else $setmeta.appendChild(a);
+    a.textContent = 'Open in YouTube Music ↗';
+    a.setAttribute('data-tip', 'Plays this set in YouTube Music, in a new tab.');
+    $ytmSlot.appendChild(a);
   }
   // The track table (track-row.ts): created on the first list, fed new lists after.
   let tt = null;
@@ -98,7 +107,6 @@ ${SET_DIAG_JS}
     $setmeta.appendChild(count);
     const src = pill(data.tracklistUrl, '1001tracklists page ↗', 'Opens this set on 1001tracklists.');
     if (src) $setmeta.appendChild(src);
-    $srcPill = src;
     ytFromPage = videoIdOf(data.setYoutubeLink);
     const al = pill(data.setAppleLink, 'Apple Music (full set) ↗', 'The whole set on Apple Music.');
     if (al) $setmeta.appendChild(al);
@@ -123,7 +131,7 @@ ${SET_DIAG_JS}
       $diag.hidden = false;
       return;
     }
-    ytFromDiag = res.data.video && typeof res.data.video.id === 'string' ? res.data.video.id : null;
+    ytFromDiag = diagVideoId(res.data);
     renderYtm();
     $diag.innerHTML = renderDiag(res.data);
     $diag.hidden = false;
@@ -144,7 +152,9 @@ ${SET_DIAG_JS}
   async function load(url) {
     currentUrl = url;
     const my = ++seq;
-    ytFromDiag = null; ytFromPage = null; $srcPill = null;
+    // Never leave another set's button on screen while this one loads.
+    ytFromDiag = null; ytFromPage = null;
+    renderYtm();
     $error.textContent = '';
     $empty.hidden = true;
     // Never leave another set's diagnostics on screen while this one loads.
