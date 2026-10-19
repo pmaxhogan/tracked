@@ -145,8 +145,14 @@ ${MKVID_STATE_JS}
   const noRecording = (r) => r.outcome === 'recording_removed' || r.outcome === 'recording_short';
   // A removal the owner has not ruled on yet: one of several within a day (lib/mkvid-removed-burst.ts).
   const unconfirmed = (r) => r.outcome === 'removed_unconfirmed';
-  // What the page paints red: a real failure, and an unconfirmed removal.
-  const isProblem = (r) => stateOf(r) === 'failed' || unconfirmed(r);
+  // A done set's playlist insert: waiting = YouTube refused it and it is tried again by itself (amber),
+  // refused = for good (red: the owner can Delete and recreate).
+  const playlistWaits = (r) => r.status === 'done' && r.playlistStatus === 'pending';
+  const playlistRefused = (r) => r.status === 'done' && r.playlistStatus === 'failed';
+  // What the page paints red: a real failure, an unconfirmed removal, and a playlist insert refused for good.
+  const isProblem = (r) => stateOf(r) === 'failed' || unconfirmed(r) || playlistRefused(r);
+  const RECREATING_TIP = 'This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.';
+  const recreatingTip = (r) => (playlistWaits(r) ? 'The new video is uploaded and waits for its playlist insert. The old video stays up until the new one is in the playlists, then it is deleted from YouTube.' : RECREATING_TIP);
   const BADGE = { pending: 'info', claimed: 'warn', done: 'ok', failed: 'bad', removed_unconfirmed: 'bad', recording_removed: 'neutral', recording_short: 'neutral', has_recording: 'neutral', duplicate: 'neutral', superseded: 'neutral', banned: 'bad' };
   const STATUS_WORDS = Object.assign({ pending: 'waiting', claimed: 'rendering' }, ${JSON.stringify(MKVID_OUTCOME_LABELS)});
 
@@ -357,6 +363,8 @@ ${MKVID_STATE_JS}
   }
   // A no-recording outcome comes with its own explanation (the durations, what the source answered).
   function statusTip(r) {
+    if (playlistWaits(r)) return 'Uploaded. YouTube refused the playlist insert for now; it is tried again by itself.';
+    if (playlistRefused(r)) return 'Uploaded, but YouTube refused to put the video in the playlist for good. Delete and recreate it from its details.';
     return r.outcomeDetail || STATUS_TIPS[stateOf(r)];
   }
   function badgeHtml(r) {
@@ -372,6 +380,8 @@ ${MKVID_STATE_JS}
     if (r.status === 'superseded' || r.status === 'banned') return esc(r.error);
     // Amber, not red: it is tried again by itself, nothing for the owner to do.
     if (retrying(r)) return '<span class="retry">' + esc(errorLabel(r)) + '</span>';
+    if (playlistWaits(r)) return '<span class="retry">' + esc(r.error) + (r.notBefore ? ' (next try ' + esc(untilTime(r.notBefore)) + ')' : '') + '</span>';
+    if (r.status === 'done' && !playlistRefused(r)) return '<span class="when">' + esc(r.error) + '</span>';
     return '<span class="flag">' + esc(errorLabel(r)) + '</span>';
   }
   // The moves act on whole-queue positions, so they are offered only while the
@@ -386,7 +396,7 @@ ${MKVID_STATE_JS}
     if (r.status === 'pending' && r.readiness) meta.push(mkWhy(r.readiness, true, capped));
     else if (backoff) meta.push('retry ' + untilTime(r.notBefore));
     else if (r.status !== 'pending') meta.push(esc(rel(r.updatedAt)));
-    if (r.replacesVideoId) meta.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
+    if (r.replacesVideoId) meta.push('<span class="why"' + TK.tip(recreatingTip(r)) + '>recreating</span>');
     if (r.status === 'done' && r.oldStyle) meta.push('<span' + TK.tip('Rendered in an older visual style than the current scene style. It can be recreated.') + '>old style</span>');
     if (r.error && (r.status !== 'pending' || backoff)) meta.push(errorHtml(r));
     const lead = withPos && r.position != null
@@ -454,7 +464,7 @@ ${MKVID_STATE_JS}
   }
   function queueMeta(r) {
     const bits = [];
-    if (r.replacesVideoId) bits.push('<span class="why"' + TK.tip('This set is being rendered again. The current video stays up until the new one is in the playlists, then it is deleted from YouTube.') + '>recreating</span>');
+    if (r.replacesVideoId) bits.push('<span class="why"' + TK.tip(recreatingTip(r)) + '>recreating</span>');
     if (r.error) bits.push(errorHtml(r));
     return bits.join(' · ');
   }
@@ -715,14 +725,15 @@ ${MKVID_STATE_JS}
     ]));
     out.push('<div class="mk-dgrp">Upload</div>');
     out.push(dl([
-      ['status', badgeHtml(r) + (r.outcomeDetail ? ' ' + esc(r.outcomeDetail) : r.error ? (r.status === 'superseded' || r.status === 'banned' ? ' <span class="when">' + esc(r.error) + '</span>' : ' <span class="warn">' + esc(errorLabel(r)) + '</span>') : '')],
+      ['status', badgeHtml(r) + (r.outcomeDetail ? ' ' + esc(r.outcomeDetail) : r.error ? (r.status === 'superseded' || r.status === 'banned' || (r.status === 'done' && !playlistWaits(r) && !playlistRefused(r)) ? ' <span class="when">' + esc(r.error) + '</span>' : ' <span class="' + (playlistRefused(r) ? 'mk-err' : 'warn') + '">' + esc(errorLabel(r)) + '</span>') : '')],
       r.outcomeDetail && r.error ? ['mkvid said', '<span class="when">' + esc(r.error) + '</span>'] : null,
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '-'],
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy === 'private' ? ' <span class="warn">(an unverified OAuth app forces private whatever was requested)</span>' : '')] : null,
-      ['attempts', esc(r.attempts) + (r.notBefore ? ' · next try ' + esc(rel(r.notBefore)) : '')],
+      ['attempts', esc(r.attempts) + (r.notBefore && r.status !== 'done' ? ' · next try ' + esc(rel(r.notBefore)) : '')],
+      r.status === 'done' && r.playlistStatus ? ['playlist', playlistWaits(r) ? '<span class="warn">waiting</span> tried again by itself ' + (r.notBefore && r.notBefore > Date.now() / 1000 ? esc(rel(r.notBefore)) : 'at the next tick') : playlistRefused(r) ? '<span class="mk-err">refused by YouTube</span>' : r.playlistStatus === 'duplicate' ? 'already in the artist playlist' : 'added to the artist playlist'] : null,
       r.status !== 'pending' ? ['project', esc(projectLabel(r))] : null,
       r.videoId ? ['style', r.style ? esc(r.style) : '<span class="warn">unknown (old style)</span>'] : null,
-      r.replacesVideoId ? ['recreating', 'replaces <span class="mono">' + esc(r.replacesVideoId) + '</span> ' + link('https://youtu.be/' + encodeURIComponent(r.replacesVideoId), 'open') + ' <span class="when">(stays up until the new video is in the playlists, then is deleted)</span>'] : null,
+      r.replacesVideoId ? [playlistWaits(r) ? 'replaces' : 'recreating', 'replaces <span class="mono">' + esc(r.replacesVideoId) + '</span> ' + link('https://youtu.be/' + encodeURIComponent(r.replacesVideoId), 'open') + ' <span class="when">(stays up until the new video is in the playlists, then is deleted)</span>'] : null,
       r.readiness ? ['waiting', mkWhy(r.readiness, false, capped)] : null,
       r.skipIdWait ? ['ID wait', 'skipped (Render now)'] : null,
       r.jobId ? ['mkvid job', '<span class="mono">' + esc(r.jobId) + '</span>'] : null,

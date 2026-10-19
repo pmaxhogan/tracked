@@ -189,7 +189,11 @@ mkvidApp.post("/complete", async (c) => {
     // A recreation: ask mkvid to delete the old video once this answer is out
     // (the cron retries it if this attempt fails).
     const doomed =
-      r.status === "done" ? r.replacedVideoId : r.status === "banned" ? r.videoId : undefined;
+      r.status === "done" && "replacedVideoId" in r
+        ? r.replacedVideoId
+        : r.status === "banned"
+          ? r.videoId
+          : undefined;
     if (doomed) {
       const job = deleteOldVideo(c.env, doomed, log, fetch, { dueOnly: true }).catch((e) =>
         log.warn("mkvid.old_video_delete_threw", errorFields(e)),

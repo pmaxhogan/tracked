@@ -34,28 +34,13 @@
  * is failed permanently as `incomplete_recording`.
  */
 
-import { notifyPlaylistAdd } from "./playlist-add-push";
 import type { Env, ParsedTrack } from "../types";
 import { dbOf, parseJson, v } from "./db";
-import { errorFields, type Logger } from "./log";
-import { flushPlaylistAdditions, type PlaylistAdditionRecord } from "./playlist-audit";
-import {
-  addToCombined,
-  flushCombined,
-  openCombinedPlaylist,
-  type CombinedAdditionStatus,
-  type CombinedHandle,
-} from "./combined-playlist";
-import {
-  cachePlaylistVideoIds,
-  findOrCreatePlaylist,
-  getCachedPlaylistVideoIds,
-} from "./playlist-cache";
-import { PlaylistNotFoundError } from "./youtube-playlists";
-import { insertInOrder } from "./playlist-order-store";
+import { type Logger } from "./log";
+import { type CombinedAdditionStatus } from "./combined-playlist";
+import { addSetToPlaylists } from "./mkvid-playlist";
 import { getTracklistRow, setTracklistVideo } from "./sync-store";
 import { isVerified, tracklistFingerprint, verifiedFingerprint } from "./verification";
-import { markInPlaylist } from "./playlist-blocklist";
 import {
   CLAIM_READY_SQL,
   ID_WAIT_SECONDS,
@@ -67,7 +52,6 @@ import {
   queueBannedUploadForDelete,
   queueSupersededOldVideo,
   RECREATE_STYLE,
-  retireReplacedVideo,
   retireSupersededOldVideo,
 } from "./mkvid-recreate";
 import { decodeEntities } from "./html-entities";
@@ -766,8 +750,14 @@ export type MkvidRequest = {
   skipIdWait: boolean;
   /** The visual style mkvid made the current video with; null = unknown (an old-style video). */
   style: string | null;
-  /** Mid "Delete and recreate": the video being replaced (still up until the new one is delivered). */
+  /** Mid "Delete and recreate": the video being replaced (still up until the new one is in the playlists). */
   replacesVideoId: string | null;
+  /**
+   * A done set's artist playlist insert: added / duplicate; `pending` = YouTube
+   * refused it and the cron tries again at `notBefore` (lib/mkvid-playlist.ts);
+   * `failed` = refused for good. Null before migration 0026 or not done.
+   */
+  playlistStatus: string | null;
 };
 
 export type MkvidRow = {
@@ -798,6 +788,7 @@ export type MkvidRow = {
   skip_id_wait?: number | null;
   style?: string | null;
   replaces_video_id?: string | null;
+  playlist_status?: string | null;
 };
 
 export function rowToRequest(r: MkvidRow): MkvidRequest {
@@ -829,6 +820,7 @@ export function rowToRequest(r: MkvidRow): MkvidRequest {
     skipIdWait: Number(r.skip_id_wait ?? 0) === 1,
     style: r.style ?? null,
     replacesVideoId: r.replaces_video_id ?? null,
+    playlistStatus: r.playlist_status ?? null,
   };
 }
 
@@ -1630,6 +1622,14 @@ export type CompleteResult =
       /** A recreation: the old video, now out of the playlists and queued for deletion from YouTube. */
       replacedVideoId?: string;
     }
+  /** Done, but YouTube refused the playlist insert: `pending` = the cron tries it again at `playlistRetryAt` (unix s), `failed` = for good. */
+  | {
+      status: "done";
+      videoId: string;
+      playlistId: null;
+      playlistStatus: "pending" | "failed";
+      playlistRetryAt: number | null;
+    }
   | { status: "superseded"; videoId: string; existingVideoId: string }
   /** Banned while it rendered: the upload is kept out of the playlists and queued for deletion. */
   | { status: "banned"; videoId: string }
@@ -1640,7 +1640,9 @@ export type CompleteResult =
  * mkvid delivered a video: put it in the artist playlist and the combined
  * playlist, record it on the tracklist row as an mkvid video (so the 5-day
  * recheck keeps it, and swaps it out if 1001tracklists ever gets a real
- * recording), write an `added` audit row, and mark the request done.
+ * recording), write an `added` audit row, and mark the request done. A
+ * playlist insert YouTube refuses (quota, rate limit, 5xx) still marks it done:
+ * the cron tries the insert again (lib/mkvid-playlist.ts).
  *
  * If the set gained a real recording while mkvid was rendering, the upload is
  * not added anywhere - the request becomes `superseded` (the video stays on
@@ -1735,99 +1737,10 @@ export async function completeMkvidRequest(
     return { status: "superseded", videoId: input.videoId, existingVideoId: tl.video_id };
   }
 
-  // Artist playlist: reuse the sync's, or resolve/create it the same way the sync would.
-  const artistName = req.artistName ?? req.slug;
-  const playlistTitle = `${artistName} (1001tklists)`;
-  const syncRow = await db
-    .prepare("SELECT playlist_id FROM sub_sync WHERE slug = ?")
-    .bind(req.slug)
-    .first<{ playlist_id: string | null }>();
-  let playlistId = syncRow?.playlist_id ?? null;
-  let justCreated = false;
-  const resolvePlaylist = async () => {
-    const r = await findOrCreatePlaylist(
-      {
-        title: playlistTitle,
-        description: `Every set ${artistName} has a YouTube recording for on 1001tracklists.`,
-        logCtx: { slug: req.slug, mkvid: true },
-      },
-      accessToken,
-      log,
-    );
-    if (!r) throw new Error(`playlist ${JSON.stringify(playlistTitle)} could not be resolved`);
-    playlistId = r.id;
-    justCreated = r.justCreated;
-    await db
-      .prepare(
-        "INSERT INTO sub_sync (slug, playlist_id, artist_name) VALUES (?, ?, ?) ON CONFLICT(slug) DO UPDATE SET playlist_id = excluded.playlist_id",
-      )
-      .bind(req.slug, r.id, v(req.artistName))
-      .run();
-  };
-  if (!playlistId) await resolvePlaylist();
-
-  let existing: Set<string>;
-  if (justCreated) existing = new Set();
-  else {
-    try {
-      existing = await getCachedPlaylistVideoIds(env, playlistId!, accessToken, log);
-    } catch (e) {
-      if (!(e instanceof PlaylistNotFoundError)) throw e;
-      await resolvePlaylist();
-      existing = justCreated
-        ? new Set()
-        : await getCachedPlaylistVideoIds(env, playlistId!, accessToken, log);
-    }
-  }
-  let playlistStatus: "added" | "duplicate" = "duplicate";
-  if (!existing.has(input.videoId)) {
-    // At the place the set's date gives it (lib/playlist-order.ts), like the sync's inserts.
-    await insertInOrder(env, {
-      playlistId: playlistId!,
-      videoId: input.videoId,
-      existing,
-      accessToken,
-      log,
-      setUrl: req.setUrl,
-    });
-    existing.add(input.videoId);
-    await cachePlaylistVideoIds(env, playlistId!, existing);
-    await markInPlaylist(env, playlistId!, input.videoId, "mkvid");
-    await notifyPlaylistAdd(
-      env,
-      {
-        setUrl: req.setUrl,
-        videoId: input.videoId,
-        playlistTitle,
-        via: "mkvid",
-        setTitle: req.setTitle,
-      },
-      log,
-    );
-    playlistStatus = "added";
-  }
-
-  // Combined playlist mirror - best-effort, like the sync's.
-  let combinedStatus: CombinedAdditionStatus = "unavailable";
-  let combined: CombinedHandle | null = null;
-  try {
-    combined = await openCombinedPlaylist(env, accessToken, log);
-    if (combined)
-      combinedStatus = await addToCombined(env, combined, input.videoId, accessToken, log);
-  } catch (e) {
-    combinedStatus = "failed";
-    log.warn("mkvid.combined_add_failed", {
-      id: req.id,
-      videoId: input.videoId,
-      ...errorFields(e),
-    });
-  }
-
-  // A recreation: the new video is in; now the old one comes out of both
-  // playlists and is queued for deletion from YouTube (lib/mkvid-recreate.ts).
+  // A recreation whose set no longer resolves to the old video (the owner or
+  // the dead-video pass took it out meanwhile): it still gets deleted, whatever
+  // happens to the new video's insert.
   if (oldVideoId && !replacing) {
-    // A recreation whose set no longer resolves to the old video (the owner or
-    // the dead-video pass took it out meanwhile): it still gets deleted.
     await retireSupersededOldVideo(env, {
       requestId: req.id,
       slug: req.slug,
@@ -1836,96 +1749,85 @@ export async function completeMkvidRequest(
       replacedBy: input.videoId,
       accessToken,
       log,
-      combined,
     });
   }
-  if (replacing && oldVideoId) {
-    await retireReplacedVideo(env, {
+  // The playlists (lib/mkvid-playlist.ts). The upload is on YouTube already, so
+  // a refused insert does not fail the completion: it waits for the cron.
+  const pl = await addSetToPlaylists(
+    env,
+    {
       requestId: req.id,
       slug: req.slug,
       setUrl: req.setUrl,
-      oldVideoId,
-      oldStyle: req.style,
-      newVideoId: input.videoId,
-      playlistId: playlistId!,
-      playlistVideoIds: existing,
-      combined,
-      combinedOk: combinedStatus !== "failed" && combinedStatus !== "unavailable",
-      accessToken,
-      log,
-    });
-  }
-  if (combined) {
-    try {
-      await flushCombined(env, combined, log);
-    } catch (e) {
-      log.warn("mkvid.combined_flush_failed", { id: req.id, ...errorFields(e) });
-    }
-  }
+      artistName: req.artistName,
+      setTitle: req.setTitle,
+      source: req.source,
+      videoId: input.videoId,
+      videoUrl: input.videoUrl ?? null,
+      privacy: input.privacy ?? null,
+      style: input.style ?? null,
+      replaces: replacing && oldVideoId ? { videoId: oldVideoId, oldStyle: req.style } : null,
+    },
+    accessToken,
+    log,
+  );
 
   await setTracklistVideo(env, req.slug, req.setUrl, {
     videoId: input.videoId,
     source: "mkvid",
     checkedAt: now,
   });
+  // A waiting insert keeps a recreation's old video in replaces_video_id (retired once the new one is in).
+  const waiting = !pl.ok && pl.kind !== "permanent";
+  const playlistStatus = pl.ok ? pl.playlistStatus : waiting ? "pending" : "failed";
   await db
     .prepare(
-      "UPDATE mkvid_requests SET status = 'done', video_id = ?, video_url = ?, privacy = ?, style = ?, replaces_video_id = NULL, job_id = COALESCE(?, job_id), error = NULL, updated_at = ? WHERE id = ?",
+      "UPDATE mkvid_requests SET status = 'done', video_id = ?, video_url = ?, privacy = ?, style = ?, replaces_video_id = ?, job_id = COALESCE(?, job_id), error = ?, not_before = ?, playlist_status = ?, playlist_tries = ?, updated_at = ? WHERE id = ?",
     )
     .bind(
       input.videoId,
       v(input.videoUrl),
       v(input.privacy),
       v(input.style),
+      waiting && replacing ? oldVideoId : null,
       v(input.jobId),
+      pl.ok ? null : pl.error,
+      pl.ok ? null : pl.retryAt,
+      playlistStatus,
+      pl.ok ? 0 : 1,
       now,
       req.id,
     )
     .run();
 
-  const record: PlaylistAdditionRecord = {
-    t: new Date().toISOString(),
-    // A recreation is a swap, like a recheck that finds a better recording: the old id rides along.
-    status: replacing ? "replaced" : "added",
-    ...(replacing ? { previousVideoId: oldVideoId } : {}),
-    slug: req.slug,
-    artistName: req.artistName,
-    setUrl: req.setUrl,
-    videoId: input.videoId,
-    videoUrl: input.videoUrl ?? `https://www.youtube.com/watch?v=${input.videoId}`,
-    playlistId: playlistId!,
-    playlistTitle,
-    combinedStatus,
-    via: "mkvid",
-    trigger: replacing ? "mkvid.recreate" : "mkvid",
-    message:
-      `rendered by mkvid from ${req.source} (${input.privacy ?? "privacy unknown"}${input.style ? `, ${input.style}` : ""})${playlistStatus === "duplicate" ? " - already in the playlist" : ""}` +
-      (replacing
-        ? ` - recreated: ${oldVideoId} removed from the playlists, deletion from YouTube requested`
-        : ""),
-    failureCount: null,
-    meta: { ms: null },
-  };
-  await flushPlaylistAdditions(env, [record], log);
   log.info("mkvid.completed", {
     id: req.id,
     slug: req.slug,
     setUrl: req.setUrl,
     videoId: input.videoId,
-    playlistId,
+    playlistId: pl.ok ? pl.playlistId : null,
     playlistStatus,
-    combinedStatus,
+    combinedStatus: pl.ok ? pl.combinedStatus : null,
+    playlistRetryAt: pl.ok ? null : pl.retryAt,
     privacy: input.privacy ?? null,
     style: input.style ?? null,
-    replacedVideoId: replacing ? oldVideoId : null,
+    replacedVideoId: pl.ok ? pl.replacedVideoId : null,
   });
+  if (!pl.ok)
+    return {
+      status: "done",
+      videoId: input.videoId,
+      playlistId: null,
+      playlistStatus: waiting ? "pending" : "failed",
+      playlistRetryAt: pl.retryAt,
+    };
   return {
     status: "done",
     videoId: input.videoId,
-    playlistId: playlistId!,
-    playlistStatus,
-    combinedStatus,
-    ...(replacing && oldVideoId ? { replacedVideoId: oldVideoId } : {}),
+    playlistId: pl.playlistId,
+    playlistStatus: pl.playlistStatus,
+    combinedStatus: pl.combinedStatus,
+    ...(pl.replacedVideoId ? { replacedVideoId: pl.replacedVideoId } : {}),
   };
 }
 
