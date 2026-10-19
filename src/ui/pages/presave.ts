@@ -49,6 +49,8 @@ const CSS = /* css */ `
   .pv-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   .pv-dl .sub { color: var(--subtle); }
   .pv-dl .bad { color: var(--danger); }
+  .pv-dl .warn { color: var(--warn); }
+  .pv-dl .muted { color: var(--muted); }
   .pv-up { margin-top: var(--sp-4); }
   .pv-up-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-3); }
   .pv-up-head h2 { margin: 0 auto 0 0; }
@@ -181,7 +183,8 @@ ${PRESAVE_UI_JS}
     h += dt('Finished', at(up.completedAt));
     if (up.notBefore && up.status === 'pending' && up.notBefore > Date.now()) h += dt('Retry', at(up.notBefore));
     if (vid) h += dt('Video', '<a href="' + esc(vid) + '" target="_blank" rel="noreferrer noopener">YouTube Music</a>');
-    if (up.error) h += dt('Error', '<span class="bad">' + esc(up.error) + '</span>');
+    // Red only when the owner has something to do; a wait the system retries by itself is amber.
+    if (up.error) h += dt(up.errorTone === 'bad' ? 'Error' : 'Note', '<span class="' + esc(up.errorTone || 'bad') + '">' + esc(up.error) + '</span>');
     const ban = !up.sourceBanned && up.status !== 'banned' && up.status !== 'superseded'
       ? '<button type="button" class="btn danger" data-do="banlink"' + TK.tip('Ban this source URL: mkvid never rips it again, and the next allowed source is queued.') + '>Ban this source URL</button>' : '';
     return '<section class="tk-card pv-up"><div class="pv-up-head"><h2>Track upload</h2><span class="badge ' + b[1] + '">' + esc(b[0]) + '</span>' +

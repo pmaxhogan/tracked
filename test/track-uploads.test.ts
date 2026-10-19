@@ -7,10 +7,15 @@ import { fakeD1 } from "./helpers/fake-d1";
 import { updateAppSettings } from "../src/lib/app-settings";
 import { mkvidAccountUsage } from "../src/lib/mkvid";
 import { makeLogger } from "../src/lib/log";
+import { getQuotaOut } from "../src/lib/youtube-quota";
 import {
   attachTrackJob,
   claimTrackUpload,
+  errorTone,
   maybeQueueTrackUpload,
+  playlistRetryAt,
+  readableError,
+  retryDueTrackPlaylistInserts,
   safeSourceUrl,
   supersedeTrackUploadsForPresave,
   trackClaimsToday,
@@ -135,6 +140,11 @@ const row = (env: Env, id: number) =>
   env.DB.prepare("SELECT * FROM track_uploads WHERE id = ?")
     .bind(id)
     .first<Record<string, unknown>>();
+/** One request as the Uploads table lists it. */
+const listed = async (env: Env, id: number) =>
+  (
+    (await (await ui(env, "/ui/api/track-uploads")).json()) as { rows: Record<string, unknown>[] }
+  ).rows.find((u) => u.id === id);
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -632,7 +642,7 @@ describe("/mkvid/track routes", () => {
     expect(JSON.parse((await env.SUBS.get(TRACK_PLAYLIST_KEY))!).playlistId).toBe("PLtrack");
   });
 
-  it("a quota error leaves the request done with playlist failed; Retry re-runs only the insert", async () => {
+  it("a quota error leaves the request done with playlist failed; Retry (a shortcut) re-runs only the insert", async () => {
     const env = makeEnv();
     const q = await maybeQueueTrackUpload(env, await seedPresave(env));
     await claimTrackUpload(env, log);
@@ -985,5 +995,195 @@ describe("review fixes", () => {
       }>()
     ).results;
     expect(claims.map((r) => r.refunded_at !== null)).toEqual([true, false]);
+  });
+});
+
+describe("failed playlist inserts heal by themselves", () => {
+  const QUOTA = () => new YouTubeApiError("playlistItems.insert", 403, "quotaExceeded", "{}");
+
+  async function doneWithFailedInsert(env: Env, e: () => Error): Promise<number> {
+    const q = await maybeQueueTrackUpload(env, await seedPresave(env));
+    await claimTrackUpload(env, log);
+    fn(addVideoToPlaylist).mockImplementationOnce(async () => {
+      throw e();
+    });
+    const r = await (
+      await mk(env, "/mkvid/track/complete", { id: q.uploadId, videoId: "vid12345678" })
+    ).json();
+    expect(r).toMatchObject({ status: "done", playlistStatus: "failed" });
+    return q.uploadId!;
+  }
+
+  it("a quota failure waits for the hold, then the cron inserts it", async () => {
+    const env = makeEnv();
+    const id = await doneWithFailedInsert(env, QUOTA);
+    const hold = (await getQuotaOut(env))!;
+    expect(hold).toBeTruthy();
+    expect((await row(env, id))!.not_before).toBe(hold.until);
+
+    // Shown amber, with when it is tried again; no Retry asked of the owner.
+    const u = (await listed(env, id))!;
+    expect(u).toMatchObject({ errorTone: "warn", playlistRetryAt: hold.until * 1000 });
+    expect(String(u.error)).toMatch(/tried again by itself/);
+    expect(String(u.error)).not.toMatch(/press Retry/);
+
+    // Not due before the reset.
+    const early = await retryDueTrackPlaylistInserts(env, log, { now: hold.until - 60 });
+    expect(early).toEqual({ tried: 0, added: 0, stoppedBy: null });
+    // Due but the hold is set: nothing is asked of YouTube.
+    await env.DB.prepare("UPDATE track_uploads SET not_before = ? WHERE id = ?")
+      .bind(hold.since, id)
+      .run();
+    const held = await retryDueTrackPlaylistInserts(env, log, { now: hold.since + 60 });
+    expect(held.stoppedBy).toBe("quota");
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1);
+
+    // After the reset (the hold has expired): inserted, the wait cleared.
+    const after = await retryDueTrackPlaylistInserts(env, log, { now: hold.until + 60 });
+    expect(after).toEqual({ tried: 1, added: 1, stoppedBy: null });
+    expect(await row(env, id)).toMatchObject({
+      status: "done",
+      playlist_status: "added",
+      error: null,
+      not_before: null,
+    });
+    expect(await listed(env, id)).toMatchObject({ errorTone: null, playlistRetryAt: null });
+    // Nothing left to do.
+    expect(await retryDueTrackPlaylistInserts(env, log, { now: hold.until + 120 })).toEqual({
+      tried: 0,
+      added: 0,
+      stoppedBy: null,
+    });
+  });
+
+  it("a row stored before the cron step (no not_before) is picked up at the next tick", async () => {
+    const env = makeEnv();
+    const id = await doneWithFailedInsert(env, QUOTA);
+    // As the prod rows were: the raw reply, no retry time, the quota day long over.
+    await env.DB.prepare("UPDATE track_uploads SET not_before = NULL, error = ? WHERE id = ?")
+      .bind(
+        'playlist insert failed (quota): youtube playlistItems.list 403 quotaExceeded: The request cannot be completed because you have exceeded your quota.\n{\n  "error":',
+        id,
+      )
+      .run();
+    expect((await listed(env, id))!.playlistRetryAt).toBe(0);
+    const later = Math.floor(Date.now() / 1000) + 2 * 86_400;
+    const r = await retryDueTrackPlaylistInserts(env, log, { now: later });
+    expect(r).toMatchObject({ tried: 1, added: 1 });
+    expect((await row(env, id))!.playlist_status).toBe("added");
+  });
+
+  it("a transient failure backs off; a quota reply stops the step", async () => {
+    const env = makeEnv();
+    const a = await doneWithFailedInsert(
+      env,
+      () => new YouTubeApiError("playlistItems.insert", 503, "backendError", "{}"),
+    );
+    const ra = (await row(env, a))!;
+    const now = Number(ra.completed_at);
+    expect(ra.not_before).toBe(now + 600);
+    const b = await doneWithFailedInsert(
+      env,
+      () => new YouTubeApiError("playlistItems.insert", 500, "backendError", "{}"),
+    );
+    // Both due; the first answers quota, so the second is not tried.
+    fn(addVideoToPlaylist).mockImplementationOnce(async () => {
+      throw QUOTA();
+    });
+    const r = await retryDueTrackPlaylistInserts(env, log, { now: now + 3600 });
+    expect(r).toEqual({ tried: 1, added: 0, stoppedBy: "quota" });
+    expect(String((await row(env, a))!.error)).toMatch(/\(quota\)/);
+    expect((await row(env, b))!.error).toMatch(/\(transient\)/);
+  });
+
+  it("a rate limit stops the step and is tried again in minutes", async () => {
+    const env = makeEnv();
+    const id = await doneWithFailedInsert(
+      env,
+      () => new YouTubeApiError("playlistItems.insert", 403, "rateLimitExceeded", "{}"),
+    );
+    const r0 = (await row(env, id))!;
+    expect(r0.not_before).toBe(Number(r0.completed_at) + 600);
+    expect(await getQuotaOut(env)).toBeNull();
+    fn(addVideoToPlaylist).mockImplementationOnce(async () => {
+      throw new YouTubeApiError("playlistItems.insert", 403, "rateLimitExceeded", "{}");
+    });
+    const r = await retryDueTrackPlaylistInserts(env, log, { now: Number(r0.not_before) });
+    expect(r).toEqual({ tried: 1, added: 0, stoppedBy: "rate_limit" });
+  });
+
+  it("a permanent refusal is never retried by itself and is red", async () => {
+    const env = makeEnv();
+    const id = await doneWithFailedInsert(
+      env,
+      () => new YouTubeApiError("playlistItems.insert", 404, "videoNotFound", "{}"),
+    );
+    expect((await row(env, id))!.not_before).toBeNull();
+    const r = await retryDueTrackPlaylistInserts(env, log, {
+      now: Math.floor(Date.now() / 1000) + 86_400,
+    });
+    expect(r.tried).toBe(0);
+    expect(await listed(env, id)).toMatchObject({ errorTone: "bad", playlistRetryAt: null });
+  });
+
+  it("does nothing without a connected account, and never throws", async () => {
+    const env = makeEnv({ SUBS: fakeKV() });
+    await env.DB.prepare(
+      `INSERT INTO track_uploads (presave_id, source_name, source_url, status, attempts, video_id, playlist_status, error, created_at, updated_at, completed_at)
+       VALUES (1, 'soundcloud', ?, 'done', 1, 'vid12345678', 'failed', 'playlist insert failed (transient): boom', 1, 1, 1)`,
+    )
+      .bind(SC)
+      .run();
+    expect(await retryDueTrackPlaylistInserts(env, log)).toMatchObject({
+      tried: 0,
+      stoppedBy: "not_connected",
+    });
+    const broken = {
+      ...env,
+      DB: {
+        prepare: () => {
+          throw new Error("d1 down");
+        },
+      },
+    } as unknown as Env;
+    expect(await retryDueTrackPlaylistInserts(broken, log)).toEqual({
+      tried: 0,
+      added: 0,
+      stoppedBy: null,
+    });
+  });
+
+  it("error tones: a wait is amber, a ban muted, a request that gave up red", () => {
+    const base = { playlist_status: null, error: "x" } as const;
+    expect(errorTone({ ...base, status: "pending" })).toBe("warn");
+    expect(errorTone({ ...base, status: "claimed" })).toBe("warn");
+    expect(errorTone({ ...base, status: "banned" })).toBe("muted");
+    expect(errorTone({ ...base, status: "superseded" })).toBe("muted");
+    expect(errorTone({ ...base, status: "failed" })).toBe("bad");
+    expect(errorTone({ ...base, status: "pending", error: null })).toBeNull();
+  });
+
+  it("readableError and playlistRetryAt", () => {
+    const q =
+      "playlist insert failed (quota): youtube playlistItems.insert 403 quotaExceeded: over";
+    expect(readableError(q)).toMatch(/^playlist insert waits: YouTube's daily quota/);
+    expect(readableError(q)).not.toMatch(/press Retry/);
+    const rl =
+      "playlist insert failed (quota): youtube playlistItems.insert 403 rateLimitExceeded: slow";
+    expect(readableError(rl)).toMatch(/limiting requests; the insert is tried again by itself/);
+    expect(readableError("playlist insert failed (transient): socket hang up")).toBe(
+      "playlist insert failed (transient): socket hang up",
+    );
+    expect(readableError(null)).toBeNull();
+    const now = 1_800_000_000;
+    expect(playlistRetryAt(rl, now - 10, now)).toBe(now + 600);
+    expect(playlistRetryAt(q, now, now)).toBeGreaterThan(now);
+    expect(playlistRetryAt("playlist insert failed (permanent): gone", now, now)).toBeNull();
+    expect(playlistRetryAt("playlist insert failed (transient): x", now - 4 * 3600, now)).toBe(
+      now + 2 * 3600,
+    );
+    expect(playlistRetryAt("playlist insert failed (transient): x", now - 86_400, now)).toBe(
+      now + 6 * 3600,
+    );
   });
 });

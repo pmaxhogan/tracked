@@ -35,6 +35,8 @@ const CSS = /* css */ `
   .tkt-table td .btn.ytm { padding: 5px 10px; font-size: var(--fs-xs); white-space: nowrap; }
   .tu-tries { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
   .tu-err { display: block; color: var(--danger); font-size: var(--fs-xs); max-width: 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tu-err.warn, .tu-dl .warn { color: var(--warn); }
+  .tu-err.muted, .tu-dl .muted { color: var(--muted); }
   .tu-ban { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-4); padding: var(--sp-3) var(--sp-4); }
   .tu-ban label { display: grid; gap: 4px; min-width: 0; }
   .tu-ban .lbl { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); }
@@ -73,6 +75,10 @@ ${PRESAVE_UI_JS}
   const short = (u) => String(u || '').replace(/^https?:[/][/](www[.])?/, '');
   const nil = '<span class="tkt-nil">\\u2013</span>';
   const count = (k) => (resp) => (resp && resp.counts ? Number(resp.counts[k]) || 0 : 0);
+  // Red means the owner has something to do: a wait the system retries by itself is amber, a ban or a request not needed is muted.
+  const tone = (u) => (u.errorTone === 'warn' || u.errorTone === 'muted' ? ' ' + u.errorTone : '');
+  // A failed playlist insert YouTube refused for good: Retry now is the owner's way (the cron re-runs any other by itself).
+  const canRetry = (u) => u.status === 'failed' || (u.status === 'done' && u.playlistStatus === 'failed' && u.playlistRetryAt == null);
   const canBan = (u) => !u.sourceBanned && u.status !== 'banned' && u.status !== 'superseded' && u.status !== 'done';
 
   // -- header: today's claims, the playlist, the settings --
@@ -102,7 +108,7 @@ ${PRESAVE_UI_JS}
         return '<div class="tu-src"><span class="ps-chip" data-site="' + esc(u.sourceName) + '">' + esc(siteName(u.sourceName)) + '</span>' + (u.sourceBanned ? ' <span class="badge bad">banned</span>' : '') +
           (href ? '<span class="u"><a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener"' + TK.tip(href) + '>' + esc(short(href)) + '</a></span>' : '') + '</div>';
       } },
-      { key: 'status', label: 'Status', type: 'enum', options: STATUS_OPTS, render: (u) => '<div>' + badge(u.status) + (u.attempts ? ' <span class="tu-tries"' + TK.tip(u.attempts + ' attempt' + (u.attempts === 1 ? '' : 's') + (u.claimedAt ? ', last claimed ' + when(u.claimedAt) + (u.account ? ' on ' + u.account : '') : '')) + '>' + esc(u.attempts + (u.attempts === 1 ? ' try' : ' tries')) + '</span>' : '') + (u.error ? '<span class="tu-err"' + TK.tip(u.error) + '>' + esc(u.error) + '</span>' : '') + '</div>' },
+      { key: 'status', label: 'Status', type: 'enum', options: STATUS_OPTS, render: (u) => '<div>' + badge(u.status) + (u.attempts ? ' <span class="tu-tries"' + TK.tip(u.attempts + ' attempt' + (u.attempts === 1 ? '' : 's') + (u.claimedAt ? ', last claimed ' + when(u.claimedAt) + (u.account ? ' on ' + u.account : '') : '')) + '>' + esc(u.attempts + (u.attempts === 1 ? ' try' : ' tries')) + '</span>' : '') + (u.error ? '<span class="tu-err' + tone(u) + '"' + TK.tip(u.error) + '>' + esc(u.error) + '</span>' : '') + '</div>' },
       { key: 'createdAt', label: 'Queued', type: 'datetime', hideOn: 'phone', render: (u) => whenCell(u.createdAt) },
       { key: 'completedAt', label: 'Finished', type: 'datetime', render: (u) => whenCell(u.completedAt) },
       { key: 'videoId', label: 'Video', type: 'text', filterable: false, sortable: false, render: (u) => { const h = TK.safeHref(u.youtubeMusicUrl); return h ? '<a class="btn ytm" href="' + esc(h) + '" target="_blank" rel="noreferrer noopener"' + TK.tip('Open ' + u.videoId + ' in YouTube Music') + '>YouTube Music</a>' : nil; } },
@@ -124,7 +130,7 @@ ${PRESAVE_UI_JS}
     onData: (resp) => { if (resp && resp.today) { today = resp.today; paintHead(); } },
     actions: (u) => {
       let h = '';
-      if (u.status === 'failed') h += '<button type="button" class="btn" data-act="retry"' + TK.tip('Queue it again now.') + '>Retry</button>';
+      if (canRetry(u)) h += '<button type="button" class="btn" data-act="retry"' + TK.tip(u.status === 'done' ? 'Try the playlist insert again now.' : 'Queue it again now.') + '>Retry</button>';
       if (canBan(u)) h += '<button type="button" class="btn ghost" data-act="ban"' + TK.tip('Ban this link: mkvid never rips this source URL again, and the next allowed source is queued.') + '>Ban link</button>';
       return h;
     },
@@ -138,7 +144,7 @@ ${PRESAVE_UI_JS}
   async function retry(u, closeDrawer) {
     const res = await TK.api.post('/ui/api/track-uploads/' + u.id + '/retry');
     if (res.ok && closeDrawer) TK.drawer.close();
-    if (res.ok) TK.toast('Queued again: ' + trackLabel(u) + '.');
+    if (res.ok) TK.toast((res.data && res.data.playlistRetried ? (res.data.upload && res.data.upload.playlistStatus !== 'failed' ? 'In the playlist now: ' : 'Playlist insert tried again: ') : 'Queued again: ') + trackLabel(u) + '.');
     else TK.toast(TK.errText(res, 'Retry failed (' + res.status + ')'), 'bad');
     uploads.reload();
     return res;
@@ -184,12 +190,12 @@ ${PRESAVE_UI_JS}
     h += dt('mkvid job', u.jobId ? esc(u.jobId) : '');
     h += dt('Finished', at(u.completedAt));
     h += dt('Video', v ? '<a href="' + esc(v) + '" target="_blank" rel="noreferrer noopener">' + esc(u.videoId) + '</a>' + (u.privacy ? ' <span class="ps-res" style="display:inline">' + esc(u.privacy) + '</span>' : '') : '');
-    h += dt('Playlist', u.playlistStatus ? esc(u.playlistStatus) : '');
-    h += dt('Error', u.error ? '<span class="bad">' + esc(u.error) + '</span>' : '');
+    h += dt('Playlist', u.playlistStatus ? (u.playlistRetryAt != null ? '<span class="warn">waiting</span> tried again by itself ' + (u.playlistRetryAt > Date.now() ? at(u.playlistRetryAt) : 'at the next tick') : esc(u.playlistStatus)) : '');
+    h += dt(u.errorTone === 'bad' ? 'Error' : 'Note', u.error ? '<span class="' + esc(u.errorTone || 'bad') + '">' + esc(u.error) + '</span>' : '');
     h += '</dl><div class="tu-dact">';
     if (canBan(u)) h += '<label>Reason for the ban (optional)<input id="tu-d-why" type="text" maxlength="500" placeholder="preview clip, wrong track"></label>';
     h += '<div class="tk-row">' + (v ? '<a class="btn ytm" href="' + esc(v) + '" target="_blank" rel="noreferrer noopener">Open in YouTube Music</a>' : '') +
-      (u.status === 'failed' ? '<button type="button" class="btn" data-do="retry">Retry</button>' : '') +
+      (canRetry(u) ? '<button type="button" class="btn" data-do="retry">Retry</button>' : '') +
       (canBan(u) ? '<button type="button" class="btn danger" data-do="ban">Ban this link</button>' : '') +
       '<a class="btn ghost" href="/ui/presave?id=' + encodeURIComponent(u.presaveId) + '">Pre-save page</a></div></div>';
     const body = TK.drawer.open(trackLabel(u), h);

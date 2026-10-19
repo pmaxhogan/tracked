@@ -12,6 +12,7 @@ import {
   presaveLikeBackfillHandler,
 } from "./routes/presave";
 import { drainPresaveLikes, retryDuePresaveLikes } from "./lib/presave-like";
+import { retryDueTrackPlaylistInserts } from "./lib/track-uploads";
 import { likedSongsRoute, likedSongsHandler } from "./routes/liked-songs";
 import { HOME_HTML, subscriptionsApp } from "./routes/subscriptions";
 import { servePage } from "./ui/pages";
@@ -329,6 +330,9 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         if (!isDaily) {
           const l = await retryDuePresaveLikes(env, log);
           if (l.tried || l.stoppedBy) log.info("cron.presave_likes", l);
+          // Track uploads whose playlist insert failed (quota, rate limit, 5xx) and is due again (lib/track-uploads.ts; never throws).
+          const t = await retryDueTrackPlaylistInserts(env, log);
+          if (t.tried || t.stoppedBy) log.info("cron.track_playlist_inserts", t);
         }
         // Playlists in set-date order: a few moves within the day's unit budget (lib/playlist-reorder.ts).
         try {

@@ -17,6 +17,12 @@
  *   pending | claimed --1001tl got a YouTube link / presave dismissed--> superseded
  *   any but done --owner bans the source URL--> banned (the next allowed source is queued)
  *
+ * A playlist insert that fails at `complete` (quota, rate limit, a 5xx) leaves
+ * the request `done` with `playlist_status = 'failed'` and `not_before` = when
+ * the cron tries the insert again (`retryDueTrackPlaylistInserts`): the next
+ * quota day for a daily-quota reply, a growing backoff otherwise. Only a
+ * permanent refusal (the video is gone) waits for the owner.
+ *
  * Caps: a claim needs room under `trackUploads.dailyCap` (track claims this
  * quota day) AND under mkvid's per-project caps - each track claim appends an
  * `mkvid_claims` row with `request_id = 'track:<id>'`, so set and track
@@ -31,12 +37,14 @@
 import type { Env } from "../types";
 import { dbOf, parseJson, v } from "./db";
 import { errorFields, type Logger } from "./log";
-import { noteQuotaOut } from "./youtube-quota";
+import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
+import { getAccessToken } from "./google-oauth";
 import { getAppSettings, type AppSettings } from "./app-settings";
 import {
   claimTtl,
   mkvidAccountUsage,
   QUOTA_RETRY_SECONDS,
+  quotaDayEnd,
   quotaDayStart,
   type MkvidAccount,
 } from "./mkvid";
@@ -187,6 +195,10 @@ export type TrackUploadOut = {
   privacy: string | null;
   playlistStatus: TrackPlaylistStatus | null;
   error: string | null;
+  /** How the UI colours `error`: red (`bad`) only when the owner has something to do. */
+  errorTone: ErrorTone;
+  /** A failed playlist insert the cron tries again by itself: when (unix ms; 0 = at the next tick). Null otherwise. */
+  playlistRetryAt: number | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -223,6 +235,11 @@ export function trackUploadOut(
     privacy: r.privacy,
     playlistStatus: r.playlist_status,
     error: readableError(r.error),
+    errorTone: errorTone(r),
+    playlistRetryAt:
+      r.status === "done" && r.playlist_status === "failed" && !isPermanentPlaylistError(r.error)
+        ? (ms(r.not_before) ?? 0)
+        : null,
     createdAt: Number(r.created_at) * 1000,
     updatedAt: Number(r.updated_at) * 1000,
     completedAt: ms(r.completed_at),
@@ -906,35 +923,97 @@ export async function addToTrackPlaylist(
   return { playlistId: pl.id, status: "added" };
 }
 
+const PLAYLIST_FAILED_RE = /^playlist insert failed \((\w+)\): ([\s\S]*)$/;
+/** A transient failed insert waits half its age since the upload, at least this long ... */
+const PLAYLIST_RETRY_MIN_SECONDS = 600;
+/** ... and at most this long. */
+const PLAYLIST_RETRY_MAX_SECONDS = 6 * 3600;
+
+/** A stored playlist error the cron never retries by itself: YouTube refused the video for good. */
+function isPermanentPlaylistError(error: string | null): boolean {
+  return PLAYLIST_FAILED_RE.exec(error ?? "")?.[1] === "permanent";
+}
+
+/**
+ * When the cron tries a failed playlist insert again (unix s), from its stored
+ * error: the next quota day for a daily-quota reply, a few minutes for a rate
+ * limit, half the time since the upload (10 min to 6 h) for anything else
+ * transient, null for a permanent refusal (never by itself).
+ */
+export function playlistRetryAt(
+  error: string | null,
+  completedAt: number | null,
+  now: number,
+): number | null {
+  const m = PLAYLIST_FAILED_RE.exec(error ?? "");
+  if (m?.[1] === "permanent") return null;
+  if (m?.[1] === "quota") {
+    const y = describeYouTubeError(m[2]);
+    if (!y || y.kind === "quota") return quotaDayEnd(now * 1000);
+    return now + PLAYLIST_RETRY_MIN_SECONDS;
+  }
+  const age = Math.max(0, now - (completedAt ?? now));
+  return (
+    now +
+    Math.min(PLAYLIST_RETRY_MAX_SECONDS, Math.max(PLAYLIST_RETRY_MIN_SECONDS, Math.floor(age / 2)))
+  );
+}
+
 /**
  * A stored `playlist insert failed (kind): <text>` as one readable line (old rows hold the raw
- * YouTube reply). Nothing retries this insert by itself, so a quota reply says to press Retry.
+ * YouTube reply). The cron tries a quota / rate-limit / transient failure again by itself
+ * (`retryDueTrackPlaylistInserts`), so a wait says so; nothing asks the owner to press Retry.
  */
 export function readableError(error: string | null): string | null {
-  const m = /^(playlist insert failed \(\w+\)): ([\s\S]*)$/.exec(error ?? "");
+  const m = PLAYLIST_FAILED_RE.exec(error ?? "");
   if (!m) return error;
   const y = describeYouTubeError(m[2]);
   if (!y) return error;
-  const say =
-    y.kind === "other"
-      ? y.headline
-      : y.kind === "quota"
-        ? "YouTube's daily quota is used up (it resets at midnight Pacific time): press Retry then"
-        : "YouTube is limiting requests: press Retry in a minute";
-  return `${m[1]}: ${say}`;
+  if (y.kind === "other") return `playlist insert failed (${m[1]}): ${y.headline}`;
+  return y.kind === "quota"
+    ? "playlist insert waits: YouTube's daily quota is used up; it resets at midnight Pacific time and the insert is tried again by itself"
+    : "playlist insert waits: YouTube is limiting requests; the insert is tried again by itself in a few minutes";
 }
 
-/** Insert with the failure classified: quota / permanent / transient errors become `failed` (the request is still done; Retry in the UI re-runs the insert). */
+/** How the UI colours a request's error; null when it has none. */
+export type ErrorTone = "bad" | "warn" | "muted" | null;
+
+/**
+ * Red means the owner has something to do: `bad` for a request that gave up
+ * (`failed`) or a playlist insert YouTube refused for good, `warn` for one that
+ * is tried again by itself, `muted` for a ban or a request that was not needed.
+ */
+export function errorTone(
+  r: Pick<TrackUploadRow, "status" | "playlist_status" | "error">,
+): ErrorTone {
+  if (!r.error) return null;
+  if (r.status === "failed") return "bad";
+  if (r.status === "done")
+    return r.playlist_status === "failed" && isPermanentPlaylistError(r.error) ? "bad" : "warn";
+  if (r.status === "banned" || r.status === "superseded") return "muted";
+  return "warn";
+}
+
+type InsertOutcome = {
+  playlistId: string | null;
+  status: TrackPlaylistStatus;
+  error: string | null;
+  /** When the cron tries a failed insert again (unix s); null when nothing failed or it is not retried by itself. */
+  retryAt: number | null;
+};
+
+/** Insert with the failure classified: quota / permanent / transient errors become `failed` (the request is still done; the cron re-runs a non-permanent insert at `retryAt`). */
 async function insertSafely(
   env: Env,
   uploadId: number,
   videoId: string,
   accessToken: string,
   log: Logger,
-): Promise<{ playlistId: string | null; status: TrackPlaylistStatus; error: string | null }> {
+  completedAt: number | null = null,
+): Promise<InsertOutcome> {
   try {
     const r = await addToTrackPlaylist(env, videoId, accessToken, log);
-    return { playlistId: r.playlistId, status: r.status, error: null };
+    return { playlistId: r.playlistId, status: r.status, error: null, retryAt: null };
   } catch (e) {
     const kind = isQuotaError(e) ? "quota" : isPermanentInsertError(e) ? "permanent" : "transient";
     log.warn("track_upload.playlist_insert_failed", {
@@ -944,12 +1023,107 @@ async function insertSafely(
       ...errorFields(e),
     });
     if (kind === "quota") await noteQuotaOut(env, e, log);
+    const error = `playlist insert failed (${kind}): ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`;
     return {
       playlistId: (await getStoredTrackPlaylist(env))?.playlistId ?? null,
       status: "failed",
-      error: `playlist insert failed (${kind}): ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`,
+      error,
+      retryAt: playlistRetryAt(error, completedAt, nowSeconds()),
     };
   }
+}
+
+/** Re-run the playlist insert of a `done` request and store the outcome. */
+async function rerunPlaylistInsert(
+  env: Env,
+  row: TrackUploadRow,
+  accessToken: string,
+  log: Logger,
+): Promise<InsertOutcome> {
+  const pl = await insertSafely(
+    env,
+    Number(row.id),
+    row.video_id!,
+    accessToken,
+    log,
+    row.completed_at,
+  );
+  await dbOf(env)
+    .prepare(
+      "UPDATE track_uploads SET playlist_status = ?, error = ?, not_before = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(pl.status, pl.error, pl.retryAt, nowSeconds(), row.id)
+    .run();
+  log.info("track_upload.playlist_retried", {
+    id: row.id,
+    videoId: row.video_id,
+    playlistStatus: pl.status,
+    retryAt: pl.retryAt,
+  });
+  return pl;
+}
+
+/** `done` requests whose playlist insert failed and is due again (not a permanent refusal). */
+const PLAYLIST_DUE_SQL = `status = 'done' AND playlist_status = 'failed' AND video_id IS NOT NULL
+  AND (error IS NULL OR error NOT LIKE 'playlist insert failed (permanent)%')
+  AND (not_before IS NULL OR not_before <= ?)`;
+const PLAYLIST_RETRIES_PER_TICK = 5;
+
+export type PlaylistRetryStop = "quota" | "rate_limit" | "not_connected";
+
+/**
+ * The cron step: re-runs the playlist inserts that failed on quota, a rate
+ * limit or a transient error once they are due, a few a tick. Nothing is
+ * asked of YouTube while the quota hold is set; a quota reply stops the step
+ * (and sets the hold). One indexed query when none is due; never throws.
+ */
+export async function retryDueTrackPlaylistInserts(
+  env: Env,
+  log: Logger,
+  opts: { now?: number; limit?: number; fetcher?: typeof fetch } = {},
+): Promise<{ tried: number; added: number; stoppedBy: PlaylistRetryStop | null }> {
+  const out = { tried: 0, added: 0, stoppedBy: null as PlaylistRetryStop | null };
+  try {
+    if (!env.DB) return out;
+    const now = opts.now ?? nowSeconds();
+    const db = dbOf(env);
+    const due = (
+      await db
+        .prepare(
+          `SELECT * FROM track_uploads WHERE ${PLAYLIST_DUE_SQL} ORDER BY COALESCE(not_before, 0), id LIMIT ?`,
+        )
+        .bind(now, opts.limit ?? PLAYLIST_RETRIES_PER_TICK)
+        .all<TrackUploadRow>()
+    ).results;
+    if (due.length === 0) return out;
+    if (await getQuotaOut(env, now * 1000)) return { ...out, stoppedBy: "quota" };
+    const tok = await getAccessToken(env, opts.fetcher).catch(() => null);
+    if (!tok) return { ...out, stoppedBy: "not_connected" };
+    for (const row of due) {
+      // Taken for this tick first, so an overlapping tick (or Retry) does not insert it twice.
+      const taken = await db
+        .prepare(
+          `UPDATE track_uploads SET not_before = ?, updated_at = ? WHERE id = ? AND ${PLAYLIST_DUE_SQL}`,
+        )
+        .bind(now + PLAYLIST_RETRY_MIN_SECONDS, now, row.id, now)
+        .run();
+      if ((taken.meta.changes ?? 0) === 0) continue;
+      out.tried++;
+      const pl = await rerunPlaylistInsert(env, row, tok.accessToken, log);
+      if (pl.status !== "failed") {
+        out.added++;
+        continue;
+      }
+      const kind = describeYouTubeError(PLAYLIST_FAILED_RE.exec(pl.error ?? "")?.[2])?.kind;
+      if (kind === "quota" || kind === "rate_limit") {
+        out.stoppedBy = kind;
+        break;
+      }
+    }
+  } catch (e) {
+    log.warn("track_upload.playlist_retries_threw", errorFields(e));
+  }
+  return out;
 }
 
 // --- complete / fail --------------------------------------------------------
@@ -1084,12 +1258,23 @@ export async function completeTrackUpload(
   }
 
   const app = (await getAppSettings(env)).trackUploads;
-  const pl = await insertSafely(env, Number(row.id), input.videoId, accessToken, log);
+  const pl = await insertSafely(env, Number(row.id), input.videoId, accessToken, log, now);
+  // not_before on a done request: when the cron tries a failed playlist insert again.
   await db
     .prepare(
-      `UPDATE track_uploads SET status = 'done', video_id = ?, privacy = COALESCE(?, privacy), job_id = COALESCE(?, job_id), playlist_status = ?, error = ?, not_before = NULL, completed_at = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE track_uploads SET status = 'done', video_id = ?, privacy = COALESCE(?, privacy), job_id = COALESCE(?, job_id), playlist_status = ?, error = ?, not_before = ?, completed_at = ?, updated_at = ? WHERE id = ?`,
     )
-    .bind(input.videoId, v(input.privacy), v(input.jobId), pl.status, pl.error, now, now, row.id)
+    .bind(
+      input.videoId,
+      v(input.privacy),
+      v(input.jobId),
+      pl.status,
+      pl.error,
+      pl.retryAt,
+      now,
+      now,
+      row.id,
+    )
     .run();
   await markPresaveUploaded(env, p.id, input.videoId, {
     uploadId: Number(row.id),
@@ -1283,7 +1468,8 @@ export type RetryResult =
 /**
  * Give a failed / superseded / banned / stuck request a fresh start (pending,
  * attempts 0). A `done` request whose playlist insert failed instead retries
- * just the insert (`accessToken` needed).
+ * just the insert now (`accessToken` needed): only a shortcut, the cron
+ * re-runs any insert that is not a permanent refusal by itself.
  */
 export async function retryTrackUpload(
   env: Env,
@@ -1305,13 +1491,7 @@ export async function retryTrackUpload(
         error: "youtube_not_connected",
         message: "connect a YouTube account first",
       };
-    const pl = await insertSafely(env, row.id, row.video_id, tok, log);
-    await db
-      .prepare(
-        "UPDATE track_uploads SET playlist_status = ?, error = ?, updated_at = ? WHERE id = ?",
-      )
-      .bind(pl.status, pl.error, now, row.id)
-      .run();
+    await rerunPlaylistInsert(env, row, tok, log);
     return { ok: true, upload: (await getTrackUpload(env, id))!, playlistRetried: true };
   }
   if (row.status === "pending")

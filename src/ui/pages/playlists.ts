@@ -182,7 +182,7 @@ ${YOUTUBE_CARD_JS}
       ': a move was not found where the plan expects it, so no more quota is spent there. It is tried again by itself after a day, or now with Retry now in the table below.</div>';
     // The one state that needs the owner: YouTube refuses positions on a playlist that sorts itself.
     if (manual.length) html += '<div class="bits"><span class="badge bad">' + manual.length + ' cannot be ordered</span> ' + manual.map((p) => esc(p.title)).join(', ') +
-      ': set the ordering of the playlist to Manual in its settings on YouTube, then press Retry now in the table below.</div>';
+      ': set the ordering of the playlist to Manual in its settings on YouTube. The pass looks again by itself after a day, or now with Retry now in the table below.</div>';
     $ordBody.innerHTML = html;
     const rows = (d.playlists || []).filter((p) => p.checkedAt);
     $ordDetails.hidden = !rows.length;
