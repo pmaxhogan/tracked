@@ -43,7 +43,7 @@ describe("audioKey", () => {
     expect(audioKey("Tiesto & KSHMR", "Secrets (Original Mix)")).toBe(
       audioKey("TIESTO  & kshmr", "secrets [original mix]"),
     );
-    expect(audioKey("Beyoncé", "Halo")).toBe(audioKey("Beyonce", "Halo"));
+    expect(audioKey("Beyonc\u00e9", "Halo")).toBe(audioKey("Beyonce", "Halo"));
     expect(audioKey(null, "X")).toBe(" - x");
   });
 });
