@@ -564,6 +564,10 @@ describe("TK.fmt", () => {
       "5 min ago",
     );
     expect(vm.runInContext("TK.fmt.until(Date.now() / 1000 + 90 * 60)", c)).toBe("in 1h 30m");
+    // A future time reads forward instead of a negative "ago".
+    expect(
+      vm.runInContext("TK.fmt.rel(new Date(Date.now() + 90 * 60000 + 1000).toISOString())", c),
+    ).toBe("in 1h 30m");
   });
 });
 

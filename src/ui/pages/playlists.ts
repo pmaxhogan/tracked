@@ -165,7 +165,7 @@ ${YOUTUBE_CARD_JS}
     ];
     if (t.undated) bits.push('<span' + TK.tip('Videos no tracked set resolves to (added by hand, for instance). They stay after the dated sets, in the order they have.') + '>' + t.undated + ' with no set date</span>');
     if (t.unmovable) bits.push('<span' + TK.tip('YouTube no longer finds these videos, so they cannot be moved. They stay where they are and the others are ordered around them. Each is tried once more after a week, or now with Retry now on its playlist.') + '>' + (t.unmovable === 1 ? '1 video could not be moved and is left where it is' : t.unmovable + ' videos could not be moved and are left where they are') + '</span>');
-    if (d.quotaStoppedUntil) bits.push('<span class="badge info"' + TK.tip('YouTube answered that the quota of today is used. Moving continues by itself after the quota resets at midnight Pacific.') + '>waiting for quota · ' + esc(TK.fmt.rel(new Date(d.quotaStoppedUntil * 1000).toISOString())) + '</span>');
+    if (d.quotaStoppedUntil && d.quotaStoppedUntil > Date.now() / 1000) bits.push('<span class="badge info"' + TK.tip('YouTube answered that the quota of today is used. Moving continues by itself after the quota resets at midnight Pacific.') + '>waiting for quota · resumes ' + esc(TK.fmt.until(d.quotaStoppedUntil)) + '</span>');
     if (d.lastRun && d.lastRun.moved) bits.push('last moved ' + d.lastRun.moved + ' ' + esc(TK.fmt.rel(new Date(d.lastRun.at * 1000).toISOString())));
     if (d.fresh) bits.push('read from YouTube just now (' + d.unitsSpent + ' units)');
     if (d.busy) bits.push('a run is moving videos right now, these are the numbers from before it');

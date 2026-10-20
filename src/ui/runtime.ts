@@ -308,6 +308,8 @@ var TK = (() => {
   function relTime(iso) {
     const t = Date.parse(iso); if (isNaN(t)) return '';
     const d = Math.round((Date.now() - t) / 1000);
+    // A time still to come (a clock skew, or a caller passing an end time) reads forward, never "-51742s ago".
+    if (d < 0) return untilTime(t / 1000);
     if (d < 60) return d + 's ago';
     if (d < 3600) return Math.floor(d / 60) + 'm ago';
     if (d < 86400) return Math.floor(d / 3600) + 'h ago';

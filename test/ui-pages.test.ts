@@ -760,7 +760,7 @@ describe("Playlists page script", () => {
           movesPerRun: 10,
           unitsUsedToday: 0,
           estimate: { moves: 40, units: 2060, days: null },
-          quotaStoppedUntil: 1790000000,
+          quotaStoppedUntil: Math.floor(Date.now() / 1000) + 90 * 60,
           lastRun: null,
           daysAt: [
             { dailyUnits: 1000, days: 3 },
@@ -858,6 +858,9 @@ describe("Playlists page script", () => {
     // Set-date order: what is left, the budget, a quota wait as info (it continues by itself) and the one state the owner must fix in red.
     const ord = els.get("ord-body").innerHTML as string;
     expect(ord).toContain("45 videos still to move");
+    // The quota wait names when moving resumes (a future time, never "-5400s ago").
+    expect(ord).toMatch(/waiting for quota · resumes in 1h (29|30)m/);
+    expect(ord).not.toContain("ago");
     // It ships paused: the card says so, how to start, and what each budget would mean.
     expect(ord).toContain("moving is paused");
     expect(ord).toContain('href="/ui/settings#sf-playlists"');
