@@ -1,6 +1,6 @@
 # YouTube quota pool and priorities
 
-Status: draft for the owner's approval (2026-10-20). Nothing here is built yet.
+Status: approved by the owner 2026-10-20 (with the "Pre-saves" playlist added at rank 2).
 
 ## Why
 
@@ -145,17 +145,17 @@ units)`) so the page can show spend by consumer.
 The order below is the owner's. "Waiting" is the work queued right now, which
 is what higher-ranked work holds back for.
 
-| Rank | Consumer                                   | What it spends                                                 | Waiting now (from)                                                                                                                                                                                                  |
-| ---- | ------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Pre-save likes                             | videos.getRating 1 + videos.rate 50                            | `presaves` with a video and a like due (`like_next_at`)                                                                                                                                                             |
-| 2    | Ripped pre-saves into "Track uploads"      | playlistItems.insert 50; the playlist's creation 50            | `track_uploads` with `playlist_status` pending or failed and due                                                                                                                                                    |
-| 3    | DJ playlists: add videos, create playlists | insert 50; playlists.insert 50 + list 1/page; recheck swaps 51 | `tracklists` with `processed = 0 AND abandoned = 0 AND video_id IS NOT NULL`, for subscribed DJs only (as fetch-scheduler.ts:1231 picks them); `mkvid_requests.playlist_status = 'pending'`; DJs without a playlist |
-| 4    | Playlist hygiene                           | comparison reads 1/page; dead-video and sweep removals 51      | planned removals (bounded by `sweepDailyRemovals`)                                                                                                                                                                  |
-| 5    | mkvid set uploads                          | upload bucket only (not this pool); shown for reference        | -                                                                                                                                                                                                                   |
-| 6    | mkvid gone check and recreate              | videos.list 1; removals 51                                     | due checks                                                                                                                                                                                                          |
-| 7    | Combined "all artists" playlist            | insert 50                                                      | videos missing from the combined playlist                                                                                                                                                                           |
-| 8    | Playlist renames                           | playlists.list 1, update 50                                    | titles to fix                                                                                                                                                                                                       |
-| 9    | Set-date ordering                          | update 50 per move; list 1/page                                | planned moves                                                                                                                                                                                                       |
+| Rank | Consumer                                                                                              | What it spends                                                 | Waiting now (from)                                                                                                                                                                                                  |
+| ---- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Pre-save likes                                                                                        | videos.getRating 1 + videos.rate 50                            | `presaves` with a video and a like due (`like_next_at`)                                                                                                                                                             |
+| 2    | Pre-saves into playlists: "Pre-saves" (every pre-save with a video) and "Track uploads" (ripped ones) | playlistItems.insert 50; each playlist's creation 50           | `presaves` with a video not yet in "Pre-saves" (`presave_playlist_status` due); `track_uploads` with `playlist_status` pending or failed and due                                                                    |
+| 3    | DJ playlists: add videos, create playlists                                                            | insert 50; playlists.insert 50 + list 1/page; recheck swaps 51 | `tracklists` with `processed = 0 AND abandoned = 0 AND video_id IS NOT NULL`, for subscribed DJs only (as fetch-scheduler.ts:1231 picks them); `mkvid_requests.playlist_status = 'pending'`; DJs without a playlist |
+| 4    | Playlist hygiene                                                                                      | comparison reads 1/page; dead-video and sweep removals 51      | planned removals (bounded by `sweepDailyRemovals`)                                                                                                                                                                  |
+| 5    | mkvid set uploads                                                                                     | upload bucket only (not this pool); shown for reference        | -                                                                                                                                                                                                                   |
+| 6    | mkvid gone check and recreate                                                                         | videos.list 1; removals 51                                     | due checks                                                                                                                                                                                                          |
+| 7    | Combined "all artists" playlist                                                                       | insert 50                                                      | videos missing from the combined playlist                                                                                                                                                                           |
+| 8    | Playlist renames                                                                                      | playlists.list 1, update 50                                    | titles to fix                                                                                                                                                                                                       |
+| 9    | Set-date ordering                                                                                     | update 50 per move; list 1/page                                | planned moves                                                                                                                                                                                                       |
 
 - **Owner actions** (the like button, undo, remove-and-replace, a manual sync or
   rename from the UI) are ranked above everything. Someone is waiting on them.
@@ -199,7 +199,7 @@ A consumer at rank r may spend u units when both hold:
 
 ## The page
 
-**Settings → YouTube quota** (`/ui/quota`), linked from Settings, the
+**Settings > YouTube quota** (`/ui/quota`), linked from Settings, the
 Playlists page's set-date card and the Scheduler page's quota notice.
 
 ### Pool header
@@ -332,10 +332,31 @@ One row per consumer, in rank order. Each row has:
 - Drag library or none.
 - The wrapper's shape, as long as every OAuth call goes through it.
 
-## Open questions for the owner
+## The "Pre-saves" playlist (owner's decision, 2026-10-20)
 
-1. **There is no "pre-saved playlist" today.** A pre-save that turns up on
-   YouTube is only liked (that is what puts it in YouTube Music). Ripped ones
-   go into the "Track uploads" playlist. Should every resolved pre-save also
-   be added to a "Pre-saves" playlist, at rank 2? This design assumes not:
-   rank 2 is the "Track uploads" insert.
+- **What goes in:** every pre-save that gets a YouTube video goes into a new
+  "Pre-saves" playlist on the channel. It does not matter how the video came:
+  found on 1001tracklists, a match the owner approved, or mkvid's upload of a
+  ripped track.
+  - It is created on first use, with privacy from a setting (default unlisted,
+    like Track uploads).
+  - Its title is a setting (default "Pre-saves").
+- **When:** it is added when the pre-save resolves (beside the like) and kept
+  track of per pre-save.
+  - Columns: `presave_playlist_status`, `presave_playlist_item_id`,
+    `presave_playlist_next_at` and `presave_playlist_error`, as the like is
+    tracked.
+  - A refused insert (quota, ranking) waits and is retried by the cron.
+- **Backfill:** every existing pre-save that already has a video is queued for
+  it.
+  - At most a few per tick, at rank 2.
+  - Oldest first, so the playlist runs in the order they were saved.
+  - Before inserting, check the playlist's listing so nothing lands twice.
+- **Rank:** 2, alongside the Track uploads insert. Likes stay at rank 1.
+- **Removal:** a pre-save that is dismissed, or whose video is later
+  replaced, is not removed from the playlist automatically.
+  - The owner can remove it on YouTube.
+  - The hygiene never-re-add list applies as it does to other playlists.
+  - This is the designer's call.
+
+Status: approved by the owner 2026-10-20.
