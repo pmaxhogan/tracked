@@ -27,7 +27,9 @@ import { quotaDayEnd } from "./mkvid";
 import { cachePlaylistVideoIds, findOrCreatePlaylist } from "./playlist-cache";
 import {
   addVideoToPlaylist,
+  isPermanentInsertError,
   isQuotaError,
+  YouTubeApiError,
   listPlaylistVideoIds,
   PlaylistNotFoundError,
 } from "./youtube-playlists";
@@ -103,6 +105,14 @@ async function resolvePlaylist(
   return r;
 }
 
+/** A refusal retrying cannot fix; a 403 rate limit is not one. */
+function isPermanent(e: unknown): boolean {
+  return (
+    isPermanentInsertError(e) &&
+    !(e instanceof YouTubeApiError && /rate|limit/i.test(e.reason ?? ""))
+  );
+}
+
 type DueRow = { id: number; youtube_video_id: string; presave_playlist_attempts: number };
 
 /**
@@ -156,29 +166,37 @@ export async function retryDuePresavePlaylist(
         .run();
       if ((taken.meta.changes ?? 0) === 0) continue;
       try {
-        if ((await listed()).has(videoId)) {
+        // Another pre-save with this video was added already (a re-ripped or shared video).
+        const sibling = await db
+          .prepare(
+            "SELECT 1 AS x FROM presaves WHERE youtube_video_id = ? AND presave_playlist_status = 'added' AND id != ?",
+          )
+          .bind(videoId, row.id)
+          .first();
+        if (sibling) {
           await markAdded(env, row.id);
           out.skipped++;
           continue;
         }
-        try {
-          await addVideoToPlaylist(pl.id, videoId, token);
-        } catch (e) {
-          if (!(e instanceof PlaylistNotFoundError)) throw e;
-          // Deleted on YouTube: find it again by title or create it, and insert there.
-          log.warn("presave.playlist_stale", { stalePlaylistId: pl.id });
-          pl = await resolvePlaylist(env, token, log, true);
-          existing = pl.justCreated ? new Set() : null;
-          if ((await listed()).has(videoId)) {
-            await markAdded(env, row.id);
-            out.skipped++;
-            continue;
+        let result: "added" | "skipped" | null = null;
+        for (let tries = 0; result === null; tries++) {
+          try {
+            result = (await listed()).has(videoId) ? "skipped" : "added";
+            if (result === "added") await addVideoToPlaylist(pl.id, videoId, token);
+          } catch (e) {
+            // Deleted on YouTube (a stale id): find it again by title or create it, and go again once; not a failed try.
+            if (!(e instanceof PlaylistNotFoundError) || tries > 0) throw e;
+            log.warn("presave.playlist_stale", { stalePlaylistId: pl.id });
+            result = null;
+            pl = await resolvePlaylist(env, token, log, true);
+            existing = pl.justCreated ? new Set() : null;
           }
-          await addVideoToPlaylist(pl.id, videoId, token);
         }
-        (await listed()).add(videoId);
+        if (result === "added") {
+          (await listed()).add(videoId);
+          out.added++;
+        } else out.skipped++;
         await markAdded(env, row.id);
-        out.added++;
       } catch (e) {
         const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
         if (isQuotaError(e)) {
@@ -194,7 +212,8 @@ export async function retryDuePresavePlaylist(
           break;
         }
         const attempts = row.presave_playlist_attempts + 1;
-        const giveUp = attempts >= MAX_ATTEMPTS;
+        // YouTube refused this video for good (deleted, private, ...): no point in four more tries.
+        const giveUp = attempts >= MAX_ATTEMPTS || isPermanent(e);
         await db
           .prepare(
             `UPDATE presaves SET presave_playlist_status = ?, presave_playlist_attempts = ?,

@@ -63,6 +63,7 @@ function stub(
     existing?: { id: string; title: string };
     inPlaylist?: string[];
     insert?: (videoId: string) => Response;
+    list?: (playlistId: string) => Response | undefined;
   } = {},
 ): Yt {
   const yt: Yt = { created: [], inserted: [], listed: 0 };
@@ -83,6 +84,8 @@ function stub(
       }
       if (u.pathname === "/youtube/v3/playlistItems" && (init?.method ?? "GET") === "GET") {
         yt.listed++;
+        const l = o.list?.(u.searchParams.get("playlistId") ?? "");
+        if (l) return l;
         return Response.json({
           items: (o.inPlaylist ?? []).map((videoId) => ({ contentDetails: { videoId } })),
         });
@@ -326,5 +329,73 @@ describe("retryDuePresavePlaylist", () => {
     ).run();
     expect((await retryDuePresavePlaylist(env, log, { nowMs: NOW })).added).toBe(0);
     expect(yt.created).toEqual([]);
+  });
+
+  it("a playlist deleted on YouTube (stale id, list 404) is created again and the row is added, no try counted", async () => {
+    const env = makeEnv();
+    await connect(env);
+    await env.SUBS.put(
+      PRESAVE_PLAYLIST_KEY,
+      JSON.stringify({ playlistId: "PL_stale", title: "Pre-saves" }),
+    );
+    const yt = stub({
+      list: (id) => (id === "PL_stale" ? ytError(404, "playlistNotFound") : undefined),
+    });
+    const a = await seed(env, "1", "vidA", 1);
+    await env.DB.prepare(
+      "UPDATE presaves SET presave_playlist_status = 'pending', presave_playlist_next_at = 0",
+    ).run();
+    const r = await retryDuePresavePlaylist(env, log, { nowMs: NOW });
+    expect(r).toEqual({ added: 1, skipped: 0, failed: 0 });
+    expect(yt.created).toHaveLength(1);
+    expect(yt.inserted).toEqual(["PL_new:vidA"]);
+    expect(await cols(env, a)).toMatchObject({ status: "added", attempts: 0 });
+    expect(JSON.parse((await env.SUBS.get(PRESAVE_PLAYLIST_KEY))!).playlistId).toBe("PL_new");
+  });
+
+  it("a due row whose video a sibling pre-save already added is marked added without an insert", async () => {
+    const env = makeEnv();
+    await connect(env);
+    const yt = stub({ existing: { id: "PL_have", title: "Pre-saves" } });
+    const a = await seed(env, "1", "vidA", 1);
+    const b = await seed(env, "2", "vidA", 2);
+    await env.DB.prepare("UPDATE presaves SET presave_playlist_status = 'added' WHERE id = ?")
+      .bind(a)
+      .run();
+    await env.DB.prepare(
+      "UPDATE presaves SET presave_playlist_status = 'pending', presave_playlist_next_at = 0 WHERE id = ?",
+    )
+      .bind(b)
+      .run();
+    const r = await retryDuePresavePlaylist(env, log, { nowMs: NOW });
+    expect(r).toEqual({ added: 0, skipped: 1, failed: 0 });
+    expect(yt.inserted).toEqual([]);
+    expect((await cols(env, b)).status).toBe("added");
+  });
+
+  it("a permanent refusal (video gone) is failed at once, not retried", async () => {
+    const env = makeEnv();
+    await connect(env);
+    stub({
+      existing: { id: "PL_have", title: "Pre-saves" },
+      insert: () => ytError(404, "videoNotFound"),
+    });
+    const a = await seed(env, "1", "vidA", 1);
+    await env.DB.prepare(
+      "UPDATE presaves SET presave_playlist_status = 'pending', presave_playlist_next_at = 0",
+    ).run();
+    const r = await retryDuePresavePlaylist(env, log, { nowMs: NOW });
+    expect(r.failed).toBe(1);
+    expect(await cols(env, a)).toMatchObject({ status: "failed", attempts: 1 });
+  });
+});
+
+describe("presave.playlistTitle", () => {
+  it("refuses a whitespace-only title and trims the rest", async () => {
+    const env = makeEnv();
+    const bad = await updateAppSettings(env, { presave: { playlistTitle: "   " } });
+    expect(bad.ok).toBe(false);
+    const ok = await updateAppSettings(env, { presave: { playlistTitle: "  Mine " } });
+    expect(ok.ok && ok.settings.presave.playlistTitle).toBe("Mine");
   });
 });

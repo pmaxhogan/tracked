@@ -160,7 +160,7 @@ export const AppSettingsSchema = z.object({
     /** Quota units a quota day the automatic likes may spend (51 each; default 1000). The backfill script is not counted. 0 = none. */
     likeDailyUnitCap: z.number().int().min(0).max(10000),
     /** The YouTube playlist every pre-save with a video goes into (lib/presave-playlist.ts; created when missing). */
-    playlistTitle: z.string().min(1).max(150),
+    playlistTitle: z.string().trim().min(1).max(150),
     /** Privacy of that playlist when it is created. */
     playlistPrivacy: z.enum(["public", "unlisted", "private"]),
     /** A set page fetched for any reason updates the pre-saved rows of that set (free). */

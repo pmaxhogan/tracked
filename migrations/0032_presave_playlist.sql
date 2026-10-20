@@ -1,7 +1,7 @@
 -- The Pre-saves playlist (lib/presave-playlist.ts): every pre-save that has a
 -- YouTube video goes into one playlist, inserted by the cron.
 --   presave_playlist_status    null (no video yet) | pending | added | failed
---   presave_playlist_item_id   the playlist item, when YouTube told us
+--   presave_playlist_item_id   reserved (playlistItems.insert's reply is not read); always null
 --   presave_playlist_next_at   unix ms the insert is due (pending only)
 --   presave_playlist_error     the last failure, one line
 --   presave_playlist_attempts  failed tries, for the backoff (failed after 5)
