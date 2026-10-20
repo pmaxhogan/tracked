@@ -14,10 +14,12 @@ import {
   failSearchJob,
   fetchVideoFacts,
   listMatchGroups,
+  matchCounts,
   nameScore,
   referencesOf,
   rejectMatch,
   searchNow,
+  supersedeSettledReviews,
   type PostedCandidate,
 } from "../src/lib/presave-match";
 import { claimTrackUpload, safeSourceUrl, soulseekSourceUrl } from "../src/lib/track-uploads";
@@ -618,6 +620,57 @@ describe("approve / reject", () => {
     expect((await listMatchGroups(env, { view: "decided" }))[0]!.candidates[0]!.decision).toBe(
       "rejected",
     );
+  });
+
+  it("a candidate whose pre-save was uploaded meanwhile leaves the review list instead of offering an Approve that is refused", async () => {
+    const env = makeEnv();
+    const { presaveId, matchId } = await inReview(
+      env,
+      topic({ scores: [{ ref: "apple", score: 0.5 }] }),
+      { Lnpw0PbJYWM: { channelTitle: "JAWNS - Topic", commentCount: "1" } },
+    );
+    expect((await matchCounts(env)).presavesInReview).toBe(1);
+    // mkvid ripped and uploaded the track another way.
+    await env.DB.prepare(
+      "UPDATE presaves SET stage = 'uploaded', youtube_video_id = 'up1' WHERE id = ?",
+    )
+      .bind(presaveId)
+      .run();
+    const counts = await matchCounts(env);
+    expect(counts.presavesInReview).toBe(0);
+    expect(counts.review).toBe(0);
+    expect(await listMatchGroups(env, { view: "review" })).toEqual([]);
+    const decided = (await listMatchGroups(env, { view: "decided" }))[0]!.candidates[0]!;
+    expect(decided).toMatchObject({
+      decision: "superseded",
+      reason: "the pre-save is uploaded already",
+    });
+    // An Approve sent from a page loaded before still says why, and changes nothing.
+    expect(await applyApproval(env, matchId, "owner", log, NOW)).toMatchObject({
+      ok: false,
+      message: "the pre-save is uploaded already",
+    });
+    // Idempotent: nothing is left to settle.
+    expect(await supersedeSettledReviews(env, NOW)).toEqual([]);
+  });
+
+  it("an Approve refused for a settled pre-save clears that pre-save's other waiting candidates", async () => {
+    const env = makeEnv();
+    const { presaveId, matchId } = await inReview(
+      env,
+      topic({ scores: [{ ref: "apple", score: 0.5 }] }),
+      { Lnpw0PbJYWM: { channelTitle: "JAWNS - Topic", commentCount: "1" } },
+    );
+    await env.DB.prepare(
+      "UPDATE presaves SET stage = 'found', youtube_video_id = 'v1' WHERE id = ?",
+    )
+      .bind(presaveId)
+      .run();
+    expect((await applyApproval(env, matchId, "owner", log, NOW)).ok).toBe(false);
+    const row = await env.DB.prepare("SELECT decision, reason FROM presave_matches WHERE id = ?")
+      .bind(matchId)
+      .first();
+    expect(row).toEqual({ decision: "superseded", reason: "the pre-save is found already" });
   });
 
   it("search now makes a presave due at once, past the watch delay and maxSearches", async () => {

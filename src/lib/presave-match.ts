@@ -941,6 +941,35 @@ export async function getMatchRow(env: Env, id: number): Promise<MatchRow | null
 }
 
 /**
+ * Candidates still waiting for review whose pre-save no longer takes one:
+ * it has its video, or left the `links` stage another way (mkvid uploaded
+ * the track, it was found or dismissed). They are superseded (never offered
+ * again) and their clips released. Cheap and idempotent: the review list and
+ * its counts run it first, so such a candidate never shows an Approve that
+ * can only be refused. Returns the pre-saves it settled.
+ */
+export async function supersedeSettledReviews(env: Env, now = Date.now()): Promise<number[]> {
+  const db = dbOf(env);
+  const res = await db
+    .prepare(
+      `SELECT DISTINCT m.presave_id AS id, p.stage AS stage FROM presave_matches m JOIN presaves p ON p.id = m.presave_id
+        WHERE m.decision = 'review' AND (p.stage != 'links' OR p.youtube_video_id IS NOT NULL)`,
+    )
+    .all<{ id: number; stage: string }>();
+  for (const r of res.results) {
+    await db
+      .prepare(
+        `UPDATE presave_matches SET decision = 'superseded', decided_by = 'auto', decided_at = ?, updated_at = ?,
+           reason = ? WHERE presave_id = ? AND decision = 'review'`,
+      )
+      .bind(now, now, `the pre-save is ${r.stage} already`, r.id)
+      .run();
+    await releaseClipsIfDone(env, Number(r.id));
+  }
+  return res.results.map((r) => Number(r.id));
+}
+
+/**
  * Approve one candidate (the owner, or decideMatch). A YouTube candidate that
  * is a Topic upload or has comments off becomes the presave's video (found);
  * any other candidate is queued for mkvid to rip and upload. The presave's
@@ -966,8 +995,11 @@ export async function applyApproval(
     };
   const p = await presaveLite(env, m.presave_id);
   if (!p) return { ok: false, outcome: null, message: "the pre-save is gone" };
-  if (p.stage !== "links" || p.youtube_video_id)
+  if (p.stage !== "links" || p.youtube_video_id) {
+    // Nothing to approve any more: the pre-save's waiting candidates leave the review list.
+    await supersedeSettledReviews(env, now);
     return { ok: false, outcome: null, message: `the pre-save is ${p.stage} already` };
+  }
 
   let result: ApplyResult;
   if (m.source === "ytm") {
@@ -1181,6 +1213,7 @@ export async function redecideReviews(
 }> {
   const db = dbOf(env);
   const settings = (await getAppSettings(env)).presaveMatch;
+  await supersedeSettledReviews(env, now);
   const rows = await db
     .prepare(
       `SELECT m.*, p.artist AS p_artist, p.title AS p_title, p.duration_seconds AS p_duration
@@ -1474,6 +1507,7 @@ export async function listMatchGroups(
   q: { view: "review" | "decided"; presaveId?: number | null; limit?: number },
 ): Promise<MatchGroup[]> {
   const db = dbOf(env);
+  if (q.view === "review") await supersedeSettledReviews(env);
   const limit = Math.max(1, Math.min(500, q.limit ?? 300));
   const where = q.view === "review" ? "m.decision = 'review'" : "m.decision != 'review'";
   const res = await db
@@ -1556,6 +1590,7 @@ export async function matchCounts(
   env: Env,
 ): Promise<Record<MatchDecision, number> & { presavesInReview: number }> {
   const db = dbOf(env);
+  await supersedeSettledReviews(env);
   const out = Object.fromEntries(MATCH_DECISIONS.map((d) => [d, 0])) as Record<
     MatchDecision,
     number
