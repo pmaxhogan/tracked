@@ -38,6 +38,8 @@ import type { Env } from "../types";
 import { dbOf, parseJson, v } from "./db";
 import { errorFields, type Logger } from "./log";
 import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
+import { OWNER, quotaGate, REFUSAL_TEXT } from "./quota-priority";
+import { setQuotaConsumer } from "./youtube-playlists";
 import { getAccessToken } from "./google-oauth";
 import { getAppSettings, type AppSettings } from "./app-settings";
 import {
@@ -994,6 +996,9 @@ export function errorTone(
   return "warn";
 }
 
+/** A stored note of an insert the priority rule held (not a failure: `warn`, tried again by itself). */
+const PLAYLIST_HELD_PREFIX = "playlist insert waits: ";
+
 type InsertOutcome = {
   playlistId: string | null;
   status: TrackPlaylistStatus;
@@ -1010,7 +1015,27 @@ async function insertSafely(
   accessToken: string,
   log: Logger,
   completedAt: number | null = null,
+  /** The owner's Retry button: never ranked, only counted as the owner's. */
+  owner = false,
+  nowMs = Date.now(),
 ): Promise<InsertOutcome> {
+  // Its turn at the quota (lib/quota-priority.ts), as a Pre-saves playlist insert. Held, it waits like a quota
+  // failure (tried again by the cron, nothing charged), in minutes, or at the day's end for the max or an empty pool.
+  const gate = owner ? null : await quotaGate(env, "presave_playlists", 50, nowMs);
+  if (owner) setQuotaConsumer(OWNER);
+  if (gate && !gate.ok) {
+    log.info("track_upload.playlist_insert_held", { id: uploadId, videoId, reason: gate.reason });
+    const now = Math.floor(nowMs / 1000);
+    return {
+      playlistId: (await getStoredTrackPlaylist(env))?.playlistId ?? null,
+      status: "failed",
+      error: `${PLAYLIST_HELD_PREFIX}${REFUSAL_TEXT[gate.reason]}; it is tried again by itself`,
+      retryAt:
+        gate.reason === "max" || gate.reason === "pool_out"
+          ? quotaDayEnd(now * 1000)
+          : now + PLAYLIST_RETRY_MIN_SECONDS,
+    };
+  }
   try {
     const r = await addToTrackPlaylist(env, videoId, accessToken, log);
     return { playlistId: r.playlistId, status: r.status, error: null, retryAt: null };
@@ -1039,6 +1064,8 @@ async function rerunPlaylistInsert(
   row: TrackUploadRow,
   accessToken: string,
   log: Logger,
+  /** The owner's Retry (not ranked), or the cron's tick time. */
+  opts: { owner?: boolean; nowMs?: number } = {},
 ): Promise<InsertOutcome> {
   const pl = await insertSafely(
     env,
@@ -1047,6 +1074,8 @@ async function rerunPlaylistInsert(
     accessToken,
     log,
     row.completed_at,
+    opts.owner,
+    opts.nowMs,
   );
   await dbOf(env)
     .prepare(
@@ -1064,12 +1093,12 @@ async function rerunPlaylistInsert(
 }
 
 /** `done` requests whose playlist insert failed and is due again (not a permanent refusal). */
-const PLAYLIST_DUE_SQL = `status = 'done' AND playlist_status = 'failed' AND video_id IS NOT NULL
+export const PLAYLIST_DUE_SQL = `status = 'done' AND playlist_status = 'failed' AND video_id IS NOT NULL
   AND (error IS NULL OR error NOT LIKE 'playlist insert failed (permanent)%')
   AND (not_before IS NULL OR not_before <= ?)`;
 const PLAYLIST_RETRIES_PER_TICK = 5;
 
-export type PlaylistRetryStop = "quota" | "rate_limit" | "not_connected";
+export type PlaylistRetryStop = "quota" | "rate_limit" | "not_connected" | "held";
 
 /**
  * The cron step: re-runs the playlist inserts that failed on quota, a rate
@@ -1109,10 +1138,14 @@ export async function retryDueTrackPlaylistInserts(
         .run();
       if ((taken.meta.changes ?? 0) === 0) continue;
       out.tried++;
-      const pl = await rerunPlaylistInsert(env, row, tok.accessToken, log);
+      const pl = await rerunPlaylistInsert(env, row, tok.accessToken, log, { nowMs: now * 1000 });
       if (pl.status !== "failed") {
         out.added++;
         continue;
+      }
+      if (pl.error?.startsWith(PLAYLIST_HELD_PREFIX)) {
+        out.stoppedBy = "held";
+        break;
       }
       const kind = describeYouTubeError(PLAYLIST_FAILED_RE.exec(pl.error ?? "")?.[2])?.kind;
       if (kind === "quota" || kind === "rate_limit") {
@@ -1491,7 +1524,7 @@ export async function retryTrackUpload(
         error: "youtube_not_connected",
         message: "connect a YouTube account first",
       };
-    await rerunPlaylistInsert(env, row, tok, log);
+    await rerunPlaylistInsert(env, row, tok, log, { owner: true });
     return { ok: true, upload: (await getTrackUpload(env, id))!, playlistRetried: true };
   }
   if (row.status === "pending")

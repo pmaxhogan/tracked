@@ -133,7 +133,7 @@ ${YOUTUBE_CARD_JS}
       return;
     }
     if (data.ok === false) {
-      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet - sync a DJ first' : 'backfill skipped: ' + data.reason, 'bad');
+      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet - sync a DJ first' : data.reason === 'quota_held' ? 'backfill waits for the YouTube quota (' + data.held + ')' : 'backfill skipped: ' + data.reason, data.reason === 'quota_held' ? 'warn' : 'bad');
     } else {
       TK.toast('combined playlist: added ' + (data.inserted || 0) + ' video' + (data.inserted === 1 ? '' : 's') +
         (data.pending ? ' · ' + data.pending + ' still pending (' + (data.cappedBy || 'capped') + ')' : ''), 'ok');
@@ -208,7 +208,7 @@ ${YOUTUBE_CARD_JS}
       TK.toast(data.errorMessage || TK.errText(res, 'moving failed (' + res.status + ')'), 'bad');
       return;
     }
-    const why = { quota: 'YouTube quota is used for today', rate_limit: 'YouTube is rate limiting, it goes on at the next tick', budget: 'the unit budget of today is used', paused: 'paused in Settings', not_connected: 'YouTube is not connected',
+    const why = { quota: 'YouTube quota is used for today', rate_limit: 'YouTube is rate limiting, it goes on at the next tick', budget: 'the unit budget of today is used', held: 'held for higher priority, it goes on by itself', paused: 'paused in Settings', not_connected: 'YouTube is not connected',
       busy: 'another run is moving videos right now, nothing was done', no_keys: 'the set dates could not be read from the database, nothing was spent' }[data.stoppedBy];
     // Out of quota or budget is a wait, not a failure: it continues by itself.
     TK.toast('playlist order: moved ' + (data.moved || 0) + ' video' + (data.moved === 1 ? '' : 's') + (why ? ' · ' + why : ''), data.moved || !why ? 'ok' : 'warn');

@@ -87,8 +87,10 @@ import {
   isQuotaError,
   PlaylistNotFoundError,
   removeVideoFromPlaylist,
+  setQuotaConsumer,
   YouTubeApiError,
 } from "./youtube-playlists";
+import { OWNER, quotaGate, type GateRefusal } from "./quota-priority";
 import { insertInOrder, type OrderKeyCache } from "./playlist-order-store";
 import {
   cachePlaylistVideoIds,
@@ -342,6 +344,8 @@ async function pausedForRun(env: Env, log: Logger, task: string): Promise<boolea
  * older than this is fetched afresh (the hold itself lasts a day at most).
  */
 export const DEFERRED_INSERT_MAX_AGE_SECONDS = 2 * 24 * 60 * 60;
+/** A recheck's write the priority rule held is due again this soon (a used-up quota waits for the quota day's end). */
+const PRIORITY_RECHECK_SECONDS = 30 * 60;
 /** A recheck whose write was refused by a per-minute limit is due again this soon (a daily one: when the quota day ends). */
 const RATE_LIMIT_RECHECK_SECONDS = 15 * 60;
 
@@ -470,9 +474,11 @@ export type SyncOneResult = {
    * `hit` = this run itself got a quota or rate-limit reply, `deferred` = the
    * sets whose write waits (page fetched and recorded, no failure counted;
    * a first-time set's video is kept for the retry, a recheck is due again
-   * when the quota is back). Not an error: it continues by itself.
+   * when the quota is back). `held` = the priority rule (lib/quota-priority.ts)
+   * refused the write: the quota is not out, higher-ranked work or this
+   * consumer's daily max comes first. Not an error: it continues by itself.
    */
-  quota?: { out: boolean; hit: boolean; deferred: string[] };
+  quota?: { out: boolean; hit: boolean; held?: GateRefusal; deferred: string[] };
   /** Why the DJ-page crawl stopped, when this run crawled. */
   crawlStopReason?: string;
 };
@@ -626,7 +632,9 @@ export async function collectCombinedSources(env: Env): Promise<PlaylistSource[]
 
 export type CombinedBackfillResult =
   | ({ ok: true } & CombinedMergeResult)
-  | { ok: false; reason: "youtube_not_connected" | "no_sources" };
+  | { ok: false; reason: "youtube_not_connected" | "no_sources" }
+  /** The priority rule held it (lib/quota-priority.ts); the missing videos wait for a later run. */
+  | { ok: false; reason: "quota_held"; held: GateRefusal };
 
 /**
  * Reconcile the combined playlist against every artist playlist, inserting
@@ -652,6 +660,13 @@ export async function backfillCombined(
     // Nothing has been synced yet - don't create an empty playlist for it.
     log.info("combined.skip_no_sources");
     return { ok: false, reason: "no_sources" };
+  }
+  // The panel's button is the owner's; the cron's run has the combined playlist's rank.
+  const consumer = opts.trigger?.startsWith("manual.") ? OWNER : "combined";
+  const g = await quotaGate(env, consumer, 50);
+  if (!g.ok) {
+    log.info("combined.quota_gate_held", { consumer, reason: g.reason });
+    return { ok: false, reason: "quota_held", held: g.reason };
   }
   const merged = await mergeIntoCombinedPlaylist(env, tokenInfo.accessToken, sources, {
     log,
@@ -719,6 +734,25 @@ export async function syncOne(
   let quotaHeld = opts.quotaHeld ?? !!(await getQuotaOut(env));
   /** Sets whose playlist write waits for quota (SyncOneResult.quota.deferred). */
   const quotaDeferred: string[] = [];
+  /** The ledger's consumer for this run: a button press is the owner's, the cron's is the DJ playlists' rank. */
+  const consumer = opts.trigger?.startsWith("manual.") ? OWNER : "dj_playlists";
+  setQuotaConsumer(consumer);
+  /** The priority rule refused a write; the quota itself is not out (SyncOneResult.quota.held). */
+  let priorityHeld: GateRefusal | null = null;
+  /**
+   * Asked before each playlist write (lib/quota-priority.ts). A refusal holds
+   * the rest of the run exactly as a used-up quota does (`quotaHeld`): every
+   * write waits, charged nothing.
+   */
+  const gate = async (units: number): Promise<boolean> => {
+    if (quotaHeld) return false;
+    const g = await quotaGate(env, consumer, units);
+    if (g.ok) return true;
+    quotaHeld = true;
+    if (g.reason !== "pool_out") priorityHeld = g.reason;
+    log.info("sync.quota_gate_held", { slug: sub.slug, consumer, reason: g.reason, units });
+    return false;
+  };
   // A button press (manual.one / manual.all / manual.resync) may wait for a
   // free pool browser; the scheduler keeps its short waits and moves on.
   const queueSeconds =
@@ -859,7 +893,7 @@ export async function syncOne(
   // unnecessary - known-empty is the right baseline.
   let justCreated = false;
   // Out of quota a DJ with no playlist yet stays without one for this run: its sets that need no write are still handled.
-  if (!playlistId && !quotaHeld) {
+  if (!playlistId && !quotaHeld && (await gate(51))) {
     const r = await resolveArtistPlaylist(playlistTitle, artistName, accessToken, log, sub.slug);
     playlistId = r.id;
     justCreated = r.justCreated;
@@ -974,6 +1008,19 @@ export async function syncOne(
   const mirrorToCombined = async (videoId: string): Promise<CombinedAdditionStatus | null> => {
     // Out of quota nothing is mirrored: the combined backfill adds it (the combined playlist is the union of the artist playlists).
     if (quotaHeld) return null;
+    // The combined playlist has its own rank: held, it is left to the backfill the same way.
+    const g = await quotaGate(env, "combined", 50);
+    if (!g.ok) {
+      log.info("sync.combined_mirror_held", { slug: sub.slug, videoId, reason: g.reason });
+      return null;
+    }
+    try {
+      return await mirrorNow(videoId);
+    } finally {
+      setQuotaConsumer(consumer);
+    }
+  };
+  const mirrorNow = async (videoId: string): Promise<CombinedAdditionStatus | null> => {
     const handle = await openCombinedOnce();
     if (!handle) return "unavailable";
     try {
@@ -1284,7 +1331,7 @@ export async function syncOne(
       const via = setFetched ? { via: setFetched.via } : {};
       if (videoId) {
         const present = membershipKnown && existingVideoIds.has(videoId);
-        if (!present && quotaHeld) {
+        if (!present && (quotaHeld || !(await gate(50)))) {
           // Everything but the insert is done (cached, verified, scheduled). The set stays unprocessed with its
           // video on record, charged nothing; the run that finds the quota back inserts it without another fetch.
           tracklistVideos[setUrl] = { videoId, checkedAt };
@@ -1576,11 +1623,15 @@ export async function syncOne(
         tracklistVideos[setUrl] = { videoId, checkedAt };
         log.info("sync.recheck_unchanged", { slug: sub.slug, setUrl, videoId });
       } else if (
-        quotaHeld &&
-        !(prev.videoId === null && membershipKnown && existingVideoIds.has(videoId))
+        !(prev.videoId === null && membershipKnown && existingVideoIds.has(videoId)) &&
+        (quotaHeld || !(await gate(51)))
       ) {
-        // A first video to insert, or a swap, while the quota is out.
-        await deferRecheck(setUrl, videoId, quotaDayEnd(Date.now()));
+        // A first video to insert, or a swap, while the quota is out (or the priority rule holds it: due again sooner).
+        await deferRecheck(
+          setUrl,
+          videoId,
+          priorityHeld ? nowSeconds() + PRIORITY_RECHECK_SECONDS : quotaDayEnd(Date.now()),
+        );
       } else if (prev.videoId === null) {
         // The set gained a recording since we last looked: same as a first-time add.
         videoIdsFound += 1;
@@ -1828,7 +1879,14 @@ export async function syncOne(
     ...(stoppedBy ? { stoppedBy } : {}),
     ...(crawlStopReason ? { crawlStopReason } : {}),
     ...(quotaHeld || quotaHit
-      ? { quota: { out: quotaHeld, hit: quotaHit, deferred: [...new Set(quotaDeferred)] } }
+      ? {
+          quota: {
+            out: quotaHeld && !priorityHeld,
+            hit: quotaHit,
+            ...(priorityHeld ? { held: priorityHeld } : {}),
+            deferred: [...new Set(quotaDeferred)],
+          },
+        }
       : {}),
   };
 }

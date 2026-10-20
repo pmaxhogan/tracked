@@ -4,7 +4,8 @@ import type { Env } from "../types";
 import { extractVideoId } from "../lib/youtube";
 import { getAccessToken, GoogleOAuthRefreshFailed } from "../lib/google-oauth";
 import { rateVideo } from "../lib/youtube-likes";
-import { YouTubeApiError } from "../lib/youtube-playlists";
+import { setQuotaConsumer, YouTubeApiError } from "../lib/youtube-playlists";
+import { OWNER } from "../lib/quota-priority";
 import { bearerAuth } from "../middleware/auth";
 import { makeLogger, errorFields } from "../lib/log";
 
@@ -102,6 +103,8 @@ export const likesHandler: RouteHandler<typeof likesRoute, { Bindings: Env }> = 
   }
 
   try {
+    // The owner's own button: never ranked, counted as the owner's in the quota ledger (lib/quota-priority.ts).
+    setQuotaConsumer(OWNER);
     await rateVideo(videoId, body.liked ? "like" : "none", accessToken);
   } catch (e) {
     log.error("likes.rate_failed", { videoId, liked: body.liked, ...errorFields(e) });

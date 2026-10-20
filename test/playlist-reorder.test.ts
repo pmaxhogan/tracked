@@ -190,9 +190,15 @@ async function makeEnv(opts: { budget?: number } = {}): Promise<Env> {
   for (let n = 1; n <= 6; n++) await add("dj", n - 1, `v${n}`);
   for (let n = 1; n <= 3; n++) await add("dj2", n + 9, `w${n}`);
   await saveCombinedState(env, { playlistId: "PLall" });
-  // The pass ships paused; these tests give it a budget unless they are about the pause.
-  if (opts.budget !== 0)
-    await updateAppSettings(env, { playlists: { orderDailyUnits: opts.budget ?? 2000 } });
+  // The pass ships paused; these tests give it a budget unless they are about the pause. The ordering
+  // quota consumer's max is that budget (it took over orderDailyUnits).
+  if (opts.budget !== 0) {
+    const budget = opts.budget ?? 2000;
+    await updateAppSettings(env, {
+      playlists: { orderDailyUnits: budget },
+      quota: { consumers: { ordering: { min: null, max: budget, enabled: true } } },
+    });
+  }
   return env;
 }
 

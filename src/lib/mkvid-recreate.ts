@@ -32,6 +32,7 @@ import { dbOf } from "./db";
 import { pullInHeldRecheck, TIMED_SQL } from "./mkvid-readiness";
 import { errorFields, type Logger } from "./log";
 import { noteQuotaOut } from "./youtube-quota";
+import { OWNER, quotaGate } from "./quota-priority";
 import {
   loadCombinedState,
   openCombinedPlaylist,
@@ -845,7 +846,8 @@ async function dropGoneRecreationVideo(
 }
 
 export type GoneCheckResult = {
-  skipped?: "off" | "not_due" | "not_connected" | "too_many_gone" | "error";
+  /** `held`: the priority rule (lib/quota-priority.ts) kept it back; nothing was marked done, the next tick asks again. */
+  skipped?: "off" | "not_due" | "not_connected" | "too_many_gone" | "error" | "held";
   checked: number;
   gone: number;
   remade: number;
@@ -876,6 +878,12 @@ export async function checkDeletedMkvidVideos(
     if (!opts.force) {
       const last = Number((await env.SUBS.get(LAST_GONE_CHECK_KEY)) ?? 0);
       if (Number.isFinite(last) && now - last < interval) return { ...out, skipped: "not_due" };
+    }
+    // Its turn at the quota, before the check counts as made (a button press is the owner's).
+    const gate = await quotaGate(env, opts.force ? OWNER : "mkvid_recreate", 51, opts.nowMs);
+    if (!gate.ok) {
+      log.info("mkvid.gone_check_held", { reason: gate.reason });
+      return { ...out, skipped: "held" };
     }
     const token = opts.accessToken ?? (await getAccessToken(env))?.accessToken;
     if (!token) return { ...out, skipped: "not_connected" };

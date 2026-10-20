@@ -37,6 +37,8 @@ import {
   sweepSettings,
   undoRemoval,
 } from "../lib/playlist-hygiene";
+import { OWNER } from "../lib/quota-priority";
+import { setQuotaConsumer } from "../lib/youtube-playlists";
 import { channelBanNotifier, decideBan, listBanQueue, processBanQueue } from "../lib/channel-bans";
 import { BANS_PAGE_HTML } from "../ui/pages/bans";
 import { parseDjSlug } from "../lib/subscriptions";
@@ -89,6 +91,8 @@ hygieneApp.post("/api/removals/:id/undo", async (c) => {
   if (!Number.isInteger(id) || id <= 0) return c.json({ error: "invalid_id" }, 400);
   const token = await getAccessToken(c.env);
   if (!token) return c.json({ error: "youtube_not_connected" }, 409);
+  // The owner's own action: never ranked, counted as the owner's in the quota ledger (lib/quota-priority.ts).
+  setQuotaConsumer(OWNER);
   const r = await undoRemoval(c.env, token.accessToken, id, log);
   if (!r.ok) return c.json({ error: r.error }, r.error === "not_found" ? 404 : 409);
   return c.json(r);
@@ -151,6 +155,7 @@ hygieneApp.post("/api/set/remove-replace", async (c) => {
     );
   const token = await getAccessToken(c.env);
   if (!token) return c.json({ error: "youtube_not_connected" }, 409);
+  setQuotaConsumer(OWNER);
   const r = await removeAndReplace(c.env, token.accessToken, { slug, setUrl: url, log });
   if (!r.ok) {
     const message =

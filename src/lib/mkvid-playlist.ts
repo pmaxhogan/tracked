@@ -42,6 +42,7 @@ import {
 } from "./youtube-playlists";
 import { quotaKind } from "./youtube-error";
 import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
+import { quotaGate, REFUSAL_TEXT } from "./quota-priority";
 import { getAccessToken } from "./google-oauth";
 import { insertInOrder } from "./playlist-order-store";
 import { markInPlaylist } from "./playlist-blocklist";
@@ -299,6 +300,25 @@ export async function addSetToPlaylists(
       error: playlistNote("quota", null),
       retryAt: Math.max(hold.until, now + RETRY_MIN_SECONDS),
     };
+  // Its turn at the quota (lib/quota-priority.ts), as a DJ-playlist insert. Held, it waits like the quota
+  // hold above; it is tried again in minutes, at the day's end only for the daily max or an empty pool.
+  const gate = await quotaGate(env, "dj_playlists", 50, now * 1000);
+  if (!gate.ok) {
+    log.info("mkvid.playlist_insert_held", {
+      id: t.requestId,
+      videoId: t.videoId,
+      reason: gate.reason,
+    });
+    return {
+      ok: false,
+      kind: "quota",
+      error: `playlist insert waits: ${REFUSAL_TEXT[gate.reason]}; it is tried again by itself`,
+      retryAt:
+        gate.reason === "max" || gate.reason === "pool_out"
+          ? quotaDayEnd(now * 1000)
+          : now + RETRY_MIN_SECONDS,
+    };
+  }
   try {
     return await addToPlaylists(env, t, accessToken, log);
   } catch (e) {

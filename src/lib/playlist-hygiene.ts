@@ -34,6 +34,7 @@ import type { Env } from "../types";
 import { dbOf, batchChunked } from "./db";
 import { errorFields, type Logger } from "./log";
 import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
+import { dailyMaxUnits, OWNER, quotaGate } from "./quota-priority";
 import {
   decideFullRecording,
   hasNoFullRecordingNotice,
@@ -118,6 +119,8 @@ export const SWEEP_INTERVAL_SECONDS = 6 * 60 * 60;
 const LIST_MAX_PAGES = 200;
 
 export type SweepSettings = { dryRun: boolean; dailyRemovals: number };
+/** What one removal is counted at against the hygiene consumer's max (the delete 50 and its share of the listings). */
+const REMOVAL_UNITS = 51;
 
 /**
  * `PLAYLIST_SWEEP_DRY_RUN` is TRUE unless explicitly set to 0/false/no/off -
@@ -133,7 +136,8 @@ export function sweepSettings(
   if (!app) return fromEnv;
   return {
     dryRun: app.playlists.sweepDryRun ?? fromEnv.dryRun,
-    dailyRemovals: app.playlists.sweepDailyRemovals ?? fromEnv.dailyRemovals,
+    // The hygiene consumer's max (settings.quota; migrated from sweepDailyRemovals), at 51 units a removal.
+    dailyRemovals: Math.floor(dailyMaxUnits(app, "hygiene", env) / REMOVAL_UNITS),
   };
 }
 
@@ -2769,6 +2773,13 @@ export async function runPlaylistHygiene(
       ? opts.force === "sweep"
       : await due(env, LAST_SWEEP_KEY, SWEEP_INTERVAL_SECONDS, now);
     if (!wantCompare && !wantSweep) return { skipped: "not_due" };
+    // Its turn at the quota, asked once for the run (a button press is the owner's). Held, nothing is
+    // marked done, so the next tick asks again.
+    const gate = await quotaGate(env, opts.force ? OWNER : "hygiene", REMOVAL_UNITS, nowMs);
+    if (!gate.ok) {
+      log.info("hygiene.quota_gate_held", { reason: gate.reason });
+      return { skipped: `quota_${gate.reason}` };
+    }
     const token = opts.accessToken ?? (await getAccessToken(env))?.accessToken;
     if (!token) return { skipped: "youtube_not_connected" };
     const out: { compare?: ComparePlaylistResult[]; sweep?: SweepResult; bans?: BanQueueResult } =

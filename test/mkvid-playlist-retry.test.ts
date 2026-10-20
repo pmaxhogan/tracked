@@ -21,7 +21,7 @@ import {
   setPlaylistRetryAt,
 } from "../src/lib/mkvid-playlist";
 import { recreateMkvidRequest } from "../src/lib/mkvid-recreate";
-import { QUOTA_OUT_KEY } from "../src/lib/youtube-quota";
+import { clearQuotaOut, QUOTA_OUT_KEY } from "../src/lib/youtube-quota";
 import { saveSubState } from "../src/lib/sync-store";
 import { makeLogger } from "../src/lib/log";
 import { storeVerifiedList } from "./helpers/mkvid-lists";
@@ -187,7 +187,8 @@ describe("set completion with a refused playlist insert", () => {
       added: 0,
       stoppedBy: "quota",
     });
-    await env.CACHE.delete(QUOTA_OUT_KEY);
+    // The quota is back: the hold and the own project's out flag both gone (the priority rule reads the pool).
+    await clearQuotaOut(env);
     expect(await retryDueSetPlaylistInserts(env, log, { now: end })).toEqual({
       tried: 1,
       added: 1,
@@ -287,7 +288,8 @@ describe("set completion with a refused playlist insert", () => {
         .first(),
     ).toEqual({ state: "awaiting_replacement" });
 
-    await env.CACHE.delete(QUOTA_OUT_KEY);
+    // The quota is back: the hold and the own project's out flag both gone (the priority rule reads the pool).
+    await clearQuotaOut(env);
     fn(removeVideoFromPlaylist).mockResolvedValue(1);
     expect(await retryDueSetPlaylistInserts(env, log, { now: quotaDayEnd() })).toMatchObject({
       tried: 1,

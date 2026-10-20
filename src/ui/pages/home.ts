@@ -336,7 +336,7 @@ ${ACTIVITY_DRAWER_JS}
       return;
     }
     if (data.ok === false) {
-      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet - sync a DJ first' : 'backfill skipped: ' + data.reason, 'bad');
+      TK.toast(data.reason === 'no_sources' ? 'nothing to backfill yet - sync a DJ first' : data.reason === 'quota_held' ? 'backfill waits for the YouTube quota (' + data.held + ')' : 'backfill skipped: ' + data.reason, data.reason === 'quota_held' ? 'warn' : 'bad');
     } else {
       TK.toast('combined playlist: added ' + (data.inserted || 0) + ' video' + (data.inserted === 1 ? '' : 's') +
         (data.pending ? ' · ' + data.pending + ' still pending (' + (data.cappedBy || 'capped') + ')' : ''), 'ok');

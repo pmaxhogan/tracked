@@ -7,8 +7,9 @@
  * existed and the upkeep afterwards (an insert that had to be appended, a
  * video the owner dragged).
  *
- * **It ships paused.** `playlists.orderDailyUnits` defaults to 0, and at 0 the
- * cron pass returns before any YouTube call, any listing included. The owner
+ * **It ships paused.** `playlists.orderDailyUnits` defaults to 0, so the
+ * ordering quota consumer starts switched off (settings.quota.consumers,
+ * migrated from it), and switched off the cron pass returns before any YouTube call, any listing included. The owner
  * starts it by saving a budget on /ui/settings after looking at the dry run.
  * New videos are inserted at their place either way (lib/playlist-order-store.ts).
  *
@@ -74,7 +75,9 @@
  *     it reads the same two positions from a listing of the playlist (1 unit
  *     per 50 entries), which shows every item. What is checked is the same.
  *
- * **Limits.** `playlists.orderDailyUnits` is everything the pass may spend in
+ * **Limits.** The ordering consumer's max (settings.quota, lib/quota-priority.ts
+ * dailyMaxUnits; it took over `playlists.orderDailyUnits`), and its turn at the
+ * quota, asked once per pass, is everything the pass may spend in
  * a quota day (midnight Pacific), listings and lookups included and failed
  * moves too (YouTube charges for those). `playlists.orderMovesPerRun`
  * (default 10) and a wall-clock ceiling bound one run. A daily-quota reply,
@@ -100,6 +103,7 @@
 
 import type { Env } from "../types";
 import { getAppSettings } from "./app-settings";
+import { dailyMaxUnits, OWNER, quotaGate, type GateRefusal } from "./quota-priority";
 import { loadCombinedState } from "./combined-playlist";
 import { dbOf } from "./db";
 import { getAccessToken } from "./google-oauth";
@@ -262,6 +266,8 @@ export type OrderStop =
   | "quota"
   | "rate_limit"
   | "budget"
+  /** The priority rule (lib/quota-priority.ts) holds the pass for higher-ranked work. */
+  | "held"
   | "run"
   | "deadline"
   | "busy"
@@ -653,6 +659,14 @@ type PassOpts = {
   sleep?: (ms: number) => Promise<void>;
 };
 
+/** How a refusal of the priority rule reads as a stop. */
+const GATE_STOP: Record<GateRefusal, OrderStop> = {
+  held: "held",
+  max: "budget",
+  off: "paused",
+  pool_out: "quota",
+};
+
 /**
  * One bounded pass. Never throws for a YouTube or D1 failure it can name; a
  * daily-quota reply ends it and is remembered for the rest of the quota day.
@@ -662,8 +676,10 @@ type PassOpts = {
  * writes nothing either; the pass itself reads the state again under the lock.
  */
 export async function runOrderPass(env: Env, opts: PassOpts): Promise<OrderPassResult> {
-  const settings = (await getAppSettings(env)).playlists;
-  const dailyUnits = settings.orderDailyUnits;
+  const app = await getAppSettings(env);
+  const settings = app.playlists;
+  // The ordering consumer's max (settings.quota; it took over orderDailyUnits); switched off = paused.
+  const dailyUnits = dailyMaxUnits(app, "ordering");
   if (dailyUnits <= 0)
     return {
       ok: true,
@@ -689,6 +705,16 @@ export async function runOrderPass(env: Env, opts: PassOpts): Promise<OrderPassR
   if (dailyUnits - used < UNITS_PER_MOVE + 1) return skipped("budget");
   if (orderQueue(await managedPlaylists(env), await loadOrderState(env), nowSeconds()).length === 0)
     return skipped(null);
+  // Its turn at the quota (the Playlists page's Run button is the owner's), for one move and its listing.
+  const gate = await quotaGate(
+    env,
+    opts.trigger?.startsWith("manual.") ? OWNER : "ordering",
+    UNITS_PER_MOVE + 1,
+  );
+  if (!gate.ok) {
+    opts.log.info("playlist_order.quota_gate_held", { reason: gate.reason });
+    return skipped(GATE_STOP[gate.reason]);
+  }
   const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken;
   if (!accessToken) return skipped("not_connected");
   const token = await takeLock(env, opts.log);
@@ -1102,7 +1128,9 @@ export async function orderReport(
     deadlineMs?: number;
   },
 ): Promise<OrderReport> {
-  const settings = (await getAppSettings(env)).playlists;
+  const app = await getAppSettings(env);
+  const settings = app.playlists;
+  const dailyUnits = dailyMaxUnits(app, "ordering");
   const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken ?? null;
   let unitsSpent = 0;
   let fresh = false;
@@ -1208,7 +1236,7 @@ export async function orderReport(
     xs.reduce((a, r) => a + f(r), 0);
   // Moves the pass will not make are not days it will take.
   const todo = read.filter((r) => !(r.problem && STOPPING.includes(r.problem)));
-  const est = estimateDays(todo, settings.orderDailyUnits, settings.orderMovesPerRun);
+  const est = estimateDays(todo, dailyUnits, settings.orderMovesPerRun);
   return {
     connected: !!accessToken,
     fresh,
@@ -1225,7 +1253,7 @@ export async function orderReport(
       units: sum(read, (r) => r.units),
       unmovable: sum(read, (r) => unmovableNow(r, nowSeconds()).length),
     },
-    dailyUnits: settings.orderDailyUnits,
+    dailyUnits,
     movesPerRun: settings.orderMovesPerRun,
     unitsUsedToday: await orderUnitsUsedToday(env),
     estimate: {

@@ -290,6 +290,14 @@ const ledgerPending = new Map<
   Map<string, { key: string; consumer: string; units: number; calls: number }>
 >();
 
+/** Units counted for `env` and not yet written to the ledger, by consumer (lib/quota-priority.ts adds them to the ledger's). */
+export function pendingLedgerUnits(env: Env): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of ledgerPending.get(env)?.values() ?? [])
+    out.set(r.consumer, (out.get(r.consumer) ?? 0) + r.units);
+  return out;
+}
+
 /** drainYoutubeLedger waits this long at most; rows still being written then are lost (bookkeeping only). */
 const LEDGER_DRAIN_LIMIT_MS = 25_000;
 

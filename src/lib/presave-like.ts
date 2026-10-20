@@ -30,9 +30,11 @@
  * the likes stay due and go as soon as it expires or the owner clears it.
  *
  * Quota: videos.getRating 1 unit, videos.rate 50. The hook and the cron spend
- * at most presave.likeDailyUnitCap units a quota day (a KV counter in CACHE,
- * approximate by design); the backfill is the owner's own run and is bounded
- * by its `limit` instead.
+ * at most the likes quota consumer's max a quota day (settings.quota, which
+ * took over presave.likeDailyUnitCap; a KV counter in CACHE, approximate by
+ * design), and only when the priority rule lets them (lib/quota-priority.ts;
+ * held, a like simply stays due); the backfill is the owner's own run and is
+ * bounded by its `limit` instead.
  *
  * Imports neither lib/presave nor lib/track-uploads (both import this).
  */
@@ -49,6 +51,7 @@ import { isQuotaError, YouTubeApiError } from "./youtube-playlists";
 import { errorOneLine, quotaKind } from "./youtube-error";
 import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
 import { quotaDayEnd, quotaDayStart } from "./mkvid";
+import { dailyMaxUnits, quotaGate, REFUSAL_TEXT } from "./quota-priority";
 
 /** One request to Google is cut off after this. Likes run in the background, so nothing a person waits for is behind it. */
 const LIKE_TIMEOUT_MS = 8000;
@@ -100,7 +103,7 @@ const UNCLAIMED_SQL = "(like_claimed_at IS NULL OR like_claimed_at <= ?)";
  * Why a like was not made.
  *   tried again:  quota (the day's quota is used: it stays due and the quota hold, lib/youtube-quota.ts,
  *                        keeps every like from being tried until it expires or the owner clears it; not counted as a try)
- *                 budget (presave.likeDailyUnitCap is used: at the quota day's roll-over, or as soon as the cap allows one again)
+ *                 budget (the likes consumer's max is used: at the quota day's roll-over, or as soon as the cap allows one again)
  *                 rate_limit, transient, not_connected (backoff, this row only)
  *                 gone (a 404: a few tries, then final)
  *   final:        rating_disabled, purchase_required, email_not_verified, forbidden, rejected, disliked
@@ -217,7 +220,7 @@ type LikeOpts = {
   force?: boolean;
   /** The rating, when the caller has read it already (the backfill): videos.getRating is not asked again. */
   rating?: Rating | "unknown";
-  /** The automatic path's: counted against presave.likeDailyUnitCap, and not made once that is used. */
+  /** The automatic path's: counted against the likes consumer's max, held by the priority rule, and not made once that is used. */
   budgeted?: boolean;
 };
 
@@ -317,9 +320,19 @@ export async function likePresaveVideo(
       }
       return { outcome: "quota", videoId, units: 0 };
     }
-    const cap = (await getAppSettings(env)).presave.likeDailyUnitCap;
+    // The likes consumer's max (settings.quota) took over likeDailyUnitCap; the count is still this KV one.
+    const cap = dailyMaxUnits(await getAppSettings(env), "likes");
     if ((await likeUnitsSpent(env, now)) + LIKE_UNITS > cap)
       return park("budget", `the ${cap} units a day for likes are used`, false);
+    // Its turn at the quota (lib/quota-priority.ts).
+    const gate = await quotaGate(env, "likes", LIKE_UNITS, now);
+    if (!gate.ok) {
+      if (gate.reason === "max")
+        return park("budget", `the ${cap} units a day for likes are used`, false);
+      // Held, switched off or the pool out: nothing asked, nothing charged, the like stays due as it is.
+      log.info("presave.like_held", { id: p.id, videoId, reason: REFUSAL_TEXT[gate.reason] });
+      return { outcome: "quota", videoId, units: 0 };
+    }
   }
 
   // Claimed first: the try is counted and held before YouTube is asked. Not a pre-save dismissed since it was read.
@@ -495,10 +508,11 @@ export async function retryDuePresaveLikes(
     const now = opts.now ?? Date.now();
     // The quota hold: nothing is asked of YouTube, and the due likes stay due.
     if (await getQuotaOut(env, now)) return { ...out, stoppedBy: "quota" };
-    const settings = (await getAppSettings(env)).presave;
-    // Likes parked for the day's budget wait for the roll-over; when the cap allows one before that (the owner
-    // raised it), they are due now.
-    if ((await likeUnitsSpent(env, now)) + LIKE_UNITS <= settings.likeDailyUnitCap) {
+    const app = await getAppSettings(env);
+    const settings = app.presave;
+    // Likes parked for the day's budget wait for the roll-over; when the likes' max allows one before that (the
+    // owner raised it), they are due now.
+    if ((await likeUnitsSpent(env, now)) + LIKE_UNITS <= dailyMaxUnits(app, "likes")) {
       await dbOf(env)
         .prepare(
           `UPDATE presaves SET like_next_at = ? WHERE like_error LIKE 'budget:%' AND like_next_at > ? AND ${RESOLVED_UNLIKED_SQL}`,

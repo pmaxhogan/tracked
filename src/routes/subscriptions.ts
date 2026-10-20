@@ -62,6 +62,8 @@ import {
 import { normalizeTracklistUrl } from "../lib/tracklists1001";
 import { resolveFullTracklist, resolveTrackMediaLinks } from "../lib/tracklist-resolve";
 import { fixPlaylistTitles } from "../lib/playlist-rename";
+import { OWNER } from "../lib/quota-priority";
+import { setQuotaConsumer } from "../lib/youtube-playlists";
 import { orderReport, retryOrderPlaylist, runOrderPass } from "../lib/playlist-reorder";
 import { getQuotaOut } from "../lib/youtube-quota";
 import { purgeAndRefetch, resolvePurgeTarget } from "../lib/tracklist-purge";
@@ -789,6 +791,8 @@ subscriptionsApp.post("/api/playlists/fix-titles", async (c) => {
   if (!tokenInfo)
     return c.json({ error: "youtube_not_connected", message: "connect YouTube first" }, 503);
   try {
+    // A button press: the owner's in the quota ledger, never ranked (lib/quota-priority.ts).
+    setQuotaConsumer(OWNER);
     const r = await fixPlaylistTitles(c.env, tokenInfo.accessToken, { dryRun, log });
     log.info("subs.fix_titles.done", { dryRun, checked: r.checked, fixes: r.fixes.length });
     return c.json(r);

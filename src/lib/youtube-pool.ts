@@ -18,15 +18,16 @@
 // nothing spent and a KV error as nothing set.
 import type { Env } from "../types";
 import { quotaDayEnd, quotaDayStart } from "./mkvid";
+import { getAppSettings } from "./app-settings";
 
 /** mkvid's key for tracked-youtube, the project tracked's stored token belongs to. */
 export const OWN_PROJECT = "shared";
 /** Keys mkvid names itself; any other key uses the label it sent. */
 const LABELS: Record<string, string> = { shared: "tracked-youtube", primary: "mkvid-uploads" };
 
-/** Units a project can spend per quota day (a later task makes it a setting). */
+/** Units a project can spend per quota day when settings.quota.projectBudget cannot be read. */
 export const PROJECT_BUDGET_UNITS = 10000;
-/** A project with less than this left is treated as used up (a later task makes it a setting). */
+/** A project with less than this left is treated as used up, when settings.quota.margin cannot be read. */
 export const POOL_MARGIN_UNITS = 300;
 
 const TOKEN_PREFIX = "yt:pool:token:";
@@ -156,7 +157,17 @@ function live(v: Out | null, nowMs: number): Out | null {
   return v && typeof v.until === "number" && v.until * 1000 > nowMs ? v : null;
 }
 
-const usable = (p: PoolProject) => p.hasToken && !p.out && p.remaining >= POOL_MARGIN_UNITS;
+const usable = (p: PoolProject, margin: number) => p.hasToken && !p.out && p.remaining >= margin;
+
+/** The owner's project budget and margin (settings.quota), else the constants. */
+export async function poolLimits(env: Env): Promise<{ budget: number; margin: number }> {
+  try {
+    const q = (await getAppSettings(env)).quota;
+    return { budget: q.projectBudget, margin: q.margin };
+  } catch {
+    return { budget: PROJECT_BUDGET_UNITS, margin: POOL_MARGIN_UNITS };
+  }
+}
 
 /** The own project plus every key with a live pushed token, with today's numbers. The legacy global flag reads as "own project out" and moves to `yt:quota:out:shared` once another project can take over. */
 export async function poolProjects(env: Env, nowMs = Date.now()): Promise<PoolProject[]> {
@@ -166,8 +177,9 @@ export async function poolProjects(env: Env, nowMs = Date.now()): Promise<PoolPr
 async function loadPool(
   env: Env,
   nowMs: number,
-): Promise<{ projects: PoolProject[]; tokens: Map<string, string> }> {
+): Promise<{ projects: PoolProject[]; tokens: Map<string, string>; margin: number }> {
   const tokens = new Map<string, string>();
+  const { budget, margin } = await poolLimits(env);
   try {
     const spent = await spentToday(env, nowMs);
     const make = (key: string, label: string, mkvidUnits: number, out: Out | null): PoolProject => {
@@ -175,10 +187,10 @@ async function loadPool(
       return {
         key,
         label,
-        budget: PROJECT_BUDGET_UNITS,
+        budget,
         spent: s,
         mkvidUnits,
-        remaining: PROJECT_BUDGET_UNITS - s - mkvidUnits,
+        remaining: budget - s - mkvidUnits,
         out,
         hasToken: true,
       };
@@ -208,7 +220,7 @@ async function loadPool(
       );
     }
 
-    if (legacy && projects.some(usable)) {
+    if (legacy && projects.some((p) => usable(p, margin))) {
       // The old flag was about the one project there was; another can take over now.
       if (!ownFlag) {
         await env.CACHE.put(OUT_PREFIX + OWN_PROJECT, JSON.stringify(legacy), {
@@ -217,16 +229,16 @@ async function loadPool(
       }
       await env.CACHE.delete(LEGACY_OUT_KEY);
     }
-    return { projects, tokens };
+    return { projects, tokens, margin };
   } catch {
-    return { projects: [], tokens };
+    return { projects: [], tokens, margin };
   }
 }
 
 /** True when every project is out or under the margin. With nothing to read (a failure) it is false, so callers keep trying. */
 export async function poolOut(env: Env, nowMs = Date.now()): Promise<boolean> {
-  const projects = await poolProjects(env, nowMs);
-  return projects.length > 0 && !projects.some(usable);
+  const { projects, margin } = await loadPool(env, nowMs);
+  return projects.length > 0 && !projects.some((p) => usable(p, margin));
 }
 
 /** The project to spend on: the most remaining, the own project on a tie. `accessToken: null` = tracked's stored token. */
@@ -235,11 +247,13 @@ export async function pickProject(
   opts: { exclude?: string[]; nowMs?: number } = {},
 ): Promise<{ key: string; accessToken: string | null } | null> {
   const nowMs = opts.nowMs ?? Date.now();
-  const { projects, tokens } = await loadPool(env, nowMs);
+  const { projects, tokens, margin } = await loadPool(env, nowMs);
   // A pushed project is only a candidate with the token this same read loaded.
   const candidates = projects.filter(
     (p) =>
-      usable(p) && !opts.exclude?.includes(p.key) && (p.key === OWN_PROJECT || tokens.has(p.key)),
+      usable(p, margin) &&
+      !opts.exclude?.includes(p.key) &&
+      (p.key === OWN_PROJECT || tokens.has(p.key)),
   );
   candidates.sort(
     (a, b) =>

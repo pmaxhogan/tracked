@@ -166,3 +166,45 @@ describe("quota validation", () => {
     expect(DEFAULT_SWEEP_REMOVALS).toBe(DEFAULT_SWEEP_DAILY_REMOVALS);
   });
 });
+
+describe("a stored quota group that is no longer whole", () => {
+  it("is normalised on read: known keys kept in order once, missing ones appended, unknown ones dropped; the rest of the document kept", async () => {
+    const SUBS = fakeKV({
+      "app:settings": JSON.stringify({
+        graph: { nodeCap: 4000 },
+        quota: {
+          order: ["ordering", "gone_consumer", "likes", "ordering", "combined"],
+          margin: 450,
+          consumers: {
+            gone_consumer: { min: null, max: 10, enabled: true },
+            ordering: { min: null, max: 500, enabled: true },
+          },
+        },
+      }),
+    });
+    const s = await getAppSettings({ SUBS });
+    expect(s.quota.order).toEqual([
+      "ordering",
+      "likes",
+      "combined",
+      "presave_playlists",
+      "dj_playlists",
+      "hygiene",
+      "mkvid_uploads",
+      "mkvid_recreate",
+      "renames",
+    ]);
+    expect(s.quota.margin).toBe(450);
+    expect(s.quota.consumers.ordering).toEqual({ min: null, max: 500, enabled: true });
+    expect(s.quota.consumers).not.toHaveProperty("gone_consumer");
+    expect(s.graph.nodeCap).toBe(4000);
+  });
+
+  it("a PATCH with an unknown key is still refused", async () => {
+    const r = await updateAppSettings(
+      { SUBS: fakeKV() },
+      { quota: { order: [...KEYS.slice(1), "gone_consumer"] } },
+    );
+    expect(r.ok).toBe(false);
+  });
+});

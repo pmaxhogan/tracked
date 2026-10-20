@@ -1364,6 +1364,9 @@ export const QUOTA_DEFERRED_REASON =
   "YouTube's daily quota is used up: the page was read, the playlist write waits for the quota";
 export const RATE_LIMIT_DEFERRED_REASON =
   "YouTube is limiting requests: the page was read, the playlist write is tried again at the next tick";
+/** The priority rule (lib/quota-priority.ts) held the write: higher-ranked work or the DJ playlists' daily max comes first. */
+export const PRIORITY_DEFERRED_REASON =
+  "held for higher priority: the page was read, the playlist write waits its turn at the quota";
 
 export type TickResult = {
   /** `quota_hold`: nothing else was due, and sets whose only next step is a YouTube insert wait for the quota (not "nothing due"). */
@@ -1824,7 +1827,11 @@ export async function runSchedulerTick(
           ? {
               item,
               outcome: "deferred",
-              stopReason: res.quota?.out ? QUOTA_DEFERRED_REASON : RATE_LIMIT_DEFERRED_REASON,
+              stopReason: res.quota?.held
+                ? PRIORITY_DEFERRED_REASON
+                : res.quota?.out
+                  ? QUOTA_DEFERRED_REASON
+                  : RATE_LIMIT_DEFERRED_REASON,
             }
           : {
               item,

@@ -462,6 +462,29 @@ export function migrateQuotaConsumers(
   return { ...s, quota: { ...s.quota, consumers: { ...have, ...fill } } };
 }
 
+/**
+ * A stored quota group made whole before it is validated: `order` keeps its
+ * known keys once each, in its own order, then the missing ones in the
+ * default order; an entry in `consumers` for a key no longer known is
+ * dropped. Without it one stale key would send the WHOLE document back to
+ * the defaults. Read path only: a PATCH is still held to the strict schema.
+ */
+export function normaliseStoredQuota(stored: unknown): unknown {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return stored;
+  const quota = (stored as { quota?: unknown }).quota;
+  if (!quota || typeof quota !== "object" || Array.isArray(quota)) return stored;
+  const q = { ...(quota as Record<string, unknown>) };
+  if (Array.isArray(q.order)) {
+    const known = [...new Set(q.order.filter((k): k is string => QUOTA_KEYS.includes(k)))];
+    q.order = [...known, ...DEFAULT_APP_SETTINGS.quota.order.filter((k) => !known.includes(k))];
+  }
+  if (q.consumers && typeof q.consumers === "object" && !Array.isArray(q.consumers))
+    q.consumers = Object.fromEntries(
+      Object.entries(q.consumers).filter(([k]) => QUOTA_KEYS.includes(k)),
+    );
+  return { ...(stored as Record<string, unknown>), quota: q };
+}
+
 const memo = new WeakMap<object, { at: number; value: AppSettings }>();
 
 /** Current settings: the stored document over the defaults (memoised MEMO_MS). One that no longer validates is ignored. */
@@ -479,7 +502,7 @@ export async function getAppSettings(
     stored = null;
   }
   const parsed = stored
-    ? AppSettingsSchema.safeParse(mergeSettings(DEFAULT_APP_SETTINGS, stored))
+    ? AppSettingsSchema.safeParse(mergeSettings(DEFAULT_APP_SETTINGS, normaliseStoredQuota(stored)))
     : null;
   const value = migrateQuotaConsumers(parsed?.success ? parsed.data : DEFAULT_APP_SETTINGS, env);
   memo.set(kv, { at: Date.now(), value });

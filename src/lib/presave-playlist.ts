@@ -34,6 +34,7 @@ import {
   PlaylistNotFoundError,
 } from "./youtube-playlists";
 import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
+import { quotaGate } from "./quota-priority";
 
 /** KV (SUBS): the playlist's id and the title it was found under. */
 export const PRESAVE_PLAYLIST_KEY = "presave:playlist_id";
@@ -143,6 +144,12 @@ export async function retryDuePresavePlaylist(
     ).results;
     if (due.length === 0) return out;
     if (await getQuotaOut(env, now)) return out;
+    // Its turn at the quota (lib/quota-priority.ts), asked once for the run: held, the rows stay due as they are.
+    const gate = await quotaGate(env, "presave_playlists", 50, now);
+    if (!gate.ok) {
+      log.info("presave.playlist_held", { due: due.length, reason: gate.reason });
+      return out;
+    }
     const tok = await getAccessToken(env).catch(() => null);
     if (!tok) return out;
     const token = tok.accessToken;

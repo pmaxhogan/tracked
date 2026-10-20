@@ -816,9 +816,11 @@ describe("a like that fails does not touch the pre-save", () => {
     expect(likeErrorLine(null)).toBeNull();
   });
 
-  it("the daily budget: once presave.likeDailyUnitCap is used the rest wait for the next quota day, without a call", async () => {
+  it("the daily budget: once the likes consumer's max is used the rest wait for the next quota day, without a call", async () => {
     const env = await makeEnv();
-    await updateAppSettings(env, { presave: { likeDailyUnitCap: 60 } });
+    await updateAppSettings(env, {
+      quota: { consumers: { likes: { min: null, max: 60, enabled: true } } },
+    });
     const a = await waiting(env, "1", "VIDEOAAAAA1", NOW - 3);
     const b = await waiting(env, "2", "VIDEOBBBBB2", NOW - 2);
     const c = await waiting(env, "3", "VIDEOCCCCC3", NOW - 1);
@@ -869,9 +871,11 @@ describe("a like that fails does not touch the pre-save", () => {
     });
   });
 
-  it("raising presave.likeDailyUnitCap mid-day lets the likes parked for it go at the next tick, not at midnight", async () => {
+  it("raising the likes consumer's max mid-day lets the likes parked for it go at the next tick, not at midnight", async () => {
     const env = await makeEnv();
-    await updateAppSettings(env, { presave: { likeDailyUnitCap: 60 } });
+    await updateAppSettings(env, {
+      quota: { consumers: { likes: { min: null, max: 60, enabled: true } } },
+    });
     const a = await waiting(env, "1", "VIDEOAAAAA1", NOW - 3);
     const b = await waiting(env, "2", "VIDEOBBBBB2", NOW - 2);
     // One waiting for another reason, later today: the cap has nothing to do with its time.
@@ -891,7 +895,9 @@ describe("a like that fails does not touch the pre-save", () => {
       stoppedBy: null,
     });
     expect(await likeCols(env, b)).toMatchObject({ like_next_at: dayEnd });
-    await updateAppSettings(env, { presave: { likeDailyUnitCap: 1000 } });
+    await updateAppSettings(env, {
+      quota: { consumers: { likes: { min: null, max: 1000, enabled: true } } },
+    });
     expect(await retryDuePresaveLikes(env, log, { now: NOW + 10 * 60_000 })).toEqual({
       tried: 1,
       liked: 1,
