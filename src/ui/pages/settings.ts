@@ -297,6 +297,24 @@ const APP_GROUPS: FormGroup[] = [
         step: 1,
       },
       {
+        path: "presave.playlistTitle",
+        label: "Playlist",
+        help: "Every pre-save with a video goes into it, newest last. Created when missing; a pre-save dismissed later stays in it. Default Pre-saves.",
+        kind: "text",
+        maxLength: 150,
+      },
+      {
+        path: "presave.playlistPrivacy",
+        label: "Playlist privacy",
+        help: "When it is created. Default unlisted.",
+        kind: "select",
+        options: [
+          { value: "public", label: "public" },
+          { value: "unlisted", label: "unlisted" },
+          { value: "private", label: "private" },
+        ],
+      },
+      {
         path: "presave.useSetFetches",
         label: "Learn from set fetches",
         help: "A set page fetched for any reason updates the ID rows saved from it. Free.",

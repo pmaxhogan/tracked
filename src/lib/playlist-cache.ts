@@ -87,6 +87,8 @@ export async function findOrCreatePlaylist(
     title: string;
     description: string;
     create?: boolean;
+    /** Privacy of a playlist created here (default public); one found keeps its own. */
+    privacyStatus?: "private" | "unlisted" | "public";
     /** Extra fields for the two log lines (e.g. `{ slug }`). */
     logCtx?: Record<string, unknown>;
   },
@@ -101,7 +103,11 @@ export async function findOrCreatePlaylist(
   }
   if (opts.create === false) return null;
   const created = await createPlaylist(
-    { title: opts.title, description: opts.description, privacyStatus: "public" },
+    {
+      title: opts.title,
+      description: opts.description,
+      privacyStatus: opts.privacyStatus ?? "public",
+    },
     accessToken,
   );
   log.info("sync.playlist_created", { ...ctx, playlistId: created.id, title: opts.title });

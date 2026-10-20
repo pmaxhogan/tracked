@@ -12,6 +12,7 @@ import {
   presaveLikeBackfillHandler,
 } from "./routes/presave";
 import { drainPresaveLikes, retryDuePresaveLikes } from "./lib/presave-like";
+import { retryDuePresavePlaylist } from "./lib/presave-playlist";
 import { retryDueTrackPlaylistInserts } from "./lib/track-uploads";
 import { retryDueSetPlaylistInserts } from "./lib/mkvid-playlist";
 import { likedSongsRoute, likedSongsHandler } from "./routes/liked-songs";
@@ -353,6 +354,9 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         if (!isDaily) {
           const l = await retryDuePresaveLikes(env, log);
           if (l.tried || l.stoppedBy) log.info("cron.presave_likes", l);
+          // Pre-saves with a video that are not in the Pre-saves playlist yet (lib/presave-playlist.ts; never throws).
+          const pp = await retryDuePresavePlaylist(env, log);
+          if (pp.added || pp.failed) log.info("cron.presave_playlist", pp);
           // Set uploads whose playlist insert waits (quota, rate limit, 5xx) and is due again (lib/mkvid-playlist.ts; never throws).
           const sp = await retryDueSetPlaylistInserts(env, log);
           if (sp.tried || sp.stoppedBy) log.info("cron.set_playlist_inserts", sp);

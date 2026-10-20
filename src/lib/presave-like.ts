@@ -40,6 +40,7 @@
 import type { Env } from "../types";
 import { dbOf } from "./db";
 import { errorFields, makeLogger, type Logger } from "./log";
+import { queuePresavePlaylist } from "./presave-playlist";
 import { getAppSettings } from "./app-settings";
 import { fetchWithTimeout } from "./fetch";
 import { getAccessToken } from "./google-oauth";
@@ -436,9 +437,10 @@ export async function onPresaveResolved(
 ): Promise<PresaveLikeFields | null> {
   const lg = log ?? makeLogger({ task: "presave.like", id: presaveId });
   try {
-    if (!(await getAppSettings(env)).presave.likeOnYouTube) return null;
     const now = opts.now ?? Date.now();
     const db = dbOf(env);
+    await queuePresavePlaylist(env, presaveId, now, !!opts.replacedVideoId);
+    if (!(await getAppSettings(env)).presave.likeOnYouTube) return null;
     if (opts.replacedVideoId) {
       await db
         .prepare(
