@@ -348,7 +348,7 @@ async function awaitingStyle(env: Env, videoId: string): Promise<string | null> 
 }
 
 /** `done` requests whose playlist insert waits and is due. */
-const DUE_SQL = `status = 'done' AND playlist_status = 'pending' AND video_id IS NOT NULL
+export const DUE_SQL = `status = 'done' AND playlist_status = 'pending' AND video_id IS NOT NULL
   AND (not_before IS NULL OR not_before <= ?)`;
 const RETRIES_PER_TICK = 5;
 

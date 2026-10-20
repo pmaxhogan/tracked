@@ -308,7 +308,7 @@ export function attemptBackoffSeconds(
     retry.attemptBackoffBaseMinutes * 60 * 2 ** Math.max(0, attempt - 1),
   );
 }
-const utcDay = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10);
+export const utcDay = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10);
 
 /**
  * Claim one fetch attempt of a set page before the tick runs it (new set,
@@ -351,7 +351,7 @@ export async function claimSetAttempt(
 
 /** SQL: the set (alias `s` = its set_schedule row, may be NULL) is not waiting out an attempt and has attempts left today. Binds now, today. */
 /** `max` = settings.retry.maxSetAttemptsPerDay (a zod-checked integer, safe to inline). */
-const attemptOkSql = (max: number = MAX_SET_ATTEMPTS_PER_DAY) =>
+export const attemptOkSql = (max: number = MAX_SET_ATTEMPTS_PER_DAY) =>
   `(s.retry_at IS NULL OR s.retry_at <= ?) AND NOT (COALESCE(s.attempt_day, '') = ? AND s.attempts_today >= ${Math.max(1, Math.floor(max))})`;
 
 /**

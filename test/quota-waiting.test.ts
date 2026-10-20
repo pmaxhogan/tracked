@@ -42,7 +42,7 @@ async function tracklist(
 
 async function mkvid(env: Env, n: number, playlistStatus: string | null): Promise<void> {
   await env.DB.prepare(
-    "INSERT INTO mkvid_requests (set_url, slug, artist_name, source, source_url, status, created_at, updated_at, playlist_status) VALUES (?, 'dj-one', 'DJ', 'soundcloud', 's', 'done', 0, 0, ?)",
+    "INSERT INTO mkvid_requests (set_url, slug, artist_name, source, source_url, status, created_at, updated_at, playlist_status, video_id) VALUES (?, 'dj-one', 'DJ', 'soundcloud', 's', 'done', 0, 0, ?, 'mkv00000001')",
   )
     .bind(`u${n}`, playlistStatus)
     .run();
@@ -72,6 +72,35 @@ describe("djInsertsWaiting", () => {
     await mkvid(env, 1, "added");
     await mkvid(env, 2, null);
     expect(await djInsertsWaiting(env)).toBe(0);
+  });
+
+  it("leaves out a set past its attempt limit for the day or waiting out a backoff", async () => {
+    const env = makeEnv();
+    await sub(env, "dj-one");
+    await tracklist(env, "dj-one", 1, {});
+    await tracklist(env, "dj-one", 2, {});
+    await tracklist(env, "dj-one", 3, {});
+    const now = Math.floor(Date.now() / 1000);
+    const day = new Date(now * 1000).toISOString().slice(0, 10);
+    const sched = (n: number, retryAt: number | null, attempts: number) =>
+      env.DB.prepare(
+        "INSERT INTO set_schedule (url, retry_at, attempt_day, attempts_today, updated_at) VALUES (?, ?, ?, ?, 0)",
+      )
+        .bind(`https://www.1001tracklists.com/tracklist/dj-one-${n}/x.html`, retryAt, day, attempts)
+        .run();
+    await sched(1, null, 50);
+    await sched(2, now + 3600, 1);
+    expect(await djInsertsWaiting(env)).toBe(1);
+  });
+
+  it("leaves out a pending set upload that is not due yet", async () => {
+    const env = makeEnv();
+    await mkvid(env, 1, "pending");
+    await mkvid(env, 2, "pending");
+    await env.DB.prepare("UPDATE mkvid_requests SET not_before = ? WHERE set_url = 'u2'")
+      .bind(Math.floor(Date.now() / 1000) + 3600)
+      .run();
+    expect(await djInsertsWaiting(env)).toBe(1);
   });
 
   it("is 0 rather than throwing when the database fails", async () => {
