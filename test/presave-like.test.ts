@@ -38,6 +38,7 @@ import { clearQuotaOut, getQuotaOut, QUOTA_OUT_KEY } from "../src/lib/youtube-qu
 import { quotaDayEnd } from "../src/lib/mkvid";
 import { DEFAULT_APP_SETTINGS, updateAppSettings } from "../src/lib/app-settings";
 import { makeLogger } from "../src/lib/log";
+import { OWN_PROJECT, recordUnits } from "../src/lib/youtube-pool";
 import { app } from "../src/index";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -869,6 +870,24 @@ describe("a like that fails does not touch the pre-save", () => {
     expect(await backfillPresaveLikes(env, { dryRun: false }, { now: dayEnd + 2 })).toMatchObject({
       liked: 1,
     });
+  });
+
+  it("units the quota ledger charged to likes do not hold them while their own counter is under the max", async () => {
+    const env = await makeEnv();
+    await updateAppSettings(env, {
+      quota: { consumers: { likes: { min: null, max: 200, enabled: true } } },
+    });
+    // Another step's calls made while the ledger's consumer still said "likes".
+    await recordUnits(env, OWN_PROJECT, "likes", 5000);
+    const a = await waiting(env, "1", "VIDEOAAAAA1", NOW - 3);
+    const yt = stub();
+    expect(await retryDuePresaveLikes(env, log, { now: NOW })).toEqual({
+      tried: 1,
+      liked: 1,
+      stoppedBy: null,
+    });
+    expect(yt.rate).toEqual(["VIDEOAAAAA1"]);
+    expect(await likeCols(env, a)).toMatchObject({ liked_at: NOW });
   });
 
   it("raising the likes consumer's max mid-day lets the likes parked for it go at the next tick, not at midnight", async () => {

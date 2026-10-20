@@ -15,6 +15,10 @@ import { markProjectOut, OWN_PROJECT, recordUnits } from "../src/lib/youtube-poo
 import { youtubePoolHooks } from "../src/lib/google-oauth";
 import { quotaConsumer, setQuotaConsumer } from "../src/lib/youtube-playlists";
 import { loadSubState, syncOne } from "../src/lib/sync";
+import { runPlaylistHygiene } from "../src/lib/playlist-hygiene";
+import { retryDuePresavePlaylist } from "../src/lib/presave-playlist";
+import { quotaDayEnd } from "../src/lib/mkvid";
+import { makeLogger } from "../src/lib/log";
 
 vi.mock("../src/lib/dj-index", async () => {
   const actual = await vi.importActual<typeof import("../src/lib/dj-index")>("../src/lib/dj-index");
@@ -175,14 +179,82 @@ describe("quotaGate", () => {
 
   it("refuses at the consumer's max, counting units not yet written to the ledger", async () => {
     const env = makeEnv();
-    await consumers(env, { ordering: { max: 200 } });
-    await spend(env, "ordering", 100);
-    expect(await quotaGate(env, "ordering", 100)).toEqual({ ok: true });
-    expect(await quotaGate(env, "ordering", 101)).toEqual({ ok: false, reason: "max" });
-    // 50 more spent this invocation, still in memory.
-    setQuotaConsumer("ordering");
+    await consumers(env, { dj_playlists: { max: 200 } });
+    await spend(env, "dj_playlists", 100);
+    expect(await quotaGate(env, "dj_playlists", 100)).toEqual({ ok: true });
+    expect(await quotaGate(env, "dj_playlists", 101)).toEqual({ ok: false, reason: "max" });
+    // 50 more spent this invocation, still in memory: counted although the ledger read is memoised.
+    setQuotaConsumer("dj_playlists");
     youtubePoolHooks(env).spent(OWN_PROJECT, 50);
-    expect(await quotaGate(env, "ordering", 51)).toEqual({ ok: false, reason: "max" });
+    expect(await quotaGate(env, "dj_playlists", 51)).toEqual({ ok: false, reason: "max" });
+  });
+
+  it("leaves the max of likes, combined, hygiene and ordering to their own exact counters", async () => {
+    const env = makeEnv();
+    await consumers(env, {
+      likes: { max: 100 },
+      combined: { max: 100 },
+      hygiene: { max: 102 },
+      ordering: { max: 100 },
+    });
+    // Units the ledger charged to them (a like's consumer left set, a comparison's reads): no refusal.
+    await spend(env, "likes", 500);
+    await spend(env, "hygiene", 800);
+    await spend(env, "combined", 500);
+    await spend(env, "ordering", 500);
+    expect(await quotaGate(env, "likes", 51)).toEqual({ ok: true });
+    expect(await quotaGate(env, "hygiene", 51)).toEqual({ ok: true });
+    expect(await quotaGate(env, "combined", 50)).toEqual({ ok: true });
+    expect(await quotaGate(env, "ordering", 51)).toEqual({ ok: true });
+  });
+
+  it("holds back for a higher rank no more than its own max still allows it", async () => {
+    // 3000 left; likes want to keep 5000 (their min).
+    const capped = makeEnv();
+    await consumers(capped, { likes: { min: 5000, max: 2000 } });
+    await spend(capped, "unknown", 7000);
+    // They may spend 2000 at most: 3000 - 50 >= 2000 + 300.
+    expect(await quotaGate(capped, "combined", 50)).toEqual({ ok: true });
+    const uncapped = makeEnv();
+    await consumers(uncapped, { likes: { min: 5000 } });
+    await spend(uncapped, "unknown", 7000);
+    expect(await quotaGate(uncapped, "combined", 50)).toEqual({ ok: false, reason: "held" });
+    const atMax = makeEnv();
+    await consumers(atMax, { likes: { min: 5000, max: 2000 } });
+    await spend(atMax, "unknown", 7000);
+    await spend(atMax, "likes", 2000);
+    // At their max the likes hold nothing back: 1000 - 50 >= 0 + 300.
+    expect(await quotaGate(atMax, "combined", 50)).toEqual({ ok: true });
+  });
+
+  it("never holds anything back for mkvid_uploads, which spends the upload bucket", async () => {
+    const env = makeEnv();
+    await consumers(env, { mkvid_uploads: { min: 100000, max: 1 } });
+    expect(await quotaGate(env, "mkvid_recreate", 51)).toEqual({ ok: true });
+    expect(await quotaGate(env, "mkvid_uploads", 500)).toEqual({ ok: true });
+  });
+
+  it("reads the pool and the ledger once in its memo window, whatever the number of calls", async () => {
+    const env = makeEnv();
+    const prepare = vi.spyOn(env.DB, "prepare");
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) await quotaGate(env, "dj_playlists", 50, now + i);
+    const ledgerReads = () =>
+      prepare.mock.calls.filter(([sql]) => String(sql).includes("youtube_quota_ledger"));
+    // One by consumer (the rule) and one by project (the pool).
+    expect(ledgerReads()).toHaveLength(2);
+    await quotaGate(env, "dj_playlists", 50, now + 6000);
+    expect(ledgerReads()).toHaveLength(4);
+  });
+
+  it("is out when what is left, less the units not yet written, is under the margin", async () => {
+    const env = makeEnv();
+    await spend(env, "unknown", 9600);
+    expect(await quotaGate(env, "likes", 51)).toEqual({ ok: true });
+    setQuotaConsumer("likes");
+    youtubePoolHooks(env).spent(OWN_PROJECT, 200);
+    // 400 - 200 = 200 left, under the 300 margin.
+    expect(await quotaGate(env, "likes", 51)).toEqual({ ok: false, reason: "pool_out" });
   });
 
   it("refuses a consumer the owner switched off", async () => {
@@ -223,9 +295,9 @@ describe("consumerStatus", () => {
     const env = makeEnv();
     await subscribe(env, "dj-one");
     await setsWaiting(env, "dj-one", 12);
-    await consumers(env, { combined: { enabled: false }, ordering: { max: 100 } });
+    await consumers(env, { combined: { enabled: false }, mkvid_recreate: { max: 100 } });
     await spend(env, "unknown", 9000);
-    await spend(env, "ordering", 100);
+    await spend(env, "mkvid_recreate", 100);
     const s = await consumerStatus(env);
     expect(s.map((r) => r.key)).toEqual([
       "likes",
@@ -246,7 +318,8 @@ describe("consumerStatus", () => {
       waiting: 600,
     });
     expect(by.combined!.status).toBe("off");
-    expect(by.ordering).toMatchObject({ status: "max", spentToday: 100 });
+    expect(by.mkvid_recreate).toMatchObject({ status: "max", spentToday: 100 });
+    expect(by.mkvid_uploads!.status).toBe("outside");
     // 900 left: rank 6 keeps 600 + 300 for the DJ inserts.
     expect(by.renames!.status).toBe("held");
   });
@@ -295,5 +368,57 @@ describe("a refused sync insert", () => {
     const state = (await loadSubState(env, sub.slug))!;
     expect(state.processedTracklistUrls).toEqual([]);
     expect(state.tracklistVideos!["https://x/tracklist/a"]!.videoId).toBe("vidA1234567");
+  });
+});
+
+describe("the cron steps on a refusal", () => {
+  const log = makeLogger({ task: "test" });
+
+  it("hygiene: a comparison's reads charged to it do not count against its removal max", async () => {
+    const env = makeEnv();
+    await consumers(env, { hygiene: { max: 102 } });
+    await spend(env, "hygiene", 5000);
+    // Past the gate: it stops only for the missing YouTube connection.
+    expect(await runPlaylistHygiene(env, log)).toEqual({ skipped: "youtube_not_connected" });
+  });
+
+  it("hygiene: held, it says so readably and marks nothing done", async () => {
+    const env = makeEnv();
+    await consumers(env, { hygiene: { enabled: false } });
+    expect(await runPlaylistHygiene(env, log)).toEqual({
+      skipped: "quota_off",
+      message: "switched off",
+    });
+  });
+
+  it("Pre-saves playlist: at its daily max the due rows wait for the quota day's end", async () => {
+    const env = makeEnv();
+    await consumers(env, { presave_playlists: { max: 100 } });
+    await spend(env, "presave_playlists", 100);
+    await env.DB.prepare(
+      "INSERT INTO presaves (id, track_id, artist, title, stage, youtube_video_id, created_at, updated_at, presave_playlist_status, presave_playlist_next_at) VALUES (1, 't1', 'A', 'T', 'found', 'VIDEOAAAAA1', 0, 0, 'pending', 0)",
+    ).run();
+    const now = Date.now();
+    expect(await retryDuePresavePlaylist(env, log, { nowMs: now })).toEqual({
+      added: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    const row = await env.DB.prepare(
+      "SELECT presave_playlist_status AS s, presave_playlist_next_at AS n FROM presaves WHERE id = 1",
+    ).first<{ s: string; n: number }>();
+    expect(row).toEqual({ s: "pending", n: quotaDayEnd(now) * 1000 });
+  });
+});
+
+describe("the ledger's consumer per request", () => {
+  it("is the owner's for the admin UI and unnamed for anything else", async () => {
+    const { app } = await import("../src/index");
+    const env = { ...makeEnv(), DEV_BYPASS_CF_ACCESS: "1" } as unknown as Env;
+    setQuotaConsumer("hygiene");
+    await app.request("https://tracked.example/ui/api/youtube/status", {}, env);
+    expect(quotaConsumer()).toBe("owner");
+    await app.request("https://tracked.example/favicon.ico", {}, env);
+    expect(quotaConsumer()).toBe("unknown");
   });
 });

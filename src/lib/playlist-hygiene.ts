@@ -34,7 +34,7 @@ import type { Env } from "../types";
 import { dbOf, batchChunked } from "./db";
 import { errorFields, type Logger } from "./log";
 import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
-import { dailyMaxUnits, OWNER, quotaGate } from "./quota-priority";
+import { dailyMaxUnits, OWNER, quotaGate, REFUSAL_TEXT } from "./quota-priority";
 import {
   decideFullRecording,
   hasNoFullRecordingNotice,
@@ -2762,6 +2762,8 @@ export async function runPlaylistHygiene(
   sweep?: SweepResult;
   bans?: BanQueueResult;
   skipped?: string;
+  /** With a `quota_*` skip: what the priority rule said, readable. */
+  message?: string;
 }> {
   const nowMs = opts.nowMs ?? Date.now();
   const now = Math.floor(nowMs / 1000);
@@ -2778,7 +2780,7 @@ export async function runPlaylistHygiene(
     const gate = await quotaGate(env, opts.force ? OWNER : "hygiene", REMOVAL_UNITS, nowMs);
     if (!gate.ok) {
       log.info("hygiene.quota_gate_held", { reason: gate.reason });
-      return { skipped: `quota_${gate.reason}` };
+      return { skipped: `quota_${gate.reason}`, message: REFUSAL_TEXT[gate.reason] };
     }
     const token = opts.accessToken ?? (await getAccessToken(env))?.accessToken;
     if (!token) return { skipped: "youtube_not_connected" };

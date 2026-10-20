@@ -50,7 +50,8 @@ import { channelBanNotifier } from "./lib/channel-bans";
 import { checkDeletedMkvidVideos, retryDueOldVideoDeletions } from "./lib/mkvid-recreate";
 import { drainYoutubeLedger, youtubePoolHooks, youtubeTokenRefresher } from "./lib/google-oauth";
 import { maybeSnapshotStats } from "./lib/stats";
-import { setAccessTokenRefresher, setYoutubePool } from "./lib/youtube-playlists";
+import { setAccessTokenRefresher, setQuotaConsumer, setYoutubePool } from "./lib/youtube-playlists";
+import { OWNER, type QuotaConsumerKey } from "./lib/quota-priority";
 import { drainLinkPrewarm } from "./lib/link-prewarm";
 import { drainTrackSets } from "./lib/track-sets";
 import { graphPagesStep } from "./lib/graph/backfill";
@@ -82,6 +83,12 @@ function ensureTokenRefresher(env: Env): void {
 
 app.use("*", async (c, next) => {
   ensureTokenRefresher(c.env);
+  // The quota ledger's consumer (lib/quota-priority.ts): the admin UI is the owner's; anything else starts
+  // unnamed and each gated consumer names itself, so a previous request's consumer never carries over.
+  const path = new URL(c.req.url).pathname;
+  setQuotaConsumer(
+    path === "/ui" || path.startsWith("/ui/") || path.startsWith("/api/") ? OWNER : null,
+  );
   await next();
 });
 
@@ -250,6 +257,8 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
     ts: event.scheduledTime,
   });
   log.info("cron.start");
+  /** Each cron step starts with its own ledger consumer, so one step's calls are never charged to the step before. */
+  const step = (key: QuotaConsumerKey | null) => setQuotaConsumer(key);
   ctx.waitUntil(
     (async () => {
       try {
@@ -259,9 +268,11 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         await runKvMigrationTickSafely(env, log);
         // Old mkvid videos a recreation replaced: retry the YouTube deletes that are due (never throws).
         if (env.MKVID_TOKEN) {
+          step("mkvid_recreate");
           const d = await retryDueOldVideoDeletions(env, log);
           if (d.tried) log.info("cron.mkvid_old_video_deletes", d);
           // Delivered videos deleted on YouTube: out of the playlists, rendered again (self-paced, never throws).
+          step("mkvid_recreate");
           if (!isDaily) await checkDeletedMkvidVideos(env, log);
         }
         if (isDaily) {
@@ -282,6 +293,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
             const t0 = Date.now();
             try {
               // A real timer: the tick spreads its fetches over tick.spreadSeconds (waiting costs no CPU).
+              step("dj_playlists");
               const r = await runSchedulerTick(env, {
                 log,
                 sleep: (ms) => new Promise<void>((res) => setTimeout(res, ms)),
@@ -307,6 +319,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
             log.error("cron.threw", errorFields(e));
           }
           // Per-track links of the sets the sync read, a few a tick at pool priority backfill, after the tick's own fetches (lib/link-prewarm.ts; never throws).
+          step(null);
           const w = await drainLinkPrewarm(env, log);
           if (w.read > 0 || w.stoppedBy) log.info("cron.link_prewarm", w);
           // The sets each followed set's track was played in, a few page views a tick at pool priority backfill (lib/track-sets.ts; never throws).
@@ -335,6 +348,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         // playlist from catching up on everything that *did* land.
         // It waits its turn at the quota like every consumer (lib/quota-priority.ts, inside backfillCombined).
         try {
+          step("combined");
           log.info(
             "cron.combined_backfill",
             (await getQuotaOut(env))
@@ -346,20 +360,25 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         }
         // Pre-saved tracks whose like is due (lib/presave-like.ts), after the playlists had their turn at the quota; one indexed query when none, never throws.
         if (!isDaily) {
+          step("likes");
           const l = await retryDuePresaveLikes(env, log);
           if (l.tried || l.stoppedBy) log.info("cron.presave_likes", l);
           // Pre-saves with a video that are not in the Pre-saves playlist yet (lib/presave-playlist.ts; never throws).
+          step("presave_playlists");
           const pp = await retryDuePresavePlaylist(env, log);
           if (pp.added || pp.failed) log.info("cron.presave_playlist", pp);
           // Set uploads whose playlist insert waits (quota, rate limit, 5xx) and is due again (lib/mkvid-playlist.ts; never throws).
+          step("dj_playlists");
           const sp = await retryDueSetPlaylistInserts(env, log);
           if (sp.tried || sp.stoppedBy) log.info("cron.set_playlist_inserts", sp);
           // Track uploads whose playlist insert failed (quota, rate limit, 5xx) and is due again (lib/track-uploads.ts; never throws).
+          step("presave_playlists");
           const t = await retryDueTrackPlaylistInserts(env, log);
           if (t.tried || t.stoppedBy) log.info("cron.track_playlist_inserts", t);
         }
         // Playlists in set-date order: a few moves within the day's unit budget (lib/playlist-reorder.ts).
         try {
+          step("ordering");
           const o = await runOrderPass(env, { log, trigger });
           if (o.read > 0 || o.stoppedBy === "quota" || o.stoppedBy === "held")
             log.info("cron.playlist_order", o);
@@ -367,6 +386,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           log.warn("cron.playlist_order_threw", errorFields(e));
         }
         // 6-hourly playlist comparison + full-recording sweep; self-paced, never throws.
+        step("hygiene");
         await runPlaylistHygiene(env, log, {
           notify: playlistHoldNotifier(env, log),
           banNotify: channelBanNotifier(env, log),

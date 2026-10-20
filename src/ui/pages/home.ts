@@ -348,6 +348,8 @@ ${ACTIVITY_DRAWER_JS}
     const res = await TK.api.post('/ui/api/hygiene/run?what=compare', {});
     const data = res.data && typeof res.data === 'object' ? res.data : {};
     if (!res.ok) { TK.toast('hygiene compare: ' + TK.errText(res, 'failed (' + res.status + ')'), 'bad'); return; }
+    // Held by the YouTube quota rule: a wait that goes on by itself, not a failure.
+    if (data.skipped && String(data.skipped).indexOf('quota_') === 0) { TK.toast('hygiene compare waits: ' + (data.message || 'held by the YouTube quota'), 'warn'); return; }
     if (data.skipped) { TK.toast('hygiene compare skipped: ' + TK.errText({ data: { error: data.skipped } }, data.skipped), 'bad'); return; }
     const results = Array.isArray(data.compare) ? data.compare : [];
     const held = results.filter((r) => r && r.status === 'held').length;

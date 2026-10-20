@@ -57,6 +57,8 @@ import {
 } from "../lib/presave";
 import { backfillPresaveLikes, BACKFILL_MAX_LIKES, likeColumnsExist } from "../lib/presave-like";
 import { ErrorResponse } from "../schemas";
+import { OWNER } from "../lib/quota-priority";
+import { setQuotaConsumer } from "../lib/youtube-playlists";
 
 // --- schemas (OpenAPI) ------------------------------------------------------
 
@@ -370,6 +372,8 @@ export const presaveLikeBackfillHandler: RouteHandler<
       503,
     );
   }
+  // The owner's own run: counted as the owner's in the quota ledger, never ranked (lib/quota-priority.ts).
+  setQuotaConsumer(OWNER);
   return c.json(await backfillPresaveLikes(c.env, c.req.valid("json"), { log }), 200);
 };
 

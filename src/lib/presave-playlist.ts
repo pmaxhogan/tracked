@@ -144,10 +144,19 @@ export async function retryDuePresavePlaylist(
     ).results;
     if (due.length === 0) return out;
     if (await getQuotaOut(env, now)) return out;
-    // Its turn at the quota (lib/quota-priority.ts), asked once for the run: held, the rows stay due as they are.
+    // Its turn at the quota (lib/quota-priority.ts), asked once for the run: held, the rows stay due as they
+    // are; at the daily max they wait for the quota day's end, as the other inserts do.
     const gate = await quotaGate(env, "presave_playlists", 50, now);
     if (!gate.ok) {
       log.info("presave.playlist_held", { due: due.length, reason: gate.reason });
+      if (gate.reason === "max")
+        await db
+          .prepare(
+            `UPDATE presaves SET presave_playlist_next_at = ? WHERE presave_playlist_status = 'pending'
+               AND id IN (${due.map(() => "?").join(", ")})`,
+          )
+          .bind(quotaDayEnd(now) * 1000, ...due.map((r) => r.id))
+          .run();
       return out;
     }
     const tok = await getAccessToken(env).catch(() => null);

@@ -9,11 +9,22 @@
  *   - Ranks are settings.quota.order; min / max / enabled are
  *     settings.quota.consumers (null = none). A consumer switched off waits
  *     for nothing and holds nothing back.
- *   - waiting_k: lib/quota-waiting.ts waitingDemand (cached 240 s).
+ *   - waiting_k: lib/quota-waiting.ts waitingDemand (cached 240 s). A held
+ *     term is capped at what k may still spend under its own max (a consumer
+ *     at its max holds nothing back).
  *   - spent: the D1 ledger for the quota day plus the units this invocation
  *     counted and has not written yet (google-oauth.ts pendingLedgerUnits).
  *   - pool remaining: what the projects with a token that are not flagged out
  *     have left, less this invocation's unwritten units.
+ *   - max: checked here against the ledger only for consumers without an
+ *     exact counter of their own. likes, combined, hygiene and ordering
+ *     enforce theirs through their KV counters (dailyMaxUnits): the ledger's
+ *     consumer is module-global, and a comparison's reads are not removals.
+ *   - mkvid_uploads spends the upload bucket, not this pool: never gated,
+ *     never holds anything back, its min / max are ignored.
+ *   - The pool, ledger and waiting reads are memoised per env for
+ *     SNAPSHOT_MEMO_MS (a sync asks before every insert); the units still in
+ *     memory are added fresh on every call.
  *   - "owner" (the like button, undo, replace, a manual sync or rename) is
  *     never ranked: it waits only for an empty pool (youtube-pool.ts poolOut).
  *
@@ -30,7 +41,26 @@ import { setQuotaConsumer } from "./youtube-playlists";
 import { poolLimits, poolOut, poolProjects } from "./youtube-pool";
 
 /** The consumer key UI-initiated calls spend under. */
-export const OWNER = "owner";
+export const OWNER = "owner" as const;
+
+/** The ranked consumer keys (lib/quota-consumers.ts has the catalogue). */
+export type QuotaConsumerKey =
+  | "likes"
+  | "presave_playlists"
+  | "dj_playlists"
+  | "hygiene"
+  | "mkvid_uploads"
+  | "mkvid_recreate"
+  | "combined"
+  | "renames"
+  | "ordering";
+
+/** Consumers whose daily max is enforced by an exact counter of their own, not the ledger. */
+const OWN_COUNTER: ReadonlySet<string> = new Set(["likes", "combined", "hygiene", "ordering"]);
+/** Spends the upload bucket only (spec, "Uploads"). */
+const OUTSIDE_POOL = "mkvid_uploads";
+/** How long one read of the pool, the ledger and the waiting work serves the gate. */
+const SNAPSHOT_MEMO_MS = 5_000;
 
 export type GateRefusal = "held" | "max" | "off" | "pool_out";
 export type GateResult = { ok: true } | { ok: false; reason: GateRefusal };
@@ -47,8 +77,8 @@ type Consumers = AppSettings["quota"]["consumers"];
 type Entry = Consumers[string];
 const NO_LIMITS: Entry = { min: null, max: null, enabled: true };
 
-/** Units spent today by consumer: the ledger plus what is still in memory. Never throws. */
-async function spentByConsumer(env: Env, nowMs: number): Promise<Map<string, number>> {
+/** Units spent today by consumer, as the ledger has them. Never throws. */
+async function ledgerByConsumer(env: Env, nowMs: number): Promise<Map<string, number>> {
   const spent = new Map<string, number>();
   try {
     const { results } = await env.DB.prepare(
@@ -60,8 +90,39 @@ async function spentByConsumer(env: Env, nowMs: number): Promise<Map<string, num
   } catch {
     // No DB binding or a D1 error: nothing counts as spent.
   }
-  for (const [k, n] of pendingLedgerUnits(env)) spent.set(k, (spent.get(k) ?? 0) + n);
   return spent;
+}
+
+/** The memoised part: what D1 and KV said, before this invocation's unwritten units. */
+type Reads = {
+  margin: number;
+  /** null when the pool could not be read: then nothing is held for it. */
+  remaining: number | null;
+  /** Some project has a token, is not flagged out and has at least the margin left. */
+  usable: boolean;
+  ledger: Map<string, number>;
+  waiting: Record<string, number>;
+};
+
+const memo = new WeakMap<object, { at: number; reads: Reads }>();
+
+async function reads(env: Env, nowMs: number): Promise<Reads> {
+  const hit = memo.get(env);
+  // Keyed by the clock it was read at: a caller with another `nowMs` (a test's time travel) reads again.
+  if (hit && nowMs >= hit.at && nowMs - hit.at < SNAPSHOT_MEMO_MS) return hit.reads;
+  const { margin } = await poolLimits(env);
+  const projects = await poolProjects(env, nowMs);
+  const live = projects.filter((p) => p.hasToken && !p.out);
+  const r: Reads = {
+    margin,
+    remaining:
+      projects.length === 0 ? null : live.reduce((a, p) => a + Math.max(0, p.remaining), 0),
+    usable: live.some((p) => p.remaining >= margin),
+    ledger: await ledgerByConsumer(env, nowMs),
+    waiting: await waitingDemand(env, nowMs),
+  };
+  memo.set(env, { at: nowMs, reads: r });
+  return r;
 }
 
 type Snapshot = {
@@ -77,30 +138,23 @@ type Snapshot = {
 
 async function snapshot(env: Env, nowMs: number): Promise<Snapshot> {
   const q = (await getAppSettings(env)).quota;
-  const { margin } = await poolLimits(env);
-  const projects = await poolProjects(env, nowMs);
-  const spent = await spentByConsumer(env, nowMs);
+  const r = await reads(env, nowMs);
+  const spent = new Map(r.ledger);
   let unwritten = 0;
-  for (const n of pendingLedgerUnits(env).values()) unwritten += n;
-  const remaining =
-    projects.length === 0
-      ? null
-      : Math.max(
-          0,
-          projects
-            .filter((p) => p.hasToken && !p.out)
-            .reduce((a, p) => a + Math.max(0, p.remaining), 0) - unwritten,
-        );
+  for (const [k, n] of pendingLedgerUnits(env)) {
+    spent.set(k, (spent.get(k) ?? 0) + n);
+    unwritten += n;
+  }
+  const remaining = r.remaining === null ? null : Math.max(0, r.remaining - unwritten);
   return {
     order: q.order,
     consumers: q.consumers,
-    margin,
+    margin: r.margin,
     remaining,
-    // youtube-pool.ts poolOut on the projects already read: every one out or under the margin.
-    out:
-      projects.length > 0 && !projects.some((p) => p.hasToken && !p.out && p.remaining >= margin),
+    // youtube-pool.ts poolOut (every project out or under the margin), with the same remaining as the rule.
+    out: remaining !== null && (!r.usable || remaining < r.margin),
     spent,
-    waiting: await waitingDemand(env, nowMs),
+    waiting: r.waiting,
   };
 }
 
@@ -112,19 +166,22 @@ function heldAbove(s: Snapshot, key: string): number {
   for (const k of s.order) {
     if (k === key) break;
     const e = entryOf(s, k);
-    if (!e.enabled) continue;
-    const left = e.min === null ? 0 : e.min - (s.spent.get(k) ?? 0);
-    held += Math.max(s.waiting[k] ?? 0, left, 0);
+    if (!e.enabled || k === OUTSIDE_POOL) continue;
+    const spent = s.spent.get(k) ?? 0;
+    const left = e.min === null ? 0 : e.min - spent;
+    const want = Math.max(s.waiting[k] ?? 0, left, 0);
+    held += e.max === null ? want : Math.min(want, Math.max(0, e.max - spent));
   }
   return held;
 }
 
 function decide(s: Snapshot, consumer: string, units: number): GateResult {
   if (consumer === OWNER) return s.out ? { ok: false, reason: "pool_out" } : { ok: true };
+  if (consumer === OUTSIDE_POOL) return { ok: true };
   const e = entryOf(s, consumer);
   if (!e.enabled) return { ok: false, reason: "off" };
   if (s.out) return { ok: false, reason: "pool_out" };
-  if (e.max !== null && (s.spent.get(consumer) ?? 0) + units > e.max)
+  if (!OWN_COUNTER.has(consumer) && e.max !== null && (s.spent.get(consumer) ?? 0) + units > e.max)
     return { ok: false, reason: "max" };
   if (s.remaining !== null && s.remaining - units < heldAbove(s, consumer) + s.margin)
     return { ok: false, reason: "held" };
@@ -138,7 +195,7 @@ function decide(s: Snapshot, consumer: string, units: number): GateResult {
  */
 export async function quotaGate(
   env: Env,
-  consumer: string,
+  consumer: QuotaConsumerKey | typeof OWNER,
   units: number,
   nowMs = Date.now(),
 ): Promise<GateResult> {
@@ -165,7 +222,8 @@ export async function consumerStatus(
 ): Promise<
   Array<{
     key: string;
-    status: "running" | GateRefusal;
+    /** `outside`: mkvid_uploads, which spends the upload bucket and not this pool. */
+    status: "running" | "outside" | GateRefusal;
     spentToday: number;
     waiting: number;
   }>
@@ -176,7 +234,7 @@ export async function consumerStatus(
     const r = decide(s, key, cost.get(key) ?? 50);
     return {
       key,
-      status: r.ok ? "running" : r.reason,
+      status: key === OUTSIDE_POOL ? "outside" : r.ok ? "running" : r.reason,
       spentToday: s.spent.get(key) ?? 0,
       waiting: s.waiting[key] ?? 0,
     };
@@ -192,7 +250,7 @@ export async function consumerStatus(
  */
 export function dailyMaxUnits(
   settings: AppSettings,
-  key: string,
+  key: QuotaConsumerKey,
   env: { PLAYLIST_SWEEP_DAILY_REMOVALS?: string } = {},
 ): number {
   const e = migrateQuotaConsumers(settings, env).quota.consumers[key] ?? NO_LIMITS;
