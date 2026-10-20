@@ -22,14 +22,17 @@ import { quotaKind } from "./youtube-error";
 import { YouTubeApiError } from "./youtube-playlists";
 // The quota day's end is mkvid.ts's (not reimplemented here), so the hold expires exactly when the daily claims reset.
 import { quotaDayEnd } from "./mkvid";
+import { markProjectOut, OWN_PROJECT, poolOut } from "./youtube-pool";
 
 export const QUOTA_OUT_KEY = "yt:quota:out";
 
 export type QuotaOut = { since: number; until: number };
 
-/** The flag while it holds, else null. */
+/** The flag while it holds and the whole pool is out (lib/youtube-pool.ts), else null. A flag set while another project can still take the work is moved to the own project's flag. */
 export async function getQuotaOut(env: Env, nowMs = Date.now()): Promise<QuotaOut | null> {
   try {
+    // poolOut reads the pool, which also converts the legacy flag when another project can take over.
+    if (!(await poolOut(env, nowMs))) return null;
     const v = await env.CACHE.get<QuotaOut>(QUOTA_OUT_KEY, "json");
     return v && typeof v.until === "number" && v.until * 1000 > nowMs ? v : null;
   } catch {
@@ -50,6 +53,9 @@ export async function noteQuotaOut(
     if (await getQuotaOut(env, nowMs)) return;
     const until = quotaDayEnd(nowMs);
     const since = Math.floor(nowMs / 1000);
+    // The reply is about tracked's own project here; the global flag is only for a pool with nothing left.
+    await markProjectOut(env, OWN_PROJECT, nowMs);
+    if (!(await poolOut(env, nowMs))) return;
     await env.CACHE.put(QUOTA_OUT_KEY, JSON.stringify({ since, until } satisfies QuotaOut), {
       expirationTtl: Math.max(60, until - since),
     });
