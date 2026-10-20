@@ -51,6 +51,7 @@ import { youtubeTokenRefresher } from "./lib/google-oauth";
 import { maybeSnapshotStats } from "./lib/stats";
 import { setAccessTokenRefresher } from "./lib/youtube-playlists";
 import { drainLinkPrewarm } from "./lib/link-prewarm";
+import { drainTrackSets } from "./lib/track-sets";
 import { graphPagesStep } from "./lib/graph/backfill";
 import { getAppSettings } from "./lib/app-settings";
 
@@ -217,8 +218,11 @@ app.doc("/openapi.json", {
  *                     budget and pacing; nothing here bursts. Then a few
  *                     per-track link lookups the sync queued (lib/link-prewarm.ts,
  *                     linkPrewarm.maxPerTick at priority backfill), so a phone
- *                     tap finds every track's links cached.
- *   - `0 6 * * *`     daily housekeeping only (audit pruning). It no longer
+ *                     tap finds every track's links cached. Then a few page
+ *                     views of the track-page crawl (lib/track-sets.ts,
+ *                     trackSets.viewsPerTick at priority backfill) for the
+ *                     Recommended sets page.
+ *   - `0 6 * * *`    daily housekeeping only (audit pruning). It no longer
  *                     crawls every DJ at once: discovery is spread around the
  *                     clock by the scheduler.
  *
@@ -296,6 +300,9 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           // Per-track links of the sets the sync read, a few a tick at pool priority backfill, after the tick's own fetches (lib/link-prewarm.ts; never throws).
           const w = await drainLinkPrewarm(env, log);
           if (w.read > 0 || w.stoppedBy) log.info("cron.link_prewarm", w);
+          // The sets each followed set's track was played in, a few page views a tick at pool priority backfill (lib/track-sets.ts; never throws).
+          const ts = await drainTrackSets(env, log);
+          if (ts.views > 0 || ts.seeded > 0 || ts.stoppedBy) log.info("cron.track_sets", ts);
           // The Graph tab's sources and credits from stored set pages, a few a tick; no pool fetch (lib/graph/backfill.ts; never throws).
           const gs = (await getAppSettings(env)).graph;
           if (gs.pagesPerTick > 0) {

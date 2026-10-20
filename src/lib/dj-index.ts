@@ -256,7 +256,8 @@ export function parseScrollKeys(html: string): ScrollKeys | null {
   return { type, idScrollObject, subtype };
 }
 
-function oItmIds(html: string): string[] {
+/** The `data-id`s of the `.oItm` rows in a list chunk, in order. */
+export function oItmIds(html: string): string[] {
   O_ITM_DATA_ID_RE.lastIndex = 0;
   return [...html.matchAll(O_ITM_DATA_ID_RE)].map((m) => m[1]!);
 }
@@ -500,8 +501,8 @@ export async function djScrollStep(
   cursor: ScrollCursor,
   opts: Fetch1001Opts,
 ): Promise<{ urls: string[]; end: boolean; next: ScrollCursor | null } | null> {
-  const chunk = await fetchInfiniteScrollChunk(
-    { ...keys, pos: cursor.pos, dataId: cursor.id, refererSlug: slug },
+  const chunk = await fetchScrollChunk(
+    { ...keys, pos: cursor.pos, dataId: cursor.id, referer: `${ORIGIN}/dj/${slug}/index.html` },
     opts,
   );
   if (!chunk.ok) return null;
@@ -519,9 +520,14 @@ export async function djScrollStep(
  * "older sets" request - through the pool like every other 1001tracklists
  * request (it counts against the account budget, decision 11). tlpool sends
  * `form` as the XHR body; `html` comes back as the raw JSON text.
+ *
+ * `referer` is the page the list is on (tlpool opens it first when its
+ * browser is not on the site). A track page's "played in" list speaks the
+ * same protocol (lib/track-sets.ts); `count` defaults to the browser's 10
+ * (checked 2026-10-20: the site serves up to at least 500 rows a step).
  */
-async function fetchInfiniteScrollChunk(
-  cursor: ScrollKeys & { pos: number; dataId: string; refererSlug: string },
+export async function fetchScrollChunk(
+  cursor: ScrollKeys & { pos: number; dataId: string; referer: string; count?: number },
   opts: Fetch1001Opts,
 ): Promise<{ ok: boolean; end: boolean; dataHtml: string }> {
   const form = {
@@ -529,11 +535,11 @@ async function fetchInfiniteScrollChunk(
     type: cursor.type,
     idScrollObject: cursor.idScrollObject,
     subtype: cursor.subtype,
-    count: String(SCROLL_COUNT),
+    count: String(cursor.count ?? SCROLL_COUNT),
     pos: String(cursor.pos),
     id: cursor.dataId,
   };
-  const referer = `${ORIGIN}/dj/${cursor.refererSlug}/index.html`;
+  const referer = cursor.referer;
   const start = Date.now();
   const r = await fetch1001(AJAX_URL, {
     ...opts,
@@ -558,19 +564,25 @@ async function fetchInfiniteScrollChunk(
     json = JSON.parse(text);
   } catch {
     opts.log?.warn("crawlDjIndex.ajax_parse_failed", {
+      referer,
       ms: Date.now() - start,
       body: text.slice(0, 300),
     });
     return { ok: false, end: false, dataHtml: "" };
   }
   if (json.captcha) {
-    opts.log?.warn("crawlDjIndex.ajax_captcha", { ms: Date.now() - start, accountId: r.accountId });
+    opts.log?.warn("crawlDjIndex.ajax_captcha", {
+      referer,
+      ms: Date.now() - start,
+      accountId: r.accountId,
+    });
     return { ok: false, end: false, dataHtml: "" };
   }
   // framework.js ends the list on `message` or on any defined `end`.
   const end = json.end !== undefined || json.message !== undefined;
   if (!json.success && !end) {
     opts.log?.warn("crawlDjIndex.ajax_unsuccessful", {
+      referer,
       ms: Date.now() - start,
       body: text.slice(0, 300),
     });

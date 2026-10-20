@@ -229,6 +229,21 @@ export const AppSettingsSchema = z.object({
     /** Lookups one 5-minute cron tick makes at most, at pool priority backfill (default 3: at most 864 a day). Cached ids cost none. */
     maxPerTick: z.number().int().min(0).max(20),
   }),
+  /** Track-page set lists (lib/track-sets.ts): the cron reads which sets each followed set's track was played in (the Recommended sets page). */
+  trackSets: z.object({
+    /** Crawl at all (off: nothing is fetched; what was stored stays). */
+    enabled: z.boolean(),
+    /** Page views one 5-minute cron tick spends at most, at pool priority backfill (default 4). */
+    viewsPerTick: z.number().int().min(0).max(30),
+    /** Sets one scroll request asks for (the browser asks for 10; default 100). */
+    stepCount: z.number().int().min(10).max(500),
+    /** A walk stops at the first set from this year or earlier (default 2020). */
+    stopYear: z.number().int().min(2000).max(2100),
+    /** Scroll requests one walk makes at most, after page 1 (default 20). */
+    maxSteps: z.number().int().min(0).max(200),
+    /** A crawled track is read again after this many days, down to the first set it already has (default 30). */
+    recrawlDays: z.number().min(1).max(3650),
+  }),
   /** Apple Music timing backstop for held mkvid sets (lib/apple-cues.ts). */
   appleCues: z.object({
     /** Fill missing cue times of a held list from the set's Apple Music album at all. */
@@ -330,6 +345,14 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     spotifyRip: false,
   },
   linkPrewarm: { enabled: true, maxPerTick: 3 },
+  trackSets: {
+    enabled: true,
+    viewsPerTick: 4,
+    stepCount: 100,
+    stopYear: 2020,
+    maxSteps: 20,
+    recrawlDays: 30,
+  },
   appleCues: {
     enabled: true,
     minMatchShare: 0.7,

@@ -35,6 +35,7 @@ export const ICON_NAMES = [
   "link",
   "clock",
   "bookmark",
+  "star",
   "upload",
   "chart",
   "graph",
@@ -86,6 +87,7 @@ const BODY: Record<IconName, string> = {
   link: '<path d="M10 13.5a4.5 4.5 0 0 0 6.4.4l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.7 1.7"/><path d="M14 10.5a4.5 4.5 0 0 0-6.4-.4l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.7-1.7"/>',
   chart:
     '<path d="M3 3v17a1 1 0 0 0 1 1h17"/><path d="M7 16v-4"/><path d="M11 16V8"/><path d="M15 16v-6"/><path d="M19 16V5"/>',
+  star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>',
   bookmark: '<path d="M6.5 3h11a1 1 0 0 1 1 1v17l-6.5-4.5L5.5 21V4a1 1 0 0 1 1-1z"/>',
   graph:
     '<circle cx="5.5" cy="6" r="2.5"/><circle cx="18.5" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 6h8"/><path d="m7 8.2 3.7 7.6"/><path d="m17 8.2-3.7 7.6"/>',

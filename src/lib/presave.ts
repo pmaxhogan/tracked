@@ -37,6 +37,7 @@ import {
   youtubeIdOf,
   type LinkEntry,
 } from "./medialinks-all";
+import { recordTrackPageHtml } from "./track-sets";
 import {
   fetchTracklist,
   normalizeTracklistUrl,
@@ -1061,6 +1062,8 @@ async function checkIdentify(
       priority: priorityFor(settings, trigger),
       log,
     });
+    // The page also lists the sets the track was played in (free: it is fetched anyway; never throws).
+    if (r.ok) await recordTrackPageHtml(env, p.track_url, r.html, log);
     if (!r.ok)
       return failCheck(
         env,
@@ -1456,6 +1459,7 @@ export async function addPresave(
     if (opts.check !== false && !(setUrl && rowIndex !== null)) {
       const t0 = Date.now();
       const r = await fetchTrackPageMediaId(env, trackUrl, { priority: "phone", log });
+      if (r.ok) await recordTrackPageHtml(env, trackUrl, r.html, log);
       if (r.ok && r.trackId) {
         trackId = r.trackId;
         artist = artist ?? r.name?.artist ?? null;

@@ -443,6 +443,8 @@ export type TrackPageLookup =
       trackId: string | null;
       via: string | null;
       name: { artist: string; title: string } | null;
+      /** The page itself (lib/track-sets.ts stores the sets it lists). */
+      html: string;
     }
   | {
       ok: false;
@@ -474,7 +476,7 @@ export async function fetchTrackPageMediaId(
       htmlBytes: r.html.length,
       accountId: r.accountId,
     });
-    return { ok: true, trackId: hit?.id ?? null, via: hit?.via ?? null, name };
+    return { ok: true, trackId: hit?.id ?? null, via: hit?.via ?? null, name, html: r.html };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     if (

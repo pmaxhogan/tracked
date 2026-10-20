@@ -14,6 +14,7 @@ import { dbOf, parseJson } from "./db";
 import { labelFromSetUrl } from "./activity";
 import { listSchedulerTicks, type TickHistoryRow } from "./tick-history";
 import { linkPrewarmPending } from "./link-prewarm";
+import { trackSetsSummary, type TrackSetsSummary } from "./track-sets";
 import type { TableDef } from "./table-query";
 
 export const SCHEDULER_CLASSES = ["new", "verify", "recheck", "backfill"] as const;
@@ -222,6 +223,8 @@ export type SchedulerSummary = {
   oldestTickAt: number | null;
   /** Track ids waiting for a link pre-warm lookup (lib/link-prewarm.ts), null when unknown. */
   linkPrewarmPending: number | null;
+  /** The track-page crawl's progress (lib/track-sets.ts), null when unknown. */
+  trackSets: TrackSetsSummary | null;
 };
 
 export async function schedulerSummary(
@@ -250,6 +253,7 @@ export async function schedulerSummary(
     latestDue: null,
     oldestTickAt: null,
     linkPrewarmPending: null,
+    trackSets: null,
   };
   for (const t of recent) {
     s.drawn += t.drawn || 0;
@@ -322,6 +326,7 @@ export async function schedulerSummary(
     .first<{ at: number | null }>();
   s.oldestTickAt = oldest?.at ?? null;
   s.linkPrewarmPending = await linkPrewarmPending(env);
+  s.trackSets = await trackSetsSummary(env);
   return s;
 }
 

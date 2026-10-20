@@ -111,6 +111,7 @@ import { hygieneApp } from "./playlist-hygiene";
 import { activityApp } from "./activity";
 import { searchApp } from "./search";
 import { graphApp } from "./graph";
+import { recommendedApp } from "./recommended";
 import { schedulerUiApp } from "./scheduler-ui";
 import { trackUploadsUiApp } from "./track-uploads-ui";
 import { presaveMatchUiApp } from "./presave-match-ui";
@@ -153,6 +154,7 @@ subscriptionsApp.route("/", searchApp);
 
 // The Graph tab over cached data (routes/graph.ts). Behind cfAccess above.
 subscriptionsApp.route("/", graphApp);
+subscriptionsApp.route("/", recommendedApp); // /ui/recommended + /ui/api/recommended* (routes/recommended.ts), behind cfAccess above
 
 // Scheduler tick history and DJ due times, and the POST that clears the YouTube quota hold (routes/scheduler-ui.ts). Behind cfAccess above.
 subscriptionsApp.route("/", schedulerUiApp);

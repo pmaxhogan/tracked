@@ -526,6 +526,60 @@ const APP_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: "sf-track-sets",
+    title: "Recommended sets crawl",
+    intro:
+      "The cron opens the 1001tracklists page of each track in the followed DJs' sets and stores every set it was played in, newest first, back to the stop year. Recommended sets ranks them.",
+    fields: [
+      {
+        path: "trackSets.enabled",
+        label: "Crawl track pages",
+        help: "Off stops fetching; what was stored stays.",
+        kind: "bool",
+      },
+      {
+        path: "trackSets.viewsPerTick",
+        label: "Page views a cron tick",
+        help: "Every 5 minutes, at pool priority backfill. A track page is one view, each scroll request another. Default 4.",
+        min: 0,
+        max: 30,
+        step: 1,
+      },
+      {
+        path: "trackSets.stepCount",
+        label: "Sets per scroll request",
+        help: "The browser asks for 10; more means fewer requests per track. Default 100.",
+        min: 10,
+        max: 500,
+        step: 10,
+      },
+      {
+        path: "trackSets.stopYear",
+        label: "Stop at sets from",
+        help: "A walk ends at the first set from this year or earlier. Default 2020.",
+        min: 2000,
+        max: 2100,
+        step: 1,
+      },
+      {
+        path: "trackSets.maxSteps",
+        label: "Scroll requests a walk",
+        help: "After the track page itself. Default 20.",
+        min: 0,
+        max: 200,
+        step: 1,
+      },
+      {
+        path: "trackSets.recrawlDays",
+        label: "Read a track again after (days)",
+        help: "Down to the first set it already has. Default 30.",
+        min: 1,
+        max: 3650,
+        step: 1,
+      },
+    ],
+  },
+  {
     id: "sf-apple-cues",
     title: "Cue times from Apple Music",
     intro:
