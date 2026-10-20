@@ -47,9 +47,9 @@ import { pruneSchedulerTicks, recordSchedulerTick } from "./lib/tick-history";
 import { playlistHoldNotifier, runPlaylistHygiene } from "./lib/playlist-hygiene";
 import { channelBanNotifier } from "./lib/channel-bans";
 import { checkDeletedMkvidVideos, retryDueOldVideoDeletions } from "./lib/mkvid-recreate";
-import { youtubeTokenRefresher } from "./lib/google-oauth";
+import { drainYoutubeLedger, youtubePoolHooks, youtubeTokenRefresher } from "./lib/google-oauth";
 import { maybeSnapshotStats } from "./lib/stats";
-import { setAccessTokenRefresher } from "./lib/youtube-playlists";
+import { setAccessTokenRefresher, setYoutubePool } from "./lib/youtube-playlists";
 import { drainLinkPrewarm } from "./lib/link-prewarm";
 import { drainTrackSets } from "./lib/track-sets";
 import { graphPagesStep } from "./lib/graph/backfill";
@@ -67,12 +67,15 @@ const app = new OpenAPIHono<{ Bindings: Env }>({
 });
 
 // A YouTube 401 retries once with a force-refreshed token (lib/youtube-playlists.ts
-// authedFetch). Set once per env (in production one env serves the whole isolate).
+// authedFetch), and every call draws from the quota pool (lib/youtube-pool.ts):
+// counted on its project, moved to the next one after a daily-quota reply.
+// Set once per env (in production one env serves the whole isolate).
 let tokenRefresherEnv: Env | null = null;
 function ensureTokenRefresher(env: Env): void {
   if (tokenRefresherEnv === env) return;
   const log = makeLogger({ task: "youtube.auth" });
   setAccessTokenRefresher(youtubeTokenRefresher(env, log), { log });
+  setYoutubePool(youtubePoolHooks(env));
   tokenRefresherEnv = env;
 }
 
@@ -81,12 +84,17 @@ app.use("*", async (c, next) => {
   await next();
 });
 
-// Stored pages (lib/page-store.ts), search index writes (lib/search/index.ts) and pre-save likes (lib/presave-like.ts) run in the background; hand them to waitUntil once the response is built.
+// Stored pages (lib/page-store.ts), search index writes (lib/search/index.ts), pre-save likes (lib/presave-like.ts) and YouTube quota ledger rows run in the background; hand them to waitUntil once the response is built.
 app.use("*", async (c, next) => {
   await next();
   try {
     c.executionCtx.waitUntil(
-      Promise.all([drainPageCaptures(), drainSearchIndex(), drainPresaveLikes()]),
+      Promise.all([
+        drainPageCaptures(),
+        drainSearchIndex(),
+        drainPresaveLikes(),
+        drainYoutubeLedger(),
+      ]),
     );
   } catch {
     /* no executionCtx (tests): captures still run */
@@ -362,6 +370,8 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         await drainPageCaptures();
         // Likes a scheduled check started (they swallow their own errors).
         await drainPresaveLikes();
+        // The quota ledger rows of this tick's YouTube calls, likewise.
+        await drainYoutubeLedger();
         // Search index writes started by this tick's verified fetches, likewise (they swallow their own errors).
         try {
           await drainSearchIndex();

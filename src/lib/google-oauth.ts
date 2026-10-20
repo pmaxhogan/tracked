@@ -1,4 +1,12 @@
 import type { Env } from "../types";
+import {
+  dropPushedToken,
+  markProjectOut,
+  OWN_PROJECT,
+  pickProject,
+  recordUnits,
+} from "./youtube-pool";
+import { quotaConsumer, type YoutubePoolHooks } from "./youtube-playlists";
 
 /**
  * Google OAuth 2.0 (authorization code, offline) for YouTube playlist access.
@@ -189,14 +197,21 @@ export async function clearTokens(env: Env): Promise<void> {
   await env.SUBS.delete(KV_KEY);
 }
 
-/**
- * Returns a usable access token (refreshing if it's within 60s of expiring),
- * or null when no tokens are stored.
- */
-export async function getAccessToken(
+/** Which project every token handed out belongs to (lib/youtube-pool.ts); a token not in it is the own project's. */
+const tokenProjects = new Map<string, string>();
+
+function remember(token: string, key: string): string {
+  // Tokens live an hour; a long-lived isolate must not keep every one it saw.
+  if (tokenProjects.size > 200) tokenProjects.clear();
+  tokenProjects.set(token, key);
+  return token;
+}
+
+/** tracked's own token (refreshing if it's within 60s of expiring), or null when none is stored. */
+async function ownAccessToken(
   env: Env,
-  fetcher: typeof fetch = fetch,
-  opts: { rejected?: string } = {},
+  fetcher: typeof fetch,
+  opts: { rejected?: string },
 ): Promise<{ accessToken: string; tokens: StoredTokens } | null> {
   const t = await loadTokens(env);
   if (!t) return null;
@@ -235,6 +250,75 @@ export async function getAccessToken(
   };
   await saveTokens(env, next);
   return { accessToken: refreshed.accessToken, tokens: next };
+}
+
+/**
+ * A usable access token for the quota pool's project with the most left
+ * (lib/youtube-pool.ts pickProject): tracked's own (refreshed when it's within
+ * 60s of expiring) or one mkvid pushed. `tokens` is always tracked's own stored
+ * set. Null when no tokens are stored. With the whole pool out it is the own
+ * token, so callers keep their quota handling.
+ *
+ * `rejected`: YouTube just 401'd this token. A pushed one is dropped and
+ * another project picked; the own one is force-refreshed.
+ */
+export async function getAccessToken(
+  env: Env,
+  fetcher: typeof fetch = fetch,
+  opts: { rejected?: string } = {},
+): Promise<{ accessToken: string; tokens: StoredTokens } | null> {
+  const rejectedKey = opts.rejected !== undefined ? tokenProjects.get(opts.rejected) : undefined;
+  const pushedRejected = rejectedKey !== undefined && rejectedKey !== OWN_PROJECT;
+  if (pushedRejected) {
+    tokenProjects.delete(opts.rejected!);
+    await dropPushedToken(env, rejectedKey).catch(() => {});
+  }
+  // A pushed token's 401 says nothing about the own token: never refresh it for one.
+  const own = await ownAccessToken(env, fetcher, pushedRejected ? {} : opts);
+  if (!own) return null;
+  const pick = await pickProject(env);
+  if (pick?.accessToken)
+    return { accessToken: remember(pick.accessToken, pick.key), tokens: own.tokens };
+  remember(own.accessToken, OWN_PROJECT);
+  return own;
+}
+
+/** Ledger writes authedFetch started (they swallow their own errors). */
+const ledgerWrites = new Set<Promise<void>>();
+
+/** Resolves when every ledger write started so far has finished; index.ts hands it to waitUntil. */
+export async function drainYoutubeLedger(): Promise<void> {
+  while (ledgerWrites.size) await Promise.allSettled([...ledgerWrites]);
+}
+
+/**
+ * The quota pool's side of authedFetch (see setYoutubePool): which project a
+ * token spends on, the ledger, and the next project's token after a
+ * daily-quota reply. Never logs a token.
+ */
+export function youtubePoolHooks(env: Env): YoutubePoolHooks {
+  return {
+    projectOf: (token) => tokenProjects.get(token) ?? OWN_PROJECT,
+    spent: (key, units) => {
+      const p = recordUnits(env, key, quotaConsumer(), units).finally(() => ledgerWrites.delete(p));
+      ledgerWrites.add(p);
+    },
+    quotaOut: async (key) => {
+      try {
+        await markProjectOut(env, key);
+        const pick = await pickProject(env, { exclude: [key] });
+        if (!pick) return null;
+        if (pick.accessToken) return remember(pick.accessToken, pick.key);
+        const own = await ownAccessToken(env, fetch, {});
+        return own ? remember(own.accessToken, OWN_PROJECT) : null;
+      } catch {
+        return null;
+      }
+    },
+    rejected: async (key) => {
+      if (key !== OWN_PROJECT) await dropPushedToken(env, key).catch(() => {});
+    },
+  };
 }
 
 /**

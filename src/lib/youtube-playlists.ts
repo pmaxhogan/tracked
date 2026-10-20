@@ -15,7 +15,7 @@
  * sites.
  */
 
-import { isQuotaReason, parseErrorBody } from "./youtube-error";
+import { DAILY_QUOTA_REASONS, isQuotaReason, parseErrorBody } from "./youtube-error";
 
 const API = "https://www.googleapis.com/youtube/v3";
 
@@ -40,6 +40,39 @@ let authRetry: Required<Pick<AuthRetryOpts, "delaysMs">> & AuthRetryOpts = {
 const replaced = new Map<string, string>();
 /** One refresh per stale token, however many calls hit the 401 at once. */
 const inflight = new Map<string, Promise<string | null>>();
+
+/**
+ * The YouTube quota pool's side of every call (lib/youtube-pool.ts; built by
+ * google-oauth.ts youtubePoolHooks, installed per worker entry in src/index.ts):
+ *   - projectOf: the project a token spends on (an unknown token is the own one);
+ *   - spent: a 2xx call's units, for the ledger;
+ *   - quotaOut: marks the project out after a daily-quota reply and returns the
+ *     next project's token, or null when the pool has nothing left;
+ *   - rejected: forgets a pushed token YouTube refused.
+ * Without hooks (tests that never install them) authedFetch is as before.
+ */
+export type YoutubePoolHooks = {
+  projectOf(token: string): string | null;
+  spent(key: string, units: number): void;
+  quotaOut(key: string): Promise<string | null>;
+  rejected(key: string): Promise<void>;
+};
+
+let pool: YoutubePoolHooks | null = null;
+let consumer = "unknown";
+
+export function setYoutubePool(h: YoutubePoolHooks | null): void {
+  pool = h;
+}
+
+/** The ledger's consumer for calls from now on (the part of the code making them); "unknown" when unset. */
+export function setQuotaConsumer(key: string | null): void {
+  consumer = key ?? "unknown";
+}
+
+export function quotaConsumer(): string {
+  return consumer;
+}
 
 export function setAccessTokenRefresher(
   r: AccessTokenRefresher | null,
@@ -82,28 +115,116 @@ export async function authedFetch(
     return fetcher(url, { ...init, headers });
   };
   const token = replaced.get(accessToken) ?? accessToken;
-  const res = await send(token);
-  if (res.status !== 401 || !refresher) return res;
-  const fresh = await refreshOnce(token);
-  if (!fresh || fresh === token) return res;
-  replaced.set(accessToken, fresh);
-  // A brand-new token has been seen rejected too (2026-10-08 20:59, a playlistItems.insert):
-  // the 401 is Google's flake, not the token's, so the same request goes again after a pause.
-  let again = await send(fresh);
-  const statuses = [res.status, again.status];
-  for (const ms of authRetry.delaysMs) {
-    if (again.status !== 401) break;
-    await new Promise((r) => setTimeout(r, ms));
-    again = await send(fresh);
-    statuses.push(again.status);
+  const first = await send(token);
+  const { res, sent } = await retryAuth(first, token);
+  return pool ? spendOrSpill(pool, res, sent) : res;
+
+  async function retryAuth(res: Response, token: string): Promise<{ res: Response; sent: string }> {
+    if (res.status !== 401 || !refresher) return { res, sent: token };
+    const fresh = await refreshOnce(token);
+    if (!fresh || fresh === token) return { res, sent: token };
+    replaced.set(accessToken, fresh);
+    // A brand-new token has been seen rejected too (2026-10-08 20:59, a playlistItems.insert):
+    // the 401 is Google's flake, not the token's, so the same request goes again after a pause.
+    let again = await send(fresh);
+    const statuses = [res.status, again.status];
+    for (const ms of authRetry.delaysMs) {
+      if (again.status !== 401) break;
+      await new Promise((r) => setTimeout(r, ms));
+      again = await send(fresh);
+      statuses.push(again.status);
+    }
+    if (statuses.length > 2)
+      authRetry.log?.warn("youtube.auth_401_persisted", {
+        url: url.split("?")[0],
+        statuses,
+        final: again.status,
+      });
+    return { res: again, sent: fresh };
   }
-  if (statuses.length > 2)
-    authRetry.log?.warn("youtube.auth_401_persisted", {
+
+  // Counts the units on the token's project; a daily-quota reply goes once to the next project.
+  async function spendOrSpill(h: YoutubePoolHooks, res: Response, sent: string): Promise<Response> {
+    const method = (init.method ?? "GET").toUpperCase();
+    const project = h.projectOf(sent) ?? "shared";
+    if (res.ok) {
+      h.spent(project, unitCostOf(method));
+      return res;
+    }
+    if (res.status !== 403 || !(await isDailyQuotaReply(res))) return res;
+    const next = await h.quotaOut(project);
+    if (!next || next === sent) return res;
+    const nextProject = h.projectOf(next) ?? "shared";
+    authRetry.log?.warn("youtube.quota_spill", {
       url: url.split("?")[0],
-      statuses,
-      final: again.status,
+      from: project,
+      to: nextProject,
     });
-  return again;
+    if (method === "POST" && pathOf(url).endsWith("/playlistItems")) {
+      // The refused insert may have landed anyway: look before inserting again.
+      const found = await findInsertedItem(next);
+      if (found === undefined) return res;
+      h.spent(nextProject, 1);
+      if (found)
+        return new Response(JSON.stringify(found), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+    }
+    replaced.set(accessToken, next);
+    // A pushed token can have been revoked: its 401 takes the usual refresh (a drop and a new pick).
+    const { res: again, sent: used } = await retryAuth(await send(next), next);
+    const usedProject = h.projectOf(used) ?? "shared";
+    if (again.ok) h.spent(usedProject, unitCostOf(method));
+    else if (again.status === 403 && (await isDailyQuotaReply(again)))
+      // Marked out too; the caller gets this reply (no third project in one call).
+      await h.quotaOut(usedProject);
+    return again;
+  }
+
+  // youtube-pool.ts unitCost's rule; not imported, since youtube-pool pulls in mkvid, which imports this module.
+  function unitCostOf(method: string): number {
+    if (method !== "GET") return 50;
+    return pathOf(url).endsWith("/search") ? 100 : 1;
+  }
+
+  /** The item a POST playlistItems body names, if the playlist has it: null when not, undefined when the check failed. */
+  async function findInsertedItem(token: string): Promise<unknown> {
+    let snippet: { playlistId?: unknown; resourceId?: { videoId?: unknown } } | undefined;
+    try {
+      snippet = (JSON.parse(String(init.body)) as { snippet?: typeof snippet }).snippet;
+    } catch {
+      return undefined;
+    }
+    const playlistId = snippet?.playlistId;
+    const videoId = snippet?.resourceId?.videoId;
+    if (typeof playlistId !== "string" || typeof videoId !== "string") return undefined;
+    const params = new URLSearchParams({ part: "id", playlistId, videoId, maxResults: "1" });
+    const headers = new Headers({ Authorization: `Bearer ${token}` });
+    const r = await fetcher(`${API}/playlistItems?${params}`, { headers }).catch(() => null);
+    if (!r?.ok) return undefined;
+    const data = (await r.json().catch(() => null)) as { items?: unknown[] } | null;
+    if (!data) return undefined;
+    return data.items?.[0] ?? null;
+  }
+}
+
+function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "");
+  } catch {
+    return (url.split("?")[0] ?? url).replace(/\/+$/, "");
+  }
+}
+
+/** A 403 whose reason is a daily-quota one (read from a clone, so the caller can still read the body). */
+async function isDailyQuotaReply(res: Response): Promise<boolean> {
+  const body = await res
+    .clone()
+    .text()
+    .catch(() => "");
+  const reason = parseErrorBody(body).reason;
+  return !!reason && DAILY_QUOTA_REASONS.includes(reason);
 }
 
 /**
