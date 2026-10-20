@@ -94,7 +94,11 @@ type Asked = Array<{
 /** tlpool: a track page answers `pages(url)`; get_data.php answers `scroll(form)` (JSON) or a contract error. */
 function stubPool(
   pages: (url: string) => string,
-  scroll: (form: Record<string, string>) => object = () => ({ success: true, end: true, data: "" }),
+  scroll: (form: Record<string, string>, referer?: string) => object = () => ({
+    success: true,
+    end: true,
+    data: "",
+  }),
 ): Asked {
   const asked: Asked = [];
   vi.stubGlobal(
@@ -118,7 +122,7 @@ function stubPool(
       });
       let html: string;
       if (body.url.endsWith("/ajax/get_data.php")) {
-        const a = scroll(body.form ?? {});
+        const a = scroll(body.form ?? {}, body.headers?.Referer);
         if ("error" in a) return Response.json(a);
         html = JSON.stringify(a);
       } else html = pages(body.url);
@@ -383,6 +387,35 @@ describe("drainTrackSets", () => {
       oldest_date: "2020-12-30",
       next_at: NOW + 30 * 86400,
     });
+  });
+
+  it("a busy track (busyRows sets seen) stops at busyStopYear instead of stopYear", async () => {
+    const env = makeEnv();
+    await updateAppSettings(env, {
+      trackSets: { viewsPerTick: 10, stepCount: 100, busyRows: 100 },
+    });
+    await queueTrack(env, "busy", `${ORIGIN}/track/busy/x/index.html`, 9);
+    await queueTrack(env, "quiet", `${ORIGIN}/track/quiet/x/index.html`, 1);
+    // Both lists reach 2022 sets in their first scroll step; only the busy one has seen 100 sets by then.
+    const asked = stubPool(
+      (url) => trackPage(rows(url.includes("busy") ? "b" : "q", 15, () => "2026-01-01")),
+      (form, referer) => {
+        const busy = !!referer?.includes("/busy/");
+        const n = busy ? 100 : 20;
+        const chunk = [
+          ...rows(`${busy ? "b" : "q"}s${form.pos}x`, n - 1, () => "2024-01-01"),
+          ...rows(`${busy ? "b" : "q"}old${form.pos}x`, 1, () => "2022-06-01"),
+        ];
+        return { success: true, data: chunk.map((r) => rowHtml(r.id, r.title, r.date)).join("") };
+      },
+    );
+    await drainTrackSets(env, log, NOW);
+    expect(await crawlRow(env, "busy")).toMatchObject({ walks: 1, stop_reason: "year" });
+    expect(asked.filter((a) => a.form && a.referer?.includes("/busy/"))).toHaveLength(1);
+    // The quiet track's 2022 sets do not stop it while it has seen fewer than 100 (35, 55, 75, 95);
+    // its fifth step reaches 115 and it stops there.
+    expect(asked.filter((a) => a.form && a.referer?.includes("/quiet/"))).toHaveLength(5);
+    expect(await crawlRow(env, "quiet")).toMatchObject({ walks: 1, stop_reason: "year" });
   });
 
   it("ends a short list at page 1 and a long one at the site's end", async () => {

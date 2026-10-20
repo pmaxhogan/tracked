@@ -31,7 +31,9 @@
  *   - `drainTrackSets`: the 5-minute cron (src/index.ts) walks queued tracks,
  *     at most `trackSets.viewsPerTick` page views a tick at pool priority
  *     backfill: page 1, then scroll requests from the stored cursor until the
- *     list ends, a set from `stopYear` or earlier shows up, or `maxSteps`.
+ *     list ends, a set from `stopYear` or earlier shows up (`busyStopYear`
+ *     once the walk has seen `busyRows` sets: a track played very often), or
+ *     `maxSteps`.
  *     One track is walked to its end before the next starts (its scroll
  *     requests go out from the page tlpool's browser is on). A finished
  *     track is walked again after `recrawlDays`, down to the first set it
@@ -413,7 +415,9 @@ async function walkTrack(
   let cursor = row.cursor_id ? { pos: Number(row.cursor_pos) || 0, id: row.cursor_id } : null;
   let steps = Number(row.steps) || 0;
   let oldest = row.oldest_date;
-  const stopBefore = `${s.stopYear + 1}-01-01`;
+  // A track played in very many sets (the walk has seen busyRows) stops at a later year.
+  const stopBefore = (seen: number) =>
+    `${(seen >= s.busyRows ? Math.max(s.stopYear, s.busyStopYear) : s.stopYear) + 1}-01-01`;
 
   const finish = async (reason: TrackSetsStop, error: string | null = null) => {
     await db
@@ -554,7 +558,7 @@ async function walkTrack(
     });
     const stop: TrackSetsStop | null = end
       ? "end"
-      : rows.some((r) => r.date !== null && r.date < stopBefore)
+      : rows.some((r) => r.date !== null && r.date < stopBefore((cursor?.pos ?? 0) + rowCount))
         ? "year"
         : row.walks > 0 && stored.known > 0
           ? "known"
