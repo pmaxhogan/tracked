@@ -30,6 +30,7 @@ import { bearerAuth } from "./middleware/auth";
 import type { Env } from "./types";
 import { backfillCombined } from "./lib/sync";
 import { getQuotaOut } from "./lib/youtube-quota";
+import { djInsertsWaiting } from "./lib/quota-waiting";
 import { runOrderPass } from "./lib/playlist-reorder";
 import { runSchedulerTick } from "./lib/fetch-scheduler";
 import { poolEventsApp } from "./routes/pool-api";
@@ -332,13 +333,19 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           );
         // Separate try/catch: a failed tick shouldn't stop the combined
         // playlist from catching up on everything that *did* land.
+        // DJ-playlist inserts outrank the combined playlist and the ordering below: both sit out a tick while any waits.
+        const djWaiting = await djInsertsWaiting(env);
         try {
-          log.info(
-            "cron.combined_backfill",
-            (await getQuotaOut(env))
-              ? { skipped: "youtube_quota_out" }
-              : await backfillCombined(env, { log, trigger }),
-          );
+          if (djWaiting > 0) {
+            log.info("cron.yielded_to_sync", { step: "combined_backfill", waiting: djWaiting });
+          } else {
+            log.info(
+              "cron.combined_backfill",
+              (await getQuotaOut(env))
+                ? { skipped: "youtube_quota_out" }
+                : await backfillCombined(env, { log, trigger }),
+            );
+          }
         } catch (e) {
           log.error("cron.combined_backfill_threw", errorFields(e));
         }
@@ -355,8 +362,12 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         }
         // Playlists in set-date order: a few moves within the day's unit budget (lib/playlist-reorder.ts).
         try {
-          const o = await runOrderPass(env, { log, trigger });
-          if (o.read > 0 || o.stoppedBy === "quota") log.info("cron.playlist_order", o);
+          if (djWaiting > 0) {
+            log.info("cron.yielded_to_sync", { step: "playlist_order", waiting: djWaiting });
+          } else {
+            const o = await runOrderPass(env, { log, trigger });
+            if (o.read > 0 || o.stoppedBy === "quota") log.info("cron.playlist_order", o);
+          }
         } catch (e) {
           log.warn("cron.playlist_order_threw", errorFields(e));
         }
