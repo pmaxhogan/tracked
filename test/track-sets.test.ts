@@ -24,6 +24,7 @@ import {
   trackSetsSummary,
 } from "../src/lib/track-sets";
 import { budgetHoldKey } from "../src/lib/fetch-scheduler";
+import { HOLD_KEY, USAGE_KEY } from "../src/lib/track-sets";
 import { updateAppSettings } from "../src/lib/app-settings";
 import { makeLogger } from "../src/lib/log";
 import { app } from "../src/index";
@@ -36,7 +37,13 @@ const TRACK_ID = "vdju0xlp";
 const TRACK_URL = `${ORIGIN}/track/${TRACK_ID}/genesi-essentia-franksy-just-like-that/index.html`;
 
 /** One row as the track page renders it (captured 2026-10-20; image and onclick query strings dropped). */
-function rowHtml(id: string, title: string, date: string, creator = "EvanPierini"): string {
+function rowHtml(
+  id: string,
+  title: string,
+  date: string,
+  creator = "EvanPierini",
+  extra: { likes?: number; genres?: string } = {},
+): string {
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   return (
     `<div class="bItm action oItm" onclick="window.open('/tracklist/${id}/${slug}.html#tr_${TRACK_ID}', '_self');" data-id="${id}" id="${id}">` +
@@ -45,7 +52,11 @@ function rowHtml(id: string, title: string, date: string, creator = "EvanPierini
     `<div class="mediaRow iRow"><div class="badge views" title="tracklist views" data-count="28"><i class="fa fa-eye spR"></i>28</div>` +
     `<div title="tracklist date"><i class="fa fa-calendar fa-20 spR"></i>${date}</div>` +
     `<div class="tlUser" title="creator" onclick="cancelBubble();"><i class="fa fa-user fa-20 spR"></i><a href="/user/${creator}/index.html">${creator}</a><span class="noMob spL">(60)</span></div>` +
-    `<div title="IDed tracks / total tracks"><i class="fa fa-check fa-20 spR"></i>14/14</div></div></div>`
+    `<div title="IDed tracks / total tracks"><i class="fa fa-check fa-20 spR"></i>14/14</div>` +
+    (extra.likes
+      ? `<div class="likes" title="likes"><i class="fa fa-thumbs-up fa-20 spR"></i>${extra.likes}</div>`
+      : `<div class="likes hidden" title="likes"><i class="fa fa-thumbs-up fa-20 spR"></i></div>`) +
+    `<div title="musicstyle(s)"><i class="fa fa-music fa-20 spR"></i>${extra.genres ?? "Tech House"}</div></div></div>`
   );
 }
 
@@ -92,6 +103,9 @@ type Asked = Array<{
 }>;
 
 /** tlpool: a track page answers `pages(url)`; get_data.php answers `scroll(form)` (JSON) or a contract error. */
+/** tlpool's /status and /settings as backfillAllowance reads them; null = the pool cannot say (404). */
+let admin: { status: object; settings: object } | null = null;
+
 function stubPool(
   pages: (url: string) => string,
   scroll: (form: Record<string, string>, referer?: string) => object = () => ({
@@ -105,6 +119,10 @@ function stubPool(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url === `${POOL}/status` || url === `${POOL}/settings`) {
+        if (!admin) return new Response("no", { status: 404 });
+        return Response.json(url.endsWith("/status") ? admin.status : admin.settings);
+      }
       if (url !== `${POOL}/fetch`) throw new Error(`unexpected fetch ${url}`);
       const body = JSON.parse(String(init!.body)) as {
         url: string;
@@ -173,6 +191,7 @@ async function setIds(env: Env, track = TRACK_ID): Promise<string[]> {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  admin = null;
 });
 
 describe("parseTrackSetRows", () => {
@@ -190,6 +209,9 @@ describe("parseTrackSetRows", () => {
         title: "Evan Pierini - The Transmission 004",
         date: "2026-10-16",
         creator: "EvanPierini",
+        views: 28,
+        likes: 0,
+        genres: "Tech House",
       },
       {
         setId: "1sjc9yyk",
@@ -197,8 +219,31 @@ describe("parseTrackSetRows", () => {
         title: "CamelPhat @ Metropolitano & Friends",
         date: "2026-10-09",
         creator: "EvanPierini",
+        views: 28,
+        likes: 0,
+        genres: "Tech House",
       },
     ]);
+  });
+
+  it("reads a row's likes and several genres, and leaves out what a row does not show", () => {
+    const [liked] = parseTrackSetRows(
+      rowHtml("l1", "A - One", "2025-01-02", "U", {
+        likes: 12,
+        genres: "Dance / Electro Pop, Tech House",
+      }),
+    );
+    expect(liked).toMatchObject({ likes: 12, genres: "Dance / Electro Pop, Tech House" });
+    const [bare] = parseTrackSetRows(
+      `<div class="bItm action oItm" data-id="b1"><div class="bTitle"><a href="/tracklist/b1/x.html">B - Two</a></div></div>`,
+    );
+    expect(bare).toMatchObject({
+      views: null,
+      likes: null,
+      genres: null,
+      date: null,
+      creator: null,
+    });
   });
 
   it("reads a scroll chunk (no list wrapper) and skips a row without a tracklist link", () => {
@@ -243,7 +288,8 @@ describe("storeTrackSetRows", () => {
   it("counts each set once per track, and the tracks that list it", async () => {
     const env = makeEnv();
     const list = parseTrackSetRows(
-      rowHtml("s1", "X - One", "2026-01-01") + rowHtml("s2", "Y - Two", "2026-01-02"),
+      rowHtml("s1", "X - One", "2026-01-01") +
+        rowHtml("s2", "Y - Two", "2026-01-02", "EvanPierini", { likes: 4, genres: "Techno" }),
     );
     expect(await storeTrackSetRows(env, "t1", list, new Set(), NOW)).toEqual({
       added: 2,
@@ -255,7 +301,7 @@ describe("storeTrackSetRows", () => {
     });
     await storeTrackSetRows(env, "t2", list.slice(0, 1), new Set(), NOW);
     const { results } = await env.DB.prepare(
-      "SELECT set_id, track_count, followed, title, set_date, creator FROM track_set_lists ORDER BY set_id",
+      "SELECT set_id, track_count, followed, title, set_date, creator, views, likes, genres FROM track_set_lists ORDER BY set_id",
     ).all();
     expect(results).toEqual([
       {
@@ -265,6 +311,9 @@ describe("storeTrackSetRows", () => {
         title: "X - One",
         set_date: "2026-01-01",
         creator: "EvanPierini",
+        views: 28,
+        likes: 0,
+        genres: "Tech House",
       },
       {
         set_id: "s2",
@@ -273,6 +322,9 @@ describe("storeTrackSetRows", () => {
         title: "Y - Two",
         set_date: "2026-01-02",
         creator: "EvanPierini",
+        views: 28,
+        likes: 4,
+        genres: "Techno",
       },
     ]);
   });
@@ -482,6 +534,112 @@ describe("drainTrackSets", () => {
     expect(asked[2]!.form).toMatchObject({ idScrollObject: "other", pos: "25", id: "s1x9" });
   });
 
+  it("stops starting steps when the tick's seconds are up, and saves the cursor", async () => {
+    const env = makeEnv();
+    await updateAppSettings(env, { trackSets: { tickSeconds: 10, stepCount: 10 } });
+    await queueTrack(env);
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    let n = 0;
+    const asked = stubPool(
+      () => {
+        clock += 4000;
+        return trackPage(rows("p", 15, () => "2026-01-01"));
+      },
+      () => {
+        clock += 4000;
+        n++;
+        return {
+          success: true,
+          data: rows(`s${n}x`, 10, () => "2025-01-01")
+            .map((r) => rowHtml(r.id, r.title, r.date))
+            .join(""),
+        };
+      },
+    );
+    const r = await drainTrackSets(env, log, NOW);
+    // Page 1 at 4 s, steps at 8 s and 12 s; the 10 s are up after that.
+    expect(r.views).toBe(3);
+    expect(asked).toHaveLength(3);
+    expect(await crawlRow(env)).toMatchObject({ walks: 0, cursor_pos: 35, cursor_id: "s2x9" });
+    vi.restoreAllMocks();
+  });
+
+  it("spends at most maxShare of the pool's backfill allowance over 24 h, page loads and scroll XHRs apart", async () => {
+    const env = makeEnv();
+    await updateAppSettings(env, { trackSets: { stepCount: 10, maxShare: 0.5 } });
+    // 2 fetching accounts (a passive and a retired one do not count): 2 x 60 XHRs, 70 pages; backfill ceiling 0.75.
+    admin = {
+      status: {
+        accounts: [
+          { id: "a1", state: "active" },
+          { id: "a2", state: "warming" },
+          { id: "a3", state: "passive", passive: true },
+          { id: "a4", state: "retired" },
+        ],
+        totals: { usedToday: 10, budgetToday: 70 },
+      },
+      settings: {
+        budgetPerDay: 35,
+        xhrBudgetPerDay: 60,
+        reservedPhoneShare: 0.2,
+        priorityCeilings: { backfill: 0.75 },
+      },
+    };
+    // Allowance: pages floor(70 x 0.75) = 52, XHRs floor(120 x 0.75) = 90; half: 26 pages, 45 XHRs.
+    // The last 24 h already spent 26 pages and 43 XHRs (an hour older than that is not counted).
+    const hour = Math.floor(NOW / 3600);
+    await env.CACHE.put(
+      USAGE_KEY,
+      JSON.stringify({
+        [hour]: { p: 20, x: 40 },
+        [hour - 5]: { p: 6, x: 3 },
+        [hour - 30]: { p: 99, x: 99 },
+      }),
+    );
+    await queueTrack(env);
+    await env.DB.prepare(
+      "UPDATE track_set_crawl SET cursor_pos = 15, cursor_id = 'p14' WHERE track_page_id = ?",
+    )
+      .bind(TRACK_ID)
+      .run();
+    await queueTrack(env, "fresh", `${ORIGIN}/track/fresh/x/index.html`, 99);
+    let n = 0;
+    const asked = stubPool(
+      () => trackPage(rows("p", 15, () => "2026-01-01")),
+      () => {
+        n++;
+        return {
+          success: true,
+          data: rows(`s${n}x`, 10, () => "2025-01-01")
+            .map((r) => rowHtml(r.id, r.title, r.date))
+            .join(""),
+        };
+      },
+    );
+    const r = await drainTrackSets(env, log, NOW);
+    // No page loads left: only the mid-walk track's scroll steps go, 2 of them.
+    expect(r.share).toEqual({
+      allowance: { pages: 52, xhr: 90 },
+      used: { p: 26, x: 43 },
+      pagesLeft: 0,
+      xhrLeft: 2,
+    });
+    expect(asked.map((a) => a.url.replace(ORIGIN, ""))).toEqual([
+      "/ajax/get_data.php",
+      "/ajax/get_data.php",
+    ]);
+    expect(r.views).toBe(2);
+    // The two are counted toward the next tick, which has nothing left.
+    const usage = JSON.parse((await env.CACHE.get(USAGE_KEY))!) as Record<
+      string,
+      { p: number; x: number }
+    >;
+    expect(usage[hour]).toEqual({ p: 20, x: 42 });
+    expect(usage[hour - 30]).toBeUndefined();
+    expect((await drainTrackSets(env, log, NOW + 300)).skipped).toBe("share_spent");
+  });
+
   it("stops a walk at maxSteps", async () => {
     const env = makeEnv();
     await updateAppSettings(env, { trackSets: { viewsPerTick: 10, maxSteps: 2, stepCount: 10 } });
@@ -525,7 +683,7 @@ describe("drainTrackSets", () => {
     expect((await setIds(env)).filter((id) => id.startsWith("n"))).toEqual(["n0", "n1", "n2"]);
   });
 
-  it("a pool refusal ends the tick, charges the row nothing and holds the backfill share on budget_exhausted", async () => {
+  it("a pool refusal ends the tick, charges the row nothing and holds the crawl alone on budget_exhausted", async () => {
     const env = makeEnv();
     await updateAppSettings(env, { trackSets: { viewsPerTick: 10, stepCount: 10 } });
     await queueTrack(env);
@@ -543,7 +701,9 @@ describe("drainTrackSets", () => {
       next_at: 0,
       attempts: 0,
     });
-    expect(Number(await env.CACHE.get(budgetHoldKey("backfill")))).toBe(NOW + 1200);
+    // The crawl holds itself only: the other backfill jobs (pre-warm, DJ history) go on.
+    expect(Number(await env.CACHE.get(HOLD_KEY))).toBe(NOW + 1200);
+    expect(await env.CACHE.get(budgetHoldKey("backfill"))).toBeNull();
     expect((await drainTrackSets(env, log, NOW + 60)).skipped).toBe("budget_hold");
   });
 
@@ -618,8 +778,13 @@ describe("Recommended sets", () => {
       ["mid", 2],
     ]);
     expect(body.total).toBe(2);
+    expect(body.rows[0]).toMatchObject({ views: 28, likes: 0, genres: "Tech House" });
     expect(body.progress).toEqual({ queued: 1, walked: 1, walking: 0, sets: 2 });
     expect(await trackSetsSummary(env)).toEqual(body.progress);
+    // Sorting by views and filtering on a genre are table queries like any other.
+    const byGenre = await app.request("/ui/api/recommended?f.genres=has:tech&sort=-views", {}, env);
+    expect(byGenre.status).toBe(200);
+    expect(((await byGenre.json()) as { total: number }).total).toBe(2);
   });
 
   it("lists the tracks that put a set there, named from the search index when it has them", async () => {

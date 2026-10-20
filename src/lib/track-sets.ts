@@ -13,8 +13,11 @@
  *   <div class="bItm action oItm" data-id="<set id>" ...>
  *     <div class="bTitle"><a href="/tracklist/<set id>/<slug>.html#tr_<page id>">DJ - Title</a></div>
  *     <div class="mediaRow iRow">
+ *       <div class="badge views" title="tracklist views" data-count="28">...28</div>
  *       <div title="tracklist date">...2026-10-16</div>
  *       <div class="tlUser" title="creator">...<a href="/user/<name>/index.html">...</a></div>
+ *       <div class="likes" title="likes">...2</div>   ("likes hidden", no number, at 0)
+ *       <div title="musicstyle(s)">...Tech House, Techno</div>
  *
  * newest first. Seen live 2026-10-20; the scroll request honours `count`
  * (500 rows came back in one request), so a walk asks for
@@ -29,7 +32,7 @@
  *     index's tracks (the tracks of the followed DJs' verified sets), a few
  *     hundred a tick by id, so new tracks join as the sync indexes them.
  *   - `drainTrackSets`: the 5-minute cron (src/index.ts) walks queued tracks,
- *     at most `trackSets.viewsPerTick` page views a tick at pool priority
+ *     for `trackSets.tickSeconds` (or `viewsPerTick` page views) a tick at pool priority
  *     backfill: page 1, then scroll requests from the stored cursor until the
  *     list ends, a set from `stopYear` or earlier shows up (`busyStopYear`
  *     once the walk has seen `busyRows` sets: a track played very often), or
@@ -51,6 +54,7 @@ import { decodeEntities } from "./html-entities";
 import { errorFields, type Logger } from "./log";
 import { poolCodeOf, poolConfigFromEnv } from "./pool";
 import { getPoolSettings } from "./pool-settings";
+import { createPoolAdminClient } from "./pool-admin-client";
 import type { TableDef } from "./table-query";
 import {
   fetch1001,
@@ -77,6 +81,13 @@ export const SEED_CURSOR_KEY = "track_sets:seed_after";
 const FOLLOWED_REFRESH_KEY = "track_sets:followed_day";
 /** Page 1 shows 15 sets; fewer than this means the list has no more. */
 const PAGE1_FULL = 10;
+/** CACHE KV: the crawl's own requests per UTC hour, `{ "<hour>": { p, x } }`, the last 24 kept. */
+export const USAGE_KEY = "track_sets:usage";
+/** CACHE KV: the pool's backfill allowance (pages / XHRs a day), read at most every ALLOWANCE_TTL. */
+const ALLOWANCE_KEY = "track_sets:allowance";
+const ALLOWANCE_TTL = 600;
+/** CACHE KV: unix s until which the crawl waits after the pool refused it for budget (its own: other backfill jobs go on). */
+export const HOLD_KEY = "track_sets:hold_until";
 const DAY = 86400;
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -93,6 +104,12 @@ export type TrackSetRow = {
   date: string | null;
   /** The 1001tracklists user who made the list. */
   creator: string | null;
+  /** The list's view count (the views badge's data-count), null when the row has none. */
+  views: number | null;
+  /** Its likes (0 when the likes badge is hidden), null when the row has no likes badge. */
+  likes: number | null;
+  /** Its music styles as the row writes them ("Tech House, Techno"), null when it shows none. */
+  genres: string | null;
 };
 
 const OITM_TAG_RE = /<div\b[^>]*\bclass="[^"]*\boItm\b[^"]*"[^>]*>/g;
@@ -132,12 +149,21 @@ export function parseTrackSetRows(html: string): TrackSetRow[] {
       "";
     const dateHtml = block.match(/title="tracklist date"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "";
     const creator = block.match(/href="\/user\/([^/"?#]+)\//)?.[1] ?? null;
+    const viewsAttr = block.match(/class="[^"]*\bviews\b[^"]*"[^>]*\bdata-count="(\d+)"/)?.[1];
+    const likesTag = block.match(/<div\b([^>]*\btitle="likes"[^>]*)>([\s\S]*?)<\/div>/);
+    const likesNum = likesTag ? stripTags(likesTag[2]!).match(/\d+/)?.[0] : undefined;
+    const genres = stripTags(
+      block.match(/title="musicstyle\(s\)"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "",
+    );
     rows.push({
       setId,
       url: ORIGIN + href[1]!,
       title: stripTags(titleHtml) || setId,
       date: stripTags(dateHtml).match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1] ?? null,
       creator: creator ? decodeURIComponent(creator) : null,
+      views: viewsAttr !== undefined ? Number(viewsAttr) : null,
+      likes: likesTag ? (likesNum !== undefined ? Number(likesNum) : 0) : null,
+      genres: genres || null,
     });
   });
   return rows;
@@ -206,13 +232,15 @@ export async function storeTrackSetRows(
     for (const r of res) added += Number(r.meta?.changes ?? 0);
   }
   const up = db.prepare(
-    `INSERT INTO track_set_lists (set_id, set_url, title, set_date, creator, track_count, followed, first_seen_at, updated_at)
+    `INSERT INTO track_set_lists (set_id, set_url, title, set_date, creator, track_count, followed, first_seen_at, updated_at, views, likes, genres)
      VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COUNT(*) FROM track_sets WHERE set_id = ?1),
-             CASE WHEN ?6 = 1 OR ${FOLLOWED_BY_ID_SQL} THEN 1 ELSE 0 END, ?7, ?7)
+             CASE WHEN ?6 = 1 OR ${FOLLOWED_BY_ID_SQL} THEN 1 ELSE 0 END, ?7, ?7, ?8, ?9, ?10)
      ON CONFLICT(set_id) DO UPDATE SET
        set_url = excluded.set_url, title = excluded.title,
        set_date = COALESCE(excluded.set_date, set_date), creator = COALESCE(excluded.creator, creator),
-       track_count = excluded.track_count, followed = excluded.followed, updated_at = excluded.updated_at`,
+       track_count = excluded.track_count, followed = excluded.followed, updated_at = excluded.updated_at,
+       views = COALESCE(excluded.views, views), likes = COALESCE(excluded.likes, likes),
+       genres = COALESCE(excluded.genres, genres)`,
   );
   for (let i = 0; i < rows.length; i += BATCH_CHUNK)
     await db.batch(
@@ -227,6 +255,9 @@ export async function storeTrackSetRows(
             r.creator,
             titleDjNames(r.title).some((n) => followed.has(n)) ? 1 : 0,
             nowSec,
+            r.views,
+            r.likes,
+            r.genres,
           ),
         ),
     );
@@ -353,7 +384,14 @@ export type TrackSetsStop = "end" | "year" | "known" | "max_steps" | "no_list" |
 
 export type TrackSetsDrain = {
   skipped?:
-    "off" | "no_db" | "pool_not_configured" | "paused" | "backoff" | "budget_hold" | "nothing_due";
+    | "off"
+    | "no_db"
+    | "pool_not_configured"
+    | "paused"
+    | "backoff"
+    | "budget_hold"
+    | "share_spent"
+    | "nothing_due";
   /** Search-index tracks offered to the queue this tick. */
   seeded: number;
   /** Page views spent (page 1s and scroll requests). */
@@ -366,6 +404,13 @@ export type TrackSetsDrain = {
   failed: number;
   /** The pool refusal that ended the drain. */
   stoppedBy?: string;
+  /** The crawl's share: the pool's backfill allowance a day (null: unknown), its own use over 24 h, what was left at the start. */
+  share?: {
+    allowance: { pages: number; xhr: number } | null;
+    used: { p: number; x: number };
+    pagesLeft: number;
+    xhrLeft: number;
+  };
 };
 
 type WalkOutcome = {
@@ -384,14 +429,19 @@ function isRefusal(e: unknown): boolean {
   );
 }
 
+/** What a tick may still spend: views (the tick's cap), page loads and scroll XHRs (the crawl's share). */
+type Quota = { views: number; pages: number; xhr: number };
+
 /**
  * Walk one claimed track: page 1 when it has no cursor, then scroll steps,
- * within `budget` page views. Saves where it got to after every step.
+ * within `quota` and before `deadlineMs` (wall clock); each step spends from
+ * it. Saves where it got to after every step.
  */
 async function walkTrack(
   env: Env,
   row: CrawlRow,
-  budget: number,
+  quota: Quota,
+  deadlineMs: number,
   s: AppSettings["trackSets"],
   followed: ReadonlySet<string>,
   log: Logger,
@@ -448,8 +498,9 @@ async function walkTrack(
   };
 
   for (;;) {
-    if (out.views >= budget) {
-      // Out of views this tick: due again at once, and picked first next tick.
+    const need = cursor ? "xhr" : "pages";
+    if (quota.views <= 0 || quota[need] <= 0 || Date.now() >= deadlineMs) {
+      // Out of views, share or time this tick: due again at once, and picked first next tick.
       await db
         .prepare(
           "UPDATE track_set_crawl SET cursor_pos = ?, cursor_id = ?, steps = ?, oldest_date = ?, next_at = ? WHERE track_page_id = ?",
@@ -466,6 +517,8 @@ async function walkTrack(
       if (!cursor) {
         const r = await fetch1001(row.track_url, opts);
         out.views++;
+        quota.views--;
+        quota.pages--;
         rows = parseTrackSetRows(r.html);
         if (!/\bid="sDivTracklists"/.test(r.html)) {
           await finish("no_list");
@@ -488,6 +541,8 @@ async function walkTrack(
           opts,
         );
         out.views++;
+        quota.views--;
+        quota.xhr--;
         steps++;
         if (!chunk.ok) throw new Error("scroll step answered no list");
         rows = parseTrackSetRows(chunk.dataHtml);
@@ -580,7 +635,75 @@ async function walkTrack(
   }
 }
 
-/** One cron tick's crawl: seed the queue, then walk due tracks within `trackSets.viewsPerTick` page views. Never throws. */
+type Usage = Record<string, { p: number; x: number }>;
+
+/** The crawl's page loads (p) and scroll XHRs (x) over the last 24 hours. */
+export async function crawlUsage(env: Env, nowSec: number): Promise<{ p: number; x: number }> {
+  const u = ((await env.CACHE.get(USAGE_KEY, "json")) as Usage | null) ?? {};
+  const from = Math.floor(nowSec / 3600) - 23;
+  let p = 0;
+  let x = 0;
+  for (const [h, v] of Object.entries(u))
+    if (Number(h) >= from) {
+      p += Number(v?.p) || 0;
+      x += Number(v?.x) || 0;
+    }
+  return { p, x };
+}
+
+async function addUsage(env: Env, nowSec: number, p: number, x: number): Promise<void> {
+  if (p <= 0 && x <= 0) return;
+  const u = ((await env.CACHE.get(USAGE_KEY, "json")) as Usage | null) ?? {};
+  const hour = Math.floor(nowSec / 3600);
+  const cur = u[hour] ?? { p: 0, x: 0 };
+  u[hour] = { p: cur.p + p, x: cur.x + x };
+  for (const h of Object.keys(u)) if (Number(h) < hour - 23) delete u[h];
+  await env.CACHE.put(USAGE_KEY, JSON.stringify(u), { expirationTtl: 2 * DAY });
+}
+
+/**
+ * What pool priority backfill may spend a day across the fleet: each
+ * fetching account's page budget (tlpool `budgetToday`, summed) and its XHR
+ * budget, times the backfill ceiling (and short of the phone reserve) - the
+ * same arithmetic as tlpool's `usable_budget`. Null when the pool cannot say
+ * (then only the pool's own refusals limit the crawl).
+ */
+export async function backfillAllowance(
+  env: Env,
+  log?: Logger,
+): Promise<{ pages: number; xhr: number } | null> {
+  const hit = (await env.CACHE.get(ALLOWANCE_KEY, "json")) as { pages: number; xhr: number } | null;
+  if (hit) return hit;
+  try {
+    const client = createPoolAdminClient(env);
+    if (!client.configured) return null;
+    const [st, ps] = await Promise.all([client.status(), client.getSettings()]);
+    if (st.budgetToday === null || ps.xhrBudgetPerDay === null) return null;
+    const factor = Math.min(1 - (ps.reservedPhoneShare ?? 0), ps.priorityCeilings?.backfill ?? 1);
+    const fetching = st.accounts.filter(
+      (a) => !a.passive && (a.state === "active" || a.state === "warming"),
+    ).length;
+    const a = {
+      pages: Math.floor(st.budgetToday * factor),
+      xhr: Math.floor(fetching * ps.xhrBudgetPerDay * factor),
+    };
+    await env.CACHE.put(ALLOWANCE_KEY, JSON.stringify(a), { expirationTtl: ALLOWANCE_TTL });
+    return a;
+  } catch (e) {
+    log?.warn("track_sets.allowance_failed", errorFields(e));
+    return null;
+  }
+}
+
+/**
+ * One cron tick's crawl: seed the queue, then walk due tracks for
+ * `trackSets.tickSeconds` (wall clock) or `viewsPerTick` page views, whichever
+ * ends first, and within `maxShare` of the pool's backfill allowance over the
+ * last 24 hours (page loads and scroll XHRs counted apart): the other
+ * backfill jobs (link pre-warm, DJ history, index catch-up) keep the rest.
+ * A pool refusal for budget holds the crawl alone (HOLD_KEY) until the pool
+ * says. Never throws.
+ */
 export async function drainTrackSets(
   env: Env,
   log: Logger,
@@ -603,9 +726,22 @@ export async function drainTrackSets(
       return { ...out, skipped: "backoff" };
     if ((Number(await env.CACHE.get(budgetHoldKey("backfill"))) || 0) > nowSec)
       return { ...out, skipped: "budget_hold" };
+    if ((Number(await env.CACHE.get(HOLD_KEY)) || 0) > nowSec)
+      return { ...out, skipped: "budget_hold" };
+    const allowance = await backfillAllowance(env, log);
+    const used = await crawlUsage(env, nowSec);
+    const quota: Quota = {
+      views: cap,
+      pages: allowance ? Math.floor(allowance.pages * settings.maxShare) - used.p : cap,
+      xhr: allowance ? Math.floor(allowance.xhr * settings.maxShare) - used.x : cap,
+    };
+    out.share = { allowance, used, pagesLeft: quota.pages, xhrLeft: quota.xhr };
+    if (quota.pages <= 0 && quota.xhr <= 0) return { ...out, skipped: "share_spent" };
     const db = env.DB;
     const followed = await followedDjNames(env);
-    while (out.views < cap) {
+    const deadlineMs = Date.now() + settings.tickSeconds * 1000;
+    const start = { pages: quota.pages, xhr: quota.xhr };
+    while (quota.views > 0 && (quota.pages > 0 || quota.xhr > 0) && Date.now() < deadlineMs) {
       const row = await pickDue(db, nowSec);
       if (!row) {
         if (out.views === 0) out.skipped = "nothing_due";
@@ -617,7 +753,7 @@ export async function drainTrackSets(
         .bind(nowSec + CLAIM_SECONDS, row.track_page_id, row.next_at)
         .run();
       if (!claim.meta.changes) continue;
-      const w = await walkTrack(env, row, cap - out.views, settings, followed, log, nowSec);
+      const w = await walkTrack(env, row, quota, deadlineMs, settings, followed, log, nowSec);
       out.views += w.views;
       out.added += w.added;
       out.failed += w.failed;
@@ -625,7 +761,8 @@ export async function drainTrackSets(
       if (w.refusal) {
         out.stoppedBy = w.refusal.error;
         if (w.refusal.poolCode === "budget_exhausted") {
-          // As the scheduler does: the backfill share is spent, so nothing of it is asked for until the pool says.
+          // The pool's backfill share (most likely the XHR share, which the crawl spends most) is out: the crawl
+          // waits until the pool says, alone - the shared hold would stop the page-based backfill jobs too.
           const pool = await getPoolSettings(env);
           const until =
             nowSec +
@@ -633,7 +770,7 @@ export async function drainTrackSets(
               pool.retry.poolBackoffMaxHours * 3600,
               Math.max(60, Math.ceil(w.refusal.retryAfterSeconds ?? 600)),
             );
-          await env.CACHE.put(budgetHoldKey("backfill"), String(until), {
+          await env.CACHE.put(HOLD_KEY, String(until), {
             expirationTtl: Math.max(60, until - nowSec + 60),
           });
         }
@@ -643,6 +780,7 @@ export async function drainTrackSets(
       // A failed step ends this track's turn; a walk with views left goes on to the next track.
       if (w.views === 0) break;
     }
+    await addUsage(env, nowSec, start.pages - quota.pages, start.xhr - quota.xhr);
     return out;
   } catch (e) {
     log.warn("track_sets.drain_threw", errorFields(e));
@@ -692,13 +830,17 @@ type RecommendedRow = {
   set_date: string | null;
   creator: string | null;
   track_count: number;
+  views: number | null;
+  likes: number | null;
+  genres: string | null;
   first_seen_at: number;
 };
 
 /** The Recommended sets table: other DJs' sets, by how many crawled tracks list them. */
 export const RECOMMENDED_TABLE: TableDef<RecommendedRow> = {
   from: "track_set_lists",
-  select: "set_id, set_url, title, set_date, creator, track_count, first_seen_at",
+  select:
+    "set_id, set_url, title, set_date, creator, track_count, views, likes, genres, first_seen_at",
   where: "followed = 0",
   primaryKey: "set_id",
   defaultSort: "-track_count",
@@ -709,6 +851,9 @@ export const RECOMMENDED_TABLE: TableDef<RecommendedRow> = {
     set_date: { sql: "set_date", type: "date" },
     creator: { sql: "creator", type: "text", searchable: true },
     track_count: { sql: "track_count", type: "number" },
+    views: { sql: "views", type: "number" },
+    likes: { sql: "likes", type: "number" },
+    genres: { sql: "genres", type: "text", searchable: true, sortable: false },
     first_seen_at: { sql: "first_seen_at", type: "datetime", storage: "s" },
   },
 };

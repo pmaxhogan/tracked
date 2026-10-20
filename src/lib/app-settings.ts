@@ -233,8 +233,12 @@ export const AppSettingsSchema = z.object({
   trackSets: z.object({
     /** Crawl at all (off: nothing is fetched; what was stored stays). */
     enabled: z.boolean(),
-    /** Page views one 5-minute cron tick spends at most, at pool priority backfill (default 12). */
-    viewsPerTick: z.number().int().min(0).max(60),
+    /** Page views one 5-minute cron tick spends at most, at pool priority backfill (default 200: a safety cap; the time below and the pool's backfill share are what limit it). */
+    viewsPerTick: z.number().int().min(0).max(1000),
+    /** Wall-clock seconds one cron tick keeps crawling (default 200; a view takes ~3 s). */
+    tickSeconds: z.number().int().min(10).max(280),
+    /** Share (0..1) of the pool's backfill allowance the crawl may spend over 24 h, page loads and scroll XHRs apart (default 0.7): the other backfill jobs keep the rest. */
+    maxShare: z.number().min(0.05).max(1),
     /** Sets one scroll request asks for (the browser asks for 10; default 100). */
     stepCount: z.number().int().min(10).max(500),
     /** A walk stops at the first set from this year or earlier (default 2020). */
@@ -351,7 +355,9 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   linkPrewarm: { enabled: true, maxPerTick: 3 },
   trackSets: {
     enabled: true,
-    viewsPerTick: 12,
+    viewsPerTick: 200,
+    tickSeconds: 200,
+    maxShare: 0.7,
     stepCount: 100,
     stopYear: 2020,
     busyRows: 300,

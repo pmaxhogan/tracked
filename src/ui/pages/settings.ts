@@ -540,10 +540,26 @@ const APP_GROUPS: FormGroup[] = [
       {
         path: "trackSets.viewsPerTick",
         label: "Page views a cron tick",
-        help: "Every 5 minutes, at pool priority backfill. A track page is one view, each scroll request another. Default 12.",
+        help: "A safety cap. Every 5 minutes, at pool priority backfill; a track page is one view, each scroll request another. The crawl stops earlier when the time below is up or the pool's backfill share is spent. Default 200.",
         min: 0,
-        max: 60,
+        max: 1000,
         step: 1,
+      },
+      {
+        path: "trackSets.maxShare",
+        label: "Share of the backfill budget",
+        help: "0 to 1, over 24 hours, page loads and scroll requests counted apart. The link pre-warm, DJ history and index catch-up keep the rest. Default 0.7.",
+        min: 0.05,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        path: "trackSets.tickSeconds",
+        label: "Seconds a cron tick crawls",
+        help: "Wall clock; a view takes about 3 s. Default 200.",
+        min: 10,
+        max: 280,
+        step: 10,
       },
       {
         path: "trackSets.stepCount",
