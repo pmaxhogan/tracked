@@ -24,3 +24,6 @@ tasker/
 
 # vitest coverage output
 coverage/
+
+# superpowers plan scratch (ledgers, briefs, review packages)
+.superpowers/
