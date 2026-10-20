@@ -22,7 +22,7 @@ import { quotaKind } from "./youtube-error";
 import { YouTubeApiError } from "./youtube-playlists";
 // The quota day's end is mkvid.ts's (not reimplemented here), so the hold expires exactly when the daily claims reset.
 import { quotaDayEnd } from "./mkvid";
-import { markProjectOut, OWN_PROJECT, poolOut } from "./youtube-pool";
+import { clearProjectOut, markProjectOut, OWN_PROJECT, poolOut } from "./youtube-pool";
 
 export const QUOTA_OUT_KEY = "yt:quota:out";
 
@@ -31,10 +31,11 @@ export type QuotaOut = { since: number; until: number };
 /** The flag while it holds and the whole pool is out (lib/youtube-pool.ts), else null. A flag set while another project can still take the work is moved to the own project's flag. */
 export async function getQuotaOut(env: Env, nowMs = Date.now()): Promise<QuotaOut | null> {
   try {
-    // poolOut reads the pool, which also converts the legacy flag when another project can take over.
-    if (!(await poolOut(env, nowMs))) return null;
+    // The common case, no flag, costs this one read and no D1 query.
     const v = await env.CACHE.get<QuotaOut>(QUOTA_OUT_KEY, "json");
-    return v && typeof v.until === "number" && v.until * 1000 > nowMs ? v : null;
+    if (!v || typeof v.until !== "number" || v.until * 1000 <= nowMs) return null;
+    // poolOut reads the pool, which also converts the flag when another project can take over.
+    return (await poolOut(env, nowMs)) ? v : null;
   } catch {
     return null;
   }
@@ -68,4 +69,5 @@ export async function noteQuotaOut(
 /** The owner's early clear (they may have raised the quota). */
 export async function clearQuotaOut(env: Env): Promise<void> {
   await env.CACHE.delete(QUOTA_OUT_KEY);
+  await clearProjectOut(env, OWN_PROJECT);
 }

@@ -13,7 +13,7 @@ import {
   unitCost,
   type PushedToken,
 } from "../src/lib/youtube-pool";
-import { getQuotaOut, noteQuotaOut, QUOTA_OUT_KEY } from "../src/lib/youtube-quota";
+import { clearQuotaOut, getQuotaOut, noteQuotaOut, QUOTA_OUT_KEY } from "../src/lib/youtube-quota";
 import { quotaDayEnd } from "../src/lib/mkvid";
 import { YouTubeApiError } from "../src/lib/youtube-playlists";
 
@@ -155,5 +155,51 @@ describe("the legacy global flag", () => {
     await markProjectOut(env, "upload2", NOW_MS);
     await noteQuotaOut(env, e, undefined, NOW_MS);
     expect(await env.CACHE.get(QUOTA_OUT_KEY)).not.toBeNull();
+  });
+});
+
+describe("fix round 1", () => {
+  const flag = JSON.stringify({ since: NOW - 60, until: quotaDayEnd(NOW_MS) });
+
+  it("getQuotaOut with no global flag asks D1 nothing", async () => {
+    const env = makeEnv();
+    let prepared = 0;
+    env.DB = {
+      prepare() {
+        prepared++;
+        throw new Error("no D1 expected");
+      },
+    } as unknown as D1Database;
+    expect(await getQuotaOut(env, NOW_MS)).toBeNull();
+    expect(prepared).toBe(0);
+  });
+
+  it("clearQuotaOut also clears the own project's flag", async () => {
+    const env = makeEnv();
+    await env.CACHE.put(QUOTA_OUT_KEY, flag);
+    await markProjectOut(env, OWN_PROJECT, NOW_MS);
+    await clearQuotaOut(env);
+    expect(await env.CACHE.get(QUOTA_OUT_KEY)).toBeNull();
+    expect(await env.CACHE.get("yt:quota:out:shared")).toBeNull();
+  });
+
+  it("drops a token 300 s early and refuses one that is about to expire", async () => {
+    const env = makeEnv();
+    const r = await storePushedTokens(env, [tok("soon", { expiresAt: NOW + 300 })], CH, NOW);
+    expect(r.rejected).toEqual([{ account: "soon", reason: "expired" }]);
+    await storePushedTokens(env, [tok("upload2", { expiresAt: NOW + 400 })], CH, NOW);
+    expect((await poolProjects(env, NOW_MS)).map((p) => p.key)).toContain("upload2");
+    expect((await poolProjects(env, NOW_MS + 150_000)).map((p) => p.key)).not.toContain("upload2");
+  });
+
+  it("pickProject falls through to the next project when a token is gone", async () => {
+    const env = makeEnv();
+    await storePushedTokens(env, [tok("upload2")], CH, NOW);
+    await recordUnits(env, OWN_PROJECT, "sync", 5000, NOW_MS);
+    await env.CACHE.delete("yt:pool:token:upload2");
+    expect(await pickProject(env, { nowMs: NOW_MS })).toEqual({
+      key: OWN_PROJECT,
+      accessToken: null,
+    });
   });
 });

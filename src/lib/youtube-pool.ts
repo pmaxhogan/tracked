@@ -112,7 +112,8 @@ export async function storePushedTokens(
     const account = typeof t?.account === "string" ? t.account : "";
     if (!isPushed(t)) rejected.push({ account, reason: "invalid" });
     else if (t.account === OWN_PROJECT) rejected.push({ account, reason: "own" });
-    else if (t.expiresAt <= nowSec) rejected.push({ account, reason: "expired" });
+    else if (t.expiresAt <= nowSec + TOKEN_SKEW_SECONDS)
+      rejected.push({ account, reason: "expired" });
     else if (!ownChannelId || t.channelId !== ownChannelId)
       rejected.push({ account, reason: "channel" });
     else {
@@ -159,6 +160,14 @@ const usable = (p: PoolProject) => p.hasToken && !p.out && p.remaining >= POOL_M
 
 /** The own project plus every key with a live pushed token, with today's numbers. The legacy global flag reads as "own project out" and moves to `yt:quota:out:shared` once another project can take over. */
 export async function poolProjects(env: Env, nowMs = Date.now()): Promise<PoolProject[]> {
+  return (await loadPool(env, nowMs)).projects;
+}
+
+async function loadPool(
+  env: Env,
+  nowMs: number,
+): Promise<{ projects: PoolProject[]; tokens: Map<string, string> }> {
+  const tokens = new Map<string, string>();
   try {
     const spent = await spentToday(env, nowMs);
     const make = (key: string, label: string, mkvidUnits: number, out: Out | null): PoolProject => {
@@ -182,7 +191,13 @@ export async function poolProjects(env: Env, nowMs = Date.now()): Promise<PoolPr
     for (const account of await readIndex(env)) {
       if (account === OWN_PROJECT) continue;
       const t = await readJson<StoredToken>(env, TOKEN_PREFIX + account);
-      if (!t || typeof t.accessToken !== "string" || !(t.expiresAt * 1000 > nowMs)) continue;
+      if (
+        !t ||
+        typeof t.accessToken !== "string" ||
+        !((t.expiresAt - TOKEN_SKEW_SECONDS) * 1000 > nowMs)
+      )
+        continue;
+      tokens.set(account, t.accessToken);
       projects.push(
         make(
           account,
@@ -202,9 +217,9 @@ export async function poolProjects(env: Env, nowMs = Date.now()): Promise<PoolPr
       }
       await env.CACHE.delete(LEGACY_OUT_KEY);
     }
-    return projects;
+    return { projects, tokens };
   } catch {
-    return [];
+    return { projects: [], tokens };
   }
 }
 
@@ -220,18 +235,18 @@ export async function pickProject(
   opts: { exclude?: string[]; nowMs?: number } = {},
 ): Promise<{ key: string; accessToken: string | null } | null> {
   const nowMs = opts.nowMs ?? Date.now();
-  const candidates = (await poolProjects(env, nowMs)).filter(
-    (p) => usable(p) && !opts.exclude?.includes(p.key),
+  const { projects, tokens } = await loadPool(env, nowMs);
+  // A pushed project is only a candidate with the token this same read loaded.
+  const candidates = projects.filter(
+    (p) =>
+      usable(p) && !opts.exclude?.includes(p.key) && (p.key === OWN_PROJECT || tokens.has(p.key)),
   );
   candidates.sort(
     (a, b) =>
       b.remaining - a.remaining || Number(b.key === OWN_PROJECT) - Number(a.key === OWN_PROJECT),
   );
   const best = candidates[0];
-  if (!best) return null;
-  if (best.key === OWN_PROJECT) return { key: best.key, accessToken: null };
-  const t = await readJson<StoredToken>(env, TOKEN_PREFIX + best.key);
-  return t ? { key: best.key, accessToken: t.accessToken } : null;
+  return best ? { key: best.key, accessToken: tokens.get(best.key) ?? null } : null;
 }
 
 /** The project got a daily-quota reply: out until the quota day ends. */
@@ -281,4 +296,9 @@ export function unitCost(method: string, url: string): number {
     path = url.split("?")[0] ?? url;
   }
   return path.replace(/\/+$/, "").endsWith("/search") ? 100 : 1;
+}
+
+/** The owner's early clear for one project. */
+export async function clearProjectOut(env: Env, key: string): Promise<void> {
+  await env.CACHE.delete(OUT_PREFIX + key);
 }
