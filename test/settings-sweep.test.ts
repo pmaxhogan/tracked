@@ -8,6 +8,7 @@ import {
   APP_SETTINGS_KEY,
   DEFAULT_APP_SETTINGS,
   getAppSettings,
+  migrateQuotaConsumers,
   updateAppSettings,
   type AppSettings,
 } from "../src/lib/app-settings";
@@ -200,7 +201,7 @@ describe("app settings", () => {
 
   it("stores a partial update, validates it, and a null resets an env-backed field", async () => {
     const env = kvEnv();
-    expect(await getAppSettings(env)).toEqual(DEFAULT_APP_SETTINGS);
+    expect(await getAppSettings(env)).toEqual(migrateQuotaConsumers(DEFAULT_APP_SETTINGS, {}));
     const r = await updateAppSettings(env, { mkvid: { dailyClaimCap: 0, retryBackoffHours: 2 } });
     expect(r.ok && r.settings.mkvid).toMatchObject({
       dailyClaimCap: 0,
@@ -249,7 +250,7 @@ describe("app settings", () => {
   it("a stored document that no longer validates is ignored", async () => {
     const env = kvEnv();
     await env.SUBS.put(APP_SETTINGS_KEY, JSON.stringify({ mkvid: { maxAttempts: "many" } }));
-    expect(await getAppSettings(env)).toEqual(DEFAULT_APP_SETTINGS);
+    expect(await getAppSettings(env)).toEqual(migrateQuotaConsumers(DEFAULT_APP_SETTINGS, {}));
   });
 
   it("precedence: saved value > env var > code default (0 is a real value)", () => {
@@ -420,7 +421,7 @@ describe("routes", () => {
       defaults: AppSettings;
       effective: { mkvid: { dailyClaimCap: number } };
     };
-    expect(got.settings).toEqual(DEFAULT_APP_SETTINGS);
+    expect(got.settings).toEqual(migrateQuotaConsumers(DEFAULT_APP_SETTINGS, {}));
     expect(got.defaults).toEqual(DEFAULT_APP_SETTINGS);
     expect(got.effective.mkvid.dailyClaimCap).toBe(6);
     const put = await call(env, "PUT", "/ui/api/settings", { mkvid: { dailyClaimCap: 0 } });

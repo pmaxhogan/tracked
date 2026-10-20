@@ -277,6 +277,24 @@ export const AppSettingsSchema = z.object({
     /** Stored set pages (R2) the 5-minute cron reads for the graph a tick; no pool fetch (default 10). 0 = none. */
     pagesPerTick: z.number().int().min(0).max(100),
   }),
+  /** YouTube quota: who goes first when the pool runs short (lib/quota-consumers.ts has the catalogue). */
+  quota: z.object({
+    /** Consumer keys, highest rank first. Owner actions always go before all of them. */
+    order: z.array(z.string().min(1).max(40)).max(30),
+    /** Units always left in the pool for owner actions (default 300). */
+    margin: z.number().int().min(0).max(5000),
+    /** Units one Google project may spend a quota day (default 10,000). */
+    projectBudget: z.number().int().min(1).max(1_000_000),
+    /** Per consumer: keep at least `min` units for it, let it spend at most `max` a day (null = none), or switch it off. A missing entry is filled from the old caps on read (migrateQuotaConsumers). */
+    consumers: z.record(
+      z.string(),
+      z.object({
+        min: z.number().int().min(0).max(1_000_000).nullable(),
+        max: z.number().int().min(0).max(1_000_000).nullable(),
+        enabled: z.boolean(),
+      }),
+    ),
+  }),
   retention: z.object({
     /** Now-playing and playlist-addition audit rows are kept this many days (default 90). */
     auditDays: z.number().int().min(1).max(3650),
@@ -378,15 +396,68 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     lengthToleranceMinutes: 2,
   },
   graph: { nodeCap: 5000, confirmOver: 300, backfill: true, pagesPerTick: 10 },
+  quota: {
+    order: [
+      "likes",
+      "presave_playlists",
+      "dj_playlists",
+      "hygiene",
+      "mkvid_uploads",
+      "mkvid_recreate",
+      "combined",
+      "renames",
+      "ordering",
+    ],
+    margin: 300,
+    projectBudget: 10000,
+    consumers: {},
+  },
   retention: { auditDays: 90, tickHistoryDays: 14 },
 };
+
+/** Sweep removals a day when neither the setting nor PLAYLIST_SWEEP_DAILY_REMOVALS is set (as lib/playlist-hygiene.ts). */
+const DEFAULT_SWEEP_REMOVALS = 40;
+
+function sweepRemovals(s: AppSettings, env: { PLAYLIST_SWEEP_DAILY_REMOVALS?: string }): number {
+  if (s.playlists.sweepDailyRemovals !== null) return s.playlists.sweepDailyRemovals;
+  const raw = env.PLAYLIST_SWEEP_DAILY_REMOVALS;
+  const n = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(n) && n >= 0
+    ? Math.floor(n)
+    : DEFAULT_SWEEP_REMOVALS;
+}
+
+/**
+ * Fill every quota consumer that has no entry yet from the old per-feature
+ * caps (their live values), so the owner's current limits carry over. Pure:
+ * nothing is written; an entry already present is never touched.
+ */
+export function migrateQuotaConsumers(
+  s: AppSettings,
+  env: { PLAYLIST_SWEEP_DAILY_REMOVALS?: string },
+): AppSettings {
+  const have = s.quota.consumers;
+  const fill: AppSettings["quota"]["consumers"] = {};
+  if (!have.ordering) {
+    const units = s.playlists.orderDailyUnits;
+    fill.ordering = { min: null, max: units, enabled: units > 0 };
+  }
+  if (!have.combined)
+    fill.combined = { min: null, max: s.playlists.combinedDailyInsertCap * 50, enabled: true };
+  if (!have.hygiene) fill.hygiene = { min: null, max: sweepRemovals(s, env) * 51, enabled: true };
+  if (!have.likes) fill.likes = { min: null, max: s.presave.likeDailyUnitCap, enabled: true };
+  if (Object.keys(fill).length === 0) return s;
+  return { ...s, quota: { ...s.quota, consumers: { ...have, ...fill } } };
+}
 
 const memo = new WeakMap<object, { at: number; value: AppSettings }>();
 
 /** Current settings: the stored document over the defaults (memoised MEMO_MS). One that no longer validates is ignored. */
-export async function getAppSettings(env: Partial<Pick<Env, "SUBS">>): Promise<AppSettings> {
+export async function getAppSettings(
+  env: Partial<Pick<Env, "SUBS" | "PLAYLIST_SWEEP_DAILY_REMOVALS">>,
+): Promise<AppSettings> {
   const kv = env.SUBS;
-  if (!kv) return DEFAULT_APP_SETTINGS;
+  if (!kv) return migrateQuotaConsumers(DEFAULT_APP_SETTINGS, env);
   const hit = memo.get(kv);
   if (hit && Date.now() - hit.at < MEMO_MS) return hit.value;
   let stored: unknown;
@@ -398,7 +469,7 @@ export async function getAppSettings(env: Partial<Pick<Env, "SUBS">>): Promise<A
   const parsed = stored
     ? AppSettingsSchema.safeParse(mergeSettings(DEFAULT_APP_SETTINGS, stored))
     : null;
-  const value = parsed?.success ? parsed.data : DEFAULT_APP_SETTINGS;
+  const value = migrateQuotaConsumers(parsed?.success ? parsed.data : DEFAULT_APP_SETTINGS, env);
   memo.set(kv, { at: Date.now(), value });
   return value;
 }
