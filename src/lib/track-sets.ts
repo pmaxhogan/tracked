@@ -18,6 +18,7 @@
  *       <div class="tlUser" title="creator">...<a href="/user/<name>/index.html">...</a></div>
  *       <div class="likes" title="likes">...2</div>   ("likes hidden", no number, at 0)
  *       <div title="musicstyle(s)">...Tech House, Techno</div>
+ *       <div title="IDed tracks / total tracks">...15/16</div>   ("<span>all</span>/28" when every row is IDed)
  *
  * newest first. Seen live 2026-10-20; the scroll request honours `count`
  * (500 rows came back in one request), so a walk asks for
@@ -110,6 +111,8 @@ export type TrackSetRow = {
   likes: number | null;
   /** Its music styles as the row writes them ("Tech House, Techno"), null when it shows none. */
   genres: string | null;
+  /** Rows in the list (the "IDed / total" badge's total), null when the row shows none. */
+  totalTracks: number | null;
 };
 
 const OITM_TAG_RE = /<div\b[^>]*\bclass="[^"]*\boItm\b[^"]*"[^>]*>/g;
@@ -152,6 +155,9 @@ export function parseTrackSetRows(html: string): TrackSetRow[] {
     const viewsAttr = block.match(/class="[^"]*\bviews\b[^"]*"[^>]*\bdata-count="(\d+)"/)?.[1];
     const likesTag = block.match(/<div\b([^>]*\btitle="likes"[^>]*)>([\s\S]*?)<\/div>/);
     const likesNum = likesTag ? stripTags(likesTag[2]!).match(/\d+/)?.[0] : undefined;
+    const total = stripTags(
+      block.match(/title="IDed tracks \/ total tracks"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "",
+    ).match(/\/\s*(\d+)/)?.[1];
     const genres = stripTags(
       block.match(/title="musicstyle\(s\)"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "",
     );
@@ -164,6 +170,7 @@ export function parseTrackSetRows(html: string): TrackSetRow[] {
       views: viewsAttr !== undefined ? Number(viewsAttr) : null,
       likes: likesTag ? (likesNum !== undefined ? Number(likesNum) : 0) : null,
       genres: genres || null,
+      totalTracks: total !== undefined ? Number(total) : null,
     });
   });
   return rows;
@@ -179,11 +186,13 @@ export function trackPageIdOf(url: string | null | undefined): string | null {
  * whole and split on "&", ",", "b2b" and "vs" ("Meduza & Greggio - Aeterna
  * Radio 018" -> meduza & greggio, meduza, greggio). Lowercased.
  */
+/** The DJ part of a set title: before " @ " or " - " ("Meduza & Greggio - Aeterna Radio 018" -> "Meduza & Greggio"). */
+export function titleDjPart(title: string): string {
+  return title.split(/\s+[@\u2013-]\s+/)[0]!.trim();
+}
+
 export function titleDjNames(title: string): string[] {
-  const head = title
-    .split(/\s+[@\u2013-]\s+/)[0]!
-    .trim()
-    .toLowerCase();
+  const head = titleDjPart(title).toLowerCase();
   if (!head) return [];
   const parts = head
     .split(/\s*(?:&|,|\bb2b\b|\bvs\.?(?=\s))\s*/i)
@@ -232,15 +241,16 @@ export async function storeTrackSetRows(
     for (const r of res) added += Number(r.meta?.changes ?? 0);
   }
   const up = db.prepare(
-    `INSERT INTO track_set_lists (set_id, set_url, title, set_date, creator, track_count, followed, first_seen_at, updated_at, views, likes, genres)
+    `INSERT INTO track_set_lists (set_id, set_url, title, set_date, creator, track_count, followed, first_seen_at, updated_at, views, likes, genres, total_tracks, djs)
      VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COUNT(*) FROM track_sets WHERE set_id = ?1),
-             CASE WHEN ?6 = 1 OR ${FOLLOWED_BY_ID_SQL} THEN 1 ELSE 0 END, ?7, ?7, ?8, ?9, ?10)
+             CASE WHEN ?6 = 1 OR ${FOLLOWED_BY_ID_SQL} THEN 1 ELSE 0 END, ?7, ?7, ?8, ?9, ?10, ?11, ?12)
      ON CONFLICT(set_id) DO UPDATE SET
        set_url = excluded.set_url, title = excluded.title,
        set_date = COALESCE(excluded.set_date, set_date), creator = COALESCE(excluded.creator, creator),
        track_count = excluded.track_count, followed = excluded.followed, updated_at = excluded.updated_at,
        views = COALESCE(excluded.views, views), likes = COALESCE(excluded.likes, likes),
-       genres = COALESCE(excluded.genres, genres)`,
+       genres = COALESCE(excluded.genres, genres), total_tracks = COALESCE(excluded.total_tracks, total_tracks),
+       djs = excluded.djs`,
   );
   for (let i = 0; i < rows.length; i += BATCH_CHUNK)
     await db.batch(
@@ -258,6 +268,8 @@ export async function storeTrackSetRows(
             r.views,
             r.likes,
             r.genres,
+            r.totalTracks,
+            titleDjPart(r.title) || null,
           ),
         ),
     );
@@ -833,6 +845,9 @@ type RecommendedRow = {
   views: number | null;
   likes: number | null;
   genres: string | null;
+  total_tracks: number | null;
+  share: number | null;
+  djs: string | null;
   first_seen_at: number;
 };
 
@@ -840,7 +855,7 @@ type RecommendedRow = {
 export const RECOMMENDED_TABLE: TableDef<RecommendedRow> = {
   from: "track_set_lists",
   select:
-    "set_id, set_url, title, set_date, creator, track_count, views, likes, genres, first_seen_at",
+    "set_id, set_url, title, set_date, creator, track_count, views, likes, genres, total_tracks, djs, first_seen_at, CAST(track_count AS REAL) / NULLIF(total_tracks, 0) AS share",
   where: "followed = 0",
   primaryKey: "set_id",
   defaultSort: "-track_count",
@@ -854,6 +869,10 @@ export const RECOMMENDED_TABLE: TableDef<RecommendedRow> = {
     views: { sql: "views", type: "number" },
     likes: { sql: "likes", type: "number" },
     genres: { sql: "genres", type: "text", searchable: true, sortable: false },
+    total_tracks: { sql: "total_tracks", type: "number" },
+    // The share of the set the followed tracks make up: a long countdown ranks by its length otherwise.
+    share: { sql: "CAST(track_count AS REAL) / NULLIF(total_tracks, 0)", type: "number" },
+    djs: { sql: "djs", type: "text", searchable: true },
     first_seen_at: { sql: "first_seen_at", type: "datetime", storage: "s" },
   },
 };

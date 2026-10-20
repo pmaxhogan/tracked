@@ -42,7 +42,7 @@ function rowHtml(
   title: string,
   date: string,
   creator = "EvanPierini",
-  extra: { likes?: number; genres?: string } = {},
+  extra: { likes?: number; genres?: string; ided?: string } = {},
 ): string {
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   return (
@@ -52,7 +52,7 @@ function rowHtml(
     `<div class="mediaRow iRow"><div class="badge views" title="tracklist views" data-count="28"><i class="fa fa-eye spR"></i>28</div>` +
     `<div title="tracklist date"><i class="fa fa-calendar fa-20 spR"></i>${date}</div>` +
     `<div class="tlUser" title="creator" onclick="cancelBubble();"><i class="fa fa-user fa-20 spR"></i><a href="/user/${creator}/index.html">${creator}</a><span class="noMob spL">(60)</span></div>` +
-    `<div title="IDed tracks / total tracks"><i class="fa fa-check fa-20 spR"></i>14/14</div>` +
+    `<div title="IDed tracks / total tracks"><i class="fa fa-check fa-20 spR"></i>${extra.ided ?? '<span class="greenTxt">all</span>/14'}</div>` +
     (extra.likes
       ? `<div class="likes" title="likes"><i class="fa fa-thumbs-up fa-20 spR"></i>${extra.likes}</div>`
       : `<div class="likes hidden" title="likes"><i class="fa fa-thumbs-up fa-20 spR"></i></div>`) +
@@ -212,6 +212,7 @@ describe("parseTrackSetRows", () => {
         views: 28,
         likes: 0,
         genres: "Tech House",
+        totalTracks: 14,
       },
       {
         setId: "1sjc9yyk",
@@ -222,6 +223,7 @@ describe("parseTrackSetRows", () => {
         views: 28,
         likes: 0,
         genres: "Tech House",
+        totalTracks: 14,
       },
     ]);
   });
@@ -231,9 +233,14 @@ describe("parseTrackSetRows", () => {
       rowHtml("l1", "A - One", "2025-01-02", "U", {
         likes: 12,
         genres: "Dance / Electro Pop, Tech House",
+        ided: "15/16",
       }),
     );
-    expect(liked).toMatchObject({ likes: 12, genres: "Dance / Electro Pop, Tech House" });
+    expect(liked).toMatchObject({
+      likes: 12,
+      genres: "Dance / Electro Pop, Tech House",
+      totalTracks: 16,
+    });
     const [bare] = parseTrackSetRows(
       `<div class="bItm action oItm" data-id="b1"><div class="bTitle"><a href="/tracklist/b1/x.html">B - Two</a></div></div>`,
     );
@@ -241,6 +248,7 @@ describe("parseTrackSetRows", () => {
       views: null,
       likes: null,
       genres: null,
+      totalTracks: null,
       date: null,
       creator: null,
     });
@@ -769,7 +777,13 @@ describe("Recommended sets", () => {
     const res = await app.request("/ui/api/recommended", {}, env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      rows: Array<{ set_id: string; track_count: number; title: string; set_url: string }>;
+      rows: Array<{
+        set_id: string;
+        track_count: number;
+        title: string;
+        set_url: string;
+        share: number;
+      }>;
       total: number;
       progress: unknown;
     };
@@ -778,13 +792,40 @@ describe("Recommended sets", () => {
       ["mid", 2],
     ]);
     expect(body.total).toBe(2);
-    expect(body.rows[0]).toMatchObject({ views: 28, likes: 0, genres: "Tech House" });
+    expect(body.rows[0]).toMatchObject({
+      views: 28,
+      likes: 0,
+      genres: "Tech House",
+      total_tracks: 14,
+      djs: "Stranger",
+    });
+    expect(body.rows[0]!.share).toBeCloseTo(3 / 14);
     expect(body.progress).toEqual({ queued: 1, walked: 1, walking: 0, sets: 2 });
     expect(await trackSetsSummary(env)).toEqual(body.progress);
     // Sorting by views and filtering on a genre are table queries like any other.
     const byGenre = await app.request("/ui/api/recommended?f.genres=has:tech&sort=-views", {}, env);
     expect(byGenre.status).toBe(200);
     expect(((await byGenre.json()) as { total: number }).total).toBe(2);
+  });
+
+  it("ranks by the share of the set: a short set with fewer matches beats a long countdown", async () => {
+    const env = makeEnv();
+    const long = parseTrackSetRows(
+      rowHtml("countdown", "AdamK & Camille - Top 1000", "2026-01-01", "U", { ided: "900/1000" }),
+    );
+    const short = parseTrackSetRows(
+      rowHtml("tight", "Stranger @ Club", "2026-01-01", "U", { ided: "all/20" }),
+    );
+    for (let i = 0; i < 30; i++) await storeTrackSetRows(env, `t${i}`, long, new Set(), NOW);
+    for (let i = 0; i < 10; i++) await storeTrackSetRows(env, `t${i}`, short, new Set(), NOW);
+    const res = await app.request("/ui/api/recommended?sort=-share", {}, env);
+    const rows = (
+      (await res.json()) as { rows: Array<{ set_id: string; share: number; djs: string }> }
+    ).rows;
+    expect(rows.map((r) => [r.set_id, r.share, r.djs])).toEqual([
+      ["tight", 0.5, "Stranger"],
+      ["countdown", 0.03, "AdamK & Camille"],
+    ]);
   });
 
   it("lists the tracks that put a set there, named from the search index when it has them", async () => {
