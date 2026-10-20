@@ -51,8 +51,11 @@ describe("settings form: pre-save and track upload cards", () => {
     const gs = groups();
     const presave = gs.find((g) => g.id === "sf-presave")!;
     const tu = gs.find((g) => g.id === "sf-track-uploads")!;
+    // likeDailyUnitCap moved to the YouTube quota page (it stays in the schema).
     expect(presave.fields.map((f) => f.path)).toEqual(
-      Object.keys(DEFAULT_APP_SETTINGS.presave).map((k) => `presave.${k}`),
+      Object.keys(DEFAULT_APP_SETTINGS.presave)
+        .filter((k) => k !== "likeDailyUnitCap")
+        .map((k) => `presave.${k}`),
     );
     expect(tu.fields.map((f) => f.path)).toEqual(
       Object.keys(DEFAULT_APP_SETTINGS.trackUploads).map((k) => `trackUploads.${k}`),
@@ -82,8 +85,9 @@ describe("settings form: pre-save and track upload cards", () => {
     );
     expect(el(presave, "presave.priority").value).toBe("recheck");
     const patch = { ...SF.read(presave).patch, ...SF.read(tu).patch };
+    const { likeDailyUnitCap: _moved, ...presaveShown } = DEFAULT_APP_SETTINGS.presave;
     expect(patch).toEqual({
-      presave: DEFAULT_APP_SETTINGS.presave,
+      presave: presaveShown,
       trackUploads: DEFAULT_APP_SETTINGS.trackUploads,
     });
 

@@ -863,7 +863,7 @@ describe("Playlists page script", () => {
     expect(ord).not.toContain("ago");
     // It ships paused: the card says so, how to start, and what each budget would mean.
     expect(ord).toContain("moving is paused");
-    expect(ord).toContain('href="/ui/settings#sf-playlists"');
+    expect(ord).toContain('href="/ui/quota"');
     expect(ord).toContain("2,000 a day: about 2 days");
     expect(ord).toContain("combined playlist not ordered");
     expect(ord).toContain("Playlist moves per run to 1");

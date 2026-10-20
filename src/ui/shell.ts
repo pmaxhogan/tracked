@@ -34,6 +34,7 @@ export type NavKey =
   | "captcha"
   | "pool-settings"
   | "scheduler"
+  | "quota"
   | "settings"
   | "tools";
 
@@ -123,6 +124,7 @@ export const NAV: NavItem[] = [
     group: "Pool",
   },
   { key: "scheduler", label: "Scheduler", href: "/ui/scheduler", icon: "clock", group: "Pool" },
+  { key: "quota", label: "YouTube quota", href: "/ui/quota", icon: "chart", group: "Pool" },
   { key: "settings", label: "Settings", href: "/ui/settings", icon: "settings", group: null },
   { key: "tools", label: "Tools", href: "/ui/tools", icon: "tools", group: null },
 ];

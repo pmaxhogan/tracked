@@ -26,7 +26,14 @@ export type FormField = {
   /** Blank saves null: the env var, else the code default. */
   nullable?: boolean;
 };
-export type FormGroup = { id: string; title: string; intro?: string; fields: FormField[] };
+export type FormGroup = {
+  id: string;
+  title: string;
+  intro?: string;
+  /** A link shown under the intro (the quota page for the groups whose caps moved there). */
+  link?: { href: string; text: string };
+  fields: FormField[];
+};
 
 export const SETTINGS_FORM_CSS = /* css */ `
   .sf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--sp-2) var(--sp-4); }
@@ -72,6 +79,7 @@ export const SETTINGS_FORM_JS = /* js */ `
     function mount(container, groups, onSave) {
       container.innerHTML = groups.map((g) => '<form id="' + g.id + '" class="tk-card" autocomplete="off" novalidate><h2>' + esc(g.title) + '</h2>' +
         (g.intro ? '<p class="muted sub sf-intro">' + esc(g.intro) + '</p>' : '') +
+        (g.link ? '<p class="sf-intro"><a href="' + esc(g.link.href) + '">' + esc(g.link.text) + '</a></p>' : '') +
         '<div class="error sf-form-err"></div><div class="sf-grid">' + g.fields.map((f) => fieldHtml(g, f)).join('') + '</div>' +
         '<div class="sf-foot"><span class="muted sf-msg" role="status"></span><span class="spacer"></span><button type="submit" class="btn primary">Save</button></div></form>').join('');
       for (const g of groups) {

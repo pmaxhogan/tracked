@@ -120,21 +120,15 @@ const APP_GROUPS: FormGroup[] = [
   {
     id: "sf-playlists",
     title: "Playlists",
+    link: { href: "/ui/quota", text: "YouTube quota" },
+    intro:
+      "How many sweep removals, combined inserts and ordering moves a day, and who goes first, is set on the YouTube quota page.",
     fields: [
       {
         path: "playlists.sweepDryRun",
         label: "Removal sweep only reports",
         help: "On: videos that are not full recordings, and deleted or private videos still in a playlist, are only listed on the Removed page. Off: they are taken out. Blank = PLAYLIST_SWEEP_DRY_RUN (unset = on).",
         kind: "bool",
-        nullable: true,
-      },
-      {
-        path: "playlists.sweepDailyRemovals",
-        label: "Sweep removals a day",
-        help: "50 quota units each; dead videos taken out of a playlist count too. Blank = env, else 40.",
-        min: 0,
-        max: 500,
-        step: 1,
         nullable: true,
       },
       {
@@ -185,28 +179,12 @@ const APP_GROUPS: FormGroup[] = [
         step: 1,
       },
       {
-        path: "playlists.combinedDailyInsertCap",
-        label: "Combined playlist inserts a day",
-        help: "50 quota units each. Default 80.",
-        min: 0,
-        max: 190,
-        step: 1,
-      },
-      {
         path: "playlists.combinedMaxInsertsPerRun",
         label: "Combined playlist inserts per run",
         help: "Default 20.",
         min: 0,
         max: 100,
         step: 1,
-      },
-      {
-        path: "playlists.orderDailyUnits",
-        label: "Quota units a day for ordering playlists",
-        help: "Moves videos already in an artist playlist to their set-date place, 50 units each. 0 = paused (the default): nothing is moved. Otherwise at least 110. Check now on the Playlists page says what a budget means in days; start small.",
-        min: 0,
-        max: 10000,
-        step: 10,
       },
       {
         path: "playlists.orderMovesPerRun",
@@ -221,6 +199,7 @@ const APP_GROUPS: FormGroup[] = [
   {
     id: "sf-presave",
     title: "Pre-saves",
+    link: { href: "/ui/quota", text: "YouTube quota" },
     intro:
       "Pre-saved tracks are looked up again until 1001tracklists has a YouTube link. Recheck on a track always works.",
     fields: [
@@ -286,15 +265,6 @@ const APP_GROUPS: FormGroup[] = [
         label: "Like it on YouTube",
         help: "Once it has a video (found or uploaded), so it is in your liked music. One you disliked is left alone.",
         kind: "bool",
-      },
-      {
-        path: "presave.likeDailyUnitCap",
-        label: "Likes may spend a day",
-        help: "Quota units, 51 a like. The rest wait for the next day. Default 1000.",
-        unit: "units",
-        min: 0,
-        max: 10000,
-        step: 1,
       },
       {
         path: "presave.playlistTitle",

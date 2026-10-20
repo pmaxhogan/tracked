@@ -174,7 +174,7 @@ ${YOUTUBE_CARD_JS}
     const stopped = (d.playlists || []).filter((p) => p.problem === 'unexpected_position' || p.problem === 'no_progress');
     let html = '<div class="headline">' + head + '</div><div class="bits">' + bits.join(' · ') + '</div>';
     // Paused is the owner's own setting, not a fault: say how to start, and what a budget means once the moves are counted.
-    if (paused) html += '<div class="bits">To start, set <a href="/ui/settings#sf-playlists">Quota units a day for ordering playlists</a> in Settings.' +
+    if (paused) html += '<div class="bits">To start, switch on Set-date ordering and give it a daily maximum on the <a href="/ui/quota">YouTube quota</a> page.' +
       (t.unread === t.playlists ? ' Check now first counts the moves.' : d.estimate && d.estimate.moves ? ' ' + (d.daysAt || []).map((x) => x.dailyUnits.toLocaleString() + ' a day: about ' + x.days + ' day' + (x.days === 1 ? '' : 's')).join(' · ') + '.' : '') +
       ' For the first day set Playlist moves per run to 1 and a small budget (200), and watch the log for playlist_order.first_move_confirmed (a move landed where planned) before raising either.</div>';
     // A move that was not found where planned stops that playlist before more quota is spent. It is tried again by itself: a warning, not red.
