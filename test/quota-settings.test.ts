@@ -5,10 +5,13 @@
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_APP_SETTINGS,
+  DEFAULT_SWEEP_REMOVALS,
   getAppSettings,
+  updateAppSettings,
   migrateQuotaConsumers,
   type AppSettings,
 } from "../src/lib/app-settings";
+import { DEFAULT_SWEEP_DAILY_REMOVALS } from "../src/lib/playlist-hygiene";
 import { QUOTA_CONSUMERS } from "../src/lib/quota-consumers";
 import { fakeKV } from "./helpers/fake-kv";
 
@@ -122,5 +125,44 @@ describe("getAppSettings", () => {
     expect(s.quota.consumers.combined?.max).toBe(4000);
     expect(s.quota.consumers.hygiene?.max).toBe(1275);
     expect(JSON.parse((await SUBS.get("app:settings")) as string).quota).toBeUndefined();
+  });
+});
+
+describe("quota validation", () => {
+  const bad: Array<[string, unknown, string]> = [
+    ["a dropped key", { quota: { order: KEYS.slice(1) } }, "quota.order"],
+    ["a duplicate", { quota: { order: [...KEYS.slice(1), KEYS[1]] } }, "quota.order"],
+    ["an unknown order key", { quota: { order: [...KEYS.slice(1), "nope"] } }, "quota.order"],
+    [
+      "an unknown consumer",
+      { quota: { consumers: { nope: { min: null, max: null, enabled: true } } } },
+      "quota.consumers",
+    ],
+  ];
+  for (const [name, patch, path] of bad)
+    it(`rejects ${name}`, async () => {
+      const r = await updateAppSettings({ SUBS: fakeKV() }, patch);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.issues.join(" ")).toContain(path);
+    });
+
+  it("accepts a reordered permutation", async () => {
+    const r = await updateAppSettings(
+      { SUBS: fakeKV() },
+      { quota: { order: [...KEYS].reverse() } },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("the first save resolves hygiene from the env var", async () => {
+    const r = await updateAppSettings(
+      { SUBS: fakeKV(), PLAYLIST_SWEEP_DAILY_REMOVALS: "25" },
+      { quota: { margin: 400 } },
+    );
+    expect(r.ok && r.settings.quota.consumers.hygiene?.max).toBe(1275);
+  });
+
+  it("the sweep default matches playlist-hygiene's", () => {
+    expect(DEFAULT_SWEEP_REMOVALS).toBe(DEFAULT_SWEEP_DAILY_REMOVALS);
   });
 });

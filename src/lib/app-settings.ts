@@ -17,6 +17,7 @@
 import { z } from "zod";
 import type { Env } from "../types";
 import { mergeSettings } from "./pool-settings";
+import { QUOTA_CONSUMERS } from "./quota-consumers";
 
 export const APP_SETTINGS_KEY = "app:settings";
 const MEMO_MS = 30_000;
@@ -29,6 +30,8 @@ export const DEFAULT_HEARTHIS_DOWNLOADS_PER_HOUR = 3;
 
 /** mkvid's own default for hearthis.at page fetches an hour (its lib/hearthis.ts), when neither the setting nor its env var is set. */
 export const DEFAULT_HEARTHIS_PAGES_PER_HOUR = 20;
+
+const QUOTA_KEYS = QUOTA_CONSUMERS.map((c) => c.key);
 
 export const AppSettingsSchema = z.object({
   mkvid: z.object({
@@ -280,20 +283,28 @@ export const AppSettingsSchema = z.object({
   /** YouTube quota: who goes first when the pool runs short (lib/quota-consumers.ts has the catalogue). */
   quota: z.object({
     /** Consumer keys, highest rank first. Owner actions always go before all of them. */
-    order: z.array(z.string().min(1).max(40)).max(30),
+    order: z
+      .array(z.string())
+      .refine((o) => o.length === QUOTA_KEYS.length && QUOTA_KEYS.every((k) => o.includes(k)), {
+        message: "must list every quota consumer exactly once",
+      }),
     /** Units always left in the pool for owner actions (default 300). */
     margin: z.number().int().min(0).max(5000),
     /** Units one Google project may spend a quota day (default 10,000). */
     projectBudget: z.number().int().min(1).max(1_000_000),
     /** Per consumer: keep at least `min` units for it, let it spend at most `max` a day (null = none), or switch it off. A missing entry is filled from the old caps on read (migrateQuotaConsumers). */
-    consumers: z.record(
-      z.string(),
-      z.object({
-        min: z.number().int().min(0).max(1_000_000).nullable(),
-        max: z.number().int().min(0).max(1_000_000).nullable(),
-        enabled: z.boolean(),
+    consumers: z
+      .record(
+        z.string(),
+        z.object({
+          min: z.number().int().min(0).max(1_000_000).nullable(),
+          max: z.number().int().min(0).max(1_000_000).nullable(),
+          enabled: z.boolean(),
+        }),
+      )
+      .refine((c) => Object.keys(c).every((k) => QUOTA_KEYS.includes(k)), {
+        message: "unknown quota consumer",
       }),
-    ),
   }),
   retention: z.object({
     /** Now-playing and playlist-addition audit rows are kept this many days (default 90). */
@@ -416,7 +427,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 };
 
 /** Sweep removals a day when neither the setting nor PLAYLIST_SWEEP_DAILY_REMOVALS is set (as lib/playlist-hygiene.ts). */
-const DEFAULT_SWEEP_REMOVALS = 40;
+/** Pinned to playlist-hygiene's DEFAULT_SWEEP_DAILY_REMOVALS by test/quota-settings.test.ts. */
+export const DEFAULT_SWEEP_REMOVALS = 40;
 
 function sweepRemovals(s: AppSettings, env: { PLAYLIST_SWEEP_DAILY_REMOVALS?: string }): number {
   if (s.playlists.sweepDailyRemovals !== null) return s.playlists.sweepDailyRemovals;
@@ -479,7 +491,7 @@ export type AppSettingsUpdate =
 
 /** Apply a partial update (deep-merged over the current settings), validate, store. `null` resets an env-backed field. */
 export async function updateAppSettings(
-  env: Pick<Env, "SUBS">,
+  env: Pick<Env, "SUBS"> & Partial<Pick<Env, "PLAYLIST_SWEEP_DAILY_REMOVALS">>,
   patch: unknown,
 ): Promise<AppSettingsUpdate> {
   if (!patch || typeof patch !== "object" || Array.isArray(patch))
