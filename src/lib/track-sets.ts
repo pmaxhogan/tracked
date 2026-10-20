@@ -153,7 +153,7 @@ export function trackPageIdOf(url: string | null | undefined): string | null {
  */
 export function titleDjNames(title: string): string[] {
   const head = title
-    .split(/\s+[@–-]\s+/)[0]!
+    .split(/\s+[@\u2013-]\s+/)[0]!
     .trim()
     .toLowerCase();
   if (!head) return [];
