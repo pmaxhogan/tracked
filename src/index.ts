@@ -93,8 +93,8 @@ app.use("*", async (c, next) => {
       Promise.all([
         drainPageCaptures(),
         drainSearchIndex(),
-        drainPresaveLikes(),
-        drainYoutubeLedger(),
+        // Likes spend quota too: the ledger is written after them.
+        drainPresaveLikes().then(() => drainYoutubeLedger()),
       ]),
     );
   } catch {
@@ -381,7 +381,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         await drainPageCaptures();
         // Likes a scheduled check started (they swallow their own errors).
         await drainPresaveLikes();
-        // The quota ledger rows of this tick's YouTube calls, likewise.
+        // The quota ledger rows of this tick's YouTube calls, after the likes (which spend quota too).
         await drainYoutubeLedger();
         // Search index writes started by this tick's verified fetches, likewise (they swallow their own errors).
         try {

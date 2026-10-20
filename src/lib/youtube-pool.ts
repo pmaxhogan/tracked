@@ -258,28 +258,37 @@ export async function markProjectOut(env: Env, key: string, nowMs = Date.now()):
   });
 }
 
-/** Forgets a pushed token (YouTube refused it); the next push brings a new one. */
-export async function dropPushedToken(env: Env, key: string): Promise<void> {
+/**
+ * Forgets a pushed token (YouTube refused it); the next push brings a new one.
+ * With `accessToken`, only while that is still the stored one: a refused old
+ * token must not take a newer push for the same account with it.
+ */
+export async function dropPushedToken(env: Env, key: string, accessToken?: string): Promise<void> {
+  if (accessToken !== undefined) {
+    const stored = await readJson<StoredToken>(env, TOKEN_PREFIX + key);
+    if (stored && stored.accessToken !== accessToken) return;
+  }
   await env.CACHE.delete(TOKEN_PREFIX + key);
   const index = await readIndex(env);
   if (index.includes(key))
     await env.CACHE.put(ACCOUNTS_KEY, JSON.stringify(index.filter((a) => a !== key)));
 }
 
-/** Adds one call's units to today's ledger row. Never throws: counting must not break the call it counts. */
+/** Adds `calls` calls' units (one call by default) to today's ledger row. Never throws: counting must not break the call it counts. */
 export async function recordUnits(
   env: Env,
   key: string,
   consumer: string,
   units: number,
   nowMs = Date.now(),
+  calls = 1,
 ): Promise<void> {
   try {
     await env.DB.prepare(
-      `INSERT INTO youtube_quota_ledger (day, project, consumer, units, calls) VALUES (?, ?, ?, ?, 1)
-       ON CONFLICT (day, project, consumer) DO UPDATE SET units = units + excluded.units, calls = calls + 1`,
+      `INSERT INTO youtube_quota_ledger (day, project, consumer, units, calls) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (day, project, consumer) DO UPDATE SET units = units + excluded.units, calls = calls + excluded.calls`,
     )
-      .bind(quotaDayStart(nowMs), key, consumer, units)
+      .bind(quotaDayStart(nowMs), key, consumer, units, calls)
       .run();
   } catch {
     // The ledger is bookkeeping only.

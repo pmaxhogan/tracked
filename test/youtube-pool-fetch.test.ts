@@ -151,6 +151,11 @@ describe("authedFetch and the quota pool", () => {
     expect(((await res.json()) as { id: string }).id).toBe("existing");
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
     expect(await ledger(env)).toEqual({ upload2: 1 });
+
+    // A later call still holding the own token goes straight to upload2.
+    calls.length = 0;
+    await authedFetch(`${API}/playlists?mine=true`, "own-at", {}, fetcher);
+    expect(calls.map((c) => c.token)).toEqual(["at-upload2"]);
   });
 
   it("returns a non-quota 403 as it is, without a retry", async () => {
@@ -182,6 +187,65 @@ describe("authedFetch and the quota pool", () => {
     expect(((await env.SUBS.get("oauth:google", "json")) as StoredTokens).accessToken).toBe(
       "own-at",
     );
+  });
+});
+
+describe("a refused pushed token", () => {
+  it("leaves a newer push for the same account stored and usable", async () => {
+    const env = await makeEnv();
+    await recordUnits(env, OWN_PROJECT, "sync", 9900);
+    const first = await getAccessToken(env);
+    expect(first?.accessToken).toBe("at-upload2");
+    // mkvid pushes a newer token for the account while the old one is in use.
+    await storePushedTokens(
+      env,
+      [
+        {
+          account: "upload2",
+          label: "upload2",
+          channelId: CH,
+          accessToken: "at-upload2-b",
+          expiresAt: Math.floor(Date.now() / 1000) + 3000,
+          unitsToday: null,
+        },
+      ],
+      CH,
+    );
+    const { fetcher, calls } = stub((c) =>
+      c.token === "at-upload2" ? json(401, { error: { code: 401 } }) : json(200, { items: [] }),
+    );
+    const res = await authedFetch(`${API}/playlists?mine=true`, first!.accessToken, {}, fetcher);
+    expect(res.status).toBe(200);
+    expect(calls.map((c) => c.token)).toEqual(["at-upload2", "at-upload2-b"]);
+    expect(
+      ((await env.CACHE.get("yt:pool:token:upload2", "json")) as { accessToken: string })
+        .accessToken,
+    ).toBe("at-upload2-b");
+    expect((await getAccessToken(env))?.accessToken).toBe("at-upload2-b");
+  });
+});
+
+describe("the ledger", () => {
+  it("writes one row per project and consumer when drained, with the summed units", async () => {
+    const env = await makeEnv();
+    const prepare = vi.spyOn(env.DB, "prepare");
+    const inserts = () =>
+      prepare.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO youtube_quota_ledger"))
+        .length;
+    const { fetcher } = stub(() => json(200, { id: "x", items: [] }));
+    await addVideoToPlaylist("PL1", "vid1", "own-at", fetcher);
+    await addVideoToPlaylist("PL1", "vid2", "own-at", fetcher);
+    await authedFetch(`${API}/playlists?mine=true`, "own-at", {}, fetcher);
+    expect(inserts()).toBe(0);
+    await drainYoutubeLedger();
+    expect(inserts()).toBe(1);
+    const row = await env.DB.prepare(
+      "SELECT project, consumer, units, calls FROM youtube_quota_ledger",
+    ).first<{ project: string; consumer: string; units: number; calls: number }>();
+    expect(row).toEqual({ project: OWN_PROJECT, consumer: "unknown", units: 101, calls: 3 });
+    // Nothing left: a second drain writes nothing.
+    await drainYoutubeLedger();
+    expect(inserts()).toBe(1);
   });
 });
 

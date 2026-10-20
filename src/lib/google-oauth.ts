@@ -271,7 +271,8 @@ export async function getAccessToken(
   const pushedRejected = rejectedKey !== undefined && rejectedKey !== OWN_PROJECT;
   if (pushedRejected) {
     tokenProjects.delete(opts.rejected!);
-    await dropPushedToken(env, rejectedKey).catch(() => {});
+    // Only while it is still the stored one: a newer push for the account stays.
+    await dropPushedToken(env, rejectedKey, opts.rejected).catch(() => {});
   }
   // A pushed token's 401 says nothing about the own token: never refresh it for one.
   const own = await ownAccessToken(env, fetcher, pushedRejected ? {} : opts);
@@ -283,12 +284,33 @@ export async function getAccessToken(
   return own;
 }
 
-/** Ledger writes authedFetch started (they swallow their own errors). */
-const ledgerWrites = new Set<Promise<void>>();
+/** Units counted since the last drain, per env and project + consumer: one ledger write each, not one per call (Workers cap subrequests). */
+const ledgerPending = new Map<
+  Env,
+  Map<string, { key: string; consumer: string; units: number; calls: number }>
+>();
 
-/** Resolves when every ledger write started so far has finished; index.ts hands it to waitUntil. */
-export async function drainYoutubeLedger(): Promise<void> {
-  while (ledgerWrites.size) await Promise.allSettled([...ledgerWrites]);
+/** drainYoutubeLedger waits this long at most; rows still being written then are lost (bookkeeping only). */
+const LEDGER_DRAIN_LIMIT_MS = 25_000;
+
+/** Writes the units counted so far to the ledger, one row write per project + consumer; index.ts awaits it after the request or tick. */
+export async function drainYoutubeLedger(limitMs = LEDGER_DRAIN_LIMIT_MS): Promise<void> {
+  const writes: Promise<void>[] = [];
+  const nowMs = Date.now();
+  for (const [env, rows] of ledgerPending) {
+    for (const r of rows.values())
+      writes.push(recordUnits(env, r.key, r.consumer, r.units, nowMs, r.calls));
+  }
+  ledgerPending.clear();
+  if (!writes.length) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.allSettled(writes),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, limitMs);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 /**
@@ -300,8 +322,15 @@ export function youtubePoolHooks(env: Env): YoutubePoolHooks {
   return {
     projectOf: (token) => tokenProjects.get(token) ?? OWN_PROJECT,
     spent: (key, units) => {
-      const p = recordUnits(env, key, quotaConsumer(), units).finally(() => ledgerWrites.delete(p));
-      ledgerWrites.add(p);
+      const consumer = quotaConsumer();
+      let rows = ledgerPending.get(env);
+      if (!rows) ledgerPending.set(env, (rows = new Map()));
+      const id = `${key}
+${consumer}`;
+      const row = rows.get(id) ?? { key, consumer, units: 0, calls: 0 };
+      row.units += units;
+      row.calls += 1;
+      rows.set(id, row);
     },
     quotaOut: async (key) => {
       try {

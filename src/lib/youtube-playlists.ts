@@ -165,11 +165,13 @@ export async function authedFetch(
       const found = await findInsertedItem(next);
       if (found === undefined) return res;
       h.spent(nextProject, 1);
-      if (found)
+      if (found) {
+        replaced.set(accessToken, next);
         return new Response(JSON.stringify(found), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
+      }
     }
     replaced.set(accessToken, next);
     // A pushed token can have been revoked: its 401 takes the usual refresh (a drop and a new pick).
