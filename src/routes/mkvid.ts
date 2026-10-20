@@ -26,15 +26,20 @@
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used; `youtube_quota` = its upload project is out of quota: the same,
  *                         handed out again after 10 min (to another project).
- *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap, hearthisDownloadsPerHour, hearthisPagesPerHour }
+ *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, youtubeTokens, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap, hearthisDownloadsPerHour, hearthisPagesPerHour }
  *                         `hearthisDownloadsPerHour` = the setting mkvid.hearthisDownloadsPerHour (null = mkvid's
  *                         own HEARTHIS_DOWNLOADS_PER_HOUR, else 3); mkvid adopts it on every health read
  *                         `hearthisPagesPerHour` = mkvid.hearthisPagesPerHour the same way (null = its
  *                         HEARTHIS_PAGES_PER_HOUR, else 20)
  *                         `uploadProjects: true` = claims take any project key and `projects` (an mkvid offers
  *                         only primary / shared until it sees it)
+ *                         `youtubeTokens: true` = POST /mkvid/youtube-tokens exists (mkvid pushes only once it sees it)
  *                         `verifiedLists: true` = only verified lists are handed out and `unverified_tracklist`
  *                         is retryable; a scene-style mkvid claims nothing until it sees it
+ *
+ *   POST /mkvid/youtube-tokens { tokens: [{ account, label, channelId, accessToken, expiresAt, unitsToday }] } -> { accepted, rejected }
+ *                         mkvid pushes its upload projects' access tokens every minute (lib/youtube-pool.ts keeps
+ *                         those on tracked's own channel; `rejected` = [{ account, reason }]). Tokens are never echoed.
  *
  * See lib/mkvid.ts for the lifecycle these drive.
  */
@@ -44,9 +49,10 @@ import { z } from "zod";
 import type { Env } from "../types";
 import { mkvidAuth } from "../middleware/auth";
 import { MkvidClaimBody } from "../schemas";
-import { getAccessToken, GoogleOAuthRefreshFailed } from "../lib/google-oauth";
+import { getAccessToken, GoogleOAuthRefreshFailed, loadTokens } from "../lib/google-oauth";
 import { makeLogger, errorFields } from "../lib/log";
 import { noteQuotaOut } from "../lib/youtube-quota";
+import { storePushedTokens, type PushedToken } from "../lib/youtube-pool";
 import { deleteOldVideo, RECREATE_STYLE } from "../lib/mkvid-recreate";
 import { getAppSettings } from "../lib/app-settings";
 import {
@@ -77,6 +83,8 @@ const CompleteBody = z.object({
     .optional()
     .nullable(),
 });
+// Each entry is checked by storePushedTokens (a bad one is reported as rejected `invalid`, not a 400).
+const YoutubeTokensBody = z.object({ tokens: z.array(z.unknown()).max(50) });
 const FailBody = z.object({
   id: z.string().uuid(),
   error: z
@@ -118,6 +126,8 @@ mkvidApp.get("/health", async (c) => {
     // Claims take any upload project key, plus mkvid's `projects` report (lib/mkvid.ts mkvidProjects).
     uploadProjects: true,
     // Recreations go only to an mkvid whose claim says this style.
+    // This Worker takes the upload projects' access tokens at /mkvid/youtube-tokens (the quota pool).
+    youtubeTokens: true,
     recreateStyle: RECREATE_STYLE,
     counts: await countMkvidRequests(c.env),
     accounts,
@@ -218,5 +228,20 @@ mkvidApp.post("/fail", async (c) => {
   if (!b) return c.json({ error: "invalid_request" }, 400);
   const r = await failMkvidRequest(c.env, b, log);
   if (!r) return c.json({ error: "not_found" }, 404);
+  return c.json(r);
+});
+
+mkvidApp.post("/youtube-tokens", async (c) => {
+  const log = logger(c, "mkvid.youtube_tokens");
+  const b = await body(c, YoutubeTokensBody);
+  if (!b)
+    return c.json({ error: "invalid_request", message: "body must be { tokens: [...] }" }, 400);
+  const own = (await loadTokens(c.env))?.channelId ?? null;
+  const r = await storePushedTokens(c.env, b.tokens as PushedToken[], own);
+  // Counts and account keys only - never a token.
+  log.info("mkvid.youtube_tokens", {
+    accepted: r.accepted.length,
+    rejected: r.rejected.map((x) => `${x.account}:${x.reason}`),
+  });
   return c.json(r);
 });

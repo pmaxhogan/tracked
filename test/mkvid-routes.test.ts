@@ -220,6 +220,7 @@ describe("/mkvid routes", () => {
       presaveSearch: true,
       audioCues: true,
       uploadProjects: true,
+      youtubeTokens: true,
       recreateStyle: "scene",
       counts: { pending: 0, claimed: 0, done: 1, failed: 0, superseded: 0, banned: 0 },
       accounts: [
@@ -1050,5 +1051,56 @@ describe("/mkvid routes", () => {
     expect(
       (await post(noYt, "/mkvid/complete", { id: r2.id, videoId: "upload12345" })).status,
     ).toBe(503);
+  });
+
+  it("/mkvid/youtube-tokens takes the pool tokens mkvid pushes, never echoes them, and is gated by MKVID_TOKEN", async () => {
+    const env = makeEnv({
+      SUBS: fakeKV({ "oauth:google": JSON.stringify({ ...tokens, channelId: "UCown" }) }),
+    });
+    const t = (account: string, channelId: string) => ({
+      account,
+      label: account,
+      channelId,
+      accessToken: `secret-${account}`,
+      expiresAt: Math.floor(Date.now() / 1000) + 3000,
+      unitsToday: 12,
+    });
+    const body = { tokens: [t("proj-a", "UCown"), t("proj-b", "UCother")] };
+    expect((await post(env, "/mkvid/youtube-tokens", body, "tasker")).status).toBe(401);
+    expect(
+      (
+        await app.request(
+          "http://x/mkvid/youtube-tokens",
+          { method: "POST", body: JSON.stringify(body) },
+          env,
+        )
+      ).status,
+    ).toBe(401);
+
+    const res = await post(env, "/mkvid/youtube-tokens", body);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain("secret-");
+    expect(text).not.toContain("accessToken");
+    expect(JSON.parse(text)).toEqual({
+      accepted: ["proj-a"],
+      rejected: [{ account: "proj-b", reason: "channel" }],
+    });
+
+    for (const bad of [{}, { tokens: "x" }, [], null, { tokens: {} }]) {
+      const r = await post(env, "/mkvid/youtube-tokens", bad);
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ error: "invalid_request" });
+    }
+    const raw = await app.request(
+      "http://x/mkvid/youtube-tokens",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer mk-secret", "Content-Type": "application/json" },
+        body: "not json",
+      },
+      env,
+    );
+    expect(raw.status).toBe(400);
   });
 });
