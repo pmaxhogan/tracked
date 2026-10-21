@@ -89,6 +89,7 @@ import { updatePresaveCandidates } from "./presave-candidates";
 import { getAppSettings } from "./app-settings";
 import { DISCOVERED_SQL, ID_WAIT_SECONDS, timedSql } from "./mkvid-readiness";
 import { getQuotaOut } from "./youtube-quota";
+import { quotaGate } from "./quota-priority";
 import { duePresaves, presaveOnSetParsed, runScheduledPresave } from "./presave";
 import {
   runTrackRefresh,
@@ -1473,6 +1474,11 @@ export async function runSchedulerTick(
   } else {
     due = { new: 0, verify: 0, recheck: 0, backfill: 0 } as Record<ScheduledClass, number>;
     quotaOut = !!(await getQuotaOut(env, nowSec * 1000));
+    // The priority rule may refuse a DJ playlist insert (held, max, a ledger-estimated
+    // pool_out) without the KV flag: such sets are left out too, or syncOne defers
+    // them, gives their attempt back, and they fill every tick. Asked once per tick.
+    let insertsWait = quotaOut;
+    if (!insertsWait) insertsWait = !(await quotaGate(env, "dj_playlists", 50, nowSec * 1000)).ok;
     const held = { quota: 0 };
     items = await pickTickItems(
       env,
@@ -1483,7 +1489,7 @@ export async function runSchedulerTick(
       undefined,
       due,
       undefined,
-      quotaOut,
+      insertsWait,
       held,
     );
     // Not "nothing due": there is work, and it waits for YouTube.

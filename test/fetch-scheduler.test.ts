@@ -12,6 +12,7 @@ import {
   ITEM_SCOPED_BACKOFF_SECONDS,
   MAX_SET_ATTEMPTS_PER_DAY,
   pickTickItems,
+  PRIORITY_DEFERRED_REASON,
   runSchedulerTick,
   scheduleAfterFetch,
   TICK_BACKOFF_KEY,
@@ -23,6 +24,7 @@ import { PoolPausedError, PoolUnavailableError } from "../src/lib/pool";
 import { clearQuotaOut, getQuotaOut, QUOTA_OUT_KEY } from "../src/lib/youtube-quota";
 import { quotaDayEnd } from "../src/lib/mkvid";
 import { YouTubeApiError } from "../src/lib/youtube-playlists";
+import { updateAppSettings } from "../src/lib/app-settings";
 
 // Network edges stubbed; the scheduler, syncOne, D1 and the verification
 // logic run for real.
@@ -726,6 +728,41 @@ describe("runSchedulerTick", () => {
     });
     const r = await runSchedulerTick(env, { random: always(0.99), now: NOW });
     expect(r.items.map((i) => [i.item.kind, i.outcome])).toEqual([["discovery", "ok"]]);
+  });
+
+  it("a priority-rule refusal (no quota flag) leaves the kept-video sets out of later ticks instead of re-picking them", async () => {
+    const env = makeEnv();
+    await subscribe(env, "a");
+    await quietDjs(env, "a");
+    // The DJ playlists' daily max is 0: the gate refuses every insert ("max"), and no KV flag is set.
+    await updateAppSettings(env as Env & { SUBS: KVNamespace }, {
+      quota: { consumers: { dj_playlists: { min: null, max: 0, enabled: true } } },
+    });
+    const urls = [1, 2].map((i) => setUrl(`g${i}`, 1));
+    await saveSubState(env, "a", {
+      playlistId: "PL",
+      artistName: "A",
+      discoveredTracklistUrls: urls,
+      processedTracklistUrls: [],
+    });
+    mocked(parseSetYouTubeId).mockReturnValue("vidG1234567");
+    // First tick: the pages are read (no video known yet) and the inserts held for the rule.
+    const first = await runSchedulerTick(env, { random: always(0.99), now: NOW });
+    expect(first.items.map((i) => [i.outcome, i.stopReason])).toEqual([
+      ["deferred", PRIORITY_DEFERRED_REASON],
+      ["deferred", PRIORITY_DEFERRED_REASON],
+    ]);
+    expect(await getQuotaOut(env, NOW * 1000)).toBeNull();
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    const fetched = mocked(fetch1001Html).mock.calls.length;
+    // Later ticks: the sets wait for the rule, and the tick says so rather than picking them again.
+    for (const at of [NOW + 600, NOW + 1200])
+      expect(await runSchedulerTick(env, { random: always(0.99), now: at })).toMatchObject({
+        skipped: "quota_hold",
+        items: [],
+      });
+    expect(fetch1001Html).toHaveBeenCalledTimes(fetched);
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
   });
 
   it("an item-scoped refusal (no_healthy_account, timeout) moves on to the next item and sets no backoff", async () => {
