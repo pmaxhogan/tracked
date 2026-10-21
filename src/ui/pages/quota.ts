@@ -59,6 +59,7 @@ const JS = /* js */ `
     max: { cls: 'neutral', text: 'at its daily limit', tip: 'It has spent the most you allowed it today. It goes on after the reset.' },
     pool_out: { cls: 'info', text: 'waiting for the quota reset', tip: 'Every project is used up for today. Everything goes on after midnight Pacific time.' },
     off: { cls: 'neutral', text: 'off', tip: 'Switched off here. It spends nothing and holds nothing back.' },
+    outside: { cls: 'neutral', text: 'outside this pool', tip: 'Uses the upload bucket, not this pool' },
   };
   const badge = (cls, text, tip) => '<span class="badge ' + cls + '"' + (tip ? TK.tip(tip) : '') + '>' + esc(text) + '</span>';
   const num = (n) => Number(n || 0).toLocaleString('en-US');
@@ -192,7 +193,10 @@ const JS = /* js */ `
     }
     const m = t.closest('button[data-margin]');
     if (m) {
-      const v = Number($('q-margin').value);
+      const raw = $('q-margin').value;
+      const v = raw === '' || raw == null ? NaN : Number(raw);
+      // A blank field is not 0: nothing is saved.
+      if (!Number.isFinite(v)) { TK.toast('Enter the margin as a number of units. Nothing was saved.', 'warn'); return; }
       await TK.busy(m, 'Saving...', async () => { if (take(await TK.api.put('/ui/api/quota', { margin: v }), 'could not save the margin')) TK.toast('Saved.'); });
     }
   });

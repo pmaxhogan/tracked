@@ -54,6 +54,12 @@ function stub(
       querySelector: () => null,
       querySelectorAll: () => [],
       closest: () => null,
+      children: [] as any[],
+      appendChild(c: any) {
+        this.children.push(c);
+        return c;
+      },
+      remove() {},
     };
   };
   const els = new Map<string, any>();
@@ -327,6 +333,36 @@ describe("YouTube quota page", () => {
     expect(t.calls.map((c) => `${c.method} ${c.u}`)).toEqual([
       "POST /ui/api/quota/projects/shared/clear",
     ]);
+  });
+
+  it("shows mkvid uploads as outside this pool, not as running", async () => {
+    const a = answer();
+    const up = a.consumers.find((c) => c.key === "mkvid_uploads")!;
+    up.status = "outside";
+    up.enabled = true;
+    const t = await boot(a);
+    const list: string = t.els.get("q-list").innerHTML;
+    const row = list.slice(list.indexOf('data-row="mkvid_uploads"'));
+    expect(row.slice(0, row.indexOf("</span></div>") + 13)).toMatch(
+      /badge neutral[^>]*>outside this pool</,
+    );
+  });
+
+  it("margin Save with a blank or non-numeric field saves nothing and warns", async () => {
+    for (const v of ["", "abc"]) {
+      const t = await boot();
+      t.ctx.document.getElementById("q-margin").value = v;
+      t.els.get("q-pool").ls.click![0]!(click("data-margin", "1"));
+      await settle();
+      expect(t.calls).toHaveLength(0);
+      const toasts = t.ctx.document.getElementById("tk-toasts").children as any[];
+      expect(toasts.map((x) => x.className)).toEqual(["toast warn"]);
+    }
+    const t = await boot();
+    t.ctx.document.getElementById("q-margin").value = "450";
+    t.els.get("q-pool").ls.click![0]!(click("data-margin", "1"));
+    await settle();
+    expect(t.calls.map((c) => c.body)).toEqual([{ margin: 450 }]);
   });
 
   it("escapes what comes from the server", async () => {

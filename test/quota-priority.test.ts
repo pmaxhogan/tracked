@@ -17,7 +17,7 @@ import { quotaConsumer, setQuotaConsumer } from "../src/lib/youtube-playlists";
 import { loadSubState, syncOne } from "../src/lib/sync";
 import { runPlaylistHygiene } from "../src/lib/playlist-hygiene";
 import { retryDuePresavePlaylist } from "../src/lib/presave-playlist";
-import { quotaDayEnd } from "../src/lib/mkvid";
+import { quotaDayEnd, quotaDayStart } from "../src/lib/mkvid";
 import { makeLogger } from "../src/lib/log";
 
 vi.mock("../src/lib/dj-index", async () => {
@@ -322,6 +322,37 @@ describe("consumerStatus", () => {
     expect(by.mkvid_uploads!.status).toBe("outside");
     // 900 left: rank 6 keeps 600 + 300 for the DJ inserts.
     expect(by.renames!.status).toBe("held");
+  });
+});
+
+describe("consumerStatus: the consumers with their own counters", () => {
+  it("shows max when the consumer's own KV counter parked it, though the gate (and the ledger) would let it run", async () => {
+    const env = makeEnv();
+    await consumers(env, {
+      likes: { max: 102 },
+      combined: { max: 100 },
+      hygiene: { max: 102 },
+      ordering: { max: 100 },
+    });
+    const now = Date.now();
+    const utc = new Date(now).toISOString().slice(0, 10);
+    // Each at its max by its own counter; the ledger has nothing for them.
+    await env.CACHE.put(`presave:like-units:${quotaDayStart(now)}`, "102");
+    await env.CACHE.put(`yt:combined:inserts:${utc}`, "2");
+    await env.CACHE.put(`hygiene:sweep:deletes:${utc}`, "2");
+    await env.CACHE.put(`yt:order:units:${quotaDayStart(now)}`, "100");
+    const by = Object.fromEntries((await consumerStatus(env, now)).map((r) => [r.key, r]));
+    for (const k of ["likes", "combined", "hygiene", "ordering"]) {
+      expect(by[k]!.status).toBe("max");
+      expect(await quotaGate(env, k as never, 50, now)).toEqual({ ok: true });
+    }
+    // Under their max by their counters: running.
+    const fresh = makeEnv();
+    await consumers(fresh, { combined: { max: 100 }, ordering: { max: 100 } });
+    await fresh.CACHE.put(`yt:combined:inserts:${utc}`, "1");
+    const s = Object.fromEntries((await consumerStatus(fresh, now)).map((r) => [r.key, r]));
+    expect(s.combined!.status).toBe("running");
+    expect(s.ordering!.status).toBe("running");
   });
 });
 

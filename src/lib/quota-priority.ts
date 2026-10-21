@@ -212,9 +212,40 @@ export async function quotaGate(
 }
 
 /**
+ * What the OWN_COUNTER consumers have spent today in units by their own KV
+ * counters (the ones their max is enforced against). Imported lazily: those
+ * modules import this one. A consumer whose counter cannot be read is left out.
+ */
+async function ownCounterUnits(env: Env, nowMs: number): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const read = async (key: string, f: () => Promise<number>): Promise<void> => {
+    try {
+      out.set(key, await f());
+    } catch {
+      // Left to the ledger.
+    }
+  };
+  await read("likes", async () => (await import("./presave-like")).likeUnitsSpent(env, nowMs));
+  await read(
+    "combined",
+    async () => (await (await import("./combined-playlist")).dailyInsertsUsed(env)) * 50,
+  );
+  await read(
+    "hygiene",
+    async () => (await (await import("./playlist-hygiene")).sweepDeletesUsed(env, nowMs)) * 51,
+  );
+  await read("ordering", async () => (await import("./playlist-reorder")).orderUnitsUsedToday(env));
+  return out;
+}
+
+/**
  * Every ranked consumer in the owner's order with what the gate would say
  * to one more of its actions now (its catalogue cost, 50 when none),
- * today's units and its waiting units: the quota page's list.
+ * today's units and its waiting units: the quota page's list. The gate
+ * leaves the max of likes, combined, hygiene and ordering to their own
+ * counters, so for the page their max is checked here against those
+ * counters (the ledger when one cannot be read): one parked by its counter
+ * shows "max", not "running".
  */
 export async function consumerStatus(
   env: Env,
@@ -230,8 +261,15 @@ export async function consumerStatus(
 > {
   const s = await snapshot(env, nowMs);
   const cost = new Map(QUOTA_CONSUMERS.map((c) => [c.key, c.waitingCost ?? 50]));
+  const own = await ownCounterUnits(env, nowMs);
   return s.order.map((key) => {
-    const r = decide(s, key, cost.get(key) ?? 50);
+    const units = cost.get(key) ?? 50;
+    let r = decide(s, key, units);
+    const e = entryOf(s, key);
+    if ((r.ok || r.reason === "held") && OWN_COUNTER.has(key) && e.max !== null) {
+      const spent = own.get(key) ?? s.spent.get(key) ?? 0;
+      if (spent + units > e.max) r = { ok: false, reason: "max" };
+    }
     return {
       key,
       status: key === OUTSIDE_POOL ? "outside" : r.ok ? "running" : r.reason,
