@@ -22,6 +22,7 @@ import {
 import { isNotManual, noteNotManual } from "../src/lib/playlist-order-store";
 import { YouTubeApiError } from "../src/lib/youtube-playlists";
 import { getQuotaOut } from "../src/lib/youtube-quota";
+import { OWN_PROJECT, recordUnits } from "../src/lib/youtube-pool";
 
 const log = makeLogger({ task: "test" });
 const setUrl = (n: number, date: string) =>
@@ -469,6 +470,25 @@ describe("runOrderPass", () => {
     spy.mockRestore();
     await run(env, yt);
     expect(yt.playlists.PLdj).toEqual(SORTED);
+  });
+});
+
+describe("the priority rule is asked for the whole run", () => {
+  it("is held when the run's planned moves would eat the margin, though one move would fit", async () => {
+    const env = await makeEnv();
+    // 700 units left of the own project; the margin keeps 300. Ten moves and a listing (501) do not fit.
+    await recordUnits(env, OWN_PROJECT, "unknown", 9300);
+    const yt = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED, PLall: UNSORTED_COMBINED });
+    expect(await run(env, yt)).toMatchObject({ moved: 0, stoppedBy: "held" });
+    expect(yt.calls).toEqual([]);
+    // A run planned at one move (51) fits: it goes.
+    const one = await makeEnv();
+    await updateAppSettings(one, { playlists: { orderMovesPerRun: 1 } });
+    await recordUnits(one, OWN_PROJECT, "unknown", 9300);
+    const yt1 = fakeYouTube({ PLdj: NEWEST_FIRST, PLdj2: W_SORTED, PLall: UNSORTED_COMBINED });
+    const r = await run(one, yt1);
+    expect(r.stoppedBy).not.toBe("held");
+    expect(r.moved).toBe(1);
   });
 });
 

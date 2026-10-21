@@ -361,6 +361,17 @@ export function combinedInsertCap(app: AppSettings): number {
 }
 
 /**
+ * The most inserts one backfill run may make: its per-run cap, within what
+ * the day's insert cap has left. What backfillCombined asks the priority
+ * rule for (50 units each), so a run cannot spend past what it was let.
+ */
+export async function plannedRunInserts(env: Env, maxInsertsPerRun?: number): Promise<number> {
+  const app = await getAppSettings(env);
+  const budget = Math.max(0, combinedInsertCap(app) - (await dailyInsertsUsed(env)));
+  return Math.max(0, Math.min(maxInsertsPerRun ?? app.playlists.combinedMaxInsertsPerRun, budget));
+}
+
+/**
  * Fill the combined playlist from the artist playlists: union them, subtract
  * what's already in the combined playlist, insert the difference up to the
  * per-run / per-day / deadline caps.

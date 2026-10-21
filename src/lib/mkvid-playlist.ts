@@ -83,6 +83,8 @@ export type SetPlaylistOutcome =
       error: string;
       /** When the cron tries again (unix s); null for a permanent refusal. */
       retryAt: number | null;
+      /** With kind `quota`: the priority rule held it (lib/quota-priority.ts), the quota itself is not out. */
+      held?: true;
     };
 
 /** A failed transient insert waits this long after its first failure, doubling per failure ... */
@@ -317,6 +319,7 @@ export async function addSetToPlaylists(
         gate.reason === "max" || gate.reason === "pool_out"
           ? quotaDayEnd(now * 1000)
           : now + RETRY_MIN_SECONDS,
+      held: true,
     };
   }
   try {
@@ -372,7 +375,8 @@ export const DUE_SQL = `status = 'done' AND playlist_status = 'pending' AND vide
   AND (not_before IS NULL OR not_before <= ?)`;
 const RETRIES_PER_TICK = 5;
 
-export type SetPlaylistRetryStop = "quota" | "rate_limit" | "not_connected";
+/** `held`: the priority rule held an insert (as track-uploads' PlaylistRetryStop). */
+export type SetPlaylistRetryStop = "quota" | "rate_limit" | "not_connected" | "held";
 
 /** Store a playlist outcome on a `done` request. */
 export async function storeSetPlaylistOutcome(
@@ -509,7 +513,7 @@ export async function retryDueSetPlaylistInserts(
         continue;
       }
       if (pl.kind === "quota" || pl.kind === "rate_limit") {
-        out.stoppedBy = pl.kind;
+        out.stoppedBy = pl.held ? "held" : pl.kind;
         break;
       }
     }

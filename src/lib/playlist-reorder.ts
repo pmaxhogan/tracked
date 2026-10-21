@@ -705,14 +705,20 @@ export async function runOrderPass(env: Env, opts: PassOpts): Promise<OrderPassR
   if (dailyUnits - used < UNITS_PER_MOVE + 1) return skipped("budget");
   if (orderQueue(await managedPlaylists(env), await loadOrderState(env), nowSeconds()).length === 0)
     return skipped(null);
-  // Its turn at the quota (the Playlists page's Run button is the owner's), for one move and its listing.
+  // Its turn at the quota (the Playlists page's Run button is the owner's), for the moves this run may
+  // make and a listing: a run let through on one move could spend into what a higher rank keeps.
+  const moves = Math.max(
+    1,
+    Math.min(settings.orderMovesPerRun, Math.floor((dailyUnits - used - 1) / UNITS_PER_MOVE)),
+  );
+  const units = moves * UNITS_PER_MOVE + 1;
   const gate = await quotaGate(
     env,
     opts.trigger?.startsWith("manual.") ? OWNER : "ordering",
-    UNITS_PER_MOVE + 1,
+    units,
   );
   if (!gate.ok) {
-    opts.log.info("playlist_order.quota_gate_held", { reason: gate.reason });
+    opts.log.info("playlist_order.quota_gate_held", { reason: gate.reason, units });
     return skipped(GATE_STOP[gate.reason]);
   }
   const accessToken = opts.accessToken ?? (await getAccessToken(env))?.accessToken;

@@ -106,6 +106,7 @@ import {
   markVideosUnavailable,
   mergeIntoCombinedPlaylist,
   openCombinedPlaylist,
+  plannedRunInserts,
   readCombinedStatus,
   removeFromCombined,
   type CombinedAdditionStatus,
@@ -663,9 +664,12 @@ export async function backfillCombined(
   }
   // The panel's button is the owner's; the cron's run has the combined playlist's rank.
   const consumer = opts.trigger?.startsWith("manual.") ? OWNER : "combined";
-  const g = await quotaGate(env, consumer, 50);
+  // The whole run's plan, not one insert: a run let through on 50 units could
+  // spend into what a higher rank keeps. At least one insert's worth.
+  const units = Math.max(1, await plannedRunInserts(env, opts.maxInsertsPerRun)) * 50;
+  const g = await quotaGate(env, consumer, units);
   if (!g.ok) {
-    log.info("combined.quota_gate_held", { consumer, reason: g.reason });
+    log.info("combined.quota_gate_held", { consumer, reason: g.reason, units });
     return { ok: false, reason: "quota_held", held: g.reason };
   }
   const merged = await mergeIntoCombinedPlaylist(env, tokenInfo.accessToken, sources, {

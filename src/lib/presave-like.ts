@@ -210,6 +210,8 @@ export type LikeResult = {
   videoId: string | null;
   error?: string;
   /** Quota units the calls made cost. */ units: number;
+  /** With outcome `quota`: the priority rule held it (lib/quota-priority.ts), the quota itself is not out. */
+  held?: true;
 };
 type LikeOpts = {
   log?: Logger;
@@ -331,7 +333,7 @@ export async function likePresaveVideo(
         return park("budget", `the ${cap} units a day for likes are used`, false);
       // Held, switched off or the pool out: nothing asked, nothing charged, the like stays due as it is.
       log.info("presave.like_held", { id: p.id, videoId, reason: REFUSAL_TEXT[gate.reason] });
-      return { outcome: "quota", videoId, units: 0 };
+      return { outcome: "quota", videoId, units: 0, held: true };
     }
   }
 
@@ -497,12 +499,15 @@ export async function onPresaveResolved(
  * existed is liked from here (that is the backfill's). Stops at the first
  * answer that says no more will go through now. Never throws.
  */
+/** Why the likes' cron step stopped; `held` = the priority rule held it (track-uploads' PlaylistRetryStop says the same). */
+export type LikeRetryStop = "quota" | "budget" | "rate_limit" | "held";
+
 export async function retryDuePresaveLikes(
   env: Env,
   log: Logger,
   opts: { now?: number; fetcher?: typeof fetch; limit?: number } = {},
-): Promise<{ tried: number; liked: number; stoppedBy: "quota" | "budget" | "rate_limit" | null }> {
-  const out = { tried: 0, liked: 0, stoppedBy: null as "quota" | "budget" | "rate_limit" | null };
+): Promise<{ tried: number; liked: number; stoppedBy: LikeRetryStop | null }> {
+  const out = { tried: 0, liked: 0, stoppedBy: null as LikeRetryStop | null };
   try {
     if (!env.DB) return out;
     const now = opts.now ?? Date.now();
@@ -537,6 +542,11 @@ export async function retryDuePresaveLikes(
         budgeted: true,
       });
       if (r.outcome === "skipped") continue;
+      // Held, nothing was asked of YouTube: not a try.
+      if (r.held) {
+        out.stoppedBy = "held";
+        break;
+      }
       if (r.outcome !== "budget") out.tried++;
       if (r.outcome === "liked" || r.outcome === "already_liked") out.liked++;
       if (r.outcome === "quota" || r.outcome === "budget" || r.outcome === "rate_limit") {

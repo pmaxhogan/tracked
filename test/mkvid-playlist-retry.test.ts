@@ -24,6 +24,7 @@ import { recreateMkvidRequest } from "../src/lib/mkvid-recreate";
 import { clearQuotaOut, QUOTA_OUT_KEY } from "../src/lib/youtube-quota";
 import { saveSubState } from "../src/lib/sync-store";
 import { makeLogger } from "../src/lib/log";
+import { updateAppSettings } from "../src/lib/app-settings";
 import { storeVerifiedList } from "./helpers/mkvid-lists";
 
 vi.mock("../src/lib/youtube-playlists", async () => {
@@ -334,6 +335,23 @@ describe("set completion with a refused playlist insert", () => {
       notBefore: null,
       error: expect.stringContaining("realVid1234"),
     });
+  });
+
+  it("the cron says held, not quota, when the priority rule holds the insert", async () => {
+    const env = makeEnv();
+    const req = await claimed(env);
+    fn(addVideoToPlaylist).mockRejectedValueOnce(unavailableErr());
+    await post(env, "/mkvid/complete", { id: req.id, videoId: "upload12345" });
+    // The DJ playlists' max is 0: the gate refuses, the quota itself is not out.
+    await updateAppSettings(env as Env & { SUBS: KVNamespace }, {
+      quota: { consumers: { dj_playlists: { min: null, max: 0, enabled: true } } },
+    });
+    expect(await retryDueSetPlaylistInserts(env, log, { now: nowS() + 3600 })).toMatchObject({
+      added: 0,
+      stoppedBy: "held",
+    });
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(1);
+    expect(await env.CACHE.get(QUOTA_OUT_KEY)).toBeNull();
   });
 
   it("the cron stops when YouTube is not connected, and skips a request another tick took", async () => {

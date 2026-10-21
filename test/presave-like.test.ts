@@ -890,6 +890,22 @@ describe("a like that fails does not touch the pre-save", () => {
     expect(await likeCols(env, a)).toMatchObject({ liked_at: NOW });
   });
 
+  it("a like the priority rule holds stops the step as held, not quota, with no try counted", async () => {
+    const env = await makeEnv();
+    // 200 units left of the own project, under the 300 margin: the rule says no; the quota flag is not set.
+    await recordUnits(env, OWN_PROJECT, "unknown", 9800, NOW);
+    const a = await waiting(env, "1", "VIDEOAAAAA1", NOW - 3);
+    const yt = stub();
+    expect(await retryDuePresaveLikes(env, log, { now: NOW })).toEqual({
+      tried: 0,
+      liked: 0,
+      stoppedBy: "held",
+    });
+    expect(yt.rate).toEqual([]);
+    expect(await getQuotaOut(env, NOW)).toBeNull();
+    expect(await likeCols(env, a)).toMatchObject({ liked_at: null, like_attempts: 1 });
+  });
+
   it("raising the likes consumer's max mid-day lets the likes parked for it go at the next tick, not at midnight", async () => {
     const env = await makeEnv();
     await updateAppSettings(env, {

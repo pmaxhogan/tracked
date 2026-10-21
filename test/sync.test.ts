@@ -87,6 +87,7 @@ import {
   parseSetYouTubeIds,
 } from "../src/lib/dj-index";
 import { getVideoMeta } from "../src/lib/video-meta";
+import { OWN_PROJECT, recordUnits } from "../src/lib/youtube-pool";
 import { confirmedMembership, recordRemoved } from "../src/lib/playlist-blocklist";
 import {
   addVideoToPlaylist,
@@ -324,6 +325,36 @@ describe("combined playlist orchestration", () => {
       ["PLcombined", "aVid1234567"],
       ["PLcombined", "bVid1234567"],
     ]);
+  });
+
+  it("the cron's backfill asks the priority rule for its whole planned run, not one insert", async () => {
+    const env = makeEnv();
+    await connectYouTube(env);
+    await subscribe(env, "a", { playlistId: "PLa", artistName: "A" });
+    // 700 units left of the own project; the margin keeps 300. 20 inserts (1,000 units) do not fit, one would.
+    await recordUnits(env, OWN_PROJECT, "unknown", 9300);
+    expect(await backfillCombined(env, { trigger: "cron" })).toEqual({
+      ok: false,
+      reason: "quota_held",
+      held: "held",
+    });
+    expect(findPlaylistByTitle).not.toHaveBeenCalled();
+    // A run planned at one insert fits.
+    const one = makeEnv();
+    await connectYouTube(one);
+    await subscribe(one, "a", { playlistId: "PLa", artistName: "A" });
+    await recordUnits(one, OWN_PROJECT, "unknown", 9300);
+    (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "PLcombined",
+      title: "All tracked artists (1001tklists)",
+    });
+    (listPlaylistVideoIds as ReturnType<typeof vi.fn>).mockImplementation(
+      async (playlistId: string) => new Set(playlistId === "PLa" ? ["aVid1234567"] : []),
+    );
+    expect(await backfillCombined(one, { trigger: "cron", maxInsertsPerRun: 1 })).toMatchObject({
+      ok: true,
+      inserted: 1,
+    });
   });
 });
 

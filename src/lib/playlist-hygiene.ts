@@ -2775,11 +2775,18 @@ export async function runPlaylistHygiene(
       ? opts.force === "sweep"
       : await due(env, LAST_SWEEP_KEY, SWEEP_INTERVAL_SECONDS, now);
     if (!wantCompare && !wantSweep) return { skipped: "not_due" };
-    // Its turn at the quota, asked once for the run (a button press is the owner's). Held, nothing is
-    // marked done, so the next tick asks again.
-    const gate = await quotaGate(env, opts.force ? OWNER : "hygiene", REMOVAL_UNITS, nowMs);
+    // Its turn at the quota, asked once for the run (a button press is the owner's) for every removal
+    // the day's budget still lets this run make (at least one): a run let through on one removal could
+    // spend into what a higher rank keeps. Held, nothing is marked done, so the next tick asks again.
+    const removals = Math.max(
+      1,
+      sweepSettings(env, await getAppSettings(env)).dailyRemovals -
+        (await sweepDeletesUsed(env, nowMs)),
+    );
+    const units = removals * REMOVAL_UNITS;
+    const gate = await quotaGate(env, opts.force ? OWNER : "hygiene", units, nowMs);
     if (!gate.ok) {
-      log.info("hygiene.quota_gate_held", { reason: gate.reason });
+      log.info("hygiene.quota_gate_held", { reason: gate.reason, units });
       return { skipped: `quota_${gate.reason}`, message: REFUSAL_TEXT[gate.reason] };
     }
     const token = opts.accessToken ?? (await getAccessToken(env))?.accessToken;
