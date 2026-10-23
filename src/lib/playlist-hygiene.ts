@@ -98,11 +98,13 @@ import { errorOneLine } from "./youtube-error";
 import {
   enqueueMkvidRequest,
   extractSetAudioSource,
+  extractSetAudioSources,
   extractSetDate,
   extractSetTitle,
   getMkvidRequestForSet,
   retryMkvidRequest,
   supersedeMkvidRequestForSet,
+  type MkvidSource,
   type MkvidSourceKind,
 } from "./mkvid";
 
@@ -173,6 +175,8 @@ export type SetFacts = {
   trackCount: number | null;
   idedCount: number | null;
   fetchedAt: number;
+  /** Every recording mkvid could use on the page, best first (extractSetAudioSources); null = not read (a row from before 0034). */
+  audioSources?: MkvidSource[] | null;
 };
 
 /** Everything the rule needs from one set page, read from HTML the sync already has. */
@@ -210,6 +214,7 @@ export function extractSetFacts(
     trackCount: trackCount || null,
     idedCount: trackCount ? idedCount : null,
     fetchedAt: now,
+    audioSources: extractSetAudioSources(html, cue),
   };
 }
 
@@ -256,12 +261,13 @@ export async function recordPageFacts(
 export async function saveSetFacts(env: Env, f: SetFacts): Promise<void> {
   await dbOf(env)
     .prepare(
-      `INSERT INTO set_media_facts (set_url, slug, video_id, no_full_notice, last_cue_seconds, audio_max_seconds, audio_kind, audio_url, set_title, set_date, last_cue_known, track_count, ided_count, fetched_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO set_media_facts (set_url, slug, video_id, no_full_notice, last_cue_seconds, audio_max_seconds, audio_kind, audio_url, set_title, set_date, last_cue_known, track_count, ided_count, fetched_at, audio_sources)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(set_url) DO UPDATE SET slug = excluded.slug, video_id = excluded.video_id, no_full_notice = excluded.no_full_notice,
          last_cue_seconds = excluded.last_cue_seconds, audio_max_seconds = excluded.audio_max_seconds, audio_kind = excluded.audio_kind,
          audio_url = excluded.audio_url, set_title = excluded.set_title, set_date = excluded.set_date, last_cue_known = excluded.last_cue_known,
-         track_count = excluded.track_count, ided_count = excluded.ided_count, fetched_at = excluded.fetched_at`,
+         track_count = excluded.track_count, ided_count = excluded.ided_count, fetched_at = excluded.fetched_at,
+         audio_sources = COALESCE(excluded.audio_sources, audio_sources)`,
     )
     .bind(
       f.setUrl,
@@ -278,6 +284,7 @@ export async function saveSetFacts(env: Env, f: SetFacts): Promise<void> {
       f.trackCount,
       f.idedCount,
       f.fetchedAt,
+      f.audioSources ? JSON.stringify(f.audioSources) : null,
     )
     .run();
 }

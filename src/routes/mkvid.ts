@@ -18,14 +18,18 @@
  *                         render slot is not handed out again after the claim TTL
  *                         Only requests whose list is verified (and whose 7-day ID wait is over or skipped)
  *                         are handed out, so `tracksTrusted` is true and `tracks` non-empty on every claim.
- *   POST /mkvid/complete  { id, videoId, videoUrl?, privacy?, jobId?, style? }
+ *   POST /mkvid/complete  { id, videoId, videoUrl?, privacy?, jobId?, style?, partial? }
+ *                         `partial` = { missingSeconds, ranges: [{ start, end }], fragments?, totalFragments? }: the
+ *                         recording had a small gap mkvid used anyway (the claim said `allowPartial`); shown as info
  *                         `style` = the visual style the video was made with (static | waves | scene);
  *                         absent = unknown = old style. A recreation's answer names `replacedVideoId`,
  *                         which the Worker then asks mkvid to delete (lib/mkvid-recreate.ts).
  *   POST /mkvid/fail      { id, error, permanent?, jobId? }
  *                         error starting `unverified_tracklist` = mkvid refused the list: back to pending,
  *                         no attempt used; `youtube_quota` = its upload project is out of quota: the same,
- *                         handed out again after 10 min (to another project).
+ *                         handed out again after 10 min (to another project); `partial_source` = the recording is
+ *                         whole but for a few empty fragments: the set's next recording is tried, and when none is
+ *                         left the request comes back with `allowPartial` (no attempt used either way).
  *   GET  /mkvid/health    -> { ok, verifiedLists, trackUploads, presaveSearch, audioCues, uploadProjects, youtubeTokens, recreateStyle, counts, accounts, dailyClaims, dailyClaimCap, hearthisDownloadsPerHour, hearthisPagesPerHour }
  *                         `hearthisDownloadsPerHour` = the setting mkvid.hearthisDownloadsPerHour (null = mkvid's
  *                         own HEARTHIS_DOWNLOADS_PER_HOUR, else 3); mkvid adopts it on every health read
@@ -82,6 +86,20 @@ const CompleteBody = z.object({
     .regex(/^[a-z][a-z0-9_-]{0,31}$/)
     .optional()
     .nullable(),
+  // The recording had a small gap mkvid accepted (claim `allowPartial`); seconds from the start.
+  partial: z
+    .object({
+      missingSeconds: z.number().min(0).max(86400),
+      ranges: z
+        .array(z.object({ start: z.number().min(0), end: z.number().min(0) }))
+        .min(1)
+        .max(50),
+      fragments: z.array(z.number().int()).max(500).optional(),
+      totalFragments: z.number().int().optional(),
+    })
+    .optional()
+    .nullable()
+    .catch(undefined), // a malformed gap never refuses the upload itself
 });
 // Each entry is checked by storePushedTokens (a bad one is reported as rejected `invalid`, not a 400).
 const YoutubeTokensBody = z.object({ tokens: z.array(z.unknown()).max(50) });
@@ -104,7 +122,7 @@ function logger(c: { req: { raw: Request } }, route: string) {
 
 async function body<T>(
   c: { req: { json(): Promise<unknown> } },
-  schema: z.ZodType<T>,
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
 ): Promise<T | null> {
   const parsed = schema.safeParse(await c.req.json().catch(() => null));
   return parsed.success ? parsed.data : null;

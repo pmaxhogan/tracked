@@ -431,6 +431,43 @@ export function extractSetAudioSource(
   return null;
 }
 
+/**
+ * Every recording on the set page mkvid could use, best first (the first one
+ * is extractSetAudioSource's pick): the SoundCloud players that reach the
+ * last cue (all of them when it is unknown; else the longest when none
+ * does), then the hearthis.at players and track pages. What a partial
+ * recording is weighed against (failMkvidRequest): another entry here is
+ * tried before a recording with a gap is used.
+ */
+export function extractSetAudioSources(html: string, lastCue: number | null = null): MkvidSource[] {
+  const out: MkvidSource[] = [];
+  const add = (s: MkvidSource | null) => {
+    if (s && !out.some((o) => o.url === s.url)) out.push(s);
+  };
+  add(extractSetAudioSource(html, lastCue));
+  const players = soundcloudPlayers(html);
+  for (const p of players)
+    if (lastCue === null || p.seconds + MKVID_COMPLETENESS_SLACK_SECONDS >= lastCue)
+      add({ kind: "soundcloud", url: `https://api.soundcloud.com/tracks/${p.id}` });
+  const embeds = new RegExp(HEARTHIS_EMBED_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  let embedded = false;
+  while ((m = embeds.exec(html))) {
+    embedded = true;
+    add({ kind: "hearthis", url: `https://hearthis.at/embed/${m[1]}/` });
+  }
+  // A track page link next to an embed is usually the same track (mkvid turns the embed into it).
+  HEARTHIS_PAGE_RE.lastIndex = 0;
+  while (!embedded && (m = HEARTHIS_PAGE_RE.exec(html))) {
+    if (HEARTHIS_RESERVED.has(m[1]!.toLowerCase())) continue;
+    add({ kind: "hearthis", url: `https://hearthis.at/${m[1]}/${m[2]}/` });
+  }
+  return out;
+}
+
+/** mkvid's COMPLETENESS_SLACK_SECONDS: a recording this much shorter than the last cue still counts as the set. */
+const MKVID_COMPLETENESS_SLACK_SECONDS = 90;
+
 const SC_PLAYER_RE = /new\s+AudioPlayerSC\(\s*"[^"]*"\s*,\s*\{([^}]{0,400})\}/g;
 
 /** The page's SoundCloud players in page order: track id (idPlayer) and duration. */
@@ -758,6 +795,10 @@ export type MkvidRequest = {
    * `failed` = refused for good. Null before migration 0026 or not done.
    */
   playlistStatus: string | null;
+  /** No other recording of the set is left to try: mkvid may use one with a small gap (the claim's `allowPartial`). */
+  allowPartial: boolean;
+  /** The video was made from a recording with a small gap: "~20 s missing at 20:49" (information, not a problem). */
+  partialNote: string | null;
 };
 
 export type MkvidRow = {
@@ -789,6 +830,9 @@ export type MkvidRow = {
   style?: string | null;
   replaces_video_id?: string | null;
   playlist_status?: string | null;
+  allow_partial?: number | null;
+  partial_tried?: string | null;
+  partial_note?: string | null;
 };
 
 export function rowToRequest(r: MkvidRow): MkvidRequest {
@@ -821,6 +865,8 @@ export function rowToRequest(r: MkvidRow): MkvidRequest {
     style: r.style ?? null,
     replacesVideoId: r.replaces_video_id ?? null,
     playlistStatus: r.playlist_status ?? null,
+    allowPartial: Number(r.allow_partial ?? 0) === 1,
+    partialNote: r.partial_note ?? null,
   };
 }
 
@@ -905,7 +951,7 @@ export async function enqueueMkvidRequest(
   const re = await dbOf(env)
     .prepare(
       `UPDATE mkvid_requests SET source = ?, source_url = ?, last_cue_seconds = ?, status = 'pending', attempts = 0, not_before = NULL,
-              claimed_at = NULL, error = NULL, updated_at = ?
+              claimed_at = NULL, error = NULL, allow_partial = 0, partial_tried = NULL, updated_at = ?
        WHERE set_url = ? AND status = 'failed' AND ${mkvidNoRecordingSql("error", { since })} AND source_url IS NOT ?`,
     )
     .bind(
@@ -1610,7 +1656,49 @@ export type CompleteInput = {
   jobId?: string | null;
   /** The visual style mkvid rendered with ('static' | 'waves' | 'scene'); absent from older mkvids = unknown. */
   style?: string | null;
+  /** The recording had a small gap mkvid accepted (mkvid lib/partial.ts); absent = whole. */
+  partial?: MkvidPartial | null;
 };
+
+/** A gap in the recording a video was made from, as mkvid reports it (seconds from the start). */
+export type MkvidPartial = {
+  missingSeconds: number;
+  ranges: Array<{ start: number; end: number }>;
+  fragments?: number[];
+  totalFragments?: number;
+};
+
+/** m:ss or h:mm:ss. */
+function clockOf(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+/** The line the panel shows for a partial recording: "~20 s missing at 20:49" (null = whole). */
+export function partialNote(p: MkvidPartial | null | undefined): string | null {
+  if (!p || !Array.isArray(p.ranges) || p.ranges.length === 0) return null;
+  const at = p.ranges
+    .slice(0, 5)
+    .map((r) => clockOf(r.start))
+    .join(", ");
+  return `~${Math.round(p.missingSeconds)} s missing at ${at}${p.ranges.length > 5 ? ", ..." : ""}`;
+}
+
+/** A JSON list of recordings (set_media_facts.audio_sources, mkvid_requests.partial_tried); junk entries dropped. */
+export function parseMkvidSources(json: string | null | undefined): MkvidSource[] {
+  const raw = parseJson<unknown>(json ?? null, null);
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (s): s is MkvidSource =>
+      !!s &&
+      typeof s === "object" &&
+      MKVID_SOURCES.includes((s as MkvidSource).kind) &&
+      typeof (s as MkvidSource).url === "string",
+  );
+}
 
 export type CompleteResult =
   | {
@@ -1782,7 +1870,7 @@ export async function completeMkvidRequest(
   const playlistStatus = pl.ok ? pl.playlistStatus : waiting ? "pending" : "failed";
   await db
     .prepare(
-      "UPDATE mkvid_requests SET status = 'done', video_id = ?, video_url = ?, privacy = ?, style = ?, replaces_video_id = ?, job_id = COALESCE(?, job_id), error = ?, not_before = ?, playlist_status = ?, playlist_tries = ?, updated_at = ? WHERE id = ?",
+      "UPDATE mkvid_requests SET status = 'done', video_id = ?, video_url = ?, privacy = ?, style = ?, replaces_video_id = ?, job_id = COALESCE(?, job_id), error = ?, not_before = ?, playlist_status = ?, playlist_tries = ?, partial_note = ?, updated_at = ? WHERE id = ?",
     )
     .bind(
       input.videoId,
@@ -1795,6 +1883,7 @@ export async function completeMkvidRequest(
       pl.ok ? null : pl.retryAt,
       playlistStatus,
       pl.ok ? 0 : 1,
+      partialNote(input.partial),
       now,
       req.id,
     )
@@ -1954,6 +2043,58 @@ export async function failMkvidRequest(
     });
     return { status: "pending", attempts: Math.max(0, req.attempts - 1) };
   }
+  // mkvid found the recording whole but for a few empty fragments, and was not
+  // told it may use it: try the set's next recording; when none is left, the
+  // first partial one again, which mkvid may now use (`allow_partial`). No
+  // attempt used. An mkvid that says it again although allowed fails as usual.
+  const partialRow = await dbOf(env)
+    .prepare("SELECT allow_partial, partial_tried FROM mkvid_requests WHERE id = ?")
+    .bind(req.id)
+    .first<{ allow_partial: number | null; partial_tried: string | null }>();
+  const tried = parseMkvidSources(partialRow?.partial_tried);
+  const allowed = Number(partialRow?.allow_partial ?? 0) === 1;
+  if (/^partial_source\b/.test(input.error) && !allowed) {
+    if (!tried.some((t) => t.url === req.sourceUrl))
+      tried.push({ kind: req.source, url: req.sourceUrl });
+    const facts = await dbOf(env)
+      .prepare("SELECT audio_sources FROM set_media_facts WHERE set_url = ?")
+      .bind(req.setUrl)
+      .first<{ audio_sources: string | null }>();
+    const next = parseMkvidSources(facts?.audio_sources).find(
+      (s) => !tried.some((t) => t.url === s.url),
+    );
+    const to = next ?? tried[0]!;
+    await dbOf(env)
+      .prepare(
+        `UPDATE mkvid_requests SET status = 'pending', attempts = MAX(0, attempts - 1), claimed_at = NULL, not_before = NULL,
+                source = ?, source_url = ?, partial_tried = ?, allow_partial = ?, error = ?, job_id = COALESCE(?, job_id), updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        to.kind,
+        to.url,
+        JSON.stringify(tried),
+        next ? 0 : 1,
+        input.error.slice(0, 500),
+        v(input.jobId),
+        now,
+        req.id,
+      )
+      .run();
+    await refundLatestClaim(env, req.id, now);
+    log.info("mkvid.partial_source", {
+      id: req.id,
+      slug: req.slug,
+      setUrl: req.setUrl,
+      from: req.sourceUrl,
+      to: to.url,
+      allowPartial: !next,
+      knownSources:
+        facts?.audio_sources == null ? null : parseMkvidSources(facts.audio_sources).length,
+      error: input.error.slice(0, 200),
+    });
+    return { status: "pending", attempts: Math.max(0, req.attempts - 1) };
+  }
   // Nothing was uploaded: the claim stops counting against today's cap.
   await refundLatestClaim(env, req.id, now);
   // A failure that would park the request (permanent, or out of attempts) for
@@ -1993,6 +2134,27 @@ export async function failMkvidRequest(
   }
   const exhausted = req.attempts >= app.maxAttempts;
   const status: MkvidStatus = input.permanent || exhausted ? "failed" : "pending";
+  // An alternative tried instead of a partial recording failed for good: the
+  // partial one is better than nothing - back to it, which mkvid may now use.
+  if (status === "failed" && tried.length > 0 && !allowed) {
+    const back = tried[0]!;
+    await dbOf(env)
+      .prepare(
+        `UPDATE mkvid_requests SET status = 'pending', attempts = 0, claimed_at = NULL, not_before = NULL, source = ?, source_url = ?,
+                allow_partial = 1, error = ?, job_id = COALESCE(?, job_id), updated_at = ? WHERE id = ?`,
+      )
+      .bind(back.kind, back.url, input.error.slice(0, 500), v(input.jobId), now, req.id)
+      .run();
+    log.info("mkvid.partial_fallback", {
+      id: req.id,
+      slug: req.slug,
+      setUrl: req.setUrl,
+      from: req.sourceUrl,
+      to: back.url,
+      error: input.error.slice(0, 200),
+    });
+    return { status: "pending", attempts: 0 };
+  }
   const notBefore =
     status === "pending"
       ? now + Math.round(app.retryBackoffHours * 3600) * Math.max(1, req.attempts)
@@ -2061,7 +2223,7 @@ export async function replaceMkvidSource(
   const r = await dbOf(env)
     .prepare(
       `UPDATE mkvid_requests SET source = ?, source_url = ?, status = 'pending', attempts = 0, not_before = NULL, claimed_at = NULL,
-              error = NULL, unknown_failures = 0, updated_at = ?
+              error = NULL, unknown_failures = 0, allow_partial = 0, partial_tried = NULL, updated_at = ?
        WHERE id = ? AND status IN ('failed', 'superseded', 'pending')`,
     )
     .bind(to.kind, to.url, nowSeconds(), id)

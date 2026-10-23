@@ -276,6 +276,39 @@ describe("mkvid page drawer", () => {
     ).toHaveLength(3);
   });
 
+  it("a failed request (any kind) offers Ban next to Retry: POST /ui/api/mkvid/ban/{id}; a partial recording is info", async () => {
+    const FAILED = {
+      ...DONE,
+      id: "r5",
+      status: "failed",
+      videoId: null,
+      error: "yt-dlp exit 1: \n\nERROR: Did not get any data blocks\n",
+    };
+    const PARTIAL = { ...DONE, id: "r6", partialNote: "~20 s missing at 20:49" };
+    const { get, calls } = page((url, init) =>
+      init?.method === "POST"
+        ? Response.json({ ok: true })
+        : url.startsWith("/ui/api/mkvid/finished?")
+          ? Response.json(tableOf([FAILED, PARTIAL, { ...DONE, id: "r7", status: "banned" }]))
+          : answers(url),
+    );
+    await settle();
+    get("mk-settled").on.click(rowClick(0));
+    const body = get("tk-drawer-body");
+    expect(body.innerHTML).toContain('data-do="retry"');
+    expect(body.innerHTML).toContain('data-do="ban"');
+    await body.onclick(doClick("ban"));
+    await settle();
+    expect(posts(calls)).toMatchObject([{ url: "/ui/api/mkvid/ban/r5", body: "{}" }]);
+    // Done (with its partial note, shown neutral) and banned: no Ban.
+    get("mk-settled").on.click(rowClick(1));
+    expect(get("tk-drawer-body").innerHTML).not.toContain('data-do="ban"');
+    expect(get("tk-drawer-body").innerHTML).toContain("partial recording: ~20 s missing at 20:49");
+    expect(get("tk-drawer-body").innerHTML).not.toContain("mk-err");
+    get("mk-settled").on.click(rowClick(2));
+    expect(get("tk-drawer-body").innerHTML).not.toContain('data-do="ban"');
+  });
+
   it("a failed action keeps the drawer open with the reason inline and reloads", async () => {
     const { get, calls } = page((url, init) =>
       init?.method === "POST"

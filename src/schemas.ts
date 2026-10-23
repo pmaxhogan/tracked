@@ -465,6 +465,10 @@ export const MkvidClaimedRequest = z
         "Upload project to upload through: primary = mkvid-uploads, shared = tracked-youtube, or one of mkvid's extra projects (always one it offered).",
     }),
     attempts: z.number().int(),
+    allowPartial: z.boolean().openapi({
+      description:
+        'true when no other recording of the set is left to try: mkvid may use a source that is whole but for a few empty fragments (a small gap), and reports the gap as `partial` on /mkvid/complete. false: it fails such a source as "partial_source: ..." (no attempt used), and tracked tries the set\'s next recording first.',
+    }),
     tracks: z.array(MkvidTrackSchema).max(300).openapi({
       description:
         'The set\'s track list: every row of the page in order, anonymous "ID - ID" rows included (at most 300 rows); [] when none is stored.',

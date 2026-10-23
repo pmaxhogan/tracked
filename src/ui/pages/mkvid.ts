@@ -385,9 +385,18 @@ ${MKVID_STATE_JS}
     return '<span class="flag">' + esc(errorLabel(r)) + '</span>';
   }
   // The moves act on whole-queue positions, so they are offered only while the
-  // table shows the queue in claim order (sorted by #, ascending); ban always.
-  function actsHtml(moves) {
-    return '<span class="mk-acts">' + ACTS.filter((a) => moves || a[0] === 'ban').map((a) => '<button type="button" class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '"' + TK.tip(ACT_TIPS[a[0]]) + ' aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
+  // table shows the queue in claim order (sorted by #, ascending); ban on any
+  // row it can ban (BANNABLE: not one mkvid is rendering).
+  function actsHtml(moves, r) {
+    return '<span class="mk-acts">' + ACTS.filter((a) => a[0] === 'ban' ? bannable(r) : moves).map((a) => '<button type="button" class="mk-act' + (a[0] === 'ban' ? ' ban' : '') + '" data-act="' + a[0] + '"' + TK.tip(ACT_TIPS[a[0]]) + ' aria-label="' + a[2] + '">' + a[1] + '</button>').join('') + '</span>';
+  }
+
+  // What the ban accepts (lib/mkvid.ts banMkvidRequest): a waiting, failed (any kind) or superseded request.
+  const BANNABLE = ['pending', 'failed', 'superseded'];
+  function bannable(r) { return !r || BANNABLE.includes(r.status); }
+  // A video made from a recording with a small gap (no other recording left): information, never red.
+  function partialHtml(r) {
+    return r.partialNote ? '<span class="why"' + TK.tip('The recording was whole but for a few empty pieces at its source, and the set has no other recording, so mkvid used it as it is. The video says so in its description.') + '>partial recording: ' + esc(r.partialNote) + '</span>' : '';
   }
 
   function rowHtml(r, withPos) {
@@ -398,6 +407,7 @@ ${MKVID_STATE_JS}
     else if (r.status !== 'pending') meta.push(esc(rel(r.updatedAt)));
     if (r.replacesVideoId) meta.push('<span class="why"' + TK.tip(recreatingTip(r)) + '>recreating</span>');
     if (r.status === 'done' && r.oldStyle) meta.push('<span' + TK.tip('Rendered in an older visual style than the current scene style. It can be recreated.') + '>old style</span>');
+    if (r.partialNote) meta.push(partialHtml(r));
     if (r.error && (r.status !== 'pending' || backoff)) meta.push(errorHtml(r));
     const lead = withPos && r.position != null
       ? '<span class="mk-pos"' + TK.tip('Place in the whole queue: the newest set goes first, undated sets last.') + '>#' + esc(r.position) + '</span>'
@@ -541,7 +551,7 @@ ${MKVID_STATE_JS}
       { id: 'retry', label: 'Retrying', group: 'q', filters: [{ col: 'error', op: 'nempty', value: '' }], tip: 'Sets whose last attempt failed and that are waiting to be tried again.' },
       { id: 'undated', label: 'Undated', group: 'q', filters: [{ col: 'setDate', op: 'empty', value: '' }], tip: 'Sets without a date: they wait at the back of the queue.' },
     ],
-    actions: (r) => actsHtml(queueSorted()),
+    actions: (r) => actsHtml(queueSorted(), r),
     onAction: async (act, r, btn) => {
       const row = btn && btn.closest ? btn.closest('tr') : null;
       const btns = row && row.querySelectorAll ? row.querySelectorAll('button[data-act]') : [btn];
@@ -558,7 +568,7 @@ ${MKVID_STATE_JS}
 
   const FIN_STATUSES = ${JSON.stringify(MKVID_OUTCOMES)}.map((v) => ({ value: v, label: STATUS_WORDS[v] }));
   function finishedMeta(r) {
-    return r.error ? errorHtml(r) : (r.status === 'done' && r.oldStyle ? 'old style' : '');
+    return [r.error ? errorHtml(r) : (r.status === 'done' && r.oldStyle ? 'old style' : ''), partialHtml(r)].filter(Boolean).join(' \\u00b7 ');
   }
   finTable = TKTable.create($('mk-settled'), {
     id: 'fin',
@@ -728,6 +738,7 @@ ${MKVID_STATE_JS}
       ['status', badgeHtml(r) + (r.outcomeDetail ? ' ' + esc(r.outcomeDetail) : r.error ? (r.status === 'superseded' || r.status === 'banned' || (r.status === 'done' && !playlistWaits(r) && !playlistRefused(r)) ? ' <span class="when">' + esc(r.error) + '</span>' : ' <span class="' + (playlistRefused(r) ? 'mk-err' : 'warn') + '">' + esc(errorLabel(r)) + '</span>') : '')],
       r.outcomeDetail && r.error ? ['mkvid said', '<span class="when">' + esc(r.error) + '</span>'] : null,
       ['video', r.videoId ? '<span class="mono">' + esc(r.videoId) + '</span> ' + link(videoHref(r), 'open') : '-'],
+      r.partialNote ? ['recording', partialHtml(r)] : null,
       r.privacy ? ['privacy', esc(r.privacy) + (r.privacy === 'private' ? ' <span class="warn">(an unverified OAuth app forces private whatever was requested)</span>' : '')] : null,
       ['attempts', esc(r.attempts) + (r.notBefore && r.status !== 'done' ? ' · next try ' + esc(rel(r.notBefore)) : '')],
       r.status === 'done' && r.playlistStatus ? ['playlist', playlistWaits(r) ? '<span class="warn">waiting</span> tried again by itself ' + (r.notBefore && r.notBefore > Date.now() / 1000 ? esc(rel(r.notBefore)) : 'at the next tick') : playlistRefused(r) ? '<span class="mk-err">refused by YouTube</span>' : r.playlistStatus === 'duplicate' ? 'already in the artist playlist' : 'added to the artist playlist'] : null,
@@ -743,6 +754,10 @@ ${MKVID_STATE_JS}
     const btns = [];
     if (r.status === 'failed' || r.status === 'superseded' || r.status === 'claimed' || r.status === 'banned') {
       btns.push('<button type="button" class="btn" data-do="retry"' + TK.tip(r.status === 'banned' ? 'Lifts the ban: the set goes back in the queue.' : unconfirmed(r) ? 'Tries this one recording again now, whatever you choose for the others.' : noRecording(r) ? 'Tries the same recording again. It only helps if the recording is back.' : r.status === 'claimed' ? 'Gives the job back, whatever mkvid is doing with it, so it can be claimed again. Use it when mkvid died mid-job.' : 'Puts the request back in the queue with a fresh start.') + '>' + (r.status === 'claimed' ? 'Release &amp; retry' : r.status === 'banned' ? 'Unban' : 'Retry') + '</button>');
+    }
+    if (bannable(r)) {
+      // Any request the ban accepts: a waiting one, a failure of any kind, a superseded one.
+      btns.push('<button type="button" class="btn danger" data-do="ban"' + TK.tip(ACT_TIPS.ban) + '>Ban</button>');
     }
     if (r.readiness && r.readiness.state === 'waiting_ids' && !r.skipIdWait) {
       btns.push('<button type="button" class="btn" data-do="render-now"' + TK.tip('Renders now with ID shown for the unidentified tracks, instead of waiting until the set is 7 days old. The track list must still be verified.') + '>Render now</button>');
@@ -779,7 +794,7 @@ ${MKVID_STATE_JS}
       const what = b.dataset.do;
       if (what === 'recreate' && !(await TK.ask(RECREATE_ASK, { yes: 'Delete and recreate', danger: true }))) return;
       if (what === 'unpublish' && !(await TK.ask(UNPUBLISH_ASK, { yes: 'Delete video', danger: true }))) return;
-      const url = what === 'retry' ? '/ui/api/mkvid/retry/' + id : what === 'render-now' ? '/ui/api/mkvid/render-now/' + id : what === 'recheck-now' ? '/ui/api/mkvid/recheck-now/' + id : what === 'unpublish' ? '/ui/api/mkvid/unpublish/' + id : '/ui/api/mkvid/recreate/' + id;
+      const url = what === 'retry' ? '/ui/api/mkvid/retry/' + id : what === 'ban' ? '/ui/api/mkvid/ban/' + id : what === 'render-now' ? '/ui/api/mkvid/render-now/' + id : what === 'recheck-now' ? '/ui/api/mkvid/recheck-now/' + id : what === 'unpublish' ? '/ui/api/mkvid/unpublish/' + id : '/ui/api/mkvid/recreate/' + id;
       if (errLine) errLine.hidden = true;
       const res = await TK.busy(b, 'Working…', () => TK.api.post(url, {}));
       if (res && res.ok) { TK.drawer.close(); await reloadAll(); return; }

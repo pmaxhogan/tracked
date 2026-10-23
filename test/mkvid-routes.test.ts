@@ -377,6 +377,16 @@ describe("/mkvid routes", () => {
       (await post(env, "/mkvid/complete", { id: crypto.randomUUID(), videoId: "upload12345" }))
         .status,
     ).toBe(404);
+    // A malformed partial-recording gap never refuses the upload itself.
+    expect(
+      (
+        await post(env, "/mkvid/complete", {
+          id: crypto.randomUUID(),
+          videoId: "upload12345",
+          partial: { missingSeconds: "lots", ranges: [] },
+        })
+      ).status,
+    ).toBe(404);
     expect((await post(env, "/mkvid/fail", { id: crypto.randomUUID(), error: "x" })).status).toBe(
       404,
     );
