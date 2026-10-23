@@ -74,6 +74,9 @@ const REMOVAL_GRACE_SECONDS = 24 * 60 * 60;
 const RUN_DEADLINE_MS = 10_000;
 /** CACHE KV: how the last run ended (its stop reason feeds the "held" status). */
 export const LAST_RUN_KEY = "genres:last_run";
+/** CACHE KV: held while a run works (KV's shortest expiry; a run ends well inside it). */
+const LOCK_KEY = "genres:lock";
+const LOCK_TTL = 120;
 const LAST_RUN_TTL = 6 * 60 * 60;
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -417,7 +420,7 @@ export type GenreRunResult =
       pending: number;
       stoppedBy: GenreStop;
     }
-  | { ok: false; reason: "youtube_not_connected" | "off" | "unknown_genre" }
+  | { ok: false; reason: "youtube_not_connected" | "off" | "unknown_genre" | "busy" }
   | { ok: false; reason: "quota_held"; held: GateRefusal };
 
 async function upsertItem(
@@ -447,10 +450,37 @@ async function upsertItem(
  * the playlists and in `genre_playlist_items`. Never throws for a YouTube
  * error; a D1 error propagates (the cron catches it).
  */
-export async function runGenrePlaylists(
-  env: Env,
-  opts: { log: Logger; trigger?: string; only?: string; maxInserts?: number; deadlineMs?: number },
-): Promise<GenreRunResult> {
+export async function runGenrePlaylists(env: Env, opts: RunOpts): Promise<GenreRunResult> {
+  // One run at a time: two overlapping cron ticks (or a tick and Backfill now)
+  // would each create the same missing playlist. Get-then-put like the order
+  // pass's lock (KV has no compare-and-set); the window is a few milliseconds.
+  const held = await env.CACHE.get(LOCK_KEY);
+  if (held) {
+    opts.log.info("genres.busy", { trigger: opts.trigger ?? null });
+    return { ok: false, reason: "busy" };
+  }
+  const token = crypto.randomUUID();
+  await env.CACHE.put(LOCK_KEY, token, { expirationTtl: LOCK_TTL });
+  try {
+    return await runLocked(env, opts);
+  } finally {
+    try {
+      if ((await env.CACHE.get(LOCK_KEY)) === token) await env.CACHE.delete(LOCK_KEY);
+    } catch {
+      // It expires by itself.
+    }
+  }
+}
+
+type RunOpts = {
+  log: Logger;
+  trigger?: string;
+  only?: string;
+  maxInserts?: number;
+  deadlineMs?: number;
+};
+
+async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
   const log = opts.log;
   const settings = await getAppSettings(env);
   const nowSec = nowSeconds();

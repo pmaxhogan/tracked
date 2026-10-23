@@ -281,6 +281,17 @@ describe("runGenrePlaylists", () => {
     expect(row!.pending).toBeLessThan(8);
   });
 
+  it("one run at a time: a second one while the lock is held does nothing", async () => {
+    const env = makeEnv();
+    await seed(env, 10, [["house", "House"]]);
+    await env.CACHE.put("genres:lock", "other");
+    expect(await runGenrePlaylists(env, { log })).toEqual({ ok: false, reason: "busy" });
+    expect(createPlaylist).not.toHaveBeenCalled();
+    await env.CACHE.delete("genres:lock");
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ ok: true, inserted: 10 });
+    expect(await env.CACHE.get("genres:lock")).toBeNull();
+  });
+
   it("a rate limit ends the run only", async () => {
     const env = makeEnv();
     await seed(env, 10, [["house", "House"]]);

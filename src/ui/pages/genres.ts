@@ -172,7 +172,7 @@ ${COMMON_JS}
       const res = await TK.busy(b, 'Backfilling...', () => TK.api.post('/ui/api/genres/' + encodeURIComponent(key) + '/backfill', {}));
       const d = (res && res.data) || {};
       if (!res || !res.ok) TK.toast(TK.errText(res, 'backfill failed'), 'bad');
-      else if (d.ok === false) TK.toast(d.reason === 'quota_held' ? 'waits for the YouTube quota (' + d.held + ')' : d.reason === 'youtube_not_connected' ? 'connect YouTube on the Playlists page first' : 'not run: ' + d.reason, d.reason === 'youtube_not_connected' ? 'bad' : 'warn');
+      else if (d.ok === false) TK.toast(d.reason === 'quota_held' ? 'waits for the YouTube quota (' + d.held + ')' : d.reason === 'youtube_not_connected' ? 'connect YouTube on the Playlists page first' : d.reason === 'busy' ? 'a run is already working on the genre playlists; try again in a minute' : 'not run: ' + d.reason, d.reason === 'youtube_not_connected' ? 'bad' : 'warn');
       else TK.toast('added ' + (d.inserted || 0) + ' video' + (d.inserted === 1 ? '' : 's') + (d.pending ? ' \\u00b7 ' + d.pending + ' still to add' : ''), 'ok');
     } else if (act === 'refresh') {
       const res = await TK.busy(b, 'Working...', () => TK.api.post('/ui/api/genres/' + encodeURIComponent(key) + '/refresh', {}));
