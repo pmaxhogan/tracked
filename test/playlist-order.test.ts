@@ -418,7 +418,8 @@ describe("insertInOrder", () => {
       log,
       cache,
     });
-    expect(spy).not.toHaveBeenCalled();
+    // The keys are not read again (the duplicate guard's own lookups are not keys).
+    expect(spy.mock.calls.filter(([sql]) => /FROM tracklists/.test(String(sql)))).toEqual([]);
     expect(add).toHaveBeenLastCalledWith("PL", "v2023", "tok", undefined, { position: 1 });
   });
 

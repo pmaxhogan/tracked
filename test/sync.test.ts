@@ -366,10 +366,10 @@ describe("syncOne", () => {
       "Lilly Palmer",
     );
     (findPlaylistByTitle as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-    (createPlaylist as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: "PLnew",
-      title: "Lilly Palmer (1001tklists)",
-    });
+    // The artist playlist, then the combined one: two playlists, two ids (an insert is claimed per playlist).
+    (createPlaylist as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ id: "PLnew", title: "Lilly Palmer (1001tklists)" })
+      .mockResolvedValueOnce({ id: "PLcombined", title: "All tracked artists (1001tklists)" });
     (parseSetYouTubeId as ReturnType<typeof vi.fn>)
       .mockReturnValueOnce("vidA1234567") // a -> has video
       .mockReturnValueOnce(null) // b -> no video

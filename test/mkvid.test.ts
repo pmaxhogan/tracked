@@ -49,6 +49,7 @@ import { DEFAULT_POOL_SETTINGS } from "../src/lib/pool-settings";
 import { MkvidClaimResponse } from "../src/schemas";
 import { loadSubState, saveSubState } from "../src/lib/sync-store";
 import { makeLogger } from "../src/lib/log";
+import { markInPlaylist } from "../src/lib/playlist-blocklist";
 import { storeVerifiedList } from "./helpers/mkvid-lists";
 
 /** Queue a set with a verified list (no ID rows), so the claim gate lets it through. */
@@ -978,6 +979,66 @@ describe("completeMkvidRequest", () => {
       combinedStatus: "added",
     });
     // Membership caches were updated so the next sync tick doesn't re-list.
+    expect(await env.CACHE.get("yt:plvids:PLartist", "json")).toEqual({
+      videoIds: ["upload12345"],
+    });
+  });
+
+  it("the same completion delivered twice at once puts the video in each playlist once (2026-10-16, GdtzBYI80i0)", async () => {
+    const env = makeEnv();
+    await saveSubState(env, "lillypalmer", {
+      playlistId: "PLartist",
+      artistName: "Lilly Palmer",
+      processedTracklistUrls: [input.setUrl],
+      tracklistVideos: { [input.setUrl]: { videoId: null, checkedAt: NOW - 100 } },
+    });
+    playlistsExist();
+    await enqueueMkvidRequest(env, input);
+    const req = (await claimMkvidRequest(env, log))!;
+    const body = { id: req.id, videoId: "upload12345", jobId: "job9" };
+    // mkvid's job-finish callback and its poll loop, both sending before either got an answer.
+    const [a, b] = await Promise.all([
+      completeMkvidRequest(env, body, "tok", log),
+      completeMkvidRequest(env, body, "tok", log),
+    ]);
+    expect([a.status, b.status].sort()).toEqual(["done", "in_progress"]);
+    expect(
+      (addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[0], c[1]]),
+    ).toEqual([
+      ["PLartist", "upload12345"],
+      ["PLcombined", "upload12345"],
+    ]);
+    const audit = await env.DB.prepare("SELECT COUNT(*) AS n FROM playlist_additions").first<{
+      n: number;
+    }>();
+    expect(audit!.n).toBe(1);
+    // Sent again later (a 503 is retried): it is done, so mkvid gets its 409 and stops.
+    expect(await completeMkvidRequest(env, body, "tok", log)).toEqual({
+      status: "invalid_state",
+      current: "done",
+    });
+    expect(addVideoToPlaylist).toHaveBeenCalledTimes(2);
+  });
+
+  it("a video tracked put in the artist playlist is not inserted again when the snapshot lost it", async () => {
+    const env = makeEnv();
+    await saveSubState(env, "lillypalmer", {
+      playlistId: "PLartist",
+      artistName: "Lilly Palmer",
+      processedTracklistUrls: [input.setUrl],
+      tracklistVideos: { [input.setUrl]: { videoId: null, checkedAt: NOW - 100 } },
+    });
+    playlistsExist();
+    // A run that read the snapshot before this video went in wrote it back without it.
+    await env.CACHE.put("yt:plvids:PLartist", JSON.stringify({ videoIds: [] }));
+    await markInPlaylist(env, "PLartist", "upload12345", "mkvid");
+    await enqueueMkvidRequest(env, input);
+    const req = (await claimMkvidRequest(env, log))!;
+    const r = await completeMkvidRequest(env, { id: req.id, videoId: "upload12345" }, "tok", log);
+    expect(r).toMatchObject({ status: "done", playlistStatus: "duplicate" });
+    expect((addVideoToPlaylist as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
+      "PLcombined",
+    ]);
     expect(await env.CACHE.get("yt:plvids:PLartist", "json")).toEqual({
       videoIds: ["upload12345"],
     });

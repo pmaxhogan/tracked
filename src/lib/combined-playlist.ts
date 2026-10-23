@@ -52,6 +52,7 @@ import {
 import { errorFields, type Logger } from "./log";
 import { noteQuotaOut } from "./youtube-quota";
 import { combinedSkipIds } from "./playlist-blocklist";
+import { playlistInsertKey, releaseClaim, takeClaim } from "./insert-claims";
 import { getAppSettings, type AppSettings } from "./app-settings";
 import { dailyMaxUnits } from "./quota-priority";
 
@@ -225,10 +226,18 @@ export async function addToCombined(
   log: Logger,
 ): Promise<"added" | "duplicate"> {
   if (handle.videoIds.has(videoId)) return "duplicate";
+  // Another run inserting it right now (lib/insert-claims.ts): one copy is enough.
+  const claim = await takeClaim(env, playlistInsertKey(handle.playlistId, videoId));
+  if (!claim) {
+    log.warn("combined.insert_skipped_claimed", { playlistId: handle.playlistId, videoId });
+    handle.videoIds.add(videoId);
+    return "duplicate";
+  }
   try {
     handle.attempts += 1;
     await addVideoToPlaylist(handle.playlistId, videoId, accessToken);
   } catch (e) {
+    await releaseClaim(env, claim);
     if (!(e instanceof PlaylistNotFoundError)) throw e;
     log.warn("combined.playlist_stale_midrun", { stalePlaylistId: handle.playlistId });
     const fresh = await openCombinedPlaylist(env, accessToken, log);

@@ -1187,6 +1187,9 @@ export async function syncOne(
    * mid-run (re-resolve by title, then retry; later iterations pick up the
    * new id). Updates the in-memory membership set and the added counter.
    * The video goes in at the place its set's date gives it (lib/playlist-order.ts).
+   * False when nothing was inserted because the video is in already: tracked
+   * put it there before (the snapshot had lost it), or another run is
+   * inserting it right now (lib/playlist-order-store.ts `skipped`).
    */
   const orderKeys: OrderKeyCache = {};
   // Addition pushes (lib/playlist-add-push.ts) go out while the run carries on
@@ -1202,9 +1205,10 @@ export async function syncOne(
       setUrl,
       cache: orderKeys,
     });
-  const addToArtistPlaylist = async (videoId: string, setUrl: string): Promise<void> => {
+  const addToArtistPlaylist = async (videoId: string, setUrl: string): Promise<boolean> => {
+    let skipped: string | undefined;
     try {
-      await insertOrdered(videoId, setUrl);
+      skipped = (await insertOrdered(videoId, setUrl)).skipped;
     } catch (e) {
       if (!(e instanceof PlaylistNotFoundError)) throw e;
       log.warn("sync.playlist_stale_midrun", { slug: sub.slug, stalePlaylistId: playlistId });
@@ -1217,9 +1221,14 @@ export async function syncOne(
       } else {
         existingVideoIds = await getCachedPlaylistVideoIds(env, playlistId, accessToken, log);
       }
-      await insertOrdered(videoId, setUrl);
+      skipped = (await insertOrdered(videoId, setUrl)).skipped;
     }
     existingVideoIds.add(videoId);
+    if (skipped) {
+      log.info("sync.insert_skipped", { slug: sub.slug, setUrl, videoId, skipped });
+      playlistChanged = true;
+      return false;
+    }
     // Confirmed insert: from now on the comparison expects it in this playlist.
     await markInPlaylist(env, playlistId, videoId, "sync");
     additionPushes.push(
@@ -1227,6 +1236,7 @@ export async function syncOne(
     );
     videoIdsAdded += 1;
     playlistChanged = true;
+    return true;
   };
 
   /** Remove from the artist playlist if it's there. Returns items deleted. */
@@ -1344,8 +1354,7 @@ export async function syncOne(
           continue;
         }
         videoIdsFound += 1;
-        if (!present) {
-          await addToArtistPlaylist(videoId, setUrl);
+        if (!present && (await addToArtistPlaylist(videoId, setUrl))) {
           log.info("sync.added", { slug: sub.slug, setUrl, videoId, playlistId });
           auditSet("added", setUrl, {
             videoId,
@@ -1639,11 +1648,10 @@ export async function syncOne(
       } else if (prev.videoId === null) {
         // The set gained a recording since we last looked: same as a first-time add.
         videoIdsFound += 1;
-        const wasPresent = existingVideoIds.has(videoId);
-        if (!wasPresent) {
-          await addToArtistPlaylist(videoId, setUrl);
+        const wasPresent =
+          existingVideoIds.has(videoId) || !(await addToArtistPlaylist(videoId, setUrl));
+        if (!wasPresent)
           log.info("sync.recheck_added", { slug: sub.slug, setUrl, videoId, playlistId });
-        }
         tracklistVideos[setUrl] = { videoId, checkedAt };
         await supersedeMkvid(setUrl, videoId);
         auditSet(wasPresent ? "duplicate" : "added", setUrl, {

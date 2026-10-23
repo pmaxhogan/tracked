@@ -55,7 +55,15 @@ const JS = (labels: Record<string, string>) => /* js */ `
     recorded: 'The video was found deleted or private. tracked noted it and will not add it back. If it is still in the playlist, it is taken out by itself once it has stayed that way for 3 days.',
     undone: 'You undid this: the video is kept, or may be added again if it comes back. One that is still in the playlist and stays deleted or private is still taken out after 3 days, unless you chose Keep it.',
   };
-  const statusView = (r) => r.source === 'dead'
+  // A duplicate's rows are tracked cleaning up after itself: the video is still in the playlist once, nothing to do.
+  const DUPLICATE_STATUS_TIPS = {
+    would_remove: 'The video is in the playlist more than once. The extra copy is deleted by itself once the sweep is live; the other copy stays.',
+    removed: 'The video was in the playlist more than once: the extra copy was deleted and one copy stays. Nothing for you to do.',
+    failed: 'YouTube refused to delete the extra copy. It is tried again at the next comparison.',
+  };
+  const statusView = (r) => r.source === 'duplicate'
+    ? { cls: r.status === 'failed' ? 'warn' : 'info', text: String(r.status).replace('_', ' '), tip: DUPLICATE_STATUS_TIPS[r.status] || STATUS_TIPS[r.status] || 'The state of this removal.' }
+    : r.source === 'dead'
     ? { cls: r.status === 'would_remove' ? 'info' : 'neutral', text: r.status === 'would_remove' ? 'waiting' : String(r.status).replace('_', ' '), tip: DEAD_STATUS_TIPS[r.status] || STATUS_TIPS[r.status] || 'The state of this removal.' }
     : { cls: r.status === 'would_remove' ? 'warn' : r.status === 'undone' ? 'neutral' : 'bad', text: String(r.status).replace('_', ' '), tip: STATUS_TIPS[r.status] || 'The state of this removal.' };
   const SOURCE_TIPS = {
@@ -63,8 +71,9 @@ const JS = (labels: Record<string, string>) => /* js */ `
     owner: 'You removed it from the playlist by hand on YouTube.',
     dead: 'The video was deleted or made private on YouTube.',
     button: 'You used Remove & replace on the set.',
+    duplicate: 'The playlist comparison found the same video twice in one playlist and deleted the extra copy.',
   };
-  const SOURCES = [{ value: 'sweep', label: 'Sweep' }, { value: 'owner', label: 'Owner' }, { value: 'dead', label: 'Dead video' }, { value: 'button', label: 'Replace' }];
+  const SOURCES = [{ value: 'sweep', label: 'Sweep' }, { value: 'owner', label: 'Owner' }, { value: 'dead', label: 'Dead video' }, { value: 'button', label: 'Replace' }, { value: 'duplicate', label: 'Duplicate' }];
   const STATUSES = [{ value: 'would_remove', label: 'would remove' }, { value: 'removed', label: 'removed' }, { value: 'recorded', label: 'recorded' }, { value: 'failed', label: 'failed' }, { value: 'undone', label: 'undone' }];
   const REASONS = Object.keys(LABELS).map((k) => ({ value: k, label: LABELS[k] }));
   const isoOf = (s) => { try { return new Date(s * 1000).toISOString(); } catch (e) { return ''; } };
@@ -133,7 +142,8 @@ const JS = (labels: Record<string, string>) => /* js */ `
   }
   $dj.addEventListener('change', () => { if (table) table.setFilter('slug', $dj.value ? 'eq' : null, $dj.value); });
 
-  const undoable = (r) => r.status === 'removed' || r.status === 'recorded' || r.status === 'would_remove';
+  // A duplicate copy is never put back: the video is still in the playlist once.
+  const undoable = (r) => r.source !== 'duplicate' && (r.status === 'removed' || r.status === 'recorded' || r.status === 'would_remove');
   // A dead video cannot be put back: its undo only lets the sync add it again, and "Keep it" leaves a waiting one in the playlist.
   const undoButton = (r) => r.source === 'dead'
     ? (r.status === 'would_remove'
@@ -152,7 +162,7 @@ const JS = (labels: Record<string, string>) => /* js */ `
     rowKey: 'id',
     columns: [
       { key: 'at', label: 'When', type: 'datetime', storage: 's' },
-      { key: 'source', label: 'Source', type: 'enum', options: SOURCES, tip: 'What removed the video: the sweep, you on YouTube, a dead video, or the Remove & replace button.',
+      { key: 'source', label: 'Source', type: 'enum', options: SOURCES, tip: 'What removed the video: the sweep, you on YouTube, a dead video, the Remove & replace button, or a duplicate copy.',
         render: (r) => '<span' + TK.tip(SOURCE_TIPS[r.source] || 'What removed the video.') + '>' + esc((SOURCES.find((o) => o.value === r.source) || { label: r.source }).label) + '</span>' },
       { key: 'status', label: 'Status', type: 'enum', options: STATUSES, tip: 'Whether the removal happened (removed), only would happen (would remove), was only noted (recorded), failed, or was undone.',
         render: (r) => { const v = statusView(r); return badge(v.cls, v.text, v.tip); } },
@@ -170,6 +180,7 @@ const JS = (labels: Record<string, string>) => /* js */ `
       { id: 'owner', label: 'Owner', group: 'source', filters: [{ col: 'source', op: 'in', value: 'owner' }], tip: SOURCE_TIPS.owner },
       { id: 'dead', label: 'Dead', group: 'source', filters: [{ col: 'source', op: 'in', value: 'dead' }], tip: SOURCE_TIPS.dead },
       { id: 'button', label: 'Replace', group: 'source', filters: [{ col: 'source', op: 'in', value: 'button' }], tip: SOURCE_TIPS.button },
+      { id: 'duplicate', label: 'Duplicate', group: 'source', filters: [{ col: 'source', op: 'in', value: 'duplicate' }], tip: SOURCE_TIPS.duplicate },
     ],
     actions: (r) => undoable(r)
       ? '<button type="button" class="btn sm" data-act="undo"' + TK.tip(undoButton(r).tip) + '>' + undoButton(r).label + '</button>'

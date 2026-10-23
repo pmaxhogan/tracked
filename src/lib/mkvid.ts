@@ -66,6 +66,7 @@ import {
   type MkvidOutcome,
 } from "./mkvid-outcome";
 import { removedBurstSince } from "./mkvid-removed-burst";
+import { releaseClaim, takeClaim } from "./insert-claims";
 import { tryApplyAppleCues } from "./apple-backstop";
 
 export type MkvidSourceKind = "soundcloud" | "hearthis";
@@ -1722,7 +1723,12 @@ export type CompleteResult =
   /** Banned while it rendered: the upload is kept out of the playlists and queued for deletion. */
   | { status: "banned"; videoId: string }
   | { status: "not_found" }
-  | { status: "invalid_state"; current: MkvidStatus };
+  | { status: "invalid_state"; current: MkvidStatus }
+  /** The same completion is being handled by another call right now: mkvid sends it again later (and gets 409 once it is done). */
+  | { status: "in_progress" };
+
+/** How long one completion holds its claim: far past any real completion, short enough that a crashed one frees itself. */
+const COMPLETE_CLAIM_SECONDS = 10 * 60;
 
 /**
  * mkvid delivered a video: put it in the artist playlist and the combined
@@ -1742,11 +1748,37 @@ export async function completeMkvidRequest(
   accessToken: string,
   log: Logger,
 ): Promise<CompleteResult> {
-  const db = dbOf(env);
   const req = await getMkvidRequest(env, input.id);
   if (!req) return { status: "not_found" };
   if (req.status === "done" || req.status === "superseded")
     return { status: "invalid_state", current: req.status };
+  // mkvid can deliver one completion twice at once (its job-finish callback and its poll loop): the
+  // status read above cannot tell, so the second would put the video in the playlists a second time
+  // (2026-10-16, GdtzBYI80i0). One call at a time does the work; the other is asked to come back.
+  const claim = await takeClaim(env, `mkvid.complete ${req.id}`, COMPLETE_CLAIM_SECONDS);
+  if (!claim) {
+    log.warn("mkvid.complete_in_progress", { id: req.id, videoId: input.videoId });
+    return { status: "in_progress" };
+  }
+  try {
+    // Read again under the claim: a call that finished just before this one took it has marked it done.
+    const fresh = (await getMkvidRequest(env, input.id)) ?? req;
+    if (fresh.status === "done" || fresh.status === "superseded")
+      return { status: "invalid_state", current: fresh.status };
+    return await completeClaimed(env, input, fresh, accessToken, log);
+  } finally {
+    await releaseClaim(env, claim);
+  }
+}
+
+async function completeClaimed(
+  env: Env,
+  input: CompleteInput,
+  req: MkvidRequest,
+  accessToken: string,
+  log: Logger,
+): Promise<CompleteResult> {
+  const db = dbOf(env);
   const now = nowSeconds();
   // Banned from the panel while mkvid rendered it (2026-10-01): the ban wins.
   if (req.status === "banned") {

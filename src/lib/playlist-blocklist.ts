@@ -17,6 +17,7 @@
 
 import type { Env } from "../types";
 import { batchChunked, dbOf } from "./db";
+import { dropClaim, playlistInsertKey } from "./insert-claims";
 
 export type RemovedReason = "owner" | "dead" | "button";
 
@@ -217,6 +218,25 @@ export async function markOutOfPlaylist(
       .run();
   } catch {
     /* see markInPlaylist */
+  }
+  // Out again: a later insert of it is a new one, not a second copy of the last.
+  await dropClaim(env, playlistInsertKey(playlistId, videoId));
+}
+
+/** True when tracked put `videoId` into `playlistId` and has not taken it out since (state 'in'). Unknown = false. Never throws. */
+export async function isConfirmedIn(
+  env: Env,
+  playlistId: string,
+  videoId: string,
+): Promise<boolean> {
+  try {
+    const r = await dbOf(env)
+      .prepare("SELECT state FROM playlist_confirmed WHERE playlist_id = ? AND video_id = ?")
+      .bind(playlistId, videoId)
+      .first<{ state: string }>();
+    return r?.state === "in";
+  } catch {
+    return false;
   }
 }
 

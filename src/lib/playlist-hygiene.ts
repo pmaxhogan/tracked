@@ -412,6 +412,7 @@ export const REASON_LABELS: Record<string, string> = {
   button: '"remove and replace" on the set',
   banned_channel: "uploaded by a channel you banned",
   struck_channel: "uploaded by a channel you removed videos of before",
+  duplicate: "the same video was in the playlist more than once",
 };
 
 export type PickRejectReason =
@@ -631,7 +632,7 @@ export async function hasGoodVideo(
 
 // --- removal log ------------------------------------------------------------
 
-export type RemovalSource = "sweep" | "owner" | "dead" | "button";
+export type RemovalSource = "sweep" | "owner" | "dead" | "button" | "duplicate";
 export type RemovalStatus = "would_remove" | "removed" | "failed" | "undone" | "recorded";
 
 export type RemovalRow = {
@@ -686,7 +687,7 @@ export const REMOVALS_TABLE: TableDef<RemovalRow> = {
   columns: {
     id: { type: "number", filterable: false },
     at: { type: "datetime", storage: "s" },
-    source: { type: "enum", options: ["sweep", "owner", "dead", "button"] },
+    source: { type: "enum", options: ["sweep", "owner", "dead", "button", "duplicate"] },
     status: { type: "enum", options: ["would_remove", "removed", "recorded", "failed", "undone"] },
     slug: { type: "text", searchable: true },
     set_url: { type: "text", searchable: true },
@@ -1263,8 +1264,19 @@ function itemVideoId(it: RawPlaylistItem): string | null {
   return it.contentDetails?.videoId ?? it.snippet?.resourceId?.videoId ?? null;
 }
 
+/** One playlist item of a video, as a complete listing shows it. */
+export type ItemCopy = {
+  itemId: string;
+  /** `snippet.position` (0-based), else the item's index in the listing. */
+  position: number;
+  /** `snippet.publishedAt`: when the item was added to the playlist. */
+  addedAt: string | null;
+};
+
 type Listing = {
   present: Set<string>;
+  /** Videos the playlist holds more than once, with every copy. */
+  duplicates: Map<string, ItemCopy[]>;
   /** Videos whose item is the husk of a deleted or private video (`isUnavailableItem`). */
   deadPresent: Set<string>;
   /** The playlist item ids of each of those, for taking them out without another lookup. */
@@ -1297,7 +1309,8 @@ async function completeListing(
     const deadPresent = new Set<string>();
     const deadItems = new Map<string, string[]>();
     const channels: VideoChannel[] = [];
-    for (const it of r.items) {
+    const copies = new Map<string, ItemCopy[]>();
+    for (const [index, it] of r.items.entries()) {
       const id = itemVideoId(it);
       if (!id) {
         // A part/format change or a partial body: nothing may be inferred from this listing.
@@ -1305,6 +1318,15 @@ async function completeListing(
         return null;
       }
       present.add(id);
+      if (it.id) {
+        const sn = it.snippet as { position?: unknown; publishedAt?: unknown } | undefined;
+        const copy: ItemCopy = {
+          itemId: it.id,
+          position: typeof sn?.position === "number" ? sn.position : index,
+          addedAt: typeof sn?.publishedAt === "string" ? sn.publishedAt : null,
+        };
+        copies.set(id, [...(copies.get(id) ?? []), copy]);
+      }
       const sn = it.snippet as
         { videoOwnerChannelId?: unknown; videoOwnerChannelTitle?: unknown } | undefined;
       if (typeof sn?.videoOwnerChannelId === "string" && sn.videoOwnerChannelId)
@@ -1319,7 +1341,15 @@ async function completeListing(
         if (it.id) deadItems.set(id, [...(deadItems.get(id) ?? []), it.id]);
       }
     }
-    return { present, deadPresent, deadItems, items: r.items.length, channels };
+    const duplicates = new Map([...copies].filter(([, c]) => c.length > 1));
+    if (duplicates.size > 0)
+      log.warn("hygiene.compare.duplicates_found", {
+        playlistId,
+        videos: duplicates.size,
+        extraItems: [...duplicates.values()].reduce((n, c) => n + c.length - 1, 0),
+        videoIds: [...duplicates.keys()].slice(0, 50),
+      });
+    return { present, duplicates, deadPresent, deadItems, items: r.items.length, channels };
   } catch (e) {
     log.warn("hygiene.compare.listing_failed", { playlistId, ...errorFields(e) });
     return null;
@@ -1468,6 +1498,10 @@ export type ComparePlaylistResult = {
   deadRemoved?: number;
   /** Dead videos still in it that are waiting: for their days to pass, for the owner (a hold), or because the sweep is a dry run. */
   deadReported?: number;
+  /** Videos the listing found in it more than once. */
+  duplicates?: number;
+  /** Extra copies this run deleted (`deleteDuplicateItems`). */
+  duplicatesRemoved?: number;
 };
 
 type RemovalFinding = { videoId: string; reason: "owner" | "dead"; setUrls: string[] };
@@ -1562,6 +1596,8 @@ type Pending = {
   /** Every dead video in the playlist with its item ids, expected or not, and the size of the playlist. */
   deadItems: ReadonlyMap<string, string[]>;
   items: number;
+  /** Videos the playlist holds more than once (`Listing.duplicates`). */
+  duplicates: ReadonlyMap<string, ItemCopy[]>;
   setUrlsOf: (id: string) => string[];
   /** Run after findings are applied (the combined playlist saves its snapshot). */
   after?: () => Promise<void>;
@@ -2151,6 +2187,182 @@ async function deleteDeadVideos(
   return removed;
 }
 
+// --- duplicate copies --------------------------------------------------------
+
+/** One video that a playlist holds more than once: the copy that stays and the ones that go. */
+export type DuplicatePlan = { videoId: string; keep: ItemCopy; extras: ItemCopy[] };
+
+/**
+ * Which copies of a duplicated video go. The one at the lowest position stays:
+ * an artist playlist is in set-date order and a second insert lands at the
+ * place the date gives it (a positioned insert) or at the end (an append),
+ * never before the right place, so the first copy is the well placed one; in
+ * the combined playlist (not ordered) it is the one added first. Ties keep the
+ * earlier added. Videos in `skip` (dead ones, whose copies all go) are left
+ * out. Pure.
+ */
+export function planDuplicateDeletes(
+  duplicates: ReadonlyMap<string, ItemCopy[]>,
+  skip: ReadonlySet<string> = new Set(),
+): DuplicatePlan[] {
+  const out: DuplicatePlan[] = [];
+  for (const [videoId, copies] of duplicates) {
+    if (skip.has(videoId) || copies.length < 2) continue;
+    const sorted = [...copies].sort(
+      (a, b) => a.position - b.position || (a.addedAt ?? "").localeCompare(b.addedAt ?? ""),
+    );
+    out.push({ videoId, keep: sorted[0]!, extras: sorted.slice(1) });
+  }
+  return out;
+}
+
+type DuplicateTask = DuplicatePlan & { p: Pending };
+
+const addedOn = (c: ItemCopy) => (c.addedAt ? c.addedAt.slice(0, 19).replace("T", " ") : "?");
+
+/** The line a duplicate's row carries. */
+export function duplicateDetail(t: DuplicatePlan, done: "deleted" | "would_delete"): string {
+  const n = t.extras.length;
+  const what = n === 1 ? "the extra copy" : `${n} extra copies`;
+  const verb = done === "deleted" ? "deleted" : "would be deleted (dry run)";
+  return `in the playlist ${n + 1} times; ${what} ${verb} (added ${t.extras.map(addedOn).join(", ")}); the copy at position ${t.keep.position + 1} (added ${addedOn(t.keep)}) stays`;
+}
+
+/**
+ * Delete the extra copies the comparison found, across every playlist of the
+ * run that is not held. A copy is not a removal: the video stays in the
+ * playlist once, so nothing is put on the never-add list, marked as taken
+ * out, or cleared from its set; only a `playlist_removals` row (source
+ * `duplicate`) says what happened. The sweep's rails apply as for dead videos
+ * (`deleteDeadVideos`): nothing is deleted in a dry run (the rows say what
+ * would be), every delete counts against the day's removal budget, charged
+ * once before the first delete and refunded for deletes not made, and a
+ * daily-quota reply stops the run and sets the hold. A delete YouTube refuses
+ * for another reason is logged `failed` and tried again at the next comparison.
+ */
+async function deleteDuplicateItems(
+  env: Env,
+  accessToken: string,
+  tasks: DuplicateTask[],
+  deadRun: DeadRun | null,
+  opts: { log: Logger; fetcher?: typeof fetch; nowMs: number },
+): Promise<{ removed: Map<string, number>; usedNow: number | null; stoppedBy: string | null }> {
+  const { log, nowMs } = opts;
+  const removed = new Map<string, number>();
+  const at = Math.floor(nowMs / 1000);
+  const row = (t: DuplicateTask) => ({
+    at,
+    source: "duplicate" as const,
+    slug: t.p.ctx.slug,
+    set_url: t.p.setUrlsOf(t.videoId)[0] ?? null,
+    video_id: t.videoId,
+    playlist_id: t.p.ctx.playlistId,
+    playlist_kind: t.p.ctx.kind,
+    reason: "duplicate",
+  });
+  const settings = sweepSettings(env, await getAppSettings(env));
+  const used = deadRun ? (deadRun.usedNow ?? deadRun.used) : await sweepDeletesUsed(env, nowMs);
+  const left = deadRun ? deadRun.budgetLeft : Math.max(0, settings.dailyRemovals - used);
+  if (settings.dryRun) {
+    for (const t of tasks)
+      await logRemoval(env, {
+        ...row(t),
+        status: "would_remove",
+        detail: duplicateDetail(t, "would_delete"),
+      });
+    log.info("hygiene.duplicates.dry_run", { videos: tasks.length });
+    return { removed, usedNow: null, stoppedBy: "dry_run" };
+  }
+  if (deadRun?.stoppedBy === "quota" || (await getQuotaOut(env, nowMs)))
+    return { removed, usedNow: null, stoppedBy: "quota" };
+  const todo: DuplicateTask[] = [];
+  let reserved = 0;
+  let stoppedBy: string | null = null;
+  for (const t of tasks) {
+    if (reserved + t.extras.length > left) {
+      stoppedBy = "budget";
+      break;
+    }
+    reserved += t.extras.length;
+    todo.push(t);
+  }
+  if (todo.length === 0) return { removed, usedNow: null, stoppedBy };
+  let before: number;
+  try {
+    before = (await bumpSweepDeletes(env, reserved, nowMs, used)) - reserved;
+  } catch (e) {
+    // The day's count could not be written: deleting now could overspend it.
+    log.warn("hygiene.duplicates.budget_write_failed", { reserved, ...errorFields(e) });
+    return { removed, usedNow: null, stoppedBy: "counter" };
+  }
+  let deleted = 0;
+  for (const t of todo) {
+    let gone = 0;
+    let quota = false;
+    try {
+      for (const c of t.extras) {
+        await deletePlaylistItem(c.itemId, accessToken, opts.fetcher);
+        gone++;
+      }
+    } catch (e) {
+      log.warn("hygiene.duplicates.remove_failed", {
+        ...t.p.ctx,
+        videoId: t.videoId,
+        gone,
+        ...errorFields(e),
+      });
+      if (isQuotaError(e)) {
+        await noteQuotaOut(env, e, log);
+        quota = true;
+      }
+      if (gone === 0)
+        await logRemoval(env, {
+          ...row(t),
+          status: "failed",
+          detail: e instanceof Error ? e.message : String(e),
+        }).catch(() => {});
+    }
+    if (gone > 0) {
+      await logRemoval(env, {
+        ...row(t),
+        status: "removed",
+        detail: duplicateDetail({ ...t, extras: t.extras.slice(0, gone) }, "deleted"),
+      }).catch((e) =>
+        log.error("hygiene.duplicates.log_failed", { videoId: t.videoId, ...errorFields(e) }),
+      );
+      removed.set(t.p.ctx.playlistId, (removed.get(t.p.ctx.playlistId) ?? 0) + gone);
+    }
+    deleted += gone;
+    if (quota) {
+      stoppedBy = "quota";
+      break;
+    }
+  }
+  let usedNow = before + reserved;
+  if (deleted < reserved) {
+    try {
+      await writeSweepDeletes(env, before + deleted, nowMs);
+      usedNow = before + deleted;
+    } catch (e) {
+      log.warn("hygiene.duplicates.budget_refund_failed", {
+        unused: reserved - deleted,
+        ...errorFields(e),
+      });
+    }
+  }
+  if (deadRun) {
+    deadRun.budgetLeft -= deleted;
+    deadRun.usedNow = usedNow;
+  }
+  log.info("hygiene.duplicates.done", {
+    videos: tasks.length,
+    deleted,
+    stoppedBy,
+    playlists: [...removed.keys()],
+  });
+  return { removed, usedNow, stoppedBy };
+}
+
 /**
  * List every managed playlist in full and compare it with what tracked put
  * there. Evidence that a video belongs in a playlist (anything else is never
@@ -2241,6 +2453,7 @@ export async function comparePlaylists(
       deadPresent: listing.deadPresent,
       deadItems: listing.deadItems,
       items: listing.items,
+      duplicates: listing.duplicates,
       setUrlsOf: (id) => referenced.get(id) ?? [],
     });
   }
@@ -2282,6 +2495,7 @@ export async function comparePlaylists(
           deadPresent: listing.deadPresent,
           deadItems: listing.deadItems,
           items: listing.items,
+          duplicates: listing.duplicates,
           setUrlsOf: (id) => allExpected.get(id) ?? [],
           // Saved only when applied: a held playlist keeps its old snapshot, so the backfill keeps skipping the held ids.
           after: () => savePlaylistMembers(env, combinedId, listing.present, now),
@@ -2311,6 +2525,10 @@ export async function comparePlaylists(
   let deadRun: DeadRun | null = null;
   /** Its setup failed: dead videos are left alone for this comparison. */
   let deadOff = false;
+  /** Extra copies of a video in a playlist that is not held, taken out after the dead videos. */
+  const dupTasks: DuplicateTask[] = [];
+  /** The day's delete count after the duplicate deletes, for the sweep of the same tick. */
+  let dupUsedNow: number | null = null;
 
   // The dead-video pass rides this loop but is not the comparison: whatever fails in it (its setup, one
   // playlist, the deletes), the comparison goes on, and what it learned about waits is saved in the `finally`.
@@ -2367,6 +2585,8 @@ export async function comparePlaylists(
       }));
       await applyFindings(env, findings, ctx);
       if (p.after) await p.after();
+      // A dead video's copies all go with it (the dead pass below): only live videos are de-duplicated.
+      for (const t of planDuplicateDeletes(p.duplicates, p.deadPresent)) dupTasks.push({ p, ...t });
       const owner = findings.filter((f) => f.reason === "owner").length;
       results[p.slot] = {
         ...ctx,
@@ -2431,6 +2651,27 @@ export async function comparePlaylists(
         log.error("hygiene.dead.threw", errorFields(e));
       }
     }
+    if (dupTasks.length > 0) {
+      try {
+        const d = await deleteDuplicateItems(env, accessToken, dupTasks, deadRun, {
+          log,
+          fetcher: opts.fetcher,
+          nowMs: now * 1000,
+        });
+        dupUsedNow = d.usedNow;
+        for (const p of pending) {
+          const found = dupTasks.filter((t) => t.p === p).length;
+          if (found > 0)
+            results[p.slot] = {
+              ...results[p.slot]!,
+              duplicates: found,
+              duplicatesRemoved: d.removed.get(p.ctx.playlistId) ?? 0,
+            };
+        }
+      } catch (e) {
+        log.error("hygiene.duplicates.threw", errorFields(e));
+      }
+    }
   } finally {
     // Waits that started or ended, and refused deletes, are remembered whatever threw above. A lost write only makes a wait start again.
     if (deadRun) {
@@ -2438,6 +2679,8 @@ export async function comparePlaylists(
       // What the day's delete budget stands at now, for the sweep that follows in the same tick.
       if (opts.spend && deadRun.usedNow !== null) opts.spend.used = deadRun.usedNow;
     }
+    if (opts.spend && dupUsedNow !== null)
+      opts.spend.used = Math.max(opts.spend.used ?? 0, dupUsedNow);
   }
 
   // -- notify: one push per new hold, or one for the whole run when the breaker tripped --
@@ -2650,6 +2893,8 @@ export async function undoRemoval(
     .bind(id)
     .first<RemovalRow>();
   if (!row) return { ok: false, error: "not_found" };
+  // An extra copy of a video that is still in the playlist once: putting it back would only make the duplicate again.
+  if (row.source === "duplicate") return { ok: false, error: "not_undoable" };
   if (!["would_remove", "removed", "recorded"].includes(row.status))
     return { ok: false, error: "not_undoable" };
   const claimed = await db
@@ -2693,6 +2938,8 @@ export async function undoRemoval(
           log,
           setUrl: row.set_url,
           fetcher,
+          // Recorded as removed, it may still read 'in': the owner wants it back.
+          trustConfirmed: false,
         });
       else await addVideoToPlaylist(row.playlist_id, row.video_id, accessToken, fetcher);
       readded = true;

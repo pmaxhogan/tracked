@@ -38,6 +38,7 @@ import { poolEventsApp } from "./routes/pool-api";
 import { runKvMigrationTickSafely } from "./lib/kv-import";
 import { pruneNowPlayingAudit } from "./lib/now-playing-audit";
 import { prunePlaylistAdditions } from "./lib/playlist-audit";
+import { pruneClaims } from "./lib/insert-claims";
 import { makeLogger, errorFields } from "./lib/log";
 import { drainPageCaptures } from "./lib/page-store";
 import { drainSearchIndex } from "./lib/search/index";
@@ -284,6 +285,7 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
               playlistAdditions: await prunePlaylistAdditions(env),
               poolEvents: await prunePoolEvents(env),
               schedulerTicks: await pruneSchedulerTicks(env),
+              insertClaims: await pruneClaims(env),
             });
           } catch (e) {
             log.warn("cron.audit_prune_threw", errorFields(e));

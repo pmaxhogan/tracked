@@ -26,6 +26,8 @@ import {
 } from "./playlist-order";
 import { addVideoToPlaylist, YouTubeApiError } from "./youtube-playlists";
 import { loadCombinedState } from "./combined-playlist";
+import { playlistInsertKey, releaseClaim, takeClaim } from "./insert-claims";
+import { isConfirmedIn } from "./playlist-blocklist";
 
 /**
  * "YouTube refuses positions for this playlist" (`manualSortRequired`: it is
@@ -124,6 +126,13 @@ export function orderKeyFor(keys: OrderKeys, videoId: string, setUrl?: string | 
  *     then inserts into that playlist are appended without trying a position.
  *   - The combined playlist never gets a position, whoever calls.
  *   - Keys that cannot be read (a D1 error) mean an append, never a failure.
+ *   - Never a second copy (the duplicates of 2026-10): a video tracked put in
+ *     and has not taken out (`playlist_confirmed` 'in') is not inserted again
+ *     whatever the caller's snapshot says, and the insert is claimed first
+ *     (lib/insert-claims.ts), so of two runs inserting it at once one does.
+ *     Either way nothing is called and `skipped` says why; the caller treats
+ *     the video as already there. `trustConfirmed: false` (the owner's undo,
+ *     putting back a video recorded as removed) skips the first check only.
  *
  * `attempts` = insert calls made.
  */
@@ -139,7 +148,33 @@ export async function insertInOrder(
     setUrl?: string | null;
     cache?: OrderKeyCache;
     fetcher?: typeof fetch;
+    trustConfirmed?: boolean;
   },
+): Promise<{ position: number | null; attempts: number; skipped?: "confirmed" | "claimed" }> {
+  if (a.trustConfirmed !== false && (await isConfirmedIn(env, a.playlistId, a.videoId))) {
+    a.log.info("playlist_insert.skipped_confirmed", {
+      playlistId: a.playlistId,
+      videoId: a.videoId,
+    });
+    return { position: null, attempts: 0, skipped: "confirmed" };
+  }
+  const claim = await takeClaim(env, playlistInsertKey(a.playlistId, a.videoId));
+  if (!claim) {
+    a.log.warn("playlist_insert.skipped_claimed", { playlistId: a.playlistId, videoId: a.videoId });
+    return { position: null, attempts: 0, skipped: "claimed" };
+  }
+  try {
+    return await insertClaimed(env, a);
+  } catch (e) {
+    // Nothing went in: the next try is a real one.
+    await releaseClaim(env, claim);
+    throw e;
+  }
+}
+
+async function insertClaimed(
+  env: Env,
+  a: Parameters<typeof insertInOrder>[1],
 ): Promise<{ position: number | null; attempts: number }> {
   let position: number | null = null;
   try {

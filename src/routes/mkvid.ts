@@ -214,6 +214,12 @@ mkvidApp.post("/complete", async (c) => {
     if (r.status === "not_found") return c.json({ error: "not_found" }, 404);
     if (r.status === "invalid_state")
       return c.json({ error: "invalid_state", current: r.current }, 409);
+    // Not a final answer for mkvid (a 5xx is delivered again): the other call is finishing it.
+    if (r.status === "in_progress")
+      return c.json(
+        { error: "in_progress", message: "this completion is being handled; send it again" },
+        503,
+      );
     // A recreation: ask mkvid to delete the old video once this answer is out
     // (the cron retries it if this attempt fails).
     const doomed =

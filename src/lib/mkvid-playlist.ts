@@ -184,16 +184,25 @@ async function addToPlaylists(
     }
   }
   let playlistStatus: "added" | "duplicate" = "duplicate";
-  if (!existing.has(t.videoId)) {
-    // At the place the set's date gives it (lib/playlist-order.ts), like the sync's inserts.
-    await insertInOrder(env, {
-      playlistId: playlistId!,
-      videoId: t.videoId,
-      existing,
-      accessToken,
-      log,
-      setUrl: t.setUrl,
-    });
+  // At the place the set's date gives it (lib/playlist-order.ts), like the sync's inserts. Skipped when
+  // tracked put it in already or another run is inserting it now: then it is a duplicate, not a second copy.
+  const skipped = existing.has(t.videoId)
+    ? "snapshot"
+    : (
+        await insertInOrder(env, {
+          playlistId: playlistId!,
+          videoId: t.videoId,
+          existing,
+          accessToken,
+          log,
+          setUrl: t.setUrl,
+        })
+      ).skipped;
+  if (skipped && skipped !== "snapshot") {
+    existing.add(t.videoId);
+    await cachePlaylistVideoIds(env, playlistId!, existing);
+  }
+  if (!skipped) {
     existing.add(t.videoId);
     await cachePlaylistVideoIds(env, playlistId!, existing);
     await markInPlaylist(env, playlistId!, t.videoId, "mkvid");

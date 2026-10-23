@@ -54,6 +54,7 @@ import {
   mkvidReplacedIds,
   approveHold,
   pickSetVideo,
+  planDuplicateDeletes,
   removeAndReplace,
   requestSweepSoon,
   runPlaylistHygiene,
@@ -2935,5 +2936,195 @@ describe("channel bans and strikes (lib/channel-bans.ts)", () => {
     const r = await runPlaylistHygiene(env, log, { nowMs: t0 + 600_000 });
     expect(r.sweep).toBeDefined();
     expect(r.compare).toBeUndefined();
+  });
+});
+
+describe("duplicate copies of a video in a playlist", () => {
+  const LIVE = { PLAYLIST_SWEEP_DRY_RUN: "0" };
+  const T = Math.floor(Date.parse("2026-10-23T12:00:00Z") / 1000);
+  /**
+   * listPlaylistItems answers with one item per entry, in order: a video named
+   * twice gets two items (`item-<id>-<n>`), each with its position and the
+   * time it was added.
+   */
+  function copies(map: Record<string, string[]>, opts: { dead?: string[] } = {}) {
+    vi.mocked(listPlaylistItems).mockImplementation(async (playlistId: string) => {
+      const seen = new Map<string, number>();
+      const items = (map[playlistId] ?? []).map((id, position) => {
+        const n = (seen.get(id) ?? 0) + 1;
+        seen.set(id, n);
+        return {
+          id: `item-${id}-${n}`,
+          snippet: {
+            title: (opts.dead ?? []).includes(id) ? "Deleted video" : `Set ${id}`,
+            position,
+            publishedAt: `2026-10-${String(10 + position).padStart(2, "0")}T05:00:29Z`,
+            resourceId: { videoId: id },
+          },
+          contentDetails: { videoId: id },
+        };
+      });
+      return { items, nextPageToken: null, pages: 1 };
+    });
+  }
+  const deleted = () => vi.mocked(deletePlaylistItem).mock.calls.map((c) => c[0]);
+  const TEN = ids([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  const V3 = "vid00000003";
+  const V10 = "vid00000010";
+
+  it("live: deletes the later copy and keeps the first, without blocking, unmarking or clearing the set", async () => {
+    const env = makeEnv(LIVE);
+    await seedFive(env);
+    // vid3 inserted twice at its place (the mkvid double completion), vid10 appended a second time.
+    copies({ [PL]: [...TEN.slice(0, 3), V3, ...TEN.slice(3), V10] });
+    const [r] = await comparePlaylists(env, "tok", { log, now: T });
+    expect(r).toMatchObject({
+      status: "ok",
+      missing: 0,
+      owner: 0,
+      duplicates: 2,
+      duplicatesRemoved: 2,
+    });
+    expect(deleted().sort()).toEqual([`item-${V3}-2`, `item-${V10}-2`]);
+    const rows = await removals(env);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((x) => x.video_id === V3)).toMatchObject({
+      source: "duplicate",
+      status: "removed",
+      reason: "duplicate",
+      slug: SLUG,
+      set_url: setUrl(3),
+      playlist_id: PL,
+      playlist_kind: "artist",
+      at: T,
+      detail:
+        "in the playlist 2 times; the extra copy deleted (added 2026-10-13 05:00:29); the copy at position 3 (added 2026-10-12 05:00:29) stays",
+    });
+    // Still in the playlist once: nothing about it changes.
+    expect(await isBlocked(env, PL, V3)).toBe(false);
+    expect((await confirmedMembership(env, PL)).get(V3)).toBe("in");
+    expect((await row(env, setUrl(3)))!.video_id).toBe(V3);
+    // Counted against the day's removal budget, like any delete of the hygiene.
+    expect(await sweepDeletesUsed(env, T * 1000)).toBe(2);
+    // The next comparison finds it clean.
+    copies({ [PL]: TEN });
+    vi.mocked(deletePlaylistItem).mockClear();
+    const [again] = await comparePlaylists(env, "tok", { log, now: T + 6 * 3600 });
+    expect(again!.duplicates).toBeUndefined();
+    expect(deletePlaylistItem).not.toHaveBeenCalled();
+  });
+
+  it("dry run (the default): only says what it would delete", async () => {
+    const env = makeEnv();
+    await seedFive(env);
+    copies({ [PL]: [...TEN, V3] });
+    const [r] = await comparePlaylists(env, "tok", { log, now: T });
+    expect(r).toMatchObject({ duplicates: 1, duplicatesRemoved: 0 });
+    expect(deletePlaylistItem).not.toHaveBeenCalled();
+    expect(await removals(env)).toMatchObject([
+      {
+        source: "duplicate",
+        status: "would_remove",
+        video_id: V3,
+        detail:
+          "in the playlist 2 times; the extra copy would be deleted (dry run) (added 2026-10-20 05:00:29); the copy at position 3 (added 2026-10-12 05:00:29) stays",
+      },
+    ]);
+    expect(await sweepDeletesUsed(env, T * 1000)).toBe(0);
+  });
+
+  it("the combined playlist is de-duplicated too, and a dead video's copies are left to the dead pass", async () => {
+    const env = makeEnv(LIVE);
+    await seedFive(env);
+    await seedCombined(env);
+    await savePlaylistMembers(env, PLC, new Set(TEN), 1);
+    copies(
+      { [PL]: TEN, [PLC]: [V10, ...TEN, "gone0000001", "gone0000001"] },
+      { dead: ["gone0000001"] },
+    );
+    const results = await comparePlaylists(env, "tok", { log, now: T });
+    expect(results.find((x) => x.kind === "combined")).toMatchObject({
+      duplicates: 1,
+      duplicatesRemoved: 1,
+    });
+    // The copy added first (position 0) stays in the unordered combined playlist.
+    expect(deleted()).toEqual([`item-${V10}-2`]);
+    expect(await removals(env)).toMatchObject(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "duplicate", playlist_kind: "combined", video_id: V10 }),
+      ]),
+    );
+  });
+
+  it("stays inside the day's removal budget", async () => {
+    const env = makeEnv(LIVE);
+    await seedFive(env);
+    await env.CACHE.put("hygiene:sweep:deletes:2026-10-23", "39");
+    copies({ [PL]: [...TEN, V3, V10] });
+    const [r] = await comparePlaylists(env, "tok", { log, now: T });
+    expect(r).toMatchObject({ duplicates: 2, duplicatesRemoved: 1 });
+    expect(deleted()).toHaveLength(1);
+    expect(await sweepDeletesUsed(env, T * 1000)).toBe(40);
+  });
+
+  it("a quota reply stops the deletes; another refusal is logged failed and tried again next time", async () => {
+    const env = makeEnv(LIVE);
+    await seedFive(env);
+    copies({ [PL]: [...TEN, V3, V10] });
+    vi.mocked(deletePlaylistItem).mockRejectedValueOnce(
+      new YouTubeApiError("playlistItems.delete", 500, null, "oops"),
+    );
+    const [r] = await comparePlaylists(env, "tok", { log, now: T });
+    expect(r).toMatchObject({ duplicates: 2, duplicatesRemoved: 1 });
+    const rows = await removals(env);
+    expect(rows.map((x) => x.status).sort()).toEqual(["failed", "removed"]);
+    // The failed delete was given back to the budget.
+    expect(await sweepDeletesUsed(env, T * 1000)).toBe(1);
+
+    const env2 = makeEnv(LIVE);
+    await seedFive(env2);
+    copies({ [PL]: [...TEN, V3, V10] });
+    vi.mocked(deletePlaylistItem)
+      .mockReset()
+      .mockRejectedValue(new YouTubeApiError("playlistItems.delete", 403, "quotaExceeded", "{}"));
+    const [q] = await comparePlaylists(env2, "tok", { log, now: T });
+    expect(q).toMatchObject({ duplicates: 2, duplicatesRemoved: 0 });
+    expect(deletePlaylistItem).toHaveBeenCalledTimes(1);
+    expect(await getQuotaOut(env2)).not.toBeNull();
+    expect(await sweepDeletesUsed(env2, T * 1000)).toBe(0);
+  });
+
+  it("a duplicate's row cannot be undone (it would only make the copy again)", async () => {
+    const env = makeEnv(LIVE);
+    await seedFive(env);
+    copies({ [PL]: [...TEN, V3] });
+    await comparePlaylists(env, "tok", { log, now: T });
+    const [dup] = await removals(env);
+    expect(await undoRemoval(env, "tok", dup!.id, log)).toEqual({
+      ok: false,
+      error: "not_undoable",
+    });
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+  });
+
+  it("planDuplicateDeletes keeps the lowest position, the earlier added on a tie, and skips what it is told to", () => {
+    const c = (itemId: string, position: number, addedAt: string | null = null) => ({
+      itemId,
+      position,
+      addedAt,
+    });
+    const plan = planDuplicateDeletes(
+      new Map([
+        ["a", [c("a2", 7), c("a1", 2), c("a3", 9)]],
+        ["b", [c("b2", 4, "2026-10-02"), c("b1", 4, "2026-10-01")]],
+        ["dead", [c("d1", 0), c("d2", 1)]],
+        ["single", [c("s1", 3)]],
+      ]),
+      new Set(["dead"]),
+    );
+    expect(plan).toEqual([
+      { videoId: "a", keep: c("a1", 2), extras: [c("a2", 7), c("a3", 9)] },
+      { videoId: "b", keep: c("b1", 4, "2026-10-01"), extras: [c("b2", 4, "2026-10-02")] },
+    ]);
   });
 });
