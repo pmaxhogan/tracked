@@ -9,6 +9,7 @@ import { tipAttr } from "../tip";
 import type { UiPage } from "./index";
 import { TRACK_ROW_CSS, TRACK_ROW_JS } from "./track-row";
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS } from "./dj-actions";
+import { YT_SUB_JS } from "./yt-sub";
 
 const BODY = /* html */ `
 <div class="dj-layout">
@@ -18,6 +19,7 @@ const BODY = /* html */ `
     <p id="counts" class="muted sub"><span class="skel" style="width:70%"></span></p>
     <p id="dj-playlist" class="sub" hidden></p>
     <p id="dj-last" class="sub" hidden></p>
+    <p id="dj-ytsub" class="sub" hidden></p>
     <p class="sub"><a id="dj-1001" target="_blank" rel="noreferrer noopener">1001tracklists ↗</a> · <a href="/ui/djs">All DJs</a></p>
     <div class="dj-actions">
       <button id="sync" type="button" class="btn primary" hidden${tipAttr("Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.")}>Sync</button>
@@ -64,6 +66,7 @@ const JS = /* js */ `
 (() => {
 ${TRACK_ROW_JS}
 ${DJ_ACTIONS_JS}
+${YT_SUB_JS}
   const $ = TK.$, esc = TK.esc;
   // The slug comes from the path (/ui/dj/<slug>).
   let slug = '', badSlug = false;
@@ -71,7 +74,7 @@ ${DJ_ACTIONS_JS}
 
   const $name = $('dj-name'), $sub = $('dj-sub'), $slug = $('dj-slug'), $link1001 = $('dj-1001'), $counts = $('counts');
   const $refresh = $('refresh'), $sync = $('sync'), $resync = $('resync');
-  const $playlist = $('dj-playlist'), $last = $('dj-last');
+  const $playlist = $('dj-playlist'), $last = $('dj-last'), $ytsub = $('dj-ytsub');
   const $error = $('error'), $setsHost = $('sets'), $skel = $('sets-skel');
   let subscribed = false;
 
@@ -291,6 +294,21 @@ ${DJ_ACTIONS_JS}
     $error.hidden = false;
   }
 
+  // The YouTube subscription to the DJ's own channel (GET /ui/api/dj/:slug/youtube-sub). A failure leaves the line hidden.
+  async function loadYtSub() {
+    try {
+      const res = await TK.api.get('/ui/api/dj/' + encodeURIComponent(slug) + '/youtube-sub');
+      if (!res.ok || !res.data) return;
+      const d = res.data;
+      let html = 'YouTube channel ' + YTS.badge(d.status, { reason: d.reason, error: d.error, needsReconnect: !!d.needsReconnect });
+      const href = TK.safeHref(d.channelUrl);
+      if (href) html += ' <a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener">Channel on YouTube ↗</a>';
+      if (d.candidates && d.candidates.length > 1) html += ' <span class="muted">(1001tracklists links ' + d.candidates.length + ' channels; the first is used)</span>';
+      $ytsub.innerHTML = html;
+      $ytsub.hidden = false;
+    } catch (e) { /* the page works without it */ }
+  }
+
   // Playlist link and last sync from the sync state. Independent of the crawl: a failure leaves the lines hidden.
   async function loadState() {
     try {
@@ -384,6 +402,7 @@ ${DJ_ACTIONS_JS}
   $link1001.href = 'https://www.1001tracklists.com/dj/' + encodeURIComponent(slug) + '/index.html';
   $name.textContent = slug;
   loadState();
+  loadYtSub();
   load(false);
 })();
 `;

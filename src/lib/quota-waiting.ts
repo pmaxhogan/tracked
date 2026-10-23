@@ -11,6 +11,7 @@ import { getPoolSettings } from "./pool-settings";
 import { RESOLVED_UNLIKED_SQL } from "./presave-like";
 import { QUOTA_CONSUMERS } from "./quota-consumers";
 import { PLAYLIST_DUE_SQL } from "./track-uploads";
+import { ytSubsPendingCount } from "./youtube-subs-plan";
 
 /** CACHE key of the last waitingDemand, kept WAITING_CACHE_SECONDS. */
 export const WAITING_CACHE_KEY = "quota:waiting";
@@ -70,7 +71,8 @@ async function presaveInsertsDue(env: Env, nowMs: number): Promise<number> {
 
 /**
  * Units waiting per consumer key: likes x 51, Pre-saves and track-upload
- * playlist inserts x 50, DJ inserts (djInsertsWaiting) x 50, every other
+ * playlist inserts x 50, DJ inserts (djInsertsWaiting) x 50, YouTube
+ * subscribes and unsubscribes (lib/youtube-subs-plan.ts) x 50, every other
  * consumer 0. Cached in CACHE for WAITING_CACHE_SECONDS, so the gate costs a
  * KV read on most calls. Never throws: a count that fails is 0.
  */
@@ -85,6 +87,9 @@ export async function waitingDemand(env: Env, nowMs = Date.now()): Promise<Recor
   out.likes = 51 * (await likesDue(env, nowMs).catch(() => 0));
   out.presave_playlists = 50 * (await presaveInsertsDue(env, nowMs).catch(() => 0));
   out.dj_playlists = 50 * (await djInsertsWaiting(env));
+  // Subscribes and unsubscribes due now; none while the feature is off.
+  if ((await getAppSettings(env).catch(() => null))?.ytSubs.enabled)
+    out.yt_subscriptions = 50 * (await ytSubsPendingCount(env, Math.floor(nowMs / 1000)));
   try {
     await env.CACHE.put(WAITING_CACHE_KEY, JSON.stringify(out), {
       expirationTtl: WAITING_CACHE_SECONDS,

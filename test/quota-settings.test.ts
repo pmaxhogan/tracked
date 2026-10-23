@@ -17,6 +17,7 @@ import { fakeKV } from "./helpers/fake-kv";
 
 const KEYS = [
   "likes",
+  "yt_subscriptions",
   "presave_playlists",
   "dj_playlists",
   "hygiene",
@@ -187,6 +188,7 @@ describe("a stored quota group that is no longer whole", () => {
     expect(s.quota.order).toEqual([
       "ordering",
       "likes",
+      "yt_subscriptions",
       "presave_playlists",
       "dj_playlists",
       "hygiene",

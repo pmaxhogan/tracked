@@ -716,6 +716,28 @@ const APP_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: "sf-ytsubs",
+    title: "YouTube subscriptions",
+    intro:
+      "Your YouTube account subscribes to each followed DJ's own channel (the YouTube link on their 1001tracklists artist box) and unsubscribes when you remove the DJ. Subscriptions you made yourself are never removed.",
+    fields: [
+      {
+        path: "ytSubs.enabled",
+        label: "Subscribe to the followed DJs' channels",
+        help: "Off: nothing is subscribed or unsubscribed; what is there stays as it is.",
+        kind: "bool",
+      },
+      {
+        path: "ytSubs.maxChangesPerRun",
+        label: "Subscribes and unsubscribes a run",
+        help: "50 quota units each. The day is bounded by the YouTube subscriptions max on the Quota page. Default 10. 0 = none.",
+        min: 0,
+        max: 50,
+        step: 1,
+      },
+    ],
+  },
+  {
     id: "sf-retention",
     title: "Retention",
     fields: [

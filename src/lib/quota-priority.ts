@@ -46,6 +46,7 @@ export const OWNER = "owner" as const;
 /** The ranked consumer keys (lib/quota-consumers.ts has the catalogue). */
 export type QuotaConsumerKey =
   | "likes"
+  | "yt_subscriptions"
   | "presave_playlists"
   | "dj_playlists"
   | "hygiene"

@@ -1,6 +1,7 @@
 import type { Env } from "../types";
 import { dbOf } from "./db";
 import type { TableDef } from "./table-query";
+import { channelUrl, YT_SUB_STATUS_SQL, type YtSubStatus } from "./youtube-subscriptions";
 
 /**
  * The DJs and Playlists pages' table (GET /ui/api/djs): one row per
@@ -42,6 +43,10 @@ type DjDbRow = {
   videos: number;
   mkvid: number;
   last_discovered_at: number | null;
+  yt_status: YtSubStatus | null;
+  yt_channel_id: string | null;
+  yt_reason: string | null;
+  yt_error: string | null;
 };
 
 export type DjTableRow = {
@@ -77,6 +82,13 @@ export type DjTableRow = {
   lastAdded: number | null;
   /** Unix ms of the newest set discovery. */
   lastDiscoveredAt: number | null;
+  /** The YouTube subscription to the DJ's own channel (lib/youtube-subscriptions.ts). */
+  ytSub: YtSubStatus;
+  ytChannelUrl: string | null;
+  /** Why no channel is known (no_set_meta | no_artist_box | no_youtube_link). */
+  ytReason: string | null;
+  /** The last failed subscribe or unsubscribe. */
+  ytError: string | null;
 };
 
 const AGG = `(SELECT slug, COUNT(*) AS sets, SUM(processed) AS processed,
@@ -91,7 +103,8 @@ const STOP_REASON = `json_extract(y.last_run_stats, '$.stop.reason')`;
 const WAITING = `(${STOP_REASON} IS NOT NULL AND NOT ${HAS_ERROR})`;
 
 export const DJS_TABLE: TableDef<DjDbRow, DjTableRow> = {
-  from: `subscriptions s LEFT JOIN sub_sync y ON y.slug = s.slug LEFT JOIN ${AGG} t ON t.slug = s.slug`,
+  from: `subscriptions s LEFT JOIN sub_sync y ON y.slug = s.slug LEFT JOIN ${AGG} t ON t.slug = s.slug
+    LEFT JOIN dj_youtube_channels yc ON yc.slug = s.slug LEFT JOIN youtube_channel_subs ys ON ys.channel_id = yc.channel_id`,
   select: `s.slug AS slug, s.source_url AS source_url, s.added_at AS added_at, s.position AS position,
     y.artist_name AS artist_name, y.playlist_id AS playlist_id, y.last_run_at AS last_run_at, y.last_error AS last_error,
     json_extract(y.last_run_stats, '$.videoIdsAdded') AS last_added,
@@ -99,7 +112,8 @@ export const DJS_TABLE: TableDef<DjDbRow, DjTableRow> = {
     json_extract(y.last_run_stats, '$.stop.since') AS stop_since,
     COALESCE(t.sets, 0) AS sets, COALESCE(t.processed, 0) AS processed, COALESCE(t.pending, 0) AS pending,
     COALESCE(t.abandoned, 0) AS abandoned, COALESCE(t.videos, 0) AS videos, COALESCE(t.mkvid, 0) AS mkvid,
-    t.last_discovered_at AS last_discovered_at`,
+    t.last_discovered_at AS last_discovered_at,
+    ${YT_SUB_STATUS_SQL} AS yt_status, yc.channel_id AS yt_channel_id, yc.reason AS yt_reason, ys.error AS yt_error`,
   primaryKey: "slug",
   defaultSort: "name",
   columns: {
@@ -122,6 +136,7 @@ export const DJS_TABLE: TableDef<DjDbRow, DjTableRow> = {
     hasPlaylist: { sql: "(y.playlist_id IS NOT NULL)", type: "bool" },
     playlistId: { sql: "y.playlist_id", type: "text" },
     lastAdded: { sql: "json_extract(y.last_run_stats, '$.videoIdsAdded')", type: "number" },
+    ytSub: { sql: YT_SUB_STATUS_SQL, type: "text" },
   },
   mapRow: (r) => djTableRow(r),
 };
@@ -153,6 +168,10 @@ export function djTableRow(r: DjDbRow): DjTableRow {
     stopSince: r.stop_since == null ? null : Number(r.stop_since) * 1000,
     lastAdded: r.last_added == null ? null : Number(r.last_added),
     lastDiscoveredAt: r.last_discovered_at == null ? null : Number(r.last_discovered_at) * 1000,
+    ytSub: r.yt_status ?? "looking",
+    ytChannelUrl: channelUrl(r.yt_channel_id ?? null),
+    ytReason: r.yt_reason ?? null,
+    ytError: r.yt_error ?? null,
   };
 }
 

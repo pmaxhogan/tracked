@@ -32,6 +32,7 @@ import type { Env } from "./types";
 import { backfillCombined } from "./lib/sync";
 import { setMetaPagesStep } from "./lib/set-meta";
 import { genrePlaylistsCronStep } from "./lib/genre-playlists";
+import { ytSubsCronStep } from "./lib/youtube-subscriptions";
 import { getQuotaOut } from "./lib/youtube-quota";
 import { runOrderPass } from "./lib/playlist-reorder";
 import { runSchedulerTick } from "./lib/fetch-scheduler";
@@ -357,6 +358,12 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         // Separate try/catch: a failed tick shouldn't stop the combined
         // playlist from catching up on everything that *did* land.
         // It waits its turn at the quota like every consumer (lib/quota-priority.ts, inside backfillCombined).
+        // YouTube subscriptions to the followed DJs' channels, and the unsubscribes of unfollowed ones (lib/youtube-subscriptions.ts; never throws).
+        step("yt_subscriptions");
+        {
+          const ys = await ytSubsCronStep(env, log, trigger);
+          if (!ys.ok) log.info("cron.yt_subscriptions", ys);
+        }
         // Genre playlists: after mkvid's recreate check and before the combined playlist (lib/genre-playlists.ts; never throws).
         step("genre_playlists");
         {

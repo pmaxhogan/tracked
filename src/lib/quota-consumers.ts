@@ -24,6 +24,14 @@ export const QUOTA_CONSUMERS: ReadonlyArray<QuotaConsumerInfo> = [
     waitingCost: 51,
   },
   {
+    key: "yt_subscriptions",
+    label: "YouTube subscriptions",
+    description:
+      "Subscribes your YouTube account to each followed DJ's own channel, and unsubscribes when you remove the DJ (only subscriptions tracked made).",
+    perAction: "subscriptions.insert or delete 50; subscriptions.list 1",
+    waitingCost: 50,
+  },
+  {
     key: "presave_playlists",
     label: "Pre-saves into playlists",
     description:

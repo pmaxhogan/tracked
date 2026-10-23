@@ -296,6 +296,13 @@ export const AppSettingsSchema = z.object({
     /** Genre playlist inserts one run makes at most (default 20, 50 units each); the day is bounded by the consumer's max (Quota). */
     maxInsertsPerRun: z.number().int().min(0).max(100),
   }),
+  /** YouTube subscriptions to the followed DJs' own channels (lib/youtube-subscriptions.ts). */
+  ytSubs: z.object({
+    /** Subscribe the linked YouTube account to each followed DJ's channel and unsubscribe when the DJ is removed (default on). Off: nothing is changed on YouTube. */
+    enabled: z.boolean(),
+    /** Subscribes and unsubscribes one run makes at most (default 10, 50 units each); the day is bounded by the consumer's max (Quota). */
+    maxChangesPerRun: z.number().int().min(0).max(50),
+  }),
   /** YouTube quota: who goes first when the pool runs short (lib/quota-consumers.ts has the catalogue). */
   quota: z.object({
     /** Consumer keys, highest rank first. Owner actions always go before all of them. */
@@ -424,9 +431,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
   graph: { nodeCap: 5000, confirmOver: 300, backfill: true, pagesPerTick: 10 },
   genres: { metaPagesPerTick: 20, auto: true, minSets: 10, maxInsertsPerRun: 20 },
+  ytSubs: { enabled: true, maxChangesPerRun: 10 },
   quota: {
     order: [
       "likes",
+      "yt_subscriptions",
       "presave_playlists",
       "dj_playlists",
       "hygiene",
@@ -450,6 +459,9 @@ export const DEFAULT_SWEEP_REMOVALS = 40;
 
 /** The genre playlists' daily max when the owner set none (100 inserts). */
 export const DEFAULT_GENRE_DAILY_UNITS = 5000;
+
+/** The YouTube subscriptions' daily max when the owner set none (40 subscribes or unsubscribes). */
+export const DEFAULT_YT_SUBS_DAILY_UNITS = 2000;
 
 function sweepRemovals(s: AppSettings, env: { PLAYLIST_SWEEP_DAILY_REMOVALS?: string }): number {
   if (s.playlists.sweepDailyRemovals !== null) return s.playlists.sweepDailyRemovals;
@@ -482,6 +494,9 @@ export function migrateQuotaConsumers(
   // New in October 2026: 100 inserts a day until the owner picks another max.
   if (!have.genre_playlists)
     fill.genre_playlists = { min: null, max: DEFAULT_GENRE_DAILY_UNITS, enabled: true };
+  // New in October 2026: 40 changes a day until the owner picks another max.
+  if (!have.yt_subscriptions)
+    fill.yt_subscriptions = { min: null, max: DEFAULT_YT_SUBS_DAILY_UNITS, enabled: true };
   if (Object.keys(fill).length === 0) return s;
   return { ...s, quota: { ...s.quota, consumers: { ...have, ...fill } } };
 }
@@ -502,7 +517,7 @@ export function normaliseStoredQuota(stored: unknown): unknown {
     const known = [...new Set(q.order.filter((k): k is string => QUOTA_KEYS.includes(k)))];
     // A key the stored order lacks (a consumer added since) goes right after the
     // key before it in the default order, so it lands at its intended rank
-    // (genre_playlists after mkvid_recreate); first when none of those is stored.
+    // (genre_playlists after mkvid_recreate, yt_subscriptions after likes); first when none of those is stored.
     const order = [...known];
     const defaults = DEFAULT_APP_SETTINGS.quota.order;
     defaults.forEach((k, i) => {

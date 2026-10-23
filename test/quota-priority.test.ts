@@ -301,6 +301,7 @@ describe("consumerStatus", () => {
     const s = await consumerStatus(env);
     expect(s.map((r) => r.key)).toEqual([
       "likes",
+      "yt_subscriptions",
       "presave_playlists",
       "dj_playlists",
       "hygiene",

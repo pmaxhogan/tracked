@@ -7,6 +7,7 @@ import { shell } from "../shell";
 import type { UiPage } from "./index";
 import { tipAttr } from "../tip";
 import { DJ_ACTIONS_CSS, DJ_ACTIONS_JS, FIX_DIALOG_HTML, FIX_TITLES_TITLE } from "./dj-actions";
+import { YT_SUB_JS } from "./yt-sub";
 
 const ACTIONS = /* html */ `
 <form id="add-form" class="dj-add">
@@ -37,6 +38,7 @@ ${DJ_ACTIONS_CSS}`;
 const JS = /* js */ `
 (() => {
 ${DJ_ACTIONS_JS}
+${YT_SUB_JS}
   const $ = TK.$, esc = TK.esc;
   const $syncAll = $('sync-all'), $resyncAll = $('resync-all'), $fix = $('fix-titles');
   const $form = $('add-form'), $url = $('url'), $addBtn = $('add-btn');
@@ -45,6 +47,8 @@ ${DJ_ACTIONS_JS}
   const busy = new Map(), confirming = new Set();
   let bulk = null; // 'sync' | 'resync' while a bulk action runs
   let total = 0, focused = false;
+  // The feature's state (GET /ui/api/djs ytSubs): switched off, or YouTube needs reconnecting.
+  let ytSummary = null;
 
   const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
   function nameHtml(r) {
@@ -73,6 +77,12 @@ ${DJ_ACTIONS_JS}
     if (!href) return '<span class="tkt-nil">-</span>';
     return '<span class="dj-pl"><a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener">Playlist ↗</a> <span class="muted">' + esc(plural(r.videos, 'video')) + '</span></span>';
   }
+  function ytHtml(r) {
+    const off = ytSummary && ytSummary.enabled === false && (r.ytSub === 'pending' || r.ytSub === 'looking');
+    const badge = YTS.badge(off ? 'off' : r.ytSub, { reason: r.ytReason, error: r.ytError, needsReconnect: !!(ytSummary && ytSummary.needsReconnect) });
+    const href = TK.safeHref(r.ytChannelUrl);
+    return href ? badge + ' <a href="' + esc(href) + '" target="_blank" rel="noreferrer noopener"' + TK.tip('This DJ on YouTube') + '>Channel ↗</a>' : badge;
+  }
   function actionsHtml(r) {
     const slug = esc(r.slug);
     if (confirming.has(r.slug)) {
@@ -85,7 +95,7 @@ ${DJ_ACTIONS_JS}
     return '<span class="dj-actions">' +
       '<button type="button" class="btn small" data-act="sync"' + dis + TK.tip('Looks for new sets from this DJ and adds their videos to the playlist. Limited to a few fetches per press.') + '>' + (b === 'sync' ? 'Syncing…' : 'Sync') + '</button>' +
       '<button type="button" class="btn small" data-act="resync"' + dis + TK.tip('Invalidate & resync: marks every processed set of this DJ as due for a re-check and re-reads its playlists from YouTube, so swapped recordings are replaced. Costs up to 10 fetches per press; the scheduler does the rest over later ticks.') + ' aria-label="Invalidate and resync ' + slug + '">' + (b === 'resync' ? 'Resyncing…' : 'Resync') + '</button>' +
-      '<button type="button" class="btn small danger" data-act="remove"' + dis + TK.tip('Unsubscribes from this DJ. Their YouTube playlist and videos stay as they are.') + '>Remove</button></span>';
+      '<button type="button" class="btn small danger" data-act="remove"' + dis + TK.tip('Unsubscribes from this DJ. Their YouTube playlist and videos stay as they are; the YouTube channel subscription tracked made for them is removed (one you made yourself stays).') + '>Remove</button></span>';
   }
 
   const table = TKTable.create($('djs'), {
@@ -98,6 +108,7 @@ ${DJ_ACTIONS_JS}
       { key: 'pending', label: 'Pending', type: 'number', render: pendingHtml, tip: 'Sets found on the DJ page that the sync has not processed yet.' },
       { key: 'lastRunAt', label: 'Last sync', type: 'datetime', render: lastHtml, tip: 'When the sync last ran for this DJ. "waiting": the pool stopped the run and the scheduler tries again by itself. "error": it needs you, or it has kept happening for 12 hours (the Errors chip lists those).' },
       { key: 'videos', label: 'Playlist', type: 'number', render: playlistHtml, tip: 'The DJ playlist on YouTube and how many sets have a video in it.' },
+      { key: 'ytSub', label: 'YouTube', type: 'text', render: ytHtml, hideOn: 'phone', tip: 'The subscription of your YouTube account to the own channel of the DJ: subscribed (tracked made it), your own (you were subscribed already; never removed), pending, or no channel known.' },
       { key: 'mkvid', label: 'mkvid', type: 'number', hideOn: 'phone', tip: 'Videos mkvid rendered from a set audio because the set had no recording.' },
       { key: 'addedAt', label: 'Added', type: 'datetime', hideOn: 'phone', render: (r) => '<span class="tkt-when">' + esc(TK.fmt.date(r.addedAt / 1000)) + '</span>', tip: 'When you subscribed.' },
     ],
@@ -121,6 +132,7 @@ ${DJ_ACTIONS_JS}
     },
     onData: (d) => {
       total = d && d.counts ? d.counts.total : (d && d.total) || 0;
+      ytSummary = d && d.ytSubs ? d.ytSubs : null;
       paintBulk();
       // ?focus=filter: the search box is only worth focusing once there are DJs.
       if (!focused && total && TK.qs.get('focus') === 'filter') { focused = true; const q = $('djs-q'); if (q && q.focus) q.focus(); }

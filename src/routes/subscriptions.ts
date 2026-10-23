@@ -10,6 +10,7 @@ import { MKVID_PAGE_HTML } from "../ui/pages/mkvid";
 import { DJS_PAGE } from "../ui/pages/djs";
 import { PLAYLISTS_PAGE } from "../ui/pages/playlists";
 import { genresApp } from "./genres";
+import { djYtSub, ytSubsSummary } from "../lib/youtube-subscriptions";
 import { SETTINGS_PAGE } from "../ui/pages/settings";
 import { TOOLS_PAGE } from "../ui/pages/tools";
 import { HOME_PAGE } from "../ui/pages/home";
@@ -540,7 +541,19 @@ subscriptionsApp.get("/api/djs", async (c) => {
   ) {
     result = await runTableQuery(c.env.DB, DJS_TABLE, query);
   }
-  return c.json({ ...result, counts: await djCounts(c.env) });
+  return c.json({
+    ...result,
+    counts: await djCounts(c.env),
+    ytSubs: await ytSubsSummary(c.env).catch(() => null),
+  });
+});
+
+/** One DJ's YouTube subscription (lib/youtube-subscriptions.ts) and the feature's state, for the DJ page. */
+subscriptionsApp.get("/api/dj/:slug/youtube-sub", async (c) => {
+  const slug = parseDjSlug(c.req.param("slug"));
+  if (!slug) return c.json({ error: "invalid_slug" }, 400);
+  const [sub, summary] = await Promise.all([djYtSub(c.env, slug), ytSubsSummary(c.env)]);
+  return c.json({ ...sub, ...summary });
 });
 
 subscriptionsApp.get("/api/list", async (c) => {
