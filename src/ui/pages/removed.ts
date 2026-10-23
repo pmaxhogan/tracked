@@ -169,7 +169,7 @@ const JS = (labels: Record<string, string>) => /* js */ `
       { key: 'slug', label: 'DJ', type: 'text', render: (r) => r.slug ? '<a href="/ui/dj/' + encodeURIComponent(r.slug) + '">' + esc(r.slug) + '</a>' : nil },
       { key: 'set_url', label: 'Set', type: 'text', render: (r) => r.set_url ? '<span class="rm-stack"><a href="/ui/set?url=' + encodeURIComponent(r.set_url) + '">' + esc(TK.fmt.setLabel(r.set_url)) + '</a></span>' : nil },
       { key: 'video_id', label: 'Video', type: 'text', render: (r) => ext('https://www.youtube.com/watch?v=' + encodeURIComponent(r.video_id), r.video_id, 'Opens the video on YouTube.') },
-      { key: 'playlist_kind', label: 'Playlist', type: 'enum', options: ['artist', 'combined'], hideOn: 'phone',
+      { key: 'playlist_kind', label: 'Playlist', type: 'enum', options: ['artist', 'combined', 'genre'], hideOn: 'phone',
         render: (r) => ext('https://www.youtube.com/playlist?list=' + encodeURIComponent(r.playlist_id), r.playlist_kind, 'Opens the playlist on YouTube.') },
       { key: 'reason', label: 'Why', type: 'enum', options: REASONS,
         render: (r) => '<span class="rm-stack"><span>' + esc(LABELS[r.reason] || r.reason) + '</span>' + (r.detail ? '<span class="rm-detail">' + esc(r.detail) + '</span>' : '') + '</span>' },

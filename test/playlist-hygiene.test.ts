@@ -3056,6 +3056,31 @@ describe("duplicate copies of a video in a playlist", () => {
     );
   });
 
+  it("a genre playlist (not compared) is listed for duplicates only, through the same delete path", async () => {
+    const env = makeEnv(LIVE);
+    await seedFive(env);
+    await env.DB.prepare(
+      "INSERT INTO genre_playlists (genre_key, genre_name, enabled, playlist_id, updated_at) VALUES ('techno', 'Techno', 1, 'PLgenre', 1)",
+    ).run();
+    copies({ [PL]: TEN, PLgenre: [V3, "vidOnlyHere", V3] });
+    const results = await comparePlaylists(env, "tok", { log, now: T });
+    // Not a compared playlist: no result row, nothing recorded as missing for it.
+    expect(results.map((r) => r.playlistId)).toEqual([PL]);
+    expect(deleted()).toEqual([`item-${V3}-2`]);
+    expect(await removals(env)).toMatchObject([
+      {
+        source: "duplicate",
+        status: "removed",
+        video_id: V3,
+        playlist_id: "PLgenre",
+        playlist_kind: "genre",
+        slug: null,
+        set_url: null,
+      },
+    ]);
+    expect(await sweepDeletesUsed(env, T * 1000)).toBe(1);
+  });
+
   it("stays inside the day's removal budget", async () => {
     const env = makeEnv(LIVE);
     await seedFive(env);

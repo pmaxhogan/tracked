@@ -644,7 +644,8 @@ export type RemovalRow = {
   set_url: string | null;
   video_id: string;
   playlist_id: string;
-  playlist_kind: "artist" | "combined";
+  /** `genre`: a genre playlist (lib/genre-playlists.ts); only its duplicate copies are logged here. */
+  playlist_kind: "artist" | "combined" | "genre";
   reason: string;
   detail: string | null;
 };
@@ -692,7 +693,7 @@ export const REMOVALS_TABLE: TableDef<RemovalRow> = {
     slug: { type: "text", searchable: true },
     set_url: { type: "text", searchable: true },
     video_id: { type: "text", searchable: true },
-    playlist_kind: { type: "enum", options: ["artist", "combined"] },
+    playlist_kind: { type: "enum", options: ["artist", "combined", "genre"] },
     playlist_id: { type: "text", sortable: false },
     reason: { type: "enum" },
     detail: { type: "text", sortable: false, searchable: true },
@@ -2216,7 +2217,52 @@ export function planDuplicateDeletes(
   return out;
 }
 
-type DuplicateTask = DuplicatePlan & { p: Pending };
+/** One duplicated video in one playlist: where, and the results slot it is counted in (none for a genre playlist). */
+type DuplicateTask = DuplicatePlan & {
+  ctx: { playlistId: string; kind: RemovalRow["playlist_kind"]; slug: string | null };
+  setUrlsOf: (id: string) => string[];
+  slot: number | null;
+};
+
+/**
+ * The genre playlists (lib/genre-playlists.ts) are not compared (their own run
+ * follows the DJ playlists), but a second copy can land in them as in any
+ * playlist: each is listed here and only its duplicates are taken. A missing
+ * table (migration 0036 not applied) or a failed listing leaves them alone.
+ */
+async function genreDuplicateTasks(
+  env: Env,
+  accessToken: string,
+  log: Logger,
+  fetcher?: typeof fetch,
+): Promise<DuplicateTask[]> {
+  let playlists: Array<{ genre_key: string; playlist_id: string }>;
+  try {
+    playlists = (
+      await dbOf(env)
+        .prepare("SELECT genre_key, playlist_id FROM genre_playlists WHERE playlist_id IS NOT NULL")
+        .all<{ genre_key: string; playlist_id: string }>()
+    ).results;
+  } catch (e) {
+    log.warn("hygiene.duplicates.genres_unreadable", errorFields(e));
+    return [];
+  }
+  const out: DuplicateTask[] = [];
+  for (const g of playlists) {
+    const listing = await completeListing(g.playlist_id, accessToken, log, fetcher);
+    if (!listing) continue;
+    // A fresh complete listing: the genre run reads it instead of listing again.
+    await cachePlaylistVideoIds(env, g.playlist_id, listing.present);
+    for (const t of planDuplicateDeletes(listing.duplicates, listing.deadPresent))
+      out.push({
+        ...t,
+        ctx: { playlistId: g.playlist_id, kind: "genre", slug: null },
+        setUrlsOf: () => [],
+        slot: null,
+      });
+  }
+  return out;
+}
 
 const addedOn = (c: ItemCopy) => (c.addedAt ? c.addedAt.slice(0, 19).replace("T", " ") : "?");
 
@@ -2253,11 +2299,11 @@ async function deleteDuplicateItems(
   const row = (t: DuplicateTask) => ({
     at,
     source: "duplicate" as const,
-    slug: t.p.ctx.slug,
-    set_url: t.p.setUrlsOf(t.videoId)[0] ?? null,
+    slug: t.ctx.slug,
+    set_url: t.setUrlsOf(t.videoId)[0] ?? null,
     video_id: t.videoId,
-    playlist_id: t.p.ctx.playlistId,
-    playlist_kind: t.p.ctx.kind,
+    playlist_id: t.ctx.playlistId,
+    playlist_kind: t.ctx.kind,
     reason: "duplicate",
   });
   const settings = sweepSettings(env, await getAppSettings(env));
@@ -2306,7 +2352,7 @@ async function deleteDuplicateItems(
       }
     } catch (e) {
       log.warn("hygiene.duplicates.remove_failed", {
-        ...t.p.ctx,
+        ...t.ctx,
         videoId: t.videoId,
         gone,
         ...errorFields(e),
@@ -2330,7 +2376,7 @@ async function deleteDuplicateItems(
       }).catch((e) =>
         log.error("hygiene.duplicates.log_failed", { videoId: t.videoId, ...errorFields(e) }),
       );
-      removed.set(t.p.ctx.playlistId, (removed.get(t.p.ctx.playlistId) ?? 0) + gone);
+      removed.set(t.ctx.playlistId, (removed.get(t.ctx.playlistId) ?? 0) + gone);
     }
     deleted += gone;
     if (quota) {
@@ -2586,7 +2632,8 @@ export async function comparePlaylists(
       await applyFindings(env, findings, ctx);
       if (p.after) await p.after();
       // A dead video's copies all go with it (the dead pass below): only live videos are de-duplicated.
-      for (const t of planDuplicateDeletes(p.duplicates, p.deadPresent)) dupTasks.push({ p, ...t });
+      for (const t of planDuplicateDeletes(p.duplicates, p.deadPresent))
+        dupTasks.push({ ...t, ctx: p.ctx, setUrlsOf: p.setUrlsOf, slot: p.slot });
       const owner = findings.filter((f) => f.reason === "owner").length;
       results[p.slot] = {
         ...ctx,
@@ -2651,6 +2698,11 @@ export async function comparePlaylists(
         log.error("hygiene.dead.threw", errorFields(e));
       }
     }
+    try {
+      dupTasks.push(...(await genreDuplicateTasks(env, accessToken, log, opts.fetcher)));
+    } catch (e) {
+      log.error("hygiene.duplicates.genres_threw", errorFields(e));
+    }
     if (dupTasks.length > 0) {
       try {
         const d = await deleteDuplicateItems(env, accessToken, dupTasks, deadRun, {
@@ -2660,7 +2712,7 @@ export async function comparePlaylists(
         });
         dupUsedNow = d.usedNow;
         for (const p of pending) {
-          const found = dupTasks.filter((t) => t.p === p).length;
+          const found = dupTasks.filter((t) => t.slot === p.slot).length;
           if (found > 0)
             results[p.slot] = {
               ...results[p.slot]!,
