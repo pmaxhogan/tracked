@@ -20,6 +20,8 @@ vi.mock("../src/lib/youtube-playlists", async () => {
     createPlaylist: vi.fn(),
     listPlaylistVideoIds: vi.fn(),
     addVideoToPlaylist: vi.fn(),
+    listPlaylistItems: vi.fn(),
+    deletePlaylistItem: vi.fn(),
   };
 });
 vi.mock("../src/lib/google-oauth", async () => {
@@ -41,7 +43,9 @@ vi.mock("../src/lib/quota-priority", async () => {
 import {
   addVideoToPlaylist,
   createPlaylist,
+  deletePlaylistItem,
   findPlaylistByTitle,
+  listPlaylistItems,
   listPlaylistVideoIds,
   PlaylistNotFoundError,
   YouTubeApiError,
@@ -54,6 +58,7 @@ import {
   genreSets,
   LAST_RUN_KEY,
   MAX_ATTEMPTS,
+  PRUNE_HOLD_SECONDS,
   runGenrePlaylists,
   setGenreChoice,
 } from "../src/lib/genre-playlists";
@@ -127,6 +132,8 @@ beforeEach(() => {
   }));
   mk(listPlaylistVideoIds).mockResolvedValue(new Set<string>());
   mk(addVideoToPlaylist).mockResolvedValue(undefined);
+  mk(listPlaylistItems).mockResolvedValue({ items: [], nextPageToken: null, pages: 1 });
+  mk(deletePlaylistItem).mockResolvedValue(undefined);
   mk(quotaGate).mockResolvedValue({ ok: true });
   mk(getAccessToken).mockResolvedValue({ accessToken: "tok", tokens: {} });
   mk(loadTokens).mockResolvedValue({ refresh_token: "r" });
@@ -357,6 +364,203 @@ describe("runGenrePlaylists", () => {
       ok: true,
       stoppedBy: "nothing",
     });
+  });
+});
+
+const vid = (i: number) => `vid${String(i).padStart(8, "0")}`;
+/** A complete listing holding `ids`, item id `it-<videoId>`. */
+const listing = (ids: string[]) => ({
+  items: ids.map((v) => ({ id: `it-${v}`, contentDetails: { videoId: v } })),
+  nextPageToken: null,
+  pages: 1,
+});
+const stateOf = async (env: Env, key: string, videoId: string) =>
+  (
+    await env.DB.prepare(
+      "SELECT state, error FROM genre_playlist_items WHERE genre_key = ? AND video_id = ?",
+    )
+      .bind(key, videoId)
+      .first<{ state: string; error: string | null }>()
+  )?.state ?? null;
+const leaveDj = (env: Env, videoId: string) =>
+  env.DB.prepare("UPDATE playlist_confirmed SET state = 'out' WHERE video_id = ?")
+    .bind(videoId)
+    .run();
+
+describe("genre playlists follow the DJ playlists", () => {
+  it("a video that leaves its DJ playlist is taken out, and put back when it returns", async () => {
+    const env = makeEnv();
+    await seed(env, 12, [["house", "House"]]);
+    await runGenrePlaylists(env, { log });
+    await leaveDj(env, vid(3));
+    let [row] = await genreOverview(env);
+    expect(row).toMatchObject({ leaving: 1, pending: 0, status: "pending" });
+    expect(row!.statusText).toBe("1 to take out, a few every scheduler tick");
+    expect((await genreSets(env, "house")).find((x) => x.videoId === vid(3))!.state).toBe(
+      "leaving",
+    );
+    mk(listPlaylistItems).mockResolvedValue(listing(Array.from({ length: 12 }, (_, i) => vid(i))));
+    mk(quotaGate).mockClear();
+    mk(addVideoToPlaylist).mockClear();
+    const r = await runGenrePlaylists(env, { log });
+    expect(r).toMatchObject({ ok: true, pruned: 1, inserted: 0 });
+    expect(quotaGate).toHaveBeenCalledWith(env, "genre_playlists", 51);
+    expect(deletePlaylistItem).toHaveBeenCalledTimes(1);
+    expect(deletePlaylistItem).toHaveBeenCalledWith(`it-${vid(3)}`, "tok");
+    expect(addVideoToPlaylist).not.toHaveBeenCalled();
+    expect(await stateOf(env, "house", vid(3))).toBe("pruned");
+    [row] = await genreOverview(env);
+    expect(row).toMatchObject({ leaving: 0, pruned: 1, inPlaylist: 11, status: "synced" });
+    expect((await genreSets(env, "house")).find((x) => x.videoId === vid(3))!.state).toBe(
+      "not_in_dj_playlist",
+    );
+    // The KV snapshot no longer has it.
+    expect(
+      (await env.CACHE.get<{ videoIds: string[] }>("yt:plvids:PLhouse", "json"))!.videoIds,
+    ).not.toContain(vid(3));
+    // Back in its DJ playlist: it qualifies again and goes back in.
+    await env.DB.prepare("UPDATE playlist_confirmed SET state = 'in' WHERE video_id = ?")
+      .bind(vid(3))
+      .run();
+    expect((await genreOverview(env))[0]).toMatchObject({ pending: 1 });
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ inserted: 1, pruned: 0 });
+    expect(await stateOf(env, "house", vid(3))).toBe("in");
+  });
+
+  it("a set whose video is replaced: the old one comes out, then the new one goes in, in one run", async () => {
+    const env = makeEnv();
+    await seed(env, 10, [["house", "House"]]);
+    await runGenrePlaylists(env, { log });
+    // The sync swapped the set's video, and the new one is in the DJ playlist.
+    await env.DB.prepare("UPDATE tracklists SET video_id = 'newvideo0001' WHERE url = ?")
+      .bind(url(5))
+      .run();
+    await leaveDj(env, vid(5));
+    await env.DB.prepare(
+      "INSERT INTO playlist_confirmed (playlist_id, video_id, state, source, at) VALUES ('PLdj', 'newvideo0001', 'in', 'sync', 0)",
+    ).run();
+    mk(listPlaylistItems).mockResolvedValue(listing([vid(5), vid(5), vid(6)]));
+    const order: string[] = [];
+    mk(deletePlaylistItem).mockImplementation(async (id: string) => void order.push(`del ${id}`));
+    mk(addVideoToPlaylist).mockImplementation(async (_p: string, v: string) => {
+      order.push(`add ${v}`);
+    });
+    mk(quotaGate).mockClear();
+    const r = await runGenrePlaylists(env, { log });
+    expect(r).toMatchObject({ pruned: 1, inserted: 1 });
+    expect(quotaGate).toHaveBeenCalledWith(env, "genre_playlists", 51 + 50);
+    // Both copies of the old one go, before the new one is inserted.
+    expect(order).toEqual([`del it-${vid(5)}`, `del it-${vid(5)}`, "add newvideo0001"]);
+    expect(await stateOf(env, "house", vid(5))).toBe("pruned");
+    expect(await stateOf(env, "house", "newvideo0001")).toBe("in");
+  });
+
+  it("one already gone from a complete listing is marked without a call; an incomplete listing marks nothing it did not delete", async () => {
+    const env = makeEnv();
+    await seed(env, 10, [["house", "House"]]);
+    await runGenrePlaylists(env, { log });
+    await leaveDj(env, vid(1));
+    await leaveDj(env, vid(2));
+    mk(listPlaylistItems).mockResolvedValueOnce({
+      ...listing([vid(2)]),
+      nextPageToken: "more",
+    });
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 1 });
+    expect(await stateOf(env, "house", vid(1))).toBe("in");
+    expect(await stateOf(env, "house", vid(2))).toBe("pruned");
+    mk(deletePlaylistItem).mockClear();
+    mk(listPlaylistItems).mockResolvedValueOnce(listing([vid(0)]));
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 1 });
+    expect(deletePlaylistItem).not.toHaveBeenCalled();
+    expect(await stateOf(env, "house", vid(1))).toBe("pruned");
+  });
+
+  it("a video the owner took out of the genre playlist stays removed, even once it stops qualifying", async () => {
+    const env = makeEnv();
+    await seed(env, 10, [["house", "House"]]);
+    await runGenrePlaylists(env, { log });
+    await env.DB.prepare("UPDATE genre_playlist_items SET at = 0").run();
+    await env.CACHE.delete("yt:plvids:PLhouse");
+    mk(listPlaylistVideoIds).mockResolvedValue(
+      new Set(Array.from({ length: 9 }, (_, i) => vid(i + 1))),
+    );
+    await leaveDj(env, vid(0));
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 0 });
+    expect(await stateOf(env, "house", vid(0))).toBe("removed");
+    expect(deletePlaylistItem).not.toHaveBeenCalled();
+    // Back in the DJ playlist: still never put back.
+    await env.DB.prepare("UPDATE playlist_confirmed SET state = 'in' WHERE video_id = ?")
+      .bind(vid(0))
+      .run();
+    expect((await genreOverview(env))[0]).toMatchObject({ pending: 0, removed: 1 });
+  });
+
+  it("a mass take-out is held for a day, then goes ahead; a switched-off genre is left alone", async () => {
+    const env = makeEnv();
+    await seed(env, 10, [["house", "House"]]);
+    await runGenrePlaylists(env, { log });
+    for (let i = 0; i < 6; i++) await leaveDj(env, vid(i));
+    mk(listPlaylistItems).mockResolvedValue(listing(Array.from({ length: 10 }, (_, i) => vid(i))));
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 0 });
+    expect(deletePlaylistItem).not.toHaveBeenCalled();
+    const since = Number(await env.CACHE.get("genres:prunehold:house"));
+    expect(since).toBeGreaterThan(0);
+    // Still within the day.
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 0 });
+    await env.CACHE.put("genres:prunehold:house", String(since - PRUNE_HOLD_SECONDS));
+    // Off: nothing is touched.
+    await setGenreChoice(env, "house", "House", false);
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ stoppedBy: "nothing" });
+    // Back to automatic: below genres.minSets now (4 videos), so nothing goes in, but what left still comes out.
+    await setGenreChoice(env, "house", "House", null);
+    expect((await genreOverview(env))[0]).toMatchObject({ enabled: false, leaving: 6 });
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 6 });
+    expect(deletePlaylistItem).toHaveBeenCalledTimes(6);
+    // Under the guard again: the hold is forgotten.
+    await leaveDj(env, vid(6));
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 1 });
+    expect(await env.CACHE.get("genres:prunehold:house")).toBeNull();
+  });
+
+  it("take-outs share the per-run cap; a quota reply stops the run and keeps what was done", async () => {
+    const env = makeEnv();
+    await seed(env, 10, [["house", "House"]]);
+    await runGenrePlaylists(env, { log });
+    await leaveDj(env, vid(1));
+    await leaveDj(env, vid(2));
+    mk(listPlaylistItems).mockResolvedValue(listing(Array.from({ length: 10 }, (_, i) => vid(i))));
+    mk(quotaGate).mockClear();
+    expect(await runGenrePlaylists(env, { log, maxInserts: 1 })).toMatchObject({
+      pruned: 1,
+      stoppedBy: null,
+    });
+    expect(quotaGate).toHaveBeenCalledWith(env, "genre_playlists", 51);
+    expect(await stateOf(env, "house", vid(1))).toBe("pruned");
+    expect(await stateOf(env, "house", vid(2))).toBe("in");
+    await leaveDj(env, vid(3));
+    mk(deletePlaylistItem)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new YouTubeApiError("playlistItems.delete", 403, "quotaExceeded", ""));
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 1, stoppedBy: "quota" });
+    expect(await stateOf(env, "house", vid(2))).toBe("pruned");
+    expect(await stateOf(env, "house", vid(3))).toBe("in");
+    // A delete refused for another reason is tried again later; a failed listing does nothing.
+    await env.CACHE.delete("yt:quota:out");
+    mk(deletePlaylistItem).mockRejectedValueOnce(
+      new YouTubeApiError("playlistItems.delete", 500, null, ""),
+    );
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 0 });
+    mk(listPlaylistItems).mockRejectedValueOnce(
+      new YouTubeApiError("playlistItems.list", 500, null, ""),
+    );
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 0 });
+    mk(listPlaylistItems).mockRejectedValueOnce(
+      new YouTubeApiError("playlistItems.list", 403, "quotaExceeded", ""),
+    );
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ stoppedBy: "quota" });
+    expect(await stateOf(env, "house", vid(3))).toBe("in");
+    expect(await runGenrePlaylists(env, { log })).toMatchObject({ pruned: 1 });
+    expect(await stateOf(env, "house", vid(3))).toBe("pruned");
   });
 });
 

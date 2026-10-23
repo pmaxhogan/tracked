@@ -361,7 +361,8 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         step("genre_playlists");
         {
           const gr = await genrePlaylistsCronStep(env, log, trigger);
-          if (!gr.ok || gr.inserted > 0 || gr.failed > 0) log.info("cron.genre_playlists", gr);
+          if (!gr.ok || gr.inserted > 0 || gr.failed > 0 || gr.pruned > 0)
+            log.info("cron.genre_playlists", gr);
         }
         try {
           step("combined");

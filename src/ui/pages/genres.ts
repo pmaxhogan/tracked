@@ -123,13 +123,14 @@ ${COMMON_JS}
   let sets = [];
   let table = null;
   const STATE = {
-    in: ['ok', 'in playlist'], pending: ['info', 'to add'], failed: ['warn', 'insert failed'],
+    in: ['ok', 'in playlist'], pending: ['info', 'to add'], leaving: ['info', 'to take out'], failed: ['warn', 'insert failed'],
     unavailable: ['neutral', 'unavailable'], removed: ['neutral', 'removed by you'],
     not_in_dj_playlist: ['neutral', 'not in a DJ playlist'], no_video: ['neutral', 'no video'],
   };
   const STATE_TIP = {
     in: 'The video is in this genre playlist.',
     pending: 'Goes in on a coming run (a few every scheduler tick).',
+    leaving: 'In the playlist, but its video is no longer in a DJ playlist: taken out on a coming run, and put back if it returns there.',
     failed: 'An insert failed three times; it is left alone.',
     unavailable: 'YouTube refuses to insert the video (deleted or private).',
     removed: 'It was in the playlist and you took it out on YouTube: never put back.',
@@ -148,6 +149,8 @@ ${COMMON_JS}
     ];
     if (g.unavailable) facts.push(g.unavailable + ' unavailable');
     if (g.removed) facts.push(g.removed + ' removed by you');
+    if (g.leaving) facts.push(g.leaving + ' to take out');
+    if (g.pruned) facts.push(g.pruned + ' taken out (left their DJ playlist)');
     if (g.lastRunAt) facts.push('last run ' + TK.fmt.rel(new Date(g.lastRunAt * 1000).toISOString()));
     const choice = g.choice === null ? 'automatic' : g.choice ? 'on' : 'off';
     let html = '<div class="gn-head"><h2>' + esc(g.name) + '</h2>' + gnBadge(g) + '<span class="muted">' + esc(g.statusText) + '</span></div>' +
@@ -204,7 +207,7 @@ ${COMMON_JS}
         { id: 'all', label: 'All', group: 's', on: true },
         { id: 'in', label: 'In playlist', group: 's', filters: [{ col: 'state', op: 'in', value: 'in' }], count: () => sets.filter((r) => r.state === 'in').length },
         { id: 'pending', label: 'To add', group: 's', filters: [{ col: 'state', op: 'in', value: 'pending' }], count: () => sets.filter((r) => r.state === 'pending').length },
-        { id: 'other', label: 'Not added', group: 's', filters: [{ col: 'state', op: 'in', value: 'failed|unavailable|removed|not_in_dj_playlist|no_video' }], count: () => sets.filter((r) => !['in', 'pending'].includes(r.state)).length },
+        { id: 'other', label: 'Not added', group: 's', filters: [{ col: 'state', op: 'in', value: 'failed|unavailable|removed|not_in_dj_playlist|no_video' }], count: () => sets.filter((r) => !['in', 'pending', 'leaving'].includes(r.state)).length },
       ],
       columns: [
         { key: 'title', label: 'Set', type: 'text',

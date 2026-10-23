@@ -38,8 +38,19 @@
  * One that cannot be inserted (deleted, private) is `unavailable`. A failed
  * insert is tried again on later runs, MAX_ATTEMPTS times.
  *
- * Not in scope (left to the DJ playlists): the 6-hourly comparison and the
- * full-recording sweep do not read genre playlists.
+ * **What comes out.** A genre playlist follows the DJ playlists: a video
+ * that stops qualifying (`LEAVING_SQL`: it left its DJ playlist through the
+ * sweep, the owner's removal, remove and replace or a dead-video delete; the
+ * set's video was replaced; the set lost the genre; its DJ was unfollowed) is
+ * taken out by the next run, before that run's inserts, so a replaced video's
+ * successor goes in once it is in its DJ playlist. Take-outs spend as this
+ * consumer (51 units each, in the same gate answer and per-run cap as the
+ * inserts) and are `pruned`: put back if the video qualifies again, unlike
+ * `removed`. The playlist comparison and the sweep (lib/playlist-hygiene.ts)
+ * still read only the DJ and combined playlists: what they decide reaches the
+ * genre playlists through `playlist_confirmed` and `tracklists.video_id`,
+ * and a genre playlist's own listing is read again by its run every 6 hours
+ * (the KV snapshot's TTL), which is how the owner's own removals are found.
  */
 import type { Env } from "../types";
 import { getAppSettings, type AppSettings } from "./app-settings";
@@ -55,11 +66,14 @@ import { insertInOrder, type OrderKeyCache } from "./playlist-order-store";
 import { OWNER, quotaGate, REFUSAL_TEXT, type GateRefusal } from "./quota-priority";
 import { quotaKind } from "./youtube-error";
 import {
+  deletePlaylistItem,
   isPermanentInsertError,
   isQuotaError,
+  listPlaylistItems,
   PlaylistNotFoundError,
   YouTubeApiError,
 } from "./youtube-playlists";
+import { dropClaim, playlistInsertKey } from "./insert-claims";
 import { getQuotaOut, noteQuotaOut } from "./youtube-quota";
 
 export const genrePlaylistTitle = (name: string) => `${name} sets (1001tklists)`;
@@ -78,6 +92,14 @@ export const LAST_RUN_KEY = "genres:last_run";
 const LOCK_KEY = "genres:lock";
 const LOCK_TTL = 120;
 const LAST_RUN_TTL = 6 * 60 * 60;
+/** CACHE KV: since when a genre has had more videos to take out than the mass-removal guard believes. */
+const PRUNE_HOLD_PREFIX = "genres:prunehold:";
+/** A mass take-out that is still there after this long is real (a DJ unfollowed, a genre dropped), not a passing state. */
+export const PRUNE_HOLD_SECONDS = 24 * 60 * 60;
+/** One take-out at the hygiene's rate: the delete (50) and its share of the listing. */
+const PRUNE_UNITS = 51;
+/** Page cap of the listing a take-out reads its item ids from (as the playlist comparison's). */
+const PRUNE_LIST_MAX_PAGES = 200;
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
@@ -97,10 +119,14 @@ export type GenreRow = {
   videos: number;
   /** Videos still to add (not in, not given up on, not removed by the owner). */
   pending: number;
+  /** Videos in the playlist that no longer qualify (`LEAVING_SQL`): taken out on a coming run. */
+  leaving: number;
   inPlaylist: number;
   failed: number;
   unavailable: number;
   removed: number;
+  /** Taken out by tracked because they stopped qualifying; put back if they qualify again. */
+  pruned: number;
   /** The owner's choice: null = automatic. */
   choice: boolean | null;
   /** Whether the genre has a playlist that is kept filled. */
@@ -126,13 +152,29 @@ export type LastRun = {
 export type GenreStop =
   null | "run" | "deadline" | "quota" | "rate_limit" | "held" | "not_connected" | "nothing";
 
+/** What makes set `t`'s video belong in the playlists of the set's genres: one rule for adding and for taking out. */
+const QUALIFIES_SQL = `t.video_id IS NOT NULL AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions)
+     AND EXISTS (SELECT 1 FROM playlist_confirmed c JOIN sub_sync y ON y.playlist_id = c.playlist_id
+                  WHERE c.video_id = t.video_id AND c.state = 'in')`;
+
 const ELIGIBLE_SQL = `
   SELECT g.genre_key AS k, t.video_id AS v, MIN(t.url) AS set_url, MAX(COALESCE(s.set_date, '')) AS set_date
     FROM set_genres g JOIN tracklists t ON t.url = g.set_url
     LEFT JOIN set_schedule s ON s.url = t.url
-   WHERE t.video_id IS NOT NULL AND t.abandoned = 0 AND t.slug IN (SELECT slug FROM subscriptions)
-     AND EXISTS (SELECT 1 FROM playlist_confirmed c JOIN sub_sync y ON y.playlist_id = c.playlist_id
-                  WHERE c.video_id = t.video_id AND c.state = 'in')`;
+   WHERE ${QUALIFIES_SQL}`;
+
+/**
+ * In a genre playlist (`in`) and no longer qualifying: no followed set of the
+ * genre has it as its video while it is in a DJ playlist. It left its DJ
+ * playlist (the sweep, the owner's removal, remove and replace, a dead
+ * video), the set's video was replaced, the set lost the genre, or its DJ was
+ * unfollowed. `?1` = one genre or NULL.
+ */
+const LEAVING_SQL = `
+  SELECT i.genre_key AS k, i.video_id AS v FROM genre_playlist_items i
+   WHERE i.state = 'in' AND (?1 IS NULL OR i.genre_key = ?1)
+     AND NOT EXISTS (SELECT 1 FROM set_genres g JOIN tracklists t ON t.url = g.set_url
+                      WHERE g.genre_key = i.genre_key AND t.video_id = i.video_id AND ${QUALIFIES_SQL})`;
 
 /** Not to be inserted now: in already, given up on, or the owner removed it. */
 const SETTLED_SQL = `(i.state IN ('in', 'unavailable', 'removed') OR (i.state = 'failed' AND i.attempts >= ${MAX_ATTEMPTS}))`;
@@ -179,6 +221,7 @@ export async function genreOverview(
   let sets: Array<{ k: string; name: string; sets: number }>;
   let vids: Array<{ k: string; videos: number; pending: number }>;
   let items: Array<{ k: string; state: string; n: number }>;
+  let leaving: Array<{ k: string; n: number }>;
   let rows: PlaylistRow[];
   try {
     sets = (
@@ -214,6 +257,12 @@ export async function genreOverview(
         .bind(one)
         .all<{ k: string; state: string; n: number }>()
     ).results;
+    leaving = (
+      await db
+        .prepare(`SELECT l.k AS k, COUNT(*) AS n FROM (${LEAVING_SQL}) l GROUP BY l.k`)
+        .bind(one)
+        .all<{ k: string; n: number }>()
+    ).results;
     rows = (
       await db
         .prepare(
@@ -238,6 +287,13 @@ export async function genreOverview(
       Number(items.find((x) => x.k === key && x.state === state)?.n ?? 0);
     const videos = Number(v?.videos ?? 0);
     const pending = Number(v?.pending ?? 0);
+    const leavingN = Number(leaving.find((x) => x.k === key)?.n ?? 0);
+    const todo = [
+      pending > 0 ? `${pending} to add` : null,
+      leavingN > 0 ? `${leavingN} to take out` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
     const choice = r?.enabled === null || r?.enabled === undefined ? null : Number(r.enabled) === 1;
     const enabled = choice ?? (g.auto && videos >= g.minSets);
     const playlistId = r?.playlist_id ?? null;
@@ -254,21 +310,21 @@ export async function genreOverview(
     } else if (!connected) {
       status = "not_connected";
       statusText = "connect a YouTube account on Playlists";
-    } else if (pending > 0 && last && last.stoppedBy === "held" && last.held) {
+    } else if (todo && last && last.stoppedBy === "held" && last.held) {
       status = "held";
-      statusText = `${pending} to add, ${REFUSAL_TEXT[last.held]}`;
-    } else if (pending > 0 && last && last.stoppedBy === "quota") {
+      statusText = `${todo}, ${REFUSAL_TEXT[last.held]}`;
+    } else if (todo && last && last.stoppedBy === "quota") {
       status = "held";
-      statusText = `${pending} to add, waiting for the quota reset (midnight Pacific)`;
+      statusText = `${todo}, waiting for the quota reset (midnight Pacific)`;
     } else if (!playlistId) {
       status = "not_created";
       statusText =
         pending > 0
           ? `${pending} to add; the playlist is created on the next run`
           : "nothing to add yet";
-    } else if (pending > 0) {
+    } else if (todo) {
       status = "pending";
-      statusText = `${pending} to add, a few every scheduler tick`;
+      statusText = `${todo}, a few every scheduler tick`;
     } else {
       status = "synced";
       statusText = "up to date";
@@ -279,10 +335,12 @@ export async function genreOverview(
       sets: Number(s?.sets ?? 0),
       videos,
       pending,
+      leaving: leavingN,
       inPlaylist: count("in"),
       failed: count("failed"),
       unavailable: count("unavailable"),
       removed: count("removed"),
+      pruned: count("pruned"),
       choice,
       enabled,
       playlistId,
@@ -302,7 +360,7 @@ export type GenreSetRow = {
   setDate: string | null;
   djs: string;
   videoId: string | null;
-  /** in / pending / failed / unavailable / removed, or `not_in_dj_playlist` (no video in a DJ playlist yet). */
+  /** in / pending / leaving (in, no longer qualifying) / failed / unavailable / removed, or `not_in_dj_playlist` (no video in a DJ playlist). */
   state: string;
   attempts: number;
   error: string | null;
@@ -344,15 +402,13 @@ export async function genreSets(env: Env, key: string): Promise<GenreSetRow[]> {
   );
   return results.map((r) => {
     const it = r.video_id ? items.get(r.video_id) : undefined;
-    const state = !r.video_id
-      ? "no_video"
-      : it
-        ? it.state === "failed" && it.attempts < MAX_ATTEMPTS
-          ? "pending"
-          : it.state
-        : Number(r.eligible) === 1
-          ? "pending"
-          : "not_in_dj_playlist";
+    const eligible = Number(r.eligible) === 1;
+    let state: string;
+    if (!r.video_id) state = "no_video";
+    else if (!it || it.state === "pruned") state = eligible ? "pending" : "not_in_dj_playlist";
+    else if (it.state === "failed" && it.attempts < MAX_ATTEMPTS) state = "pending";
+    else if (it.state === "in" && !eligible) state = "leaving";
+    else state = it.state;
     return {
       setUrl: r.set_url,
       title: r.title,
@@ -418,6 +474,8 @@ export type GenreRunResult =
       created: number;
       genres: number;
       pending: number;
+      /** Videos taken out because they no longer qualify. */
+      pruned: number;
       stoppedBy: GenreStop;
     }
   | { ok: false; reason: "youtube_not_connected" | "off" | "unknown_genre" | "busy" }
@@ -480,6 +538,150 @@ type RunOpts = {
   deadlineMs?: number;
 };
 
+/**
+ * Take out of one genre playlist the videos that no longer qualify
+ * (`LEAVING_SQL`), at most `budget` of them, and mark them `pruned`: not
+ * settled, so a video that qualifies again (back in its DJ playlist) is put
+ * back. The item ids come from one listing of the playlist (1 unit a page),
+ * which also finds the item of a video deleted from YouTube; one that a
+ * complete listing does not show any more is marked without a call. Each
+ * video is marked as soon as its deletes are made, so a run cut short by the
+ * quota leaves no taken-out video recorded as still in (which a later listing
+ * would read as the owner's removal).
+ *
+ * The mass-removal guard of the playlist comparison (app settings
+ * playlists.massRemovalMax / massRemovalRatio of what the playlist holds)
+ * holds a genre whose content seems to leave all at once: more often a
+ * passing state (a DJ playlist found again under a new id, whose videos are
+ * confirmed again by its next listing) than a real one. Still there after
+ * PRUNE_HOLD_SECONDS, it is real (an unfollowed DJ, a genre gone from the set
+ * pages) and goes ahead. Never throws for a YouTube error.
+ */
+async function pruneLeaving(
+  env: Env,
+  a: {
+    key: string;
+    playlistId: string;
+    existing: Set<string>;
+    token: string;
+    log: Logger;
+    nowSec: number;
+    budget: number;
+    settings: AppSettings;
+  },
+): Promise<{ pruned: number; attempts: number; stop: GenreStop }> {
+  const { log } = a;
+  const none = { pruned: 0, attempts: 0, stop: null };
+  const leaving = (
+    await env.DB.prepare(LEAVING_SQL).bind(a.key).all<{ k: string; v: string }>()
+  ).results.map((r) => r.v);
+  if (leaving.length === 0) return none;
+  if (await pruneHeld(env, a.key, leaving.length, a.nowSec, a.settings, log)) return none;
+  if (a.budget <= 0) return { ...none, stop: "run" };
+  const ids = leaving.sort().slice(0, a.budget);
+  const want = new Set(ids);
+  const itemsOf = new Map<string, string[]>();
+  let complete: boolean;
+  try {
+    const r = await listPlaylistItems(a.playlistId, a.token, { maxPages: PRUNE_LIST_MAX_PAGES });
+    complete = !r.nextPageToken;
+    for (const it of r.items) {
+      const v = it.contentDetails?.videoId || it.snippet?.resourceId?.videoId;
+      if (it.id && v && want.has(v)) itemsOf.set(v, [...(itemsOf.get(v) ?? []), it.id]);
+    }
+  } catch (e) {
+    if (isQuotaError(e)) {
+      await noteQuotaOut(env, e, log);
+      return { ...none, attempts: 1, stop: quotaStopOf(e) };
+    }
+    log.warn("genres.prune_list_failed", {
+      genre: a.key,
+      playlistId: a.playlistId,
+      ...errorFields(e),
+    });
+    return { ...none, attempts: 1 };
+  }
+  const mark = async (videoId: string, detail: string) => {
+    await upsertItem(env, a.key, videoId, null, "pruned", detail, a.nowSec);
+    a.existing.delete(videoId);
+    // A later insert of it is a real one again.
+    await dropClaim(env, playlistInsertKey(a.playlistId, videoId));
+  };
+  let pruned = 0;
+  let deletes = 0;
+  let stop: GenreStop = null;
+  for (const v of ids) {
+    const itemIds = itemsOf.get(v);
+    if (!itemIds) {
+      // Not in a complete listing: gone already (the owner, or YouTube), nothing to call.
+      if (complete) {
+        await mark(v, "no longer qualifies; already gone from the playlist");
+        pruned++;
+      }
+      continue;
+    }
+    try {
+      for (const id of itemIds) {
+        await deletePlaylistItem(id, a.token);
+        deletes++;
+      }
+      await mark(v, "no longer qualifies; taken out of the playlist");
+      pruned++;
+    } catch (e) {
+      if (isQuotaError(e)) {
+        await noteQuotaOut(env, e, log);
+        stop = quotaStopOf(e);
+        break;
+      }
+      // Tried again on a later run: the row stays `in`.
+      log.warn("genres.prune_failed", { genre: a.key, videoId: v, ...errorFields(e) });
+    }
+  }
+  log.info("genres.pruned", {
+    genre: a.key,
+    playlistId: a.playlistId,
+    leaving: leaving.length,
+    pruned,
+    deletes,
+    stoppedBy: stop,
+    videoIds: ids.slice(0, 50),
+  });
+  return { pruned, attempts: Math.max(1, deletes), stop };
+}
+
+/** The mass-removal guard of `pruneLeaving`: true = leave the genre alone this run. */
+async function pruneHeld(
+  env: Env,
+  key: string,
+  leaving: number,
+  nowSec: number,
+  settings: AppSettings,
+  log: Logger,
+): Promise<boolean> {
+  const { massRemovalMax, massRemovalRatio } = settings.playlists;
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM genre_playlist_items WHERE genre_key = ? AND state = 'in'",
+  )
+    .bind(key)
+    .first<{ n: number }>();
+  const total = Number(row?.n ?? 0);
+  const k = PRUNE_HOLD_PREFIX + key;
+  const raw = await env.CACHE.get(k);
+  if (!(leaving > massRemovalMax && leaving > massRemovalRatio * total)) {
+    if (raw) await env.CACHE.delete(k);
+    return false;
+  }
+  const since = raw === null ? NaN : Number(raw);
+  if (!Number.isFinite(since)) {
+    await env.CACHE.put(k, String(nowSec), { expirationTtl: 3 * PRUNE_HOLD_SECONDS });
+    log.warn("genres.prune_held", { genre: key, leaving, inPlaylist: total });
+    return true;
+  }
+  if (nowSec - since < PRUNE_HOLD_SECONDS) return true;
+  log.warn("genres.prune_hold_lapsed", { genre: key, leaving, inPlaylist: total, since });
+  return false;
+}
+
 async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
   const log = opts.log;
   const settings = await getAppSettings(env);
@@ -488,15 +690,21 @@ async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
   const all = await genreOverview(env, { key: opts.only, settings });
   if (opts.only && all.length === 0) return { ok: false, reason: "unknown_genre" };
   if (opts.only && !all[0]!.enabled) return { ok: false, reason: "off" };
+  // Taking out follows every playlist that exists unless the owner switched its genre off (one that fell
+  // below genres.minSets is no longer filled, but is not left holding what left the DJ playlists).
+  // A genre with videos to take out goes first (wrong content is worse than missing content), then the least complete.
+  const prunable = (g: GenreRow) => g.leaving > 0 && g.playlistId !== null && g.choice !== false;
   const targets = all
-    .filter((g) => g.enabled && g.pending > 0)
+    .filter((g) => (g.enabled && g.pending > 0) || prunable(g))
     .sort(
       (a, b) =>
+        Number(prunable(b)) - Number(prunable(a)) ||
         a.inPlaylist / Math.max(1, a.videos) - b.inPlaylist / Math.max(1, b.videos) ||
         b.videos - a.videos,
     );
   const perRun = opts.maxInserts ?? settings.genres.maxInsertsPerRun;
-  const pendingTotal = targets.reduce((n, g) => n + g.pending, 0);
+  const pendingTotal = targets.reduce((n, g) => n + (g.enabled ? g.pending : 0), 0);
+  const leavingTotal = targets.reduce((n, g) => n + (prunable(g) ? g.leaving : 0), 0);
   if (targets.length === 0 || perRun <= 0) {
     return {
       ok: true,
@@ -505,6 +713,7 @@ async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
       created: 0,
       genres: 0,
       pending: 0,
+      pruned: 0,
       stoppedBy: "nothing",
     };
   }
@@ -521,8 +730,11 @@ async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
   }
   const token = tokenInfo.accessToken;
   const consumer = manual ? OWNER : "genre_playlists";
-  // The whole run's plan, as the combined playlist asks: never less than one insert's worth.
-  const units = Math.max(1, Math.min(perRun, pendingTotal)) * 50;
+  // The whole run's plan, as the combined playlist asks: never less than one insert's worth. Take-outs
+  // come out of the same per-run cap, first.
+  const pruneOps = Math.min(perRun, leavingTotal);
+  const insertOps = Math.min(perRun - pruneOps, pendingTotal);
+  const units = Math.max(50, insertOps * 50 + pruneOps * PRUNE_UNITS);
   const gate = await quotaGate(env, consumer, units);
   if (!gate.ok) {
     log.info("genres.quota_gate_held", { consumer, reason: gate.reason, units });
@@ -542,6 +754,7 @@ async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
   let inserted = 0;
   let failed = 0;
   let created = 0;
+  let pruned = 0;
   let touched = 0;
   let stoppedBy: GenreStop = null;
   outer: for (const g of targets) {
@@ -629,16 +842,42 @@ async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
         );
         log.info("genres.owner_removed", { genre: g.key, videoId: r.video_id });
       }
-    const { results: cands } = await env.DB.prepare(
-      `WITH e AS (${ELIGIBLE_SQL} AND g.genre_key = ?1 GROUP BY g.genre_key, t.video_id)
-       SELECT e.v AS video_id, e.set_url AS set_url FROM e
-         LEFT JOIN genre_playlist_items i ON i.genre_key = e.k AND i.video_id = e.v
-        WHERE i.state IS NULL OR NOT ${SETTLED_SQL}
-        ORDER BY e.set_date DESC, e.v`,
-    )
-      .bind(g.key)
-      .all<{ video_id: string; set_url: string }>();
     let changed = false;
+    // What no longer qualifies comes out before anything goes in (a replaced video, then its replacement).
+    if (prunable(g)) {
+      const p = await pruneLeaving(env, {
+        key: g.key,
+        playlistId,
+        existing,
+        token,
+        log,
+        nowSec,
+        budget: perRun - attempts,
+        settings,
+      });
+      attempts += p.attempts;
+      pruned += p.pruned;
+      if (p.pruned > 0) changed = true;
+      if (p.stop) {
+        stoppedBy = p.stop;
+        if (changed) await cachePlaylistVideoIds(env, playlistId, existing);
+        break;
+      }
+    }
+    // Not enabled (here only to take out): nothing goes in.
+    const cands = !g.enabled
+      ? []
+      : (
+          await env.DB.prepare(
+            `WITH e AS (${ELIGIBLE_SQL} AND g.genre_key = ?1 GROUP BY g.genre_key, t.video_id)
+             SELECT e.v AS video_id, e.set_url AS set_url FROM e
+               LEFT JOIN genre_playlist_items i ON i.genre_key = e.k AND i.video_id = e.v
+              WHERE i.state IS NULL OR NOT ${SETTLED_SQL}
+              ORDER BY e.set_date DESC, e.v`,
+          )
+            .bind(g.key)
+            .all<{ video_id: string; set_url: string }>()
+        ).results;
     for (const c of cands) {
       if (existing.has(c.video_id)) {
         await upsertItem(env, g.key, c.video_id, c.set_url, "in", null, nowSec);
@@ -713,6 +952,7 @@ async function runLocked(env: Env, opts: RunOpts): Promise<GenreRunResult> {
     created,
     genres: touched,
     pending: Math.max(0, pendingTotal - inserted),
+    pruned,
     stoppedBy,
   };
   await saveLastRun(env, {
