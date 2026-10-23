@@ -48,6 +48,10 @@ import {
 import { DJS_TABLE } from "../src/lib/dj-table";
 import { parseTableQuery, runTableQuery } from "../src/lib/table-query";
 import { app } from "../src/index";
+import vm from "node:vm";
+import { DJS_PAGE } from "../src/ui/pages/djs";
+import { DJ_PAGE } from "../src/ui/pages/dj";
+import { YT_SUB_JS } from "../src/ui/pages/yt-sub";
 
 const log = makeLogger({ task: "test" });
 const mk = <T>(f: unknown) => f as ReturnType<typeof vi.fn> & T;
@@ -650,5 +654,37 @@ describe("the pages", () => {
     expect(dj).toContain("dj-ytsub");
     const settings = await (await req(env, "/ui/settings")).text();
     expect(settings).toContain("ytSubs.enabled");
+  });
+
+  it("the page scripts parse, and the badge renders every status (red only for a reconnect)", () => {
+    for (const html of [DJS_PAGE.html, DJ_PAGE.html])
+      for (const m of html.matchAll(/<script>([\s\S]*?)<\/script>/g))
+        expect(() => new vm.Script(m[1]!)).not.toThrow();
+    const ctx = vm.createContext({
+      TK: { esc: (x: string) => String(x), tip: (t: string) => ` data-tip="${t}"` },
+    });
+    const badge = vm.runInContext(`${YT_SUB_JS}; YTS.badge`, ctx) as (
+      s: string,
+      o?: Record<string, unknown>,
+    ) => string;
+    const statuses = [
+      "subscribed",
+      "owner",
+      "pending",
+      "looking",
+      "no_channel",
+      "failed",
+      "not_found",
+      "off",
+    ];
+    for (const st of statuses)
+      expect(badge(st, { reason: "no_youtube_link" })).not.toContain("badge bad");
+    expect(badge("subscribed")).toContain("badge ok");
+    expect(badge("no_channel", { reason: "no_youtube_link" })).toContain(
+      "lists no YouTube channel",
+    );
+    expect(badge("pending", { needsReconnect: true })).toContain("badge bad");
+    expect(badge("subscribed", { needsReconnect: true })).toContain("badge ok");
+    expect(badge("other")).toContain("tkt-nil");
   });
 });
