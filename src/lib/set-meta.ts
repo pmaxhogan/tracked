@@ -747,7 +747,8 @@ export async function loadSetMeta(
 /** CACHE KV: the last R2 key the pass looked at, and when it finished (both carry META_FORMAT). */
 export const META_PAGES_CURSOR_KEY = `set_meta:pages_after:v${META_FORMAT}`;
 export const META_PAGES_DONE_KEY = `set_meta:pages_done:v${META_FORMAT}`;
-const LIST_LIMIT = 200;
+// Most stored objects are DJ pages and medialink answers: a wide listing gets past them fast (metadata only).
+const LIST_LIMIT = 1000;
 
 export type MetaPagesStepResult = { listed: number; read: number; written: number; done: boolean };
 
