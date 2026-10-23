@@ -20,6 +20,7 @@ const BODY = /* html */ `
   <div class="set-main">
   <div id="error" class="error" role="alert"></div>
   <div id="setmeta" class="tk-row muted set-meta" hidden></div>
+  <div id="setinfo" class="tk-card set-info" hidden></div>
   <div id="cachebar" class="tk-row cachebar" hidden>
     <span id="cache-age" class="muted"></span>
     <button type="button" id="refresh" class="btn small"${tipAttr("Throws away the cached track list and fetches the page again. Costs one 1001tracklists page view and is limited per set and per day.")}>Refresh track list</button>
@@ -40,17 +41,71 @@ const CSS = /* css */ `
   .cachebar { font-size: var(--fs-sm); margin-bottom: var(--sp-3); }
   .btn.small { padding: 5px 10px; font-size: var(--fs-sm); }
   .set-ytm { margin-bottom: var(--sp-3); }
+  .set-info { margin-bottom: var(--sp-3); font-size: var(--fs-sm); }
+  .set-info .si-genres { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+  .set-info .si-genres a.badge { text-decoration: none; }
+  .set-info .si-facts { color: var(--muted); margin-top: var(--sp-2); overflow-wrap: anywhere; }
+  .set-info details { margin-top: var(--sp-2); }
+  .set-info summary { cursor: pointer; color: var(--muted); }
+  .set-info dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px var(--sp-3); margin: var(--sp-2) 0 0; }
+  .set-info dt { color: var(--muted); }
+  .set-info dd { margin: 0; overflow-wrap: anywhere; }
   .set-ytm .ytm { text-decoration: none; }
 ${TRACK_ROW_CSS}
 ${SET_DIAG_CSS}`;
 
+// Where a genre badge goes, and what its tooltip says.
+const GENRE_JS = /* js */ `
+  const GENRE_HREF = (g) => 'https://www.1001tracklists.com/genre/' + encodeURIComponent(g.key) + '/index.html';
+  const GENRE_TIP = 'The genre 1001tracklists gives this set. Opens its genre page there.';
+`;
+
 const JS = /* js */ `
 (() => {
+${GENRE_JS}
 ${TRACK_ROW_JS}
 ${SET_DIAG_JS}
   const $ = TK.$;
   const $form = $('load-form'), $url = $('url'), $btn = $('load-btn'), $error = $('error'), $setmeta = $('setmeta');
   const $tracks = $('tracks'), $empty = $('empty'), $cachebar = $('cachebar'), $cacheAge = $('cache-age');
+  const $setinfo = $('setinfo');
+  // Genres and the rest of the set page (stored on every fetch, lib/set-meta.ts), from the diagnostics.
+  function genreHref(g) { return GENRE_HREF(g); }
+  function renderSetInfo(sm) {
+    const m = sm && sm.meta;
+    if (!sm || (!m && !(sm.genres || []).length)) { $setinfo.hidden = true; $setinfo.innerHTML = ''; return; }
+    const esc = TK.esc;
+    const genres = sm.genres || [];
+    let html = '<div class="si-genres"><strong>Genres</strong>' + (genres.length
+      ? genres.map((g) => '<a class="badge info" href="' + esc(genreHref(g)) + '"' + TK.tip(GENRE_TIP) + '>' + esc(g.name) + '</a>').join('')
+      : '<span class="muted">none given</span>') + '</div>';
+    if (m) {
+      const bits = [];
+      if (m.views != null) bits.push(m.views + ' views');
+      if (m.likes != null) bits.push(m.likes + ' likes');
+      if (m.total != null) bits.push((m.ided != null ? m.ided : '?') + '/' + m.total + ' IDed');
+      if (m.durationSeconds) bits.push(TK.fmt.clock(m.durationSeconds) + ' long');
+      if (m.postedBy) bits.push('list by ' + m.postedBy.name);
+      const places = (m.boxes || []).filter((b) => b.object === 3).map((b) => b.title + (b.country ? ' (' + b.country + ')' : ''));
+      if (places.length) bits.push(places.join(', '));
+      if (bits.length) html += '<div class="si-facts">' + esc(bits.join(' · ')) + '</div>';
+      const rows = [];
+      const add = (k, v) => { if (v != null && v !== '') rows.push('<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>'); };
+      add('Set date', m.date);
+      add('Posted', m.postedAt);
+      add('Updated', m.updatedAt);
+      add('Live set', m.isLive == null ? null : m.isLive ? 'yes' : 'no');
+      add('Tracks (page)', m.numTracks);
+      for (const b of m.boxes || []) add(b.object === 2 ? 'Artist' : 'Source', b.title + (b.country ? ', ' + b.country : '') + (b.links && b.links.length ? ' (' + b.links.map((l) => l.label).join(', ') + ')' : ''));
+      for (const x of m.media || []) add('Player', (x.sourceName || ('source ' + x.source)) + (x.label ? ' ' + x.label : '') + (x.externalId ? ' [' + x.externalId + ']' : ''));
+      add('Notice', m.notice);
+      add('Short link', m.shortLink);
+      add('Stored', TK.fmt.rel(new Date(sm.fetchedAt * 1000).toISOString()) + ' (' + sm.source + ')');
+      if (rows.length) html += '<details><summary>Everything stored about this set</summary><dl>' + rows.join('') + '</dl></details>';
+    }
+    $setinfo.innerHTML = html;
+    $setinfo.hidden = false;
+  }
   const $refresh = $('refresh'), $loadLinks = $('load-links'), $result = $('refresh-result'), $diag = $('diag'), $skel = $('tracks-skel');
   let currentUrl = null, seq = 0;
   // The set's YouTube video, for the YouTube Music button: the diagnostics'
@@ -133,6 +188,7 @@ ${SET_DIAG_JS}
     }
     ytFromDiag = diagVideoId(res.data);
     renderYtm();
+    renderSetInfo(res.data.setMeta);
     $diag.innerHTML = renderDiag(res.data);
     $diag.hidden = false;
   }
@@ -155,6 +211,7 @@ ${SET_DIAG_JS}
     // Never leave another set's button on screen while this one loads.
     ytFromDiag = null; ytFromPage = null;
     renderYtm();
+    renderSetInfo(null);
     $error.textContent = '';
     $empty.hidden = true;
     // Never leave another set's diagnostics on screen while this one loads.
@@ -191,6 +248,8 @@ ${SET_DIAG_JS}
         return;
       }
       render(data);
+      // A fresh fetch has just stored the page's genres: read them again.
+      if (data.cacheAgeSeconds != null && data.cacheAgeSeconds < 90) loadDiag(url, my).catch(() => {});
     });
   }
 

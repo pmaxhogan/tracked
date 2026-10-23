@@ -285,6 +285,11 @@ export const AppSettingsSchema = z.object({
     /** Stored set pages (R2) the 5-minute cron reads for the graph a tick; no pool fetch (default 10). 0 = none. */
     pagesPerTick: z.number().int().min(0).max(100),
   }),
+  /** Set and track page metadata (lib/set-meta.ts). */
+  genres: z.object({
+    /** Stored set pages (R2) the 5-minute cron reads a tick for their genres and the rest of the page; no pool fetch (default 20). 0 = none. */
+    metaPagesPerTick: z.number().int().min(0).max(100),
+  }),
   /** YouTube quota: who goes first when the pool runs short (lib/quota-consumers.ts has the catalogue). */
   quota: z.object({
     /** Consumer keys, highest rank first. Owner actions always go before all of them. */
@@ -412,6 +417,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     lengthToleranceMinutes: 2,
   },
   graph: { nodeCap: 5000, confirmOver: 300, backfill: true, pagesPerTick: 10 },
+  genres: { metaPagesPerTick: 20 },
   quota: {
     order: [
       "likes",

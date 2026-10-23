@@ -30,6 +30,7 @@
  * Everything here talks to YouTube only; none of it fetches 1001tracklists.
  */
 
+import { recordSetMeta } from "./set-meta";
 import type { Env } from "../types";
 import { dbOf, batchChunked } from "./db";
 import { errorFields, type Logger } from "./log";
@@ -246,6 +247,7 @@ export async function recordPageFacts(
       env,
       extractSetFacts(tl?.slug ?? prev?.slug ?? "", setUrl, html, parseSetYouTubeId(html)),
     );
+    await recordSetMeta(env, setUrl, html, "page", log);
   } catch (e) {
     log?.warn("hygiene.page_facts_failed", { setUrl, ...errorFields(e) });
   }
@@ -476,6 +478,8 @@ export async function pickSetVideo(
     else {
       facts = extractSetFacts(ctx.slug, ctx.setUrl, ctx.html, ctx.rawVideoId);
       await saveSetFacts(env, facts);
+      // Genres and the rest of the page (lib/set-meta.ts; never throws).
+      await recordSetMeta(env, ctx.setUrl, ctx.html, "sync", log);
     }
   } catch (e) {
     log.warn("hygiene.facts_failed", { slug: ctx.slug, setUrl: ctx.setUrl, ...errorFields(e) });

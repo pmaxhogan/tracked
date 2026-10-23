@@ -30,6 +30,7 @@ import { MkvidClaimBody, MkvidClaimResponse } from "./schemas";
 import { bearerAuth } from "./middleware/auth";
 import type { Env } from "./types";
 import { backfillCombined } from "./lib/sync";
+import { setMetaPagesStep } from "./lib/set-meta";
 import { getQuotaOut } from "./lib/youtube-quota";
 import { runOrderPass } from "./lib/playlist-reorder";
 import { runSchedulerTick } from "./lib/fetch-scheduler";
@@ -330,6 +331,12 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
           if (gs.pagesPerTick > 0) {
             const g = await graphPagesStep(env, { limit: gs.pagesPerTick, log });
             if (g.read > 0) log.info("cron.graph_pages", g);
+          }
+          // Genres and the rest of the page from stored set pages, a few a tick; no pool fetch (lib/set-meta.ts; never throws).
+          const mp = (await getAppSettings(env)).genres.metaPagesPerTick;
+          if (mp > 0) {
+            const m = await setMetaPagesStep(env, { limit: mp, log });
+            if (m.read > 0) log.info("cron.set_meta_pages", m);
           }
         }
         // The Stats page's hourly snapshot (lib/stats.ts; never throws, at most once an hour).

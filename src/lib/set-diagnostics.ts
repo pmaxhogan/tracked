@@ -24,11 +24,14 @@ import {
 import { removedBurstSince } from "./mkvid-removed-burst";
 import { readinessFor, type MkvidReadiness } from "./mkvid-readiness";
 import { supersededReason } from "./activity";
+import { loadSetMeta, type StoredSetMeta } from "./set-meta";
 import { describeYouTubeError, type YouTubeErrorView } from "./youtube-error";
 
 export type SetDiagnostics = {
   url: string;
   now: number;
+  /** What the set page says beyond the track list (lib/set-meta.ts), genres first; null until a fetch stored it. */
+  setMeta: StoredSetMeta | null;
   discovered: Array<{
     slug: string;
     artistName: string | null;
@@ -361,9 +364,17 @@ export async function setDiagnostics(env: Env, url: string): Promise<SetDiagnost
     }));
   }
 
+  let setMeta: StoredSetMeta | null = null;
+  try {
+    setMeta = await loadSetMeta(env, url);
+  } catch {
+    // Migration 0033 not applied, or a D1 error: the column still renders.
+  }
+
   return {
     url,
     now,
+    setMeta,
     discovered,
     schedule: sched
       ? {

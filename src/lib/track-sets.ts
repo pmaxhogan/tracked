@@ -47,6 +47,7 @@
 import type { Env } from "../types";
 import { getAppSettings, type AppSettings } from "./app-settings";
 import { isPaused } from "./ban-state";
+import { recordTrackMeta } from "./set-meta";
 import { BATCH_CHUNK } from "./db";
 import { fetchScrollChunk, oItmIds, parseScrollKeys, type ScrollKeys } from "./dj-index";
 import { IPBlockedError } from "./fetch";
@@ -290,6 +291,7 @@ export async function recordTrackPageHtml(
     if (!env.DB) return 0;
     const id = trackPageIdOf(trackUrl);
     if (!id) return 0;
+    await recordTrackMeta(env, trackUrl, html, log);
     const rows = parseTrackSetRows(html);
     if (rows.length === 0) return 0;
     const r = await storeTrackSetRows(env, id, rows, await followedDjNames(env));
@@ -532,6 +534,8 @@ async function walkTrack(
         quota.views--;
         quota.pages--;
         rows = parseTrackSetRows(r.html);
+        // The rest of the track page (lib/set-meta.ts; never throws).
+        await recordTrackMeta(env, row.track_url, r.html, log, nowSec);
         if (!/\bid="sDivTracklists"/.test(r.html)) {
           await finish("no_list");
           return out;

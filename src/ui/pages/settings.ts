@@ -677,6 +677,22 @@ const APP_GROUPS: FormGroup[] = [
     ],
   },
   {
+    id: "sf-genres",
+    title: "Set metadata and genres",
+    intro:
+      "Every set and track page the app reads is kept with its genres, labels, links and counts. Sets read before that are filled in from stored pages.",
+    fields: [
+      {
+        path: "genres.metaPagesPerTick",
+        label: "Stored pages read a cron tick",
+        help: "Set pages kept in R2, read for their genres and the rest of the page; no pool fetch. Default 20. 0 = none.",
+        min: 0,
+        max: 100,
+        step: 1,
+      },
+    ],
+  },
+  {
     id: "sf-retention",
     title: "Retention",
     fields: [
