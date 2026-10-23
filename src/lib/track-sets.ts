@@ -85,7 +85,7 @@ const PAGE1_FULL = 10;
 /** CACHE KV: the crawl's own requests per UTC hour, `{ "<hour>": { p, x } }`, the last 24 kept. */
 export const USAGE_KEY = "track_sets:usage";
 /** CACHE KV: the pool's backfill allowance (pages / XHRs a day), read at most every ALLOWANCE_TTL. */
-const ALLOWANCE_KEY = "track_sets:allowance";
+export const ALLOWANCE_KEY = "track_sets:allowance";
 const ALLOWANCE_TTL = 600;
 /** CACHE KV: unix s until which the crawl waits after the pool refused it for budget (its own: other backfill jobs go on). */
 export const HOLD_KEY = "track_sets:hold_until";
@@ -811,24 +811,57 @@ export type TrackSetsSummary = {
   walking: number;
   /** Sets stored that are not a followed DJ's. */
   sets: number;
+  /** Walks that ended in the last 24 hours (the crawl's rate, tracks a day). */
+  read24h: number;
+  /** Days until every queued track is walked once at the last 24 hours' rate; null when nothing ended in them. */
+  etaDays: number | null;
+  /** The crawl's page loads over the last 24 hours (one per track: page loads are what pace it). */
+  pages24h: number;
+  /** Page loads a day the crawl may spend (`maxShare` of the pool's backfill allowance); null when the pool has not said lately. */
+  pageShare: number | null;
 };
 
 /** The crawl's progress (the Recommended sets page and the Scheduler page), null when D1 cannot say. */
-export async function trackSetsSummary(env: Env): Promise<TrackSetsSummary | null> {
+export async function trackSetsSummary(
+  env: Env,
+  nowSec = nowSeconds(),
+): Promise<TrackSetsSummary | null> {
   try {
     if (!env.DB) return null;
     const q = await env.DB.prepare(
-      `SELECT COUNT(*) AS queued, COALESCE(SUM(walks > 0), 0) AS walked, COALESCE(SUM(cursor_id IS NOT NULL), 0) AS walking
+      `SELECT COUNT(*) AS queued, COALESCE(SUM(walks > 0), 0) AS walked, COALESCE(SUM(cursor_id IS NOT NULL), 0) AS walking,
+              COALESCE(SUM(crawled_at >= ?), 0) AS day
          FROM track_set_crawl`,
-    ).first<{ queued: number; walked: number; walking: number }>();
+    )
+      .bind(nowSec - DAY)
+      .first<{ queued: number; walked: number; walking: number; day: number }>();
     const l = await env.DB.prepare(
       "SELECT COUNT(*) AS n FROM track_set_lists WHERE followed = 0",
     ).first<{ n: number }>();
+    const queued = Number(q?.queued ?? 0);
+    const walked = Number(q?.walked ?? 0);
+    const read24h = Number(q?.day ?? 0);
+    const left = Math.max(0, queued - walked);
+    // Only the allowance the crawl cached (it refreshes it every tick): a page view never calls the pool.
+    const allowance = (await env.CACHE.get(ALLOWANCE_KEY, "json").catch(() => null)) as {
+      pages: number;
+    } | null;
+    const share = (await getAppSettings(env)).trackSets.maxShare;
     return {
-      queued: Number(q?.queued ?? 0),
-      walked: Number(q?.walked ?? 0),
+      queued,
+      walked,
       walking: Number(q?.walking ?? 0),
       sets: Number(l?.n ?? 0),
+      read24h,
+      etaDays: left === 0 ? 0 : read24h > 0 ? Math.round((left / read24h) * 10) / 10 : null,
+      pages24h: await crawlUsage(env, nowSec).then(
+        (u) => u.p,
+        () => 0,
+      ),
+      pageShare:
+        allowance && Number.isFinite(Number(allowance.pages))
+          ? Math.floor(Number(allowance.pages) * share)
+          : null,
     };
   } catch {
     return null;
@@ -855,7 +888,7 @@ type RecommendedRow = {
 export const RECOMMENDED_TABLE: TableDef<RecommendedRow> = {
   from: "track_set_lists",
   select:
-    "set_id, set_url, title, set_date, creator, track_count, views, likes, genres, total_tracks, djs, first_seen_at, CAST(track_count AS REAL) / NULLIF(total_tracks, 0) AS share",
+    "set_id, set_url, title, set_date, creator, track_count, views, likes, genres, total_tracks, djs, first_seen_at, MIN(1.0, CAST(track_count AS REAL) / NULLIF(total_tracks, 0)) AS share",
   where: "followed = 0",
   primaryKey: "set_id",
   defaultSort: "-track_count",
@@ -871,7 +904,9 @@ export const RECOMMENDED_TABLE: TableDef<RecommendedRow> = {
     genres: { sql: "genres", type: "text", searchable: true, sortable: false },
     total_tracks: { sql: "total_tracks", type: "number" },
     // The share of the set the followed tracks make up: a long countdown ranks by its length otherwise.
-    share: { sql: "CAST(track_count AS REAL) / NULLIF(total_tracks, 0)", type: "number" },
+    // At most 1: a mashup row lists the mashup and each track in it (each one's track page lists the set) while
+    // total_tracks counts rows, so a short list of mashups has more followed tracks than rows (seen: 12 of 5).
+    share: { sql: "MIN(1.0, CAST(track_count AS REAL) / NULLIF(total_tracks, 0))", type: "number" },
     djs: { sql: "djs", type: "text", searchable: true },
     first_seen_at: { sql: "first_seen_at", type: "datetime", storage: "s" },
   },

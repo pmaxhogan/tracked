@@ -39,6 +39,7 @@ const JS = /* js */ `
     $bar.innerHTML =
       badge('neutral', 'tracks read ' + num(p.walked) + ' / ' + num(p.queued), 'Tracks of the followed DJs whose 1001tracklists page has been read for the sets it lists, out of every track queued. A few page views each cron tick, at pool priority backfill.') +
       (num(p.walking) ? badge('info', 'reading ' + num(p.walking), 'Tracks part way through their list of sets: the next tick goes on where it stopped.') : '') +
+      (num(p.queued) > num(p.walked) ? badge('neutral', num(p.read24h) + ' a day' + (p.etaDays == null ? '' : ', about ' + Math.ceil(num(p.etaDays)) + (Math.ceil(num(p.etaDays)) === 1 ? ' day' : ' days') + ' to go'), 'Tracks read in the last 24 hours, and how long the rest of the queue takes at that rate. Each track costs one page load, so the crawl goes as fast as its share of the backfill page budget of the pool allows: ' + num(p.pages24h) + ' page loads in 24 hours' + (p.pageShare == null ? '' : ' of ' + num(p.pageShare) + ' a day') + ' (Settings, Share of the backfill budget).') : '') +
       badge('neutral', num(p.sets) + ' sets', 'Sets by DJs you do not follow that at least one of those tracks was played in.');
   }
 
@@ -73,14 +74,14 @@ const JS = /* js */ `
         tip: 'How many tracks from the sets of the followed DJs this set plays, as far as the crawl has read.' },
       { key: 'share', label: 'Share', type: 'number', width: '5rem',
         render: (r) => r.share == null ? nil : esc(Math.round(r.share * 100) + '%'),
-        tip: 'The share of the set that followed tracks make up (Tracks / Total). A long countdown matches many tracks just by being long; this ranks it by how much of it is your style.' },
+        tip: 'The share of the set that followed tracks make up (Tracks / Total), at most 100%. A long countdown matches many tracks just by being long; this ranks it by how much of it is your style. A mashup row names several tracks (the mashup and each track in it) and Total counts rows, so a short list of mashups can have more followed tracks than rows: it shows 100%.' },
       { key: 'total_tracks', label: 'Total', type: 'number', width: '5rem', hideOn: 'phone',
         tip: 'Tracks in the set, as 1001tracklists counts them. Filled in when a crawled track page lists the set again.' },
       { key: 'djs', label: 'DJs', type: 'text', hideOn: 'phone',
         render: (r) => r.djs ? esc(r.djs) : nil,
         tip: 'The DJs the set title names.' },
       { key: 'title', label: 'Set', type: 'text',
-        render: (r) => '<span class="rs-title">' + ext(r.set_url, r.title, 'Opens the set on 1001tracklists.') + '</span>' },
+        render: (r) => '<span class="rs-title"><a href="/ui/set?url=' + encodeURIComponent(r.set_url || '') + '"' + TK.tip('Opens the set in tracked, with its track list.') + '>' + esc(r.title) + '</a></span>' },
       { key: 'set_date', label: 'Date', type: 'date', width: '7.5rem' },
       { key: 'views', label: 'Views', type: 'number', width: '5rem',
         tip: 'Views of the list on 1001tracklists, as of the last track page that listed it.' },
@@ -94,7 +95,8 @@ const JS = /* js */ `
       { key: 'first_seen_at', label: 'Found', type: 'datetime', storage: 's', hideOn: 'phone',
         tip: 'When a track page first listed this set.' },
     ],
-    actions: () => '<button type="button" class="btn sm" data-act="tracks"' + TK.tip('Lists the followed tracks this set plays.') + '>Tracks</button>',
+    actions: (r) => '<button type="button" class="btn sm" data-act="tracks"' + TK.tip('Lists the followed tracks this set plays.') + '>Tracks</button>' +
+      (TK.safeHref(r.set_url) ? ' <a class="btn sm" href="' + esc(TK.safeHref(r.set_url)) + '" target="_blank" rel="noreferrer noopener"' + TK.tip('Opens the set on 1001tracklists.') + '>1001tracklists</a>' : ''),
     onAction: (act, r, btn) => {
       if (act !== 'tracks') return;
       return TK.busy(btn, 'Loading...', () => showTracks(r));

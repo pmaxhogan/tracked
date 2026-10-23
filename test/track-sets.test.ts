@@ -8,6 +8,7 @@
  * Recommended sets endpoint. tlpool is a stubbed global fetch; D1 and KV are
  * the in-memory fakes with the real migrations.
  */
+import vm from "node:vm";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { fakeKV } from "./helpers/fake-kv";
 import { fakeD1 } from "./helpers/fake-d1";
@@ -24,7 +25,7 @@ import {
   trackSetsSummary,
 } from "../src/lib/track-sets";
 import { budgetHoldKey } from "../src/lib/fetch-scheduler";
-import { HOLD_KEY, USAGE_KEY } from "../src/lib/track-sets";
+import { ALLOWANCE_KEY, HOLD_KEY, USAGE_KEY } from "../src/lib/track-sets";
 import { updateAppSettings } from "../src/lib/app-settings";
 import { makeLogger } from "../src/lib/log";
 import { app } from "../src/index";
@@ -747,6 +748,59 @@ describe("drainTrackSets", () => {
   });
 });
 
+describe("trackSetsSummary", () => {
+  it("says the last 24 hours' rate, the days the queue has left at it, and the page share that paces it", async () => {
+    const env = makeEnv();
+    const ins = env.DB.prepare(
+      "INSERT INTO track_set_crawl (track_page_id, track_url, queued_at, walks, crawled_at, cursor_id) VALUES (?, 'u', 0, ?, ?, ?)",
+    );
+    // Two walks ended in the last 24 h, one before; one track mid-walk, seven never walked.
+    await ins.bind("a", 1, NOW - 3600, null).run();
+    await ins.bind("b", 1, NOW - 23 * 3600, null).run();
+    await ins.bind("c", 1, NOW - 25 * 3600, null).run();
+    await ins.bind("d", 0, null, "x1").run();
+    for (let i = 0; i < 6; i++) await ins.bind(`n${i}`, 0, null, null).run();
+    const hour = Math.floor(NOW / 3600);
+    await env.CACHE.put(
+      USAGE_KEY,
+      JSON.stringify({
+        [hour]: { p: 40, x: 9 },
+        [hour - 5]: { p: 2, x: 0 },
+        [hour - 30]: { p: 99, x: 0 },
+      }),
+    );
+    await env.CACHE.put(ALLOWANCE_KEY, JSON.stringify({ pages: 1000, xhr: 2000 }));
+    expect(await trackSetsSummary(env, NOW)).toEqual({
+      queued: 10,
+      walked: 3,
+      walking: 1,
+      sets: 0,
+      read24h: 2,
+      etaDays: 3.5,
+      pages24h: 42,
+      // The default share (0.75) of the cached allowance.
+      pageShare: 750,
+    });
+    await updateAppSettings(env, { trackSets: { maxShare: 0.5 } });
+    expect((await trackSetsSummary(env, NOW))?.pageShare).toBe(500);
+  });
+
+  it("has no rate to go by when nothing ended in 24 h, and no share without a cached allowance", async () => {
+    const env = makeEnv();
+    await env.DB.prepare(
+      "INSERT INTO track_set_crawl (track_page_id, track_url, queued_at, walks) VALUES ('a', 'u', 0, 0)",
+    ).run();
+    expect(await trackSetsSummary(env, NOW)).toMatchObject({
+      queued: 1,
+      walked: 0,
+      read24h: 0,
+      etaDays: null,
+      pages24h: 0,
+      pageShare: null,
+    });
+  });
+});
+
 describe("Recommended sets", () => {
   async function seeded(): Promise<Env> {
     const env = makeEnv();
@@ -800,7 +854,16 @@ describe("Recommended sets", () => {
       djs: "Stranger",
     });
     expect(body.rows[0]!.share).toBeCloseTo(3 / 14);
-    expect(body.progress).toEqual({ queued: 1, walked: 1, walking: 0, sets: 2 });
+    expect(body.progress).toEqual({
+      queued: 1,
+      walked: 1,
+      walking: 0,
+      sets: 2,
+      read24h: 0,
+      etaDays: 0,
+      pages24h: 0,
+      pageShare: null,
+    });
     expect(await trackSetsSummary(env)).toEqual(body.progress);
     // Sorting by views and filtering on a genre are table queries like any other.
     const byGenre = await app.request("/ui/api/recommended?f.genres=has:tech&sort=-views", {}, env);
@@ -825,6 +888,27 @@ describe("Recommended sets", () => {
     expect(rows.map((r) => [r.set_id, r.share, r.djs])).toEqual([
       ["tight", 0.5, "Stranger"],
       ["countdown", 0.03, "AdamK & Camille"],
+    ]);
+  });
+
+  it("caps the share at 1: a short list of mashups has more followed tracks than rows", async () => {
+    const env = makeEnv();
+    // Two rows, each a mashup: the mashup's page and both originals' pages list the set (6 tracks, 2 rows).
+    const mash = parseTrackSetRows(
+      rowHtml("mashups", "Oliver Heldens @ Festival", "2024-06-02", "U", { ided: "all/2" }),
+    );
+    const half = parseTrackSetRows(
+      rowHtml("half", "Stranger @ Club", "2026-01-01", "U", { ided: "all/4" }),
+    );
+    for (let i = 0; i < 6; i++) await storeTrackSetRows(env, `m${i}`, mash, new Set(), NOW);
+    for (let i = 0; i < 2; i++) await storeTrackSetRows(env, `h${i}`, half, new Set(), NOW);
+    const res = await app.request("/ui/api/recommended?sort=-share", {}, env);
+    const rows = (
+      (await res.json()) as { rows: Array<{ set_id: string; share: number; track_count: number }> }
+    ).rows;
+    expect(rows.map((r) => [r.set_id, r.share, r.track_count])).toEqual([
+      ["mashups", 1, 6],
+      ["half", 0.5, 2],
     ]);
   });
 
@@ -854,5 +938,13 @@ describe("Recommended sets", () => {
     expect(html).toContain("Recommended sets");
     expect(html).toContain("/ui/api/recommended");
     expect(html).toContain('href="/ui/recommended"');
+    // The set title opens the set in tracked; 1001tracklists is a row button.
+    expect(html).toContain("/ui/set?url=");
+    expect(html).toContain(">1001tracklists</a>");
+    const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(
+      (m) => m[1]!,
+    );
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const s of scripts) expect(() => new vm.Script(s)).not.toThrow();
   });
 });

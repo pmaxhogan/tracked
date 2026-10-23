@@ -141,7 +141,7 @@ const JS = /* js */ `
       tile('Stopped early', String(Object.keys(s.stopReasons || {}).reduce((a, k) => a + n(s.stopReasons[k]), 0)), 'ticks cut short') +
       tile('Errors', String(n(s.errored)), n(s.errored) ? '<span class="error">ticks that threw</span>' : 'ticks that threw') +
       (s.linkPrewarmPending == null ? '' : tile('Link pre-warms', String(n(s.linkPrewarmPending)), '<span' + TK.tip('Tracks of the sets the sync read whose Apple Music / YouTube links are still to be looked up ahead of a phone tap: a few each tick at pool priority backfill.') + '>tracks waiting</span>')) +
-      (s.trackSets == null ? '' : tile('Track pages', n(s.trackSets.walked) + ' / ' + n(s.trackSets.queued), '<span' + TK.tip('Tracks from the sets of the followed DJs whose 1001tracklists page was read for the sets it lists (Recommended sets), out of those queued: a few page views each tick at pool priority backfill.') + '>tracks read</span>'));
+      (s.trackSets == null ? '' : tile('Track pages', n(s.trackSets.walked) + ' / ' + n(s.trackSets.queued), '<span' + TK.tip('Tracks from the sets of the followed DJs whose 1001tracklists page was read for the sets it lists (Recommended sets), out of those queued: a few page views each tick at pool priority backfill.') + '>tracks read' + (s.trackSets.queued > s.trackSets.walked ? ', ' + n(s.trackSets.read24h) + ' in 24 h' + (s.trackSets.etaDays == null ? '' : ', ~' + Math.ceil(s.trackSets.etaDays) + ' d to go') : '') + '</span>'));
     $('sc-asof').textContent = s.oldestTickAt ? 'history since ' + (TK.fmt.time(iso(s.oldestTickAt)) || '') : 'no ticks recorded yet';
 
     const due = s.latestDue && s.latestDue.due ? s.latestDue.due : null;

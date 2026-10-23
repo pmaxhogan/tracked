@@ -536,7 +536,7 @@ const APP_GROUPS: FormGroup[] = [
       {
         path: "trackSets.maxShare",
         label: "Share of the backfill budget",
-        help: "0 to 1, over 24 hours, page loads and scroll requests counted apart. The link pre-warm, DJ history and index catch-up keep the rest. Default 0.7.",
+        help: "0 to 1, over 24 hours, page loads and scroll requests counted apart. The link pre-warm, DJ history and index catch-up keep the rest. A track costs one page load, so this share is what paces the crawl. Default 0.75.",
         min: 0.05,
         max: 1,
         step: 0.05,

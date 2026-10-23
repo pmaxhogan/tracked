@@ -244,7 +244,12 @@ export const AppSettingsSchema = z.object({
     viewsPerTick: z.number().int().min(0).max(1000),
     /** Wall-clock seconds one cron tick keeps crawling (default 200; a view takes ~3 s). */
     tickSeconds: z.number().int().min(10).max(280),
-    /** Share (0..1) of the pool's backfill allowance the crawl may spend over 24 h, page loads and scroll XHRs apart (default 0.7): the other backfill jobs keep the rest. */
+    /**
+     * Share (0..1) of the pool's backfill allowance the crawl may spend over 24 h, page loads and scroll XHRs apart
+     * (default 0.75): the other backfill jobs keep the rest. A track costs one page load, so this is what paces the
+     * crawl; measured 2026-10-23 the other backfill jobs spent ~20% of the page allowance (DJ history set pages and
+     * the pool's context pages for link lookups), so 0.75 leaves them that and a small margin.
+     */
     maxShare: z.number().min(0.05).max(1),
     /** Sets one scroll request asks for (the browser asks for 10; default 100). */
     stepCount: z.number().int().min(10).max(500),
@@ -392,7 +397,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     enabled: true,
     viewsPerTick: 200,
     tickSeconds: 200,
-    maxShare: 0.7,
+    maxShare: 0.75,
     stepCount: 100,
     stopYear: 2020,
     busyRows: 300,
