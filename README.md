@@ -529,6 +529,14 @@ POST /ui/api/genres/<key>/enabled   { enabled: true | false | null }
 POST /ui/api/genres/<key>/refresh   -> the playlist is read from YouTube again on its next run
 ```
 
+### YouTube subscriptions to the followed DJs (`src/lib/youtube-subscriptions.ts`)
+
+The linked YouTube account subscribes to each followed DJ's own channel and unsubscribes when the DJ is removed, but only from subscriptions tracked made (migration `0037`). The channel is the first YouTube channel link (a `UC...` id) in the DJ's own artist box on their stored set pages (`set_meta` boxes, matched by `sub_sync.artist_name` or the slug, never a B2B partner's box); no video uploader is ever taken for the DJ. `dj_youtube_channels` holds the channel per DJ, or why there is none (`no_set_meta`, `no_artist_box`, `no_youtube_link`; looked at again hourly); `youtube_channel_subs` holds the subscription per channel with its origin (`tracked`, or `owner` when the account was subscribed already: never removed). The 5-minute cron unsubscribes what tracked made and no followed DJ wants, checks the rest with one `subscriptions.list` (1 unit), then subscribes (50 each), as the `yt_subscriptions` quota consumer (rank 2, right after pre-save likes; default max 2,000 units a day), at most `ytSubs.maxChangesPerRun` (10) a run. Settings has the switch (`ytSubs.enabled`); the DJs table and the DJ page show each DJ's state.
+
+```
+GET  /ui/api/dj/<slug>/youtube-sub  -> { status, channelId, channelUrl, candidates, reason, origin, error, enabled, lastRun, needsReconnect }
+```
+
 ### Playlist hygiene (`src/lib/playlist-hygiene.ts`)
 
 **Full-recording rule.** A page's YouTube video is not added when the page shows 1001tracklists' "no (full) recording" notice, the video is over 5 min shorter than the last cue, or an audio player on the page declares a duration over 10 min longer than the video (this is the player's declared duration, which on every saved page equals the set's own `itemprop="duration"`; it is not measured from the audio file). A fourth rule, vertical video, reads `videos.list` embed sizes (verified live 2026-10-14: Shorts and portrait phone recordings report 1280x2276, 16:9 videos 1280x720; oEmbed reports 200x113 for all) and is **on** unless `REJECT_VERTICAL=0` or the setting says otherwise.
