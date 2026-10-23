@@ -2027,6 +2027,50 @@ export async function retryMkvidRequest(env: Env, id: string): Promise<boolean> 
   return (r.meta.changes ?? 0) > 0;
 }
 
+export type ReplaceMkvidSourceResult =
+  | { ok: true; id: string; from: MkvidSource; to: MkvidSource }
+  | {
+      ok: false;
+      id: string;
+      error: "invalid_url" | "not_found" | "wrong_status";
+      status?: MkvidStatus;
+    };
+
+/**
+ * Operator action: point a request at another recording of the same set (the
+ * page's recording is gone, but the set was uploaded again elsewhere) and
+ * queue it with a fresh start. The URL is read the way a set page is
+ * (extractSetAudioSource): a SoundCloud API track URL, a hearthis embed or a
+ * hearthis track page. Not for a request being rendered (`claimed`), one with
+ * its video (`done`: recreate it instead) or a banned set. A later recheck that
+ * finds the page's own recording still gone leaves it alone: the sync only
+ * swaps the source of a `failed` request.
+ */
+export async function replaceMkvidSource(
+  env: Env,
+  id: string,
+  url: string,
+): Promise<ReplaceMkvidSourceResult> {
+  const to = extractSetAudioSource(url.trim());
+  if (!to) return { ok: false, id, error: "invalid_url" };
+  const row = await dbOf(env)
+    .prepare("SELECT status, source, source_url FROM mkvid_requests WHERE id = ?")
+    .bind(id)
+    .first<{ status: MkvidStatus; source: MkvidSourceKind; source_url: string }>();
+  if (!row) return { ok: false, id, error: "not_found" };
+  const r = await dbOf(env)
+    .prepare(
+      `UPDATE mkvid_requests SET source = ?, source_url = ?, status = 'pending', attempts = 0, not_before = NULL, claimed_at = NULL,
+              error = NULL, unknown_failures = 0, updated_at = ?
+       WHERE id = ? AND status IN ('failed', 'superseded', 'pending')`,
+    )
+    .bind(to.kind, to.url, nowSeconds(), id)
+    .run();
+  if ((r.meta.changes ?? 0) === 0)
+    return { ok: false, id, error: "wrong_status", status: row.status };
+  return { ok: true, id, from: { kind: row.source, url: row.source_url }, to };
+}
+
 /** The set gained a real recording on 1001tracklists: nothing left for mkvid to do. */
 export async function supersedeMkvidRequestForSet(
   env: Env,

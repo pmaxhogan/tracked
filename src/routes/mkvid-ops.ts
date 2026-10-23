@@ -2,6 +2,8 @@
  * Operator routes for mkvid requests, bearer API_TOKEN (the panel's own
  * buttons go through /ui/api/*, behind Access, and share the handlers):
  *   POST /ops/mkvid/unpublish/<request id>   take a delivered video down and requeue the set
+ *   POST /ops/mkvid/source/<request id>      { url } point the request at another recording of the set and queue it again
+ *   POST /ops/mkvid/recheck-set/<request id> fetch the request's set page again on the next tick (any status)
  *   GET  /ops/scheduler/ticks?limit=&before=  scheduler tick history, newest first (lib/tick-history.ts)
  *   POST /ops/mkvid/apple-backstop?limit=&restart=1  Apple Music cues for every held set, one batch a call
  *   POST /ops/presave-matches/redecide       decide the pending pre-save match reviews again with the current rules (idempotent)
@@ -13,6 +15,9 @@ import { bearerAuthFor } from "../middleware/auth";
 import { getAccessToken } from "../lib/google-oauth";
 import { makeLogger, type Logger } from "../lib/log";
 import { deleteOldVideo, unpublishMkvidRequest } from "../lib/mkvid-recreate";
+import { replaceMkvidSource } from "../lib/mkvid";
+import { dbOf } from "../lib/db";
+import { markSetDue } from "../lib/fetch-scheduler";
 import { listSchedulerTicks } from "../lib/tick-history";
 import { appleBackstopBatch } from "../lib/apple-backstop";
 import { redecideReviews } from "../lib/presave-match";
@@ -45,6 +50,47 @@ mkvidOpsApp.post("/mkvid/unpublish/:id", async (c) => {
     route: "ops.mkvid_unpublish",
   });
   return unpublishResponse(c, c.req.param("id"), log);
+});
+
+/**
+ * Replace a request's recording (lib/mkvid.ts replaceMkvidSource): 400 for a
+ * URL that is no SoundCloud or hearthis recording, 404 for an unknown id, 409
+ * for a request being rendered, done or banned.
+ */
+mkvidOpsApp.post("/mkvid/source/:id", async (c) => {
+  const log = makeLogger({
+    reqId: c.req.raw.headers.get("cf-ray") ?? "local",
+    route: "ops.mkvid_source",
+  });
+  const body = (await c.req.json().catch(() => null)) as { url?: unknown } | null;
+  const url = typeof body?.url === "string" ? body.url : "";
+  const r = await replaceMkvidSource(c.env, c.req.param("id"), url);
+  if (!r.ok) {
+    log.warn("ops.mkvid_source_refused", { id: r.id, error: r.error, status: r.status });
+    return c.json(r, r.error === "invalid_url" ? 400 : r.error === "not_found" ? 404 : 409);
+  }
+  log.info("ops.mkvid_source_replaced", { id: r.id, from: r.from.url, to: r.to.url });
+  return c.json(r);
+});
+
+/**
+ * Mark the request's set page due now (lib/fetch-scheduler.ts markSetDue): the
+ * next tick fetches it as a recheck, which queues a failed request again when
+ * the page now links a different recording. One page, at the scheduler's pace.
+ */
+mkvidOpsApp.post("/mkvid/recheck-set/:id", async (c) => {
+  const id = c.req.param("id");
+  const row = await dbOf(c.env)
+    .prepare("SELECT set_url FROM mkvid_requests WHERE id = ?")
+    .bind(id)
+    .first<{ set_url: string }>();
+  if (!row) return c.json({ ok: false, id, error: "not_found" }, 404);
+  await markSetDue(c.env, row.set_url);
+  makeLogger({
+    reqId: c.req.raw.headers.get("cf-ray") ?? "local",
+    route: "ops.mkvid_recheck_set",
+  }).info("ops.mkvid_recheck_set", { id, setUrl: row.set_url });
+  return c.json({ ok: true, id, setUrl: row.set_url });
 });
 
 /**
