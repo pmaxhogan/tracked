@@ -31,6 +31,7 @@ import { bearerAuth } from "./middleware/auth";
 import type { Env } from "./types";
 import { backfillCombined } from "./lib/sync";
 import { setMetaPagesStep } from "./lib/set-meta";
+import { genrePlaylistsCronStep } from "./lib/genre-playlists";
 import { getQuotaOut } from "./lib/youtube-quota";
 import { runOrderPass } from "./lib/playlist-reorder";
 import { runSchedulerTick } from "./lib/fetch-scheduler";
@@ -356,6 +357,12 @@ async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext)
         // Separate try/catch: a failed tick shouldn't stop the combined
         // playlist from catching up on everything that *did* land.
         // It waits its turn at the quota like every consumer (lib/quota-priority.ts, inside backfillCombined).
+        // Genre playlists: after mkvid's recreate check and before the combined playlist (lib/genre-playlists.ts; never throws).
+        step("genre_playlists");
+        {
+          const gr = await genrePlaylistsCronStep(env, log, trigger);
+          if (!gr.ok || gr.inserted > 0 || gr.failed > 0) log.info("cron.genre_playlists", gr);
+        }
         try {
           step("combined");
           log.info(

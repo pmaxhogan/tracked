@@ -9,6 +9,7 @@ import { DJ_PAGE } from "../ui/pages/dj";
 import { MKVID_PAGE_HTML } from "../ui/pages/mkvid";
 import { DJS_PAGE } from "../ui/pages/djs";
 import { PLAYLISTS_PAGE } from "../ui/pages/playlists";
+import { genresApp } from "./genres";
 import { SETTINGS_PAGE } from "../ui/pages/settings";
 import { TOOLS_PAGE } from "../ui/pages/tools";
 import { HOME_PAGE } from "../ui/pages/home";
@@ -158,6 +159,7 @@ subscriptionsApp.route("/", searchApp);
 // The Graph tab over cached data (routes/graph.ts). Behind cfAccess above.
 subscriptionsApp.route("/", graphApp);
 subscriptionsApp.route("/", quotaUiApp); // /ui/quota + /ui/api/quota* (routes/quota-ui.ts), behind cfAccess above
+subscriptionsApp.route("/", genresApp); // /ui/genres* + /ui/api/genres* (routes/genres.ts), behind cfAccess above
 subscriptionsApp.route("/", recommendedApp); // /ui/recommended + /ui/api/recommended* (routes/recommended.ts), behind cfAccess above
 
 // Scheduler tick history and DJ due times, and the POST that clears the YouTube quota hold (routes/scheduler-ui.ts). Behind cfAccess above.

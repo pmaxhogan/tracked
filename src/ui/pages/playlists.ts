@@ -24,6 +24,13 @@ ${YOUTUBE_CARD_HTML}
   <div id="cmb-body"><span class="muted">Loading…</span></div>
   <div id="cmb-meter" class="tk-meter" hidden><i id="cmb-fill"></i></div>
 </div>
+<div id="gn-card" class="tk-card">
+  <div class="pl-head">
+    <h2><span class="tip-term"${tipAttr("One YouTube playlist per genre, holding the videos of the followed DJs' sets of that genre in set-date order. A genre gets one once it has enough sets with a video; switch genres on or off on the Genres page.")}>Genre playlists</span></h2>
+    <div class="tk-row"><a class="btn small" href="/ui/genres"${tipAttr("Every genre, its playlist, status and sets.")}>Genres</a></div>
+  </div>
+  <div id="gn-body"><span class="muted">Loading...</span></div>
+</div>
 <div id="ord-card" class="tk-card">
   <div class="pl-head">
     <h2><span class="tip-term"${tipAttr("Each DJ playlist is kept in the order the sets took place, earliest first. A new video is inserted at its place. Videos added before this existed are moved there a few a day once you set a daily budget, because each move costs 50 YouTube quota units. The combined playlist is not ordered.")}>Set-date order</span></h2>
@@ -51,6 +58,8 @@ const CSS = /* css */ `
   #cmb-body .warn { color: var(--danger); }
   #cmb-meter { margin-top: var(--sp-3); }
   .pl-sub { display: block; color: var(--muted); font-size: var(--fs-xs); }
+  #gn-body .headline { font-weight: 600; }
+  #gn-body .bits { color: var(--muted); font-size: var(--fs-sm); margin-top: 2px; }
   #ord-body .headline { font-weight: 600; }
   #ord-body .bits { color: var(--muted); font-size: var(--fs-sm); margin-top: 2px; }
   #ord-details { margin-top: var(--sp-3); }
@@ -124,6 +133,30 @@ ${YOUTUBE_CARD_JS}
   }
 
   $cmbRefresh.addEventListener('click', () => loadCombined());
+
+  // -- genre playlists: a summary of GET /ui/api/genres --
+  async function loadGenres() {
+    const $gn = $('gn-body');
+    const res = await TK.api.get('/ui/api/genres');
+    if (!res.ok) { $gn.textContent = 'status unavailable (' + (res.status || 'offline') + ')'; return; }
+    const rows = (res.data && res.data.rows) || [];
+    const on = rows.filter((r) => r.enabled);
+    const made = on.filter((r) => r.playlistId);
+    const pending = on.reduce((n, r) => n + (r.pending || 0), 0);
+    const held = on.find((r) => r.status === 'held');
+    const s = (res.data && res.data.settings) || {};
+    const bits = [
+      made.length + ' of ' + on.length + ' genre playlist' + (on.length === 1 ? '' : 's') + ' made',
+      pending ? pending + ' video' + (pending === 1 ? '' : 's') + ' to add' : 'nothing to add',
+      rows.length - on.length + ' genre' + (rows.length - on.length === 1 ? '' : 's') + ' without one',
+    ];
+    let html = '<div class="headline">' + esc(made.length ? made.slice(0, 6).map((r) => r.name).join(', ') + (made.length > 6 ? ', ...' : '') : 'No genre playlist yet') + '</div>' +
+      '<div class="bits">' + esc(bits.join(' \u00b7 ')) + '</div>';
+    if (held) html += '<div class="bits"><span class="badge warn">quota held</span> ' + esc(held.statusText) + '</div>';
+    html += '<div class="bits">' + esc(s.auto ? 'A genre gets its playlist at ' + s.minSets + ' sets with a video.' : 'Automatic genre playlists are off.') + '</div>';
+    $gn.innerHTML = html;
+  }
+  loadGenres().catch(() => {});
   $cmbBackfill.addEventListener('click', () => TK.busy($cmbBackfill, 'Backfilling…', async () => {
     const res = await TK.api.post('/ui/api/combined/backfill', {});
     const data = res.data && typeof res.data === 'object' ? res.data : {};

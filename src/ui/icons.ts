@@ -39,6 +39,7 @@ export const ICON_NAMES = [
   "upload",
   "chart",
   "graph",
+  "genre",
 ] as const;
 
 export type IconName = (typeof ICON_NAMES)[number];
@@ -93,6 +94,8 @@ const BODY: Record<IconName, string> = {
     '<circle cx="5.5" cy="6" r="2.5"/><circle cx="18.5" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 6h8"/><path d="m7 8.2 3.7 7.6"/><path d="m17 8.2-3.7 7.6"/>',
   upload:
     '<path d="M12 15V3.5"/><path d="m7 8.5 5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
+  genre:
+    '<path d="M3 11.6V4a1 1 0 0 1 1-1h7.6a1 1 0 0 1 .7.3l8.4 8.4a1 1 0 0 1 0 1.4l-7.6 7.6a1 1 0 0 1-1.4 0L3.3 12.3a1 1 0 0 1-.3-.7z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
 };
 
 function escAttr(s: string): string {

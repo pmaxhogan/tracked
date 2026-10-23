@@ -22,6 +22,7 @@ const KEYS = [
   "hygiene",
   "mkvid_uploads",
   "mkvid_recreate",
+  "genre_playlists",
   "combined",
   "renames",
   "ordering",
@@ -168,7 +169,7 @@ describe("quota validation", () => {
 });
 
 describe("a stored quota group that is no longer whole", () => {
-  it("is normalised on read: known keys kept in order once, missing ones appended, unknown ones dropped; the rest of the document kept", async () => {
+  it("is normalised on read: known keys kept in order once, missing ones after their default predecessor, unknown ones dropped; the rest of the document kept", async () => {
     const SUBS = fakeKV({
       "app:settings": JSON.stringify({
         graph: { nodeCap: 4000 },
@@ -186,12 +187,13 @@ describe("a stored quota group that is no longer whole", () => {
     expect(s.quota.order).toEqual([
       "ordering",
       "likes",
-      "combined",
       "presave_playlists",
       "dj_playlists",
       "hygiene",
       "mkvid_uploads",
       "mkvid_recreate",
+      "genre_playlists",
+      "combined",
       "renames",
     ]);
     expect(s.quota.margin).toBe(450);

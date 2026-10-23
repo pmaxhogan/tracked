@@ -56,8 +56,8 @@ ${SET_DIAG_CSS}`;
 
 // Where a genre badge goes, and what its tooltip says.
 const GENRE_JS = /* js */ `
-  const GENRE_HREF = (g) => 'https://www.1001tracklists.com/genre/' + encodeURIComponent(g.key) + '/index.html';
-  const GENRE_TIP = 'The genre 1001tracklists gives this set. Opens its genre page there.';
+  const GENRE_HREF = (g) => '/ui/genres/' + encodeURIComponent(g.key);
+  const GENRE_TIP = 'The genre 1001tracklists gives this set. Opens the genre: its playlist and its sets.';
 `;
 
 const JS = /* js */ `

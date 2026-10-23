@@ -105,6 +105,7 @@ import type { Env } from "../types";
 import { getAppSettings } from "./app-settings";
 import { dailyMaxUnits, OWNER, quotaGate, type GateRefusal } from "./quota-priority";
 import { loadCombinedState } from "./combined-playlist";
+import { genrePlaylistTitle, genrePlaylistsForOrdering } from "./genre-playlists";
 import { dbOf } from "./db";
 import { getAccessToken } from "./google-oauth";
 import { errorFields, type Logger } from "./log";
@@ -425,13 +426,23 @@ export async function managedPlaylists(env: Env): Promise<ManagedPlaylist[]> {
     )
     .all<{ slug: string; playlist_id: string; artist_name: string | null }>();
   const combined = (await loadCombinedState(env)).playlistId ?? null;
-  return res.results
+  const djs = res.results
     .filter((r) => r.playlist_id !== combined)
     .map((r) => ({
       playlistId: r.playlist_id,
       slug: r.slug,
       title: `${r.artist_name ?? r.slug} (1001tklists)`,
     }));
+  // The genre playlists (lib/genre-playlists.ts) are kept in set-date order too.
+  const seen = new Set(djs.map((d) => d.playlistId));
+  const genres = (await genrePlaylistsForOrdering(env))
+    .filter((g) => g.playlistId !== combined && !seen.has(g.playlistId))
+    .map((g) => ({
+      playlistId: g.playlistId,
+      slug: `genre:${g.key}`,
+      title: genrePlaylistTitle(g.name),
+    }));
+  return [...djs, ...genres];
 }
 
 /** `fixed` = never moved and never looked up by its video id: the video is gone from YouTube (see the file comment). */

@@ -306,6 +306,7 @@ describe("consumerStatus", () => {
       "hygiene",
       "mkvid_uploads",
       "mkvid_recreate",
+      "genre_playlists",
       "combined",
       "renames",
       "ordering",

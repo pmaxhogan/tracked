@@ -62,6 +62,14 @@ export const QUOTA_CONSUMERS: ReadonlyArray<QuotaConsumerInfo> = [
     waitingCost: 51,
   },
   {
+    key: "genre_playlists",
+    label: "Genre playlists",
+    description:
+      "Adds the videos of the followed DJs' sets to one playlist per genre (Genres page), creates those playlists, in set-date order.",
+    perAction: "playlistItems.insert 50; creating a playlist 50 + list 1/page",
+    waitingCost: 50,
+  },
+  {
     key: "combined",
     label: 'Combined "all artists" playlist',
     description: "Adds videos that are missing from the combined playlist.",

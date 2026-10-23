@@ -35,6 +35,7 @@ export type NavKey =
   | "pool-settings"
   | "scheduler"
   | "quota"
+  | "genres"
   | "settings"
   | "tools";
 
@@ -82,6 +83,7 @@ export const NAV: NavItem[] = [
     group: "Library",
   },
   { key: "bans", label: "Bans", href: "/ui/bans", icon: "ban", group: "Library" },
+  { key: "genres", label: "Genres", href: "/ui/genres", icon: "genre", group: "Library" },
   { key: "graph", label: "Graph", href: "/ui/graph", icon: "graph", group: "Library" },
   {
     key: "recommended",

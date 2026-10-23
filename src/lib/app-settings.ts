@@ -289,6 +289,12 @@ export const AppSettingsSchema = z.object({
   genres: z.object({
     /** Stored set pages (R2) the 5-minute cron reads a tick for their genres and the rest of the page; no pool fetch (default 20). 0 = none. */
     metaPagesPerTick: z.number().int().min(0).max(100),
+    /** A genre gets its playlist by itself once it has minSets sets with a video (default on); the owner's on/off per genre always wins. */
+    auto: z.boolean(),
+    /** Sets with a video (in a DJ playlist) a genre needs before its playlist is made automatically (default 10). */
+    minSets: z.number().int().min(1).max(10000),
+    /** Genre playlist inserts one run makes at most (default 20, 50 units each); the day is bounded by the consumer's max (Quota). */
+    maxInsertsPerRun: z.number().int().min(0).max(100),
   }),
   /** YouTube quota: who goes first when the pool runs short (lib/quota-consumers.ts has the catalogue). */
   quota: z.object({
@@ -417,7 +423,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     lengthToleranceMinutes: 2,
   },
   graph: { nodeCap: 5000, confirmOver: 300, backfill: true, pagesPerTick: 10 },
-  genres: { metaPagesPerTick: 20 },
+  genres: { metaPagesPerTick: 20, auto: true, minSets: 10, maxInsertsPerRun: 20 },
   quota: {
     order: [
       "likes",
@@ -426,6 +432,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       "hygiene",
       "mkvid_uploads",
       "mkvid_recreate",
+      "genre_playlists",
       "combined",
       "renames",
       "ordering",
@@ -440,6 +447,9 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 /** Sweep removals a day when neither the setting nor PLAYLIST_SWEEP_DAILY_REMOVALS is set (as lib/playlist-hygiene.ts). */
 /** Pinned to playlist-hygiene's DEFAULT_SWEEP_DAILY_REMOVALS by test/quota-settings.test.ts. */
 export const DEFAULT_SWEEP_REMOVALS = 40;
+
+/** The genre playlists' daily max when the owner set none (100 inserts). */
+export const DEFAULT_GENRE_DAILY_UNITS = 5000;
 
 function sweepRemovals(s: AppSettings, env: { PLAYLIST_SWEEP_DAILY_REMOVALS?: string }): number {
   if (s.playlists.sweepDailyRemovals !== null) return s.playlists.sweepDailyRemovals;
@@ -469,6 +479,9 @@ export function migrateQuotaConsumers(
     fill.combined = { min: null, max: s.playlists.combinedDailyInsertCap * 50, enabled: true };
   if (!have.hygiene) fill.hygiene = { min: null, max: sweepRemovals(s, env) * 51, enabled: true };
   if (!have.likes) fill.likes = { min: null, max: s.presave.likeDailyUnitCap, enabled: true };
+  // New in October 2026: 100 inserts a day until the owner picks another max.
+  if (!have.genre_playlists)
+    fill.genre_playlists = { min: null, max: DEFAULT_GENRE_DAILY_UNITS, enabled: true };
   if (Object.keys(fill).length === 0) return s;
   return { ...s, quota: { ...s.quota, consumers: { ...have, ...fill } } };
 }
@@ -487,7 +500,20 @@ export function normaliseStoredQuota(stored: unknown): unknown {
   const q = { ...(quota as Record<string, unknown>) };
   if (Array.isArray(q.order)) {
     const known = [...new Set(q.order.filter((k): k is string => QUOTA_KEYS.includes(k)))];
-    q.order = [...known, ...DEFAULT_APP_SETTINGS.quota.order.filter((k) => !known.includes(k))];
+    // A key the stored order lacks (a consumer added since) goes right after the
+    // key before it in the default order, so it lands at its intended rank
+    // (genre_playlists after mkvid_recreate); first when none of those is stored.
+    const order = [...known];
+    const defaults = DEFAULT_APP_SETTINGS.quota.order;
+    defaults.forEach((k, i) => {
+      if (order.includes(k)) return;
+      const prev = defaults
+        .slice(0, i)
+        .reverse()
+        .find((x) => order.includes(x));
+      order.splice(prev === undefined ? 0 : order.indexOf(prev) + 1, 0, k);
+    });
+    q.order = order;
   }
   if (q.consumers && typeof q.consumers === "object" && !Array.isArray(q.consumers))
     q.consumers = Object.fromEntries(

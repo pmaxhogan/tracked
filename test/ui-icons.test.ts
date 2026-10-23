@@ -22,9 +22,9 @@ describe("icon()", () => {
     const s = icon("home", { label: 'a&b<c>"d' });
     expect(s).toContain('aria-label="a&amp;b&lt;c&gt;&quot;d"');
   });
-  it("has 37 unique names, each with drawn children", () => {
-    expect(ICON_NAMES.length).toBe(37);
-    expect(new Set(ICON_NAMES).size).toBe(37);
+  it("has 38 unique names, each with drawn children", () => {
+    expect(ICON_NAMES.length).toBe(38);
+    expect(new Set(ICON_NAMES).size).toBe(38);
     for (const n of ICON_NAMES)
       expect(icon(n)).toMatch(/<(path|circle|rect|line|polyline|polygon)\b/);
   });
